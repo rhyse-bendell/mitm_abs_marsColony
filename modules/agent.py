@@ -100,22 +100,13 @@ class Agent:
         return packet_name in normalized_allowed
 
     def _choose_info_target(self, environment):
-        """Select an information target using soft role-aware scoring."""
+        """Select an information interaction target using soft role-aware scoring."""
         candidates = []
         for packet_name in environment.knowledge_packets.keys():
             if not self._has_packet_access(packet_name):
                 continue
-            if packet_name not in environment.objects:
-                continue
 
-            obj = environment.objects[packet_name]
-            if obj.get("type") == "rect":
-                ox, oy = obj["position"]
-                w, h = obj["size"]
-                target = (ox + (w / 2.0), oy + (h / 2.0))
-            else:
-                target = obj.get("position")
-
+            target = environment.get_interaction_target_position(packet_name, from_position=self.position)
             if target is None:
                 continue
 
@@ -129,12 +120,25 @@ class Agent:
             candidates.append((score, packet_name, target))
 
         if not candidates:
-            return environment.objects["Team_Info"]["position"]
+            return self.position
 
         candidates.sort(key=lambda x: x[0], reverse=True)
         chosen = candidates[0]
         self.activity_log.append(f"Selected info target {chosen[1]} (score={chosen[0]:.2f})")
         return chosen[2]
+
+
+    def _build_readiness_score(self):
+        info_count = len(self.mental_model["information"])
+        knowledge_count = len(self.mental_model["knowledge"].rules)
+        return info_count + (2 * knowledge_count)
+
+    def _is_build_eligible(self):
+        # Lightweight threshold: build should not start from a trivial information fragment.
+        return self._build_readiness_score() >= 3
+
+    def _select_build_target(self, environment):
+        return environment.get_interaction_target_position("Build_Table_B", from_position=self.position)
 
     def current_goal(self):
         return self.goal_stack[-1] if self.goal_stack else None
@@ -216,13 +220,29 @@ class Agent:
         elif goal == "share":
             if not self.has_shared:
                 self.activity_log.append("Preparing to share information with teammates")
+                return
+
             self.pop_goal()
-            self.push_goal("build", environment.objects["Table_B"]["position"])
+            if self._is_build_eligible():
+                build_target = self._select_build_target(environment)
+                if build_target is not None:
+                    self.push_goal("build", build_target)
+                else:
+                    self.activity_log.append("No accessible build interaction target found; gathering more info")
+                    self.push_goal("seek_info", self._choose_info_target(environment))
+            else:
+                self.activity_log.append(
+                    f"Build deferred (readiness={self._build_readiness_score()}); continuing information gathering"
+                )
+                self.push_goal("seek_info", self._choose_info_target(environment))
 
         elif goal == "build":
+            if self.target is None:
+                self.target = self._select_build_target(environment)
+
             if self.mental_model["knowledge"].rules:
                 self.activity_log.append("Building task engaged")
-            else:
+            elif not self._is_build_eligible():
                 self.pop_goal()
                 self.push_goal("seek_info", self._choose_info_target(environment))
 
