@@ -3,7 +3,7 @@
 import math
 from modules.agent import Agent
 from modules.brain_context import BrainContextBuilder
-from modules.brain_provider import RuleBrain
+from modules.brain_provider import BrainBackendConfig, create_brain_provider
 from modules.environment import Environment
 from modules.logging_tools import SimulationLogger
 from modules.team_knowledge import TeamKnowledgeManager
@@ -17,7 +17,7 @@ class SimulationState:
         "Fast": 2.0
     }
 
-    def __init__(self, agent_configs=None, num_runs=1, speed="Normal", experiment_name=None, phases=None, flash_mode=False, project_root=None):
+    def __init__(self, agent_configs=None, num_runs=1, speed="Normal", experiment_name=None, phases=None, flash_mode=False, project_root=None, brain_backend="rule_brain"):
         self.environment = Environment(phases=phases)
         self.agents = []
         self.num_runs = num_runs
@@ -26,7 +26,8 @@ class SimulationState:
         self.logger = SimulationLogger(experiment_name=experiment_name or "experiment", project_root=project_root)
         self.team_knowledge_manager = TeamKnowledgeManager()
         self.brain_context_builder = BrainContextBuilder()
-        self.brain_provider = RuleBrain()
+        self.brain_backend_config = BrainBackendConfig(backend=brain_backend)
+        self.brain_provider = create_brain_provider(self.brain_backend_config)
         self.save_interval = 10.0
         self._last_save_time = 0.0
 

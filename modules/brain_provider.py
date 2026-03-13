@@ -1,8 +1,23 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 from modules.action_schema import BrainDecision, CommunicationIntent, ExecutableActionType
+
+
+@dataclass(frozen=True)
+class BrainBackendConfig:
+    backend: str = "rule_brain"
+
+
+def create_brain_provider(config: BrainBackendConfig | None = None) -> BrainProvider:
+    selected = (config.backend if config else "rule_brain").lower()
+    if selected == "local_stub":
+        return LocalLLMBrainStub()
+    if selected == "cloud_stub":
+        return CloudBrainStub()
+    return RuleBrain()
 
 
 class BrainProvider(ABC):

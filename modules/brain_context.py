@@ -68,8 +68,12 @@ class BrainContextBuilder:
         information_summary = [getattr(info, "id", str(info)) for info in agent.mental_model["information"]]
         data_summary = [getattr(data, "id", str(data)) for data in agent.mental_model["data"]]
 
-        history_tail = agent.activity_log[-8:]
-        plan_tail = [entry for entry in history_tail if "goal" in entry.lower() or "plan" in entry.lower()]
+        history_bands = agent.history_bands() if hasattr(agent, "history_bands") else {
+            "current_state_summary": f"goal={agent.goal} active_actions={len(agent.active_actions)}",
+            "near_preceding_events": agent.activity_log[-8:],
+            "recent_history_summary": "",
+            "recent_plan_history": [],
+        }
 
         static_task_context = {
             "mission": self.scenario_name,
@@ -108,7 +112,15 @@ class BrainContextBuilder:
             "knowledge_summary": knowledge_summary,
             "known_gaps": list(agent.known_gaps),
             "packets_inspected": list(agent.memory_seen_packets),
-            "recent_failed_attempts": [e for e in history_tail if "blocked" in e.lower() or "could not" in e.lower()],
+            "recent_failed_attempts": [
+                e for e in history_bands["near_preceding_events"] if "blocked" in e.lower() or "could not" in e.lower()
+            ],
+            "active_plan": {
+                "plan_id": getattr(getattr(agent, "current_plan", None), "plan_id", None),
+                "created_at": getattr(getattr(agent, "current_plan", None), "created_at", None),
+                "last_reviewed_at": getattr(getattr(agent, "current_plan", None), "last_reviewed_at", None),
+                "invalidation_reason": getattr(getattr(agent, "current_plan", None), "invalidation_reason", None),
+            },
         }
 
         team_state = {
@@ -119,13 +131,6 @@ class BrainContextBuilder:
             },
             "tom_summary": agent.theory_of_mind,
             "recent_shared_updates": sim_state.team_knowledge_manager.recent_updates[-5:],
-        }
-
-        history_bands = {
-            "current_state_summary": f"goal={agent.goal} active_actions={len(agent.active_actions)}",
-            "near_preceding_events": history_tail,
-            "recent_history_summary": " | ".join(history_tail[-3:]) if history_tail else "",
-            "recent_plan_history": plan_tail,
         }
 
         return BrainContextPacket(

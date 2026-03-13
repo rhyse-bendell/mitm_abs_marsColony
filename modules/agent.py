@@ -2,6 +2,7 @@
 
 import math
 import random
+from dataclasses import dataclass
 
 try:
     import matplotlib.patches as patches
@@ -37,6 +38,17 @@ MESSAGE_TYPES = {
     "TKRQ": "Team Knowledge Request",
     "TCR": "Team Correction or Repair"
 }
+
+
+@dataclass
+class PlanRecord:
+    plan_id: str
+    decision: BrainDecision
+    created_at: float
+    last_reviewed_at: float
+    trigger_reason: str
+    remaining_executions: int = 2
+    invalidation_reason: str | None = None
 
 
 class Agent:
@@ -85,6 +97,23 @@ class Agent:
 
         # Theory of Mind (ToM) about teammates
         self.theory_of_mind = {}  # {agent_name: {"goals": [], "knowledge": set(), "last_seen": time}}
+
+        # Brain-backed decision routing state
+        self.current_plan = None
+        self.plan_counter = 0
+        self.plan_expiry_s = 12.0
+        self.plan_review_interval_s = 3.0
+        self.last_phase_name = None
+        self.last_info_count = 0
+        self.last_knowledge_count = 0
+        self.last_build_readiness = 0
+        self.last_team_update_count = 0
+        self.last_replan_time = None
+        self.history_compaction = {
+            "recent_history_summary": "",
+            "plan_evolution": [],
+            "compaction_count": 0,
+        }
 
     def _normalize_packet_name(self, packet_name):
         """Map UI packet labels and aliases to canonical environment packet keys."""
@@ -173,30 +202,163 @@ class Agent:
         self.current_action = self._plan_actions_for_current_goal()
         self._advance_active_actions(dt=1.0)
 
-    def _build_rule_based_brain_decision(self, sim_state):
+    def _build_rule_based_brain_decision(self, sim_state, trigger_reason):
         context = sim_state.brain_context_builder.build(sim_state, self)
-        sim_state.logger.log_event(sim_state.time, "brain_context_built", {"agent": self.name})
-        decision = sim_state.brain_provider.decide(context)
         sim_state.logger.log_event(
             sim_state.time,
-            "brain_decision",
-            {"agent": self.name, "selected_action": decision.selected_action.value, "confidence": decision.confidence},
+            "brain_decision_query",
+            {"agent": self.name, "trigger_reason": trigger_reason, "plan_id": getattr(self.current_plan, "plan_id", None)},
         )
+        decision = sim_state.brain_provider.decide(context)
         legal_actions = [ExecutableActionType(a["action_type"]) for a in context.action_affordances]
+
+        repaired = False
+        if not (0.0 <= decision.confidence <= 1.0):
+            decision.confidence = max(0.0, min(1.0, decision.confidence))
+            repaired = True
+
         errors = validate_brain_decision(decision, legal_actions)
-        if errors:
-            sim_state.logger.log_event(
-                sim_state.time,
-                "brain_decision_rejected",
-                {"agent": self.name, "errors": errors},
-            )
-            return BrainDecision(
+        if errors and decision.selected_action != ExecutableActionType.WAIT and ExecutableActionType.WAIT in legal_actions:
+            repaired = True
+            decision = BrainDecision(
                 selected_action=ExecutableActionType.WAIT,
-                reason_summary="Fallback due to decision validation failure.",
+                reason_summary="Repaired to WAIT due to validation failure.",
+                confidence=1.0,
+                assumptions=["simulator legality gate"],
+            )
+            errors = validate_brain_decision(decision, legal_actions)
+
+        status = "accepted"
+        if errors:
+            status = "rejected"
+            decision = BrainDecision(
+                selected_action=ExecutableActionType.WAIT,
+                reason_summary="Fallback due to unrecoverable decision validation failure.",
                 confidence=1.0,
             )
-        return decision
+        elif repaired:
+            status = "repaired"
 
+        sim_state.logger.log_event(
+            sim_state.time,
+            "brain_decision_outcome",
+            {
+                "agent": self.name,
+                "trigger_reason": trigger_reason,
+                "decision_status": status,
+                "selected_action": decision.selected_action.value,
+                "errors": errors,
+            },
+        )
+        return decision, status
+
+    def _next_plan_id(self):
+        self.plan_counter += 1
+        return f"{self.name}-plan-{self.plan_counter}"
+
+    def _compact_history(self):
+        near_window = 8
+        near_events = self.activity_log[-near_window:]
+        older_events = self.activity_log[:-near_window]
+        if older_events:
+            snippet = " | ".join(older_events[-3:])
+            previous = self.history_compaction["recent_history_summary"]
+            merged = " | ".join([part for part in [previous, snippet] if part])
+            self.history_compaction["recent_history_summary"] = merged[-400:]
+            self.history_compaction["compaction_count"] += 1
+
+        plan_evolution = []
+        if self.current_plan is not None:
+            plan_evolution.append(
+                f"{self.current_plan.plan_id}:{self.current_plan.decision.selected_action.value}:remaining={self.current_plan.remaining_executions}"
+            )
+            if self.current_plan.invalidation_reason:
+                plan_evolution.append(f"invalidated:{self.current_plan.invalidation_reason}")
+        self.history_compaction["plan_evolution"] = plan_evolution
+
+    def history_bands(self):
+        self._compact_history()
+        near_events = self.activity_log[-8:]
+        return {
+            "current_state_summary": f"goal={self.goal} active_actions={len(self.active_actions)} plan={getattr(self.current_plan, 'plan_id', None)}",
+            "near_preceding_events": near_events,
+            "recent_history_summary": self.history_compaction["recent_history_summary"],
+            "recent_plan_history": list(self.history_compaction["plan_evolution"]),
+        }
+
+    def _plan_trigger_reason(self, sim_state, environment):
+        now = sim_state.time
+        phase_name = (environment.get_current_phase() or {}).get("name")
+        info_count = len(self.mental_model["information"])
+        knowledge_count = len(self.mental_model["knowledge"].rules)
+        build_readiness = self._build_readiness_score()
+        team_updates = len(sim_state.team_knowledge_manager.recent_updates)
+        recent_log = " ".join(self.activity_log[-4:]).lower()
+
+        if self.current_plan is None:
+            reason = "no_active_plan"
+        elif self.current_plan.remaining_executions <= 0:
+            reason = "plan_completed"
+        elif self.current_plan.invalidation_reason:
+            reason = "plan_invalidated"
+        elif phase_name != self.last_phase_name and self.last_phase_name is not None:
+            reason = "phase_transition"
+        elif info_count > self.last_info_count or knowledge_count > self.last_knowledge_count:
+            reason = "new_dik_acquired"
+        elif "mismatch with construction" in recent_log:
+            reason = "contradiction_detected"
+        elif "blocked while moving" in recent_log:
+            reason = "path_blocked_or_stalled"
+        elif team_updates > self.last_team_update_count:
+            reason = "communication_update_received"
+        elif build_readiness != self.last_build_readiness:
+            reason = "build_readiness_changed"
+        elif self.current_plan and (now - self.current_plan.created_at) >= self.plan_expiry_s:
+            reason = "plan_invalidated"
+        elif self.current_plan and (now - self.current_plan.last_reviewed_at) >= self.plan_review_interval_s:
+            reason = "periodic_reassessment"
+        else:
+            reason = None
+
+        self.last_phase_name = phase_name
+        self.last_info_count = info_count
+        self.last_knowledge_count = knowledge_count
+        self.last_build_readiness = build_readiness
+        self.last_team_update_count = team_updates
+        return reason
+
+    def _adopt_new_plan(self, decision, trigger_reason, sim_time):
+        if self.current_plan is not None and self.current_plan.invalidation_reason is None:
+            self.current_plan.invalidation_reason = f"replaced_by_{trigger_reason}"
+        self.current_plan = PlanRecord(
+            plan_id=self._next_plan_id(),
+            decision=decision,
+            created_at=sim_time,
+            last_reviewed_at=sim_time,
+            trigger_reason=trigger_reason,
+            remaining_executions=2,
+        )
+
+    def _continue_cached_plan(self, sim_state, environment):
+        if self.current_plan is None:
+            return False
+        if self.current_plan.remaining_executions <= 0:
+            self.current_plan.invalidation_reason = "plan_completed"
+            return False
+
+        self.current_action = self._translate_brain_decision_to_legacy_action(self.current_plan.decision, environment)
+        self.current_plan.remaining_executions -= 1
+        self.current_plan.last_reviewed_at = sim_state.time
+        sim_state.logger.log_event(
+            sim_state.time,
+            "brain_plan_continued",
+            {
+                "agent": self.name,
+                "plan_id": self.current_plan.plan_id,
+                "remaining_executions": self.current_plan.remaining_executions,
+            },
+        )
+        return True
     def _translate_brain_decision_to_legacy_action(self, decision, environment):
         mapping = {
             ExecutableActionType.MOVE_TO_TARGET: {"type": "move_to", "duration": 1.0, "priority": 1},
@@ -576,13 +738,22 @@ class Agent:
         self.update_physiology(exertion=0.5)
         self.update_knowledge(environment)
         if sim_state is None:
+            # Legacy compatibility path for unit-level agent calls outside full simulation state.
             self._run_goal_management_pipeline(dt, environment)
         else:
+            self.perceive_environment(sim_state)
             if self.active_actions:
                 self._advance_active_actions(dt)
             else:
-                decision = self._build_rule_based_brain_decision(sim_state)
-                self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment)
+                trigger_reason = self._plan_trigger_reason(sim_state, environment)
+                if trigger_reason is None and self._continue_cached_plan(sim_state, environment):
+                    pass
+                else:
+                    if trigger_reason is None:
+                        trigger_reason = "no_active_plan"
+                    decision, _status = self._build_rule_based_brain_decision(sim_state, trigger_reason)
+                    self._adopt_new_plan(decision, trigger_reason, sim_state.time)
+                    self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment)
                 self._advance_active_actions(dt)
 
         if self.target:
