@@ -16,8 +16,9 @@ env/
 .DS_Store
 Thumbs.db
 
-# Generated outputs
-Outputs/
+# Generated outputs (keep folder, ignore run contents)
+Outputs/*
+!Outputs/.gitkeep
 
 # Python packaging/build
 build/

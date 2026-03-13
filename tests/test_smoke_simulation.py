@@ -1,5 +1,9 @@
 import unittest
 import random
+import json
+import re
+import tempfile
+from pathlib import Path
 
 from modules.agent import Agent
 from modules.environment import Environment
@@ -11,10 +15,45 @@ class TestSimulationSmoke(unittest.TestCase):
         random.seed(0)
 
     def test_non_gui_simulation_step_runs(self):
-        sim = SimulationState(phases=[])
-        sim.update(0.1)
-        self.assertGreater(sim.time, 0.0)
-        self.assertEqual(len(sim.agents), 3)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir)
+            sim.update(0.1)
+            self.assertGreater(sim.time, 0.0)
+            self.assertEqual(len(sim.agents), 3)
+
+    def test_session_output_structure_and_manifest_created(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                experiment_name="My Test Experiment",
+                speed=1.5,
+                flash_mode=True,
+                project_root=tmpdir,
+            )
+
+            sim.update(0.1)
+            sim.stop()
+
+            outputs_root = Path(tmpdir) / "Outputs"
+            sessions = [path for path in outputs_root.iterdir() if path.is_dir()]
+            self.assertEqual(len(sessions), 1)
+
+            session_dir = sessions[0]
+            self.assertRegex(session_dir.name, r"^My_Test_Experiment_\d{8}_\d{6}$")
+
+            logs_dir = session_dir / "logs"
+            self.assertTrue(logs_dir.exists())
+            self.assertTrue(any(path.suffix == ".csv" for path in logs_dir.iterdir()))
+
+            manifest_path = session_dir / "session_manifest.json"
+            self.assertTrue(manifest_path.exists())
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["experiment_name"], "My Test Experiment")
+            self.assertEqual(manifest["sanitized_prefix"], "My_Test_Experiment")
+            self.assertTrue(re.match(r"^\d{8}_\d{6}$", manifest["timestamp"]))
+
+            measures_placeholder = session_dir / "measures" / "final_measures_placeholder.json"
+            self.assertTrue(measures_placeholder.exists())
 
     def test_packet_access_respected(self):
         env = Environment(phases=[])
