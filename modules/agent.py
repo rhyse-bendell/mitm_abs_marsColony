@@ -1,9 +1,13 @@
 # File: modules/agent.py
 
 import math
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-import numpy as np
+import random
+
+try:
+    import matplotlib.patches as patches
+except ImportError:
+    patches = None
+
 from modules.knowledge import Data, Information, Knowledge
 
 DIK_LOG = []
@@ -72,6 +76,27 @@ class Agent:
 
         # Theory of Mind (ToM) about teammates
         self.theory_of_mind = {}  # {agent_name: {"goals": [], "knowledge": set(), "last_seen": time}}
+
+    def _normalize_packet_name(self, packet_name):
+        """Map UI packet labels and aliases to canonical environment packet keys."""
+        mapping = {
+            "Team_Packet": "Team_Info",
+            "Architect_Packet": "Architect_Info",
+            "Engineer_Packet": "Engineer_Info",
+            "Botanist_Packet": "Botanist_Info",
+        }
+        return mapping.get(packet_name, packet_name)
+
+    def _has_packet_access(self, packet_name):
+        allowed = getattr(self, "allowed_packet", None)
+        if allowed is None:
+            return True
+
+        if isinstance(allowed, str):
+            allowed = [allowed]
+
+        normalized_allowed = {self._normalize_packet_name(p) for p in allowed}
+        return packet_name in normalized_allowed
 
     def current_goal(self):
         return self.goal_stack[-1] if self.goal_stack else None
@@ -206,7 +231,7 @@ class Agent:
 
     def absorb_packet(self, packet, accuracy=1.0):
         for d in packet.get("data", []):
-            if np.random.rand() <= accuracy:
+            if random.random() <= accuracy:
                 if d not in self.mental_model["data"]:
                     self.mental_model["data"].add(d)
                     d.acquired_by[self.name] = {"mode": "direct", "from": d.source}
@@ -221,7 +246,7 @@ class Agent:
                     self.activity_log.append(f"Absorbed data: {d.id} (from {d.source})")
 
         for info in packet.get("information", []):
-            if np.random.rand() <= accuracy:
+            if random.random() <= accuracy:
                 if info not in self.mental_model["information"]:
                     self.mental_model["information"].add(info)
                     info.acquired_by[self.name] = {"mode": "direct", "from": info.source}
@@ -282,6 +307,8 @@ class Agent:
         for packet_name, packet_content in environment.knowledge_packets.items():
             if packet_name in self.mental_model["information"]:
                 continue
+            if not self._has_packet_access(packet_name):
+                continue
             if self.role not in packet_name and "Team" not in packet_name:
                 continue
             if environment.can_access_info(self.position, packet_name):
@@ -304,7 +331,7 @@ class Agent:
                     candidate_tags.setdefault(tag, []).append(info)
             for tag, group in candidate_tags.items():
                 if len(group) >= 2:
-                    if np.random.rand() < 0.9:
+                    if random.random() < 0.9:
                         self.mental_model["knowledge"].try_infer_rules(group)
                         self.activity_log.append(f"Inferred rule from tag [{tag}]")
 
@@ -546,7 +573,7 @@ class Agent:
 
         for tag, group in candidate_tags.items():
             if len(group) >= 2:
-                if np.random.rand() < 0.95:  # Retry with high confidence
+                if random.random() < 0.95:  # Retry with high confidence
                     self.mental_model["knowledge"].try_infer_rules(group)
                     self.activity_log.append(f"Reinferred rule from tag [{tag}]")
 
@@ -574,6 +601,9 @@ class Agent:
 
 
     def draw(self, ax):
+        if patches is None:
+            return
+
         x, y = self.position
         angle = self.orientation
         color = ROLE_COLORS.get(self.role, "gray")
