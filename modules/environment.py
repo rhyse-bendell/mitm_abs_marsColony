@@ -1,6 +1,7 @@
 # File: modules/environment.py
 
 import math
+from modules.construction import ConstructionManager
 
 
 SHOW_LAYOUT = True
@@ -8,11 +9,14 @@ SHOW_LAYOUT = True
 try:
     import matplotlib.pyplot as plt
     import matplotlib.patches as patches
-    import numpy as np
-    from modules.construction import ConstructionManager
-    import tkinter as tk
 except ImportError:
     plt = None
+    patches = None
+
+try:
+    import tkinter as tk
+except ImportError:
+    tk = None
 
 from modules.knowledge import init_dik_packets
 
@@ -272,6 +276,8 @@ class Environment:
 # ----------------------------
 
 def get_screen_size_inches(dpi=100):
+    if tk is None:
+        return 10, 8
     root = tk.Tk()
     root.withdraw()
     width_px = root.winfo_screenwidth()
