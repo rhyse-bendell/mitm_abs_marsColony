@@ -116,11 +116,12 @@ class Agent:
             self.goal = self.goal_stack[-1]["goal"] if self.goal_stack else None  # Sync again
 
     def decide(self, sim_state):
+        """Deprecated compatibility wrapper for legacy callers."""
         self.perceive_environment(sim_state)
         self.update_internal_state()
-        self.evaluate_goals()
-        action = self.select_action()
-        self.perform_action(action)
+        self._evaluate_goal_state(sim_state.environment)
+        self.current_action = self._plan_actions_for_current_goal()
+        self._advance_active_actions(dt=1.0)
 
     def perceive_environment(self, sim_state):
         self_visible_range = 2.0
@@ -151,64 +152,72 @@ class Agent:
                     self.reevaluate_knowledge()
 
     def evaluate_goals(self):
-        if not self.goal_stack:
-            self.push_goal("seek_info")
+        """Deprecated: retained for compatibility; delegates to authoritative evaluator."""
+        self._evaluate_goal_state(environment=None)
+
+    def _evaluate_goal_state(self, environment):
+        """Authoritative goal-state evaluator used by the live simulation update path."""
+        if environment is None:
             return
 
-        current = self.current_goal()["goal"]
+        goal_entry = self.current_goal()
+        if not goal_entry:
+            self.push_goal("seek_info", environment.objects["Team_Info"]["position"])
+            return
 
-        if current == "seek_info":
-            if self.mental_model["information"]:
+        goal = goal_entry["goal"]
+        self.target = goal_entry["target"]
+
+        if goal == "seek_info":
+            team_info_ids = {i.id for i in self.mental_model["information"]}
+            if "I004" in team_info_ids:
                 self.pop_goal()
                 self.push_goal("share")
-            elif not self.mental_model["data"]:
-                self.push_goal("request_data")
             else:
-                self.push_goal("request_info")
+                self.activity_log.append("Still seeking info...")
 
-        elif current == "share":
-            if self.has_shared:
-                self.pop_goal()
-                self.push_goal("build")
-
-        elif current == "build":
-            if self.mental_model["knowledge"].rules:
-                self.target = (5.0, 5.0)  # placeholder for construction location
-            else:
-                self.activity_log.append("Not enough knowledge: pushing request_rule goal")
-                self.push_goal("request_rule")
-
-        elif current in ["request_data", "request_info", "request_rule"]:
-            self.activity_log.append(f"Attempting to resolve {current}")
+        elif goal == "share":
+            if not self.has_shared:
+                self.activity_log.append("Preparing to share information with teammates")
             self.pop_goal()
+            self.push_goal("build", environment.objects["Table_B"]["position"])
 
-        elif current == "idle":
-            pass
+        elif goal == "build":
+            if self.mental_model["knowledge"].rules:
+                self.activity_log.append("Building task engaged")
+            else:
+                self.pop_goal()
+                self.push_goal("seek_info", environment.objects["Team_Info"]["position"])
 
-    def select_action(self):
+        elif goal == "idle":
+            self.activity_log.append("Idling...")
+
+    def _plan_actions_for_current_goal(self):
+        """Authoritative action planner from current goal state."""
         if not self.goal_stack:
-            return [{"type": "idle"}]
+            return [{"type": "idle", "duration": 1.0, "priority": 0}]
 
         goal = self.goal_stack[-1]["goal"]
 
-        multitask = False
-        if goal in ["share", "request_data", "request_info", "request_rule"]:
-            multitask = True
+        if goal == "seek_info":
+            return [{"type": "move_to", "target": (7.0, 6.4), "duration": 1.0, "priority": 1}]
+        if goal == "share":
+            return [{"type": "communicate", "duration": 0.5, "priority": 1}]
+        if goal == "build":
+            return [{"type": "construct", "duration": 2.0, "priority": 1}]
 
-        actions = []
+        return [{"type": "idle", "duration": 1.0, "priority": 0}]
 
-        if multitask and self.target:
-            actions.append({"type": "move_to", "target": self.target, "duration": 1.0, "priority": 1})
-            actions.append({"type": "communicate", "duration": 0.5, "priority": 2})
-        elif goal == "seek_info":
-            actions.append({"type": "move_to", "target": (7.0, 6.4), "duration": 1.0, "priority": 1})
-        elif goal == "share":
-            actions.append({"type": "communicate", "duration": 0.5, "priority": 1})
-        elif goal == "build":
-            actions.append({"type": "construct", "duration": 2.0, "priority": 1})
-        else:
-            actions.append({"type": "idle", "duration": 1.0, "priority": 0})
+    def _run_goal_management_pipeline(self, dt, environment):
+        """Single authoritative goal-management pipeline for agent behavior."""
+        self.update_internal_state()
+        self._evaluate_goal_state(environment)
+        self.current_action = self._plan_actions_for_current_goal()
+        self._advance_active_actions(dt)
 
+    def select_action(self):
+        """Deprecated: retained for compatibility; delegates to action planner."""
+        actions = self._plan_actions_for_current_goal()
         self.current_action = actions
         return actions
 
@@ -336,45 +345,14 @@ class Agent:
                         self.activity_log.append(f"Inferred rule from tag [{tag}]")
 
     def decide_next_action(self, environment):
-        goal_entry = self.current_goal()
-
-        if not goal_entry:
-            self.push_goal("seek_info", environment.objects["Team_Info"]["position"])
-            return
-
-        goal = goal_entry["goal"]
-        self.target = goal_entry["target"]
-
-        if goal == "seek_info":
-            team_info_ids = {i.id for i in self.mental_model["information"]}
-            if "I004" in team_info_ids:
-                self.pop_goal()
-                self.push_goal("share")
-            else:
-                self.activity_log.append("Still seeking info...")
-
-        elif goal == "share":
-            if not self.has_shared:
-                self.has_shared = True
-                self.activity_log.append("Shared information with teammates")
-            self.pop_goal()
-            self.push_goal("build", environment.objects["Table_B"]["position"])
-
-        elif goal == "build":
-            if self.mental_model["knowledge"].rules:
-                self.activity_log.append("Building task engaged")
-            else:
-                self.pop_goal()
-                self.push_goal("seek_info", environment.objects["Team_Info"]["position"])
-
-        elif goal == "idle":
-            self.activity_log.append("Idling...")
+        """Deprecated compatibility wrapper for legacy callers."""
+        self._evaluate_goal_state(environment)
+        self.current_action = self._plan_actions_for_current_goal()
 
     def update(self, dt, environment):
         self.update_physiology(exertion=0.5)
         self.update_knowledge(environment)
-        self.decide_next_action(environment)
-        self.update_active_actions(dt)
+        self._run_goal_management_pipeline(dt, environment)
 
         if self.target:
             self.move_toward(self.target, dt, environment)
@@ -391,6 +369,10 @@ class Agent:
                     self.communicate_with(agent)
 
     def update_active_actions(self, dt):
+        """Deprecated wrapper: use `_advance_active_actions(...)` in live path."""
+        self._advance_active_actions(dt)
+
+    def _advance_active_actions(self, dt):
         completed = []
 
         for action in self.active_actions:
