@@ -105,7 +105,7 @@ class TestUnifiedGoalPipeline(unittest.TestCase):
         self.assertEqual(calls[0][0], 0.25)
         self.assertIs(calls[0][1], env)
 
-    def test_authoritative_pipeline_advances_goal_seek_share_build(self):
+    def test_authoritative_pipeline_defers_build_until_readiness_threshold(self):
         env = Environment(phases=[])
         agent = Agent(name="Architect", role="Architect", position=env.objects["Team_Info"]["position"])
         agent.allowed_packet = ["Team_Packet", "Architect_Packet"]
@@ -114,7 +114,7 @@ class TestUnifiedGoalPipeline(unittest.TestCase):
         agent._run_goal_management_pipeline(dt=0.1, environment=env)
         self.assertEqual(agent.current_goal()["goal"], "seek_info")
 
-        # Make I004 available in mental model to trigger share transition.
+        # A single information fragment is not enough to start build.
         architect_info = [i for i in env.knowledge_packets["Architect_Info"]["information"] if i.id == "I004"][0]
         agent.mental_model["information"].add(architect_info)
 
@@ -122,10 +122,19 @@ class TestUnifiedGoalPipeline(unittest.TestCase):
         agent._run_goal_management_pipeline(dt=0.1, environment=env)
         self.assertEqual(agent.current_goal()["goal"], "share")
 
-        # Step 3: share -> build with construction target.
+        # Step 3: share remains share until communication action is completed.
         agent._run_goal_management_pipeline(dt=0.1, environment=env)
-        self.assertEqual(agent.current_goal()["goal"], "build")
-        self.assertEqual(agent.current_goal()["target"], env.objects["Table_B"]["position"])
+        self.assertEqual(agent.current_goal()["goal"], "share")
+
+        # Complete communicate action; then share resolves to seek_info (not build) due to low readiness.
+        for _ in range(12):
+            agent._run_goal_management_pipeline(dt=0.2, environment=env)
+            if agent.has_shared:
+                break
+        self.assertTrue(agent.has_shared)
+
+        agent._run_goal_management_pipeline(dt=0.1, environment=env)
+        self.assertEqual(agent.current_goal()["goal"], "seek_info")
 
 
 class TestMovementAndInfoAccessRepairs(unittest.TestCase):
@@ -217,4 +226,40 @@ class TestMovementAndInfoAccessRepairs(unittest.TestCase):
             len(clustered),
             len(sim.agents),
             msg="All agents remained clustered around the central blocked zone",
+        )
+
+
+class TestBuildTargetAndProgress(unittest.TestCase):
+    def setUp(self):
+        random.seed(0)
+
+    def test_build_target_uses_accessible_interaction_zone_not_table_center(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Engineer", role="Engineer", position=env.get_spawn_point("Engineer"))
+
+        target = agent._select_build_target(env)
+        self.assertIsNotNone(target)
+        self.assertNotEqual(target, env.objects["Table_B"]["position"])
+        self.assertTrue(env.is_point_navigable(target), msg=f"Build target should be navigable: {target}")
+
+    def test_agent_can_progress_toward_build_interaction_target(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Engineer", role="Engineer", position=env.get_spawn_point("Engineer"))
+        target = agent._select_build_target(env)
+        self.assertIsNotNone(target)
+
+        start_dist = ((agent.position[0] - target[0]) ** 2 + (agent.position[1] - target[1]) ** 2) ** 0.5
+        for _ in range(30):
+            agent.move_toward(target, dt=0.25, environment=env)
+        end_dist = ((agent.position[0] - target[0]) ** 2 + (agent.position[1] - target[1]) ** 2) ** 0.5
+
+        self.assertLess(end_dist, start_dist)
+        self.assertGreater(
+            end_dist,
+            0.2,
+            msg="Agent should not snap into the table center/obstacle while pursuing build interaction",
+        )
+        self.assertFalse(
+            env.is_in_blocked_zone(agent.position),
+            msg=f"Agent deadlocked into blocked center while pursuing build target: {agent.position}",
         )

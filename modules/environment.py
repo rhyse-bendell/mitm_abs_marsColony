@@ -133,6 +133,17 @@ ZONES = {
     "Zone_Transition": {"default": True}
 }
 
+
+INTERACTION_TARGETS = {
+    "Team_Info": {"kind": "information", "zone": "Zone_Team_Info"},
+    "Engineer_Info": {"kind": "information", "zone": "Zone_Engineer_Info"},
+    "Botanist_Info": {"kind": "information", "zone": "Zone_Botanist_Info"},
+    "Architect_Info": {"kind": "information", "zone": "Zone_Architect_Info"},
+    "Build_Table_A": {"kind": "build", "zone": "Zone_Table_A", "object": "Table_A"},
+    "Build_Table_B": {"kind": "build", "zone": "Zone_Table_B", "object": "Table_B"},
+    "Build_Table_C": {"kind": "build", "zone": "Zone_Table_C", "object": "Table_C"},
+}
+
 OBJECTS = RAW_OBJECTS
 
 class Environment:
@@ -145,7 +156,78 @@ class Environment:
         self.resources = []
         self.construction = ConstructionManager()
         self.knowledge_packets = init_dik_packets()
+        self.interaction_targets = INTERACTION_TARGETS
         self._time = 0.0
+
+    def _zone_corners(self, zone_name):
+        zone = self.zones.get(zone_name, {})
+        return zone.get("corners")
+
+    def _zone_candidate_points(self, zone_name):
+        corners = self._zone_corners(zone_name)
+        if not corners:
+            return []
+        (x1, y1), (x2, y2) = corners
+        x_min, x_max = min(x1, x2), max(x1, x2)
+        y_min, y_max = min(y1, y2), max(y1, y2)
+        cx = (x_min + x_max) / 2.0
+        cy = (y_min + y_max) / 2.0
+        return [
+            (x_min, y_min),
+            (x_min, y_max),
+            (x_max, y_min),
+            (x_max, y_max),
+            (cx, y_min),
+            (cx, y_max),
+            (x_min, cy),
+            (x_max, cy),
+            (cx, cy),
+        ]
+
+    def is_point_navigable(self, point, threshold=0.15):
+        for name, obj in self.objects.items():
+            if obj.get("type") in {"rect", "circle", "blocked"} and not obj.get("passable", False):
+                if self.is_near_object(point, name, threshold=threshold):
+                    return False
+        return True
+
+
+    def _segment_is_navigable(self, start, end, samples=24):
+        for i in range(1, samples + 1):
+            t = i / samples
+            px = start[0] + (end[0] - start[0]) * t
+            py = start[1] + (end[1] - start[1]) * t
+            if not self.is_point_navigable((px, py)):
+                return False
+        return True
+
+    def get_interaction_target_position(self, target_name, from_position=None):
+        target = self.interaction_targets.get(target_name)
+        if not target:
+            return None
+
+        candidates = [p for p in self._zone_candidate_points(target["zone"]) if self.is_point_navigable(p)]
+        if target.get("kind") == "build":
+            candidates = [
+                p for p in candidates
+                if not any(
+                    self.is_near_object(p, name, threshold=0.25)
+                    for name, obj in self.objects.items()
+                    if obj.get("type") == "blocked"
+                )
+            ] or candidates
+
+        if not candidates:
+            return None
+
+        if from_position is None:
+            return candidates[0]
+
+        clear_candidates = [p for p in candidates if self._segment_is_navigable(from_position, p)]
+        if clear_candidates:
+            candidates = clear_candidates
+
+        return min(candidates, key=lambda p: math.hypot(p[0] - from_position[0], p[1] - from_position[1]))
 
     def get_spawn_points(self):
         return [
