@@ -20,15 +20,97 @@ class BrainContextBuilder:
     def __init__(self, scenario_name: str = "Minerva Mars Colony"):
         self.scenario_name = scenario_name
 
+    def _summarize_structures(self, environment) -> List[Dict[str, Any]]:
+        build_targets = {
+            name: t for name, t in environment.interaction_targets.items() if t.get("kind") == "build"
+        }
+        projects_by_id = {p.get("id"): p for p in environment.construction.projects.values() if isinstance(p, dict)}
+        summaries: List[Dict[str, Any]] = []
+
+        for target_id, target in build_targets.items():
+            object_id = target.get("object")
+            project = projects_by_id.get(target_id)
+            state = "absent"
+            usable = False
+            progress = 0.0
+            validated_correctness = None
+            needs_repair = False
+            overloaded = False
+
+            if project:
+                raw_status = project.get("status")
+                if raw_status == "complete":
+                    state = "built"
+                    usable = bool(project.get("correct", True))
+                else:
+                    state = "in_progress"
+                    usable = False
+
+                required = project.get("required_resources", {}).get("bricks", 0)
+                delivered = project.get("delivered_resources", {}).get("bricks", 0)
+                progress = min(1.0, delivered / required) if required else 0.0
+                validated_correctness = bool(project.get("correct", True))
+                needs_repair = project.get("correct", True) is False
+                overloaded = bool(project.get("overloaded", False))
+
+            summaries.append(
+                {
+                    "structure_id": target_id,
+                    "object_id": object_id,
+                    "zone": target.get("zone"),
+                    "structure_type": (project or {}).get("type", "unknown"),
+                    "state": state,
+                    "validated_correctness": validated_correctness,
+                    "usable": usable,
+                    "progress": round(progress, 2),
+                    "needs_repair": needs_repair,
+                    "overloaded": overloaded,
+                    "functional_connections": [f"zone_link:{target.get('zone')}"] if target.get("zone") else [],
+                }
+            )
+
+        return summaries
+
+    def _build_readiness(self, agent, structure_summary: List[Dict[str, Any]]) -> Dict[str, Any]:
+        info_count = len(agent.mental_model["information"])
+        knowledge_count = len(agent.mental_model["knowledge"].rules)
+        score = info_count + (2 * knowledge_count)
+        in_progress = sum(1 for s in structure_summary if s["state"] == "in_progress")
+        absent = sum(1 for s in structure_summary if s["state"] == "absent")
+
+        if score < 3:
+            status = "premature"
+            blockers = ["insufficient_validated_dik"]
+        elif in_progress > 0:
+            status = "plausible"
+            blockers = []
+        elif absent == 0:
+            status = "blocked"
+            blockers = ["no_remaining_absent_structure_targets"]
+        else:
+            status = "plausible"
+            blockers = []
+
+        return {
+            "status": status,
+            "score": score,
+            "blockers": blockers,
+            "ready_for_build": status == "plausible",
+        }
+
     def _affordances(self, agent, environment) -> List[Dict[str, Any]]:
         legal = [
-            {"action_type": ExecutableActionType.OBSERVE_ENVIRONMENT.value, "target_id": None},
-            {"action_type": ExecutableActionType.REASSESS_PLAN.value, "target_id": None},
-            {"action_type": ExecutableActionType.WAIT.value, "target_id": None},
-            {"action_type": ExecutableActionType.COMMUNICATE.value, "target_id": "nearby_agent"},
+            {"action_type": ExecutableActionType.OBSERVE_ENVIRONMENT.value, "target_id": None, "target_class": "self"},
+            {"action_type": ExecutableActionType.REASSESS_PLAN.value, "target_id": None, "target_class": "self"},
+            {"action_type": ExecutableActionType.WAIT.value, "target_id": None, "target_class": "self"},
+            {"action_type": ExecutableActionType.COMMUNICATE.value, "target_id": "nearby_agent", "target_class": "team"},
         ]
 
         for target_name, target in environment.interaction_targets.items():
+            accessible_point = environment.get_interaction_target_position(target_name, from_position=agent.position)
+            reachable = accessible_point is not None and environment._segment_is_navigable(agent.position, accessible_point)
+            if accessible_point is None:
+                continue
             action_type = (
                 ExecutableActionType.INSPECT_INFORMATION_SOURCE
                 if target.get("kind") == "information"
@@ -39,6 +121,9 @@ class BrainContextBuilder:
                     "action_type": action_type.value,
                     "target_id": target_name,
                     "target_zone": target.get("zone"),
+                    "target_point": accessible_point,
+                    "target_class": target.get("kind"),
+                    "reachable": reachable,
                 }
             )
 
@@ -46,10 +131,47 @@ class BrainContextBuilder:
             {
                 "action_type": ExecutableActionType.TRANSPORT_RESOURCES.value,
                 "target_id": "resource_zone_to_work_zone",
+                "target_class": "logistics",
                 "duration_s": 30.0,
             }
         )
         return legal
+
+    def _world_affordance_summary(self, agent, environment) -> Dict[str, Any]:
+        physical_obstacles = [
+            {"object_id": name, "kind": "blocked", "zone_corners": obj.get("corners")}
+            for name, obj in environment.objects.items()
+            if obj.get("type") == "blocked"
+        ]
+
+        information_sources = []
+        work_targets = []
+        unreachable_targets = []
+        for target_name, target in environment.interaction_targets.items():
+            point = environment.get_interaction_target_position(target_name, from_position=agent.position)
+            target_summary = {
+                "target_id": target_name,
+                "zone": target.get("zone"),
+                "interaction_point": point,
+            }
+            if target.get("kind") == "information":
+                information_sources.append(target_summary)
+            elif target.get("kind") == "build":
+                work_targets.append(target_summary)
+
+            if point is None:
+                unreachable_targets.append({"target_id": target_name, "reason": "no_navigable_interaction_point"})
+
+        return {
+            "physical_obstacles": physical_obstacles,
+            "information_sources": information_sources,
+            "work_zones": work_targets,
+            "resource_logistics": {
+                "sources": [{"zone": "field_resources", "visible_count": len(environment.get_visible_resources(agent.position))}],
+                "destinations": [{"zone": t.get("zone"), "target_id": name} for name, t in environment.interaction_targets.items() if t.get("kind") == "build"],
+            },
+            "unreachable_targets": unreachable_targets,
+        }
 
     def build(self, sim_state, agent) -> BrainContextPacket:
         environment = sim_state.environment
@@ -74,6 +196,14 @@ class BrainContextBuilder:
             "recent_history_summary": "",
             "recent_plan_history": [],
         }
+        history_events = history_bands.get("near_preceding_events", [])
+        repeated_stalls = sum(1 for e in history_events if "blocked while moving" in e.lower())
+        recent_plan_evolution = list(history_bands.get("recent_plan_history", []))
+
+        structure_summary = self._summarize_structures(environment)
+        affordance_summary = self._world_affordance_summary(agent, environment)
+        action_affordances = self._affordances(agent, environment)
+        build_readiness = self._build_readiness(agent, structure_summary)
 
         static_task_context = {
             "mission": self.scenario_name,
@@ -93,14 +223,29 @@ class BrainContextBuilder:
             "phase_state": current_phase,
             "agent_position": agent.position,
             "nearby_agents": nearby_agents,
-            "accessible_info_sources": list(environment.knowledge_packets.keys()),
-            "work_zones": list(environment.interaction_targets.keys()),
-            "built_structures": list(environment.construction.projects.values()),
-            "in_progress_projects": environment.construction.get_active_projects(),
+            "built_state": structure_summary,
+            "affordance_map": affordance_summary,
             "resource_status": {"visible_resources": environment.get_visible_resources(agent.position)},
-            "blocked_or_unreachable": [],
-            "legal_actions": self._affordances(agent, environment),
+            "legal_actions": action_affordances,
         }
+
+        active_plan = getattr(agent, "current_plan", None)
+        inspected_artifact_ids = {
+            aid for aid in agent.memory_seen_packets if isinstance(aid, str) and aid in sim_state.team_knowledge_manager.artifacts
+        }
+        artifact_summaries = []
+        for aid, artifact in sim_state.team_knowledge_manager.artifacts.items():
+            artifact_summaries.append(
+                {
+                    "artifact_id": aid,
+                    "type": artifact.artifact_type,
+                    "summary": artifact.summary,
+                    "author": artifact.author,
+                    "uptake_count": artifact.uptake_count,
+                    "inspected_by_agent": aid in inspected_artifact_ids,
+                    "adopted_by_agent": aid in inspected_artifact_ids,
+                }
+            )
 
         individual_cognitive_state = {
             "goal_stack": list(agent.goal_stack),
@@ -111,18 +256,26 @@ class BrainContextBuilder:
             "information_summary": information_summary,
             "knowledge_summary": knowledge_summary,
             "known_gaps": list(agent.known_gaps),
+            "certainty_signals": {
+                "definitely_known": knowledge_summary[-5:],
+                "uncertain_or_missing": sorted(set(list(agent.known_gaps) + (["validated_plan_missing"] if active_plan is None else []))),
+                "information_gathering_value": "high" if (len(knowledge_summary) < 2 or build_readiness["status"] != "plausible") else "medium",
+            },
+            "build_readiness": build_readiness,
             "packets_inspected": list(agent.memory_seen_packets),
             "recent_failed_attempts": [
-                e for e in history_bands["near_preceding_events"] if "blocked" in e.lower() or "could not" in e.lower()
+                e for e in history_events if "blocked" in e.lower() or "could not" in e.lower() or "mismatch" in e.lower()
             ],
             "active_plan": {
-                "plan_id": getattr(getattr(agent, "current_plan", None), "plan_id", None),
-                "created_at": getattr(getattr(agent, "current_plan", None), "created_at", None),
-                "last_reviewed_at": getattr(getattr(agent, "current_plan", None), "last_reviewed_at", None),
-                "invalidation_reason": getattr(getattr(agent, "current_plan", None), "invalidation_reason", None),
+                "plan_id": getattr(active_plan, "plan_id", None),
+                "created_at": getattr(active_plan, "created_at", None),
+                "last_reviewed_at": getattr(active_plan, "last_reviewed_at", None),
+                "invalidation_reason": getattr(active_plan, "invalidation_reason", None),
+                "remaining_executions": getattr(active_plan, "remaining_executions", None),
             },
         }
 
+        validated_plan_exists = any(a.artifact_type == "plan" for a in sim_state.team_knowledge_manager.artifacts.values())
         team_state = {
             "team_shared_knowledge": sim_state.team_knowledge_manager.summarize(),
             "teammate_roles": {other.name: other.role for other in sim_state.agents if other.name != agent.name},
@@ -131,6 +284,15 @@ class BrainContextBuilder:
             },
             "tom_summary": agent.theory_of_mind,
             "recent_shared_updates": sim_state.team_knowledge_manager.recent_updates[-5:],
+            "plan_readiness": "validated_shared_plan" if validated_plan_exists else "partial_or_fragmentary_plan",
+            "externalized_artifacts": artifact_summaries,
+        }
+
+        history_bands["semantic_plan_evolution"] = {
+            "recent_selected_actions": [e for e in recent_plan_evolution if ":" in e][:5],
+            "invalidations": [e for e in recent_plan_evolution if "invalidated:" in e],
+            "repeated_stalls": repeated_stalls,
+            "unresolved_contradictions": [e for e in history_events if "mismatch with construction" in e.lower()],
         }
 
         return BrainContextPacket(
@@ -139,5 +301,5 @@ class BrainContextBuilder:
             individual_cognitive_state=individual_cognitive_state,
             team_state=team_state,
             history_bands=history_bands,
-            action_affordances=self._affordances(agent, environment),
+            action_affordances=action_affordances,
         )

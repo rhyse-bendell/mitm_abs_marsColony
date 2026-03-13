@@ -204,10 +204,21 @@ class Agent:
 
     def _build_rule_based_brain_decision(self, sim_state, trigger_reason):
         context = sim_state.brain_context_builder.build(sim_state, self)
+        provider_name = sim_state.brain_provider.__class__.__name__
         sim_state.logger.log_event(
             sim_state.time,
             "brain_decision_query",
-            {"agent": self.name, "trigger_reason": trigger_reason, "plan_id": getattr(self.current_plan, "plan_id", None)},
+            {
+                "agent": self.name,
+                "trigger_reason": trigger_reason,
+                "plan_id": getattr(self.current_plan, "plan_id", None),
+                "provider": provider_name,
+                "context_meta": {
+                    "affordance_count": len(context.action_affordances),
+                    "known_gaps": len(context.individual_cognitive_state.get("known_gaps", [])),
+                    "build_status": context.individual_cognitive_state.get("build_readiness", {}).get("status"),
+                },
+            },
         )
         decision = sim_state.brain_provider.decide(context)
         legal_actions = [ExecutableActionType(a["action_type"]) for a in context.action_affordances]
@@ -245,9 +256,13 @@ class Agent:
             {
                 "agent": self.name,
                 "trigger_reason": trigger_reason,
+                "provider": provider_name,
                 "decision_status": status,
                 "selected_action": decision.selected_action.value,
+                "confidence": decision.confidence,
                 "errors": errors,
+                "validation_repaired": repaired,
+                "validation_fallback_to_wait": decision.selected_action == ExecutableActionType.WAIT and bool(errors),
             },
         )
         return decision, status
