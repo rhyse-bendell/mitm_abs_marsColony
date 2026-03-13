@@ -184,3 +184,37 @@ class TestMovementAndInfoAccessRepairs(unittest.TestCase):
 
         info_ids = {info.id for info in agent.mental_model["information"]}
         self.assertIn("I004", info_ids)
+
+    def test_agent_can_route_around_central_blocked_zone_to_reachable_target(self):
+        env = Environment(phases=[])
+        start = env.get_spawn_point("Engineer")
+        target = env.objects["Team_Info"]["position"]
+        agent = Agent(name="Engineer", role="Engineer", position=start)
+
+        for _ in range(40):
+            agent.move_toward(target, dt=0.25, environment=env)
+
+        self.assertTrue(
+            env.can_access_info(agent.position, "Team_Info", role="Engineer"),
+            msg=f"Agent failed to route around obstacle; final position: {agent.position}",
+        )
+
+    def test_early_simulation_steps_do_not_deadlock_all_agents_at_central_block(self):
+        sim = SimulationState(phases=[])
+        central_block = sim.environment.objects["Blocked_Zone_AC"]
+        (x1, y1), (x2, y2) = central_block["corners"]
+        x_min, x_max = min(x1, x2), max(x1, x2)
+        y_min, y_max = min(y1, y2), max(y1, y2)
+
+        def near_central_block(pos, margin=0.25):
+            return (x_min - margin) <= pos[0] <= (x_max + margin) and (y_min - margin) <= pos[1] <= (y_max + margin)
+
+        for _ in range(20):
+            sim.update(1.0)
+
+        clustered = [a for a in sim.agents if near_central_block(a.position)]
+        self.assertLess(
+            len(clustered),
+            len(sim.agents),
+            msg="All agents remained clustered around the central blocked zone",
+        )

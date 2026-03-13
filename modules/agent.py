@@ -53,6 +53,7 @@ class Agent:
         self.goal = None  # Synchronized with top of stack
         self.target = None
         self.has_shared = False
+        self.detour_target = None
 
         # Cognitive state
         self.data_memory = set()
@@ -307,8 +308,114 @@ class Agent:
                     self.activity_log.append(f"Absorbed info: {info.id} (from {info.source})")
 
     def move_toward(self, target, dt, environment):
+        def is_blocking_object(obj):
+            obj_type = obj.get("type")
+            # Anything that is not a bridge/line is impassable unless marked passable
+            return obj_type in {"rect", "circle", "blocked"} and not obj.get("passable", False)
+
+        def can_occupy(point):
+            return not any(
+                environment.is_near_object(point, name, threshold=0.15)
+                for name, obj in environment.objects.items()
+                if is_blocking_object(obj)
+            )
+
+        def segment_is_clear(start, end, samples=24):
+            for i in range(1, samples + 1):
+                t = i / samples
+                px = start[0] + (end[0] - start[0]) * t
+                py = start[1] + (end[1] - start[1]) * t
+                if not can_occupy((px, py)):
+                    return False
+            return True
+
+        def first_intersected_blocked_zone(start, end):
+            for name, obj in environment.objects.items():
+                if obj.get("type") != "blocked":
+                    continue
+                (x1, y1), (x2, y2) = obj["corners"]
+                x_min, x_max = min(x1, x2), max(x1, x2)
+                y_min, y_max = min(y1, y2), max(y1, y2)
+                # Quick broad phase: if any sampled segment point enters zone, treat as intersecting.
+                for i in range(1, 25):
+                    t = i / 24
+                    px = start[0] + (end[0] - start[0]) * t
+                    py = start[1] + (end[1] - start[1]) * t
+                    if x_min <= px <= x_max and y_min <= py <= y_max:
+                        return obj
+            return None
+
+        def compute_detour_waypoint(start, final_target):
+            blocked_zone = first_intersected_blocked_zone(start, final_target)
+            if blocked_zone is None:
+                # Fallback for circular/rectangular blockers encountered in practice.
+                vx, vy = final_target[0] - start[0], final_target[1] - start[1]
+                v_len = math.hypot(vx, vy)
+                if v_len < 1e-6:
+                    return None
+
+                ux, uy = vx / v_len, vy / v_len
+                # Perpendicular candidates (left/right) to slip around local obstacles.
+                offset = 0.9
+                candidates = [
+                    (start[0] - uy * offset, start[1] + ux * offset),
+                    (start[0] + uy * offset, start[1] - ux * offset),
+                ]
+
+                feasible = []
+                for wp in candidates:
+                    if not can_occupy(wp):
+                        continue
+                    if not segment_is_clear(start, wp):
+                        continue
+                    cost = math.hypot(wp[0] - start[0], wp[1] - start[1]) + math.hypot(
+                        final_target[0] - wp[0], final_target[1] - wp[1]
+                    )
+                    feasible.append((cost, wp))
+
+                if not feasible:
+                    return None
+
+                feasible.sort(key=lambda item: item[0])
+                return feasible[0][1]
+
+            (x1, y1), (x2, y2) = blocked_zone["corners"]
+            x_min, x_max = min(x1, x2), max(x1, x2)
+            y_min, y_max = min(y1, y2), max(y1, y2)
+            margin = 0.35
+
+            candidate_waypoints = [
+                (x_min - margin, y_min - margin),
+                (x_min - margin, y_max + margin),
+                (x_max + margin, y_min - margin),
+                (x_max + margin, y_max + margin),
+            ]
+
+            feasible = []
+            for wp in candidate_waypoints:
+                if not can_occupy(wp):
+                    continue
+                if not segment_is_clear(start, wp):
+                    continue
+                total_cost = math.hypot(wp[0] - start[0], wp[1] - start[1]) + math.hypot(
+                    final_target[0] - wp[0], final_target[1] - wp[1]
+                )
+                feasible.append((total_cost, wp))
+
+            if not feasible:
+                return None
+
+            feasible.sort(key=lambda item: item[0])
+            return feasible[0][1]
+
+        if self.detour_target is not None:
+            if math.hypot(self.detour_target[0] - self.position[0], self.detour_target[1] - self.position[1]) <= 0.2:
+                self.detour_target = None
+
+        active_target = self.detour_target if self.detour_target is not None else target
+
         x, y = self.position
-        tx, ty = target
+        tx, ty = active_target
         dx, dy = tx - x, ty - y
         dist = math.hypot(dx, dy)
         if dist < 0.01:
@@ -320,19 +427,18 @@ class Agent:
         new_x = x + math.cos(angle) * step
         new_y = y + math.sin(angle) * step
 
-        def is_blocking_object(obj):
-            obj_type = obj.get("type")
-            # Anything that is not a bridge/line is impassable unless marked passable
-            return obj_type in {"rect", "circle", "blocked"} and not obj.get("passable", False)
-
-        if not any(
-                environment.is_near_object((new_x, new_y), name, threshold=0.15)
-                for name, obj in environment.objects.items()
-                if is_blocking_object(obj)
-        ):
+        if can_occupy((new_x, new_y)):
             self.position = (new_x, new_y)
         else:
-            self.activity_log.append(f"Blocked while moving toward {target}")
+            if self.detour_target is None:
+                detour = compute_detour_waypoint(self.position, target)
+                if detour is not None:
+                    self.detour_target = detour
+                    self.activity_log.append(f"Detouring around obstacle via {detour}")
+                else:
+                    self.activity_log.append(f"Blocked while moving toward {target}")
+            else:
+                self.activity_log.append(f"Blocked while moving toward {active_target}")
 
         self.heart_rate += 1
 
