@@ -98,6 +98,43 @@ class Agent:
         normalized_allowed = {self._normalize_packet_name(p) for p in allowed}
         return packet_name in normalized_allowed
 
+    def _choose_info_target(self, environment):
+        """Select an information target using soft role-aware scoring."""
+        candidates = []
+        for packet_name in environment.knowledge_packets.keys():
+            if not self._has_packet_access(packet_name):
+                continue
+            if packet_name not in environment.objects:
+                continue
+
+            obj = environment.objects[packet_name]
+            if obj.get("type") == "rect":
+                ox, oy = obj["position"]
+                w, h = obj["size"]
+                target = (ox + (w / 2.0), oy + (h / 2.0))
+            else:
+                target = obj.get("position")
+
+            if target is None:
+                continue
+
+            distance = math.hypot(target[0] - self.position[0], target[1] - self.position[1])
+            score = -distance
+            if packet_name == f"{self.role}_Info":
+                score += 2.0
+            if packet_name == "Team_Info":
+                score += 1.5
+
+            candidates.append((score, packet_name, target))
+
+        if not candidates:
+            return environment.objects["Team_Info"]["position"]
+
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        chosen = candidates[0]
+        self.activity_log.append(f"Selected info target {chosen[1]} (score={chosen[0]:.2f})")
+        return chosen[2]
+
     def current_goal(self):
         return self.goal_stack[-1] if self.goal_stack else None
 
@@ -162,15 +199,14 @@ class Agent:
 
         goal_entry = self.current_goal()
         if not goal_entry:
-            self.push_goal("seek_info", environment.objects["Team_Info"]["position"])
+            self.push_goal("seek_info", self._choose_info_target(environment))
             return
 
         goal = goal_entry["goal"]
         self.target = goal_entry["target"]
 
         if goal == "seek_info":
-            team_info_ids = {i.id for i in self.mental_model["information"]}
-            if "I004" in team_info_ids:
+            if self.mental_model["information"]:
                 self.pop_goal()
                 self.push_goal("share")
             else:
@@ -187,7 +223,7 @@ class Agent:
                 self.activity_log.append("Building task engaged")
             else:
                 self.pop_goal()
-                self.push_goal("seek_info", environment.objects["Team_Info"]["position"])
+                self.push_goal("seek_info", self._choose_info_target(environment))
 
         elif goal == "idle":
             self.activity_log.append("Idling...")
@@ -200,7 +236,8 @@ class Agent:
         goal = self.goal_stack[-1]["goal"]
 
         if goal == "seek_info":
-            return [{"type": "move_to", "target": (7.0, 6.4), "duration": 1.0, "priority": 1}]
+            target = self.goal_stack[-1].get("target") or self.target or (7.0, 6.4)
+            return [{"type": "move_to", "target": target, "duration": 1.0, "priority": 1}]
         if goal == "share":
             return [{"type": "communicate", "duration": 0.5, "priority": 1}]
         if goal == "build":

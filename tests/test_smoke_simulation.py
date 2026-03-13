@@ -126,3 +126,61 @@ class TestUnifiedGoalPipeline(unittest.TestCase):
         agent._run_goal_management_pipeline(dt=0.1, environment=env)
         self.assertEqual(agent.current_goal()["goal"], "build")
         self.assertEqual(agent.current_goal()["target"], env.objects["Table_B"]["position"])
+
+
+class TestMovementAndInfoAccessRepairs(unittest.TestCase):
+    def setUp(self):
+        random.seed(0)
+
+    def test_role_spawns_are_not_inside_blocking_geometry(self):
+        env = Environment(phases=[])
+
+        for role in ["Architect", "Engineer", "Botanist"]:
+            pos = env.get_spawn_point(role)
+            for name, obj in env.objects.items():
+                if obj.get("type") in {"rect", "circle", "blocked"} and not obj.get("passable", False):
+                    self.assertFalse(
+                        env.is_near_object(pos, name, threshold=0.0),
+                        msg=f"{role} spawn {pos} overlaps blocking geometry {name}",
+                    )
+
+    def test_info_packets_are_non_blocking_interaction_targets(self):
+        env = Environment(phases=[])
+        for packet_name in ["Team_Info", "Architect_Info", "Engineer_Info", "Botanist_Info"]:
+            self.assertTrue(env.objects[packet_name].get("passable", False), msg=f"{packet_name} should be passable")
+
+    def test_rectangular_info_access_uses_zone_proximity(self):
+        env = Environment(phases=[])
+
+        architect_station = env.objects["Architect_Info"]
+        inside_point = (architect_station["position"][0] + 0.2, architect_station["position"][1] + 0.2)
+        self.assertTrue(env.can_access_info(inside_point, "Architect_Info", role="Architect"))
+
+        far_from_rect = (architect_station["position"][0] + 1.0, architect_station["position"][1] + 1.0)
+        self.assertFalse(env.can_access_info(far_from_rect, "Architect_Info", role="Architect"))
+
+    def test_roles_leave_spawn_and_are_not_immediately_stuck(self):
+        sim = SimulationState(phases=[])
+        starts = {a.role: a.position for a in sim.agents}
+
+        for _ in range(4):
+            sim.update(1.0)
+
+        for agent in sim.agents:
+            moved = ((agent.position[0] - starts[agent.role][0]) ** 2 + (agent.position[1] - starts[agent.role][1]) ** 2) ** 0.5
+            self.assertGreater(moved, 0.2, msg=f"{agent.role} did not leave spawn")
+
+            recent_log = " ".join(agent.activity_log[-8:])
+            self.assertNotIn("Blocked while moving", recent_log, msg=f"{agent.role} became immediately stuck")
+
+    def test_agent_can_reach_and_ingest_allowed_packet(self):
+        env = Environment(phases=[])
+        station = env.objects["Architect_Info"]
+        center = (station["position"][0] + (station["size"][0] / 2.0), station["position"][1] + (station["size"][1] / 2.0))
+        agent = Agent(name="Architect", role="Architect", position=center)
+        agent.allowed_packet = ["Architect_Packet"]
+
+        agent.update_knowledge(env)
+
+        info_ids = {info.id for info in agent.mental_model["information"]}
+        self.assertIn("I004", info_ids)

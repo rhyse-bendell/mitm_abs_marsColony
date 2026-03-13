@@ -32,9 +32,9 @@ class SimulationState:
 
         if agent_configs is None:
             agent_configs = [
-                {"name": "Architect", "role": "Architect", "traits": {}, "packet_access": "Team_Packet"},
-                {"name": "Engineer", "role": "Engineer", "traits": {}, "packet_access": "Team_Packet"},
-                {"name": "Botanist", "role": "Botanist", "traits": {}, "packet_access": "Team_Packet"},
+                {"name": "Architect", "role": "Architect", "traits": {}, "packet_access": ["Team_Packet", "Architect_Packet"]},
+                {"name": "Engineer", "role": "Engineer", "traits": {}, "packet_access": ["Team_Packet", "Engineer_Packet"]},
+                {"name": "Botanist", "role": "Botanist", "traits": {}, "packet_access": ["Team_Packet", "Botanist_Packet"]},
             ]
 
 

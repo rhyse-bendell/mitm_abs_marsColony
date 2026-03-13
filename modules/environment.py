@@ -39,6 +39,7 @@ RAW_OBJECTS = {
         "position": (7.0, 6.4),
         "size": (2.0, 0.5),
         "label": "Team Info",
+        "passable": True,
         "access_radius": DEFAULT_INFO_ACCESS_RADIUS
     },
     "Engineer_Info": {
@@ -47,6 +48,7 @@ RAW_OBJECTS = {
         "size": (.4, 0.4),
         "label": "Engineer Info",
         "orientation": "left",
+        "passable": True,
         "access_radius": DEFAULT_INFO_ACCESS_RADIUS
     },
     "Botanist_Info": {
@@ -55,6 +57,7 @@ RAW_OBJECTS = {
         "size": (.4, 0.4),
         "label": "Botanist Info",
         "orientation": "down",
+        "passable": True,
         "access_radius": DEFAULT_INFO_ACCESS_RADIUS
     },
     "Architect_Info": {
@@ -63,6 +66,7 @@ RAW_OBJECTS = {
         "size": (.4, 0.4),
         "label": "Architect Info",
         "orientation": "right",
+        "passable": True,
         "access_radius": DEFAULT_INFO_ACCESS_RADIUS
     },
     "Table_A": {
@@ -208,10 +212,24 @@ class Environment:
         else:
             return False
 
-        obj_pos = self.objects[object_key].get("position", (0.0, 0.0))
-        access_radius = self.objects[object_key].get("access_radius", DEFAULT_INFO_ACCESS_RADIUS)
+        obj = self.objects[object_key]
+        access_radius = obj.get("access_radius", DEFAULT_INFO_ACCESS_RADIUS)
 
-        dist = math.hypot(position[0] - obj_pos[0], position[1] - obj_pos[1])
+        if obj.get("type") == "rect":
+            ox, oy = obj["position"]
+            w, h = obj["size"]
+            nearest_x = max(ox, min(position[0], ox + w))
+            nearest_y = max(oy, min(position[1], oy + h))
+            dist = math.hypot(position[0] - nearest_x, position[1] - nearest_y)
+        elif obj.get("type") == "circle":
+            ox, oy = obj["position"]
+            radius = obj["radius"]
+            center_dist = math.hypot(position[0] - ox, position[1] - oy)
+            dist = max(0.0, center_dist - radius)
+        else:
+            obj_pos = obj.get("position", (0.0, 0.0))
+            dist = math.hypot(position[0] - obj_pos[0], position[1] - obj_pos[1])
+
         if dist > access_radius:
             return False
 
@@ -244,8 +262,8 @@ class Environment:
         Returns a safe, role-specific spawn point not inside any blocked zone.
         """
         candidate_spawns = {
-            "Architect": (6.4, 1.2),  # Near Architect_Info
-            "Engineer": (3.5, 1.2),  # Near Engineer_Info
+            "Architect": (6.9, 1.2),  # Near Architect_Info, outside station geometry
+            "Engineer": (3.9, 1.2),  # Near Engineer_Info, outside station geometry
             "Botanist": (5.0, 1.0)  # Between them
         }
         pos = candidate_spawns.get(role, (6.0, 3.0))
