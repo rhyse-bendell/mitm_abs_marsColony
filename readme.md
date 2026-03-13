@@ -28,6 +28,8 @@ This repository contains an in-progress prototype of a Mars Colony agent-based s
 
 ## Quick launch (double-click)
 
-- Use `launch_interface.sh` from the repository root to open the simulation interface directly.
-- On Linux desktop environments, you can double-click the script and choose **Run**.
-- On macOS, run `chmod +x launch_interface.sh` once, then double-click in Finder (or run from Terminal).
+- **Windows (recommended):** double-click `launch_interface.bat` from File Explorer.
+  - The launcher finds the repo path automatically, tries `py -3`, `python`, then `python3`, and shows clear errors if Python or dependencies are missing.
+- **Linux/macOS helper:** use `launch_interface.sh`.
+  - Linux: double-click and choose **Run**.
+  - macOS: run `chmod +x launch_interface.sh` once, then double-click in Finder (or run from Terminal).
