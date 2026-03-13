@@ -9,6 +9,14 @@ except ImportError:
     patches = None
 
 from modules.knowledge import Data, Information, Knowledge
+from modules.action_schema import (
+    BrainDecision,
+    CommunicationIntent,
+    ExecutableActionType,
+    InternalEventType,
+    LEGACY_COMMUNICATION_TYPE_MAP,
+    validate_brain_decision,
+)
 
 DIK_LOG = []
 
@@ -164,6 +172,58 @@ class Agent:
         self._evaluate_goal_state(sim_state.environment)
         self.current_action = self._plan_actions_for_current_goal()
         self._advance_active_actions(dt=1.0)
+
+    def _build_rule_based_brain_decision(self, sim_state):
+        context = sim_state.brain_context_builder.build(sim_state, self)
+        sim_state.logger.log_event(sim_state.time, "brain_context_built", {"agent": self.name})
+        decision = sim_state.brain_provider.decide(context)
+        sim_state.logger.log_event(
+            sim_state.time,
+            "brain_decision",
+            {"agent": self.name, "selected_action": decision.selected_action.value, "confidence": decision.confidence},
+        )
+        legal_actions = [ExecutableActionType(a["action_type"]) for a in context.action_affordances]
+        errors = validate_brain_decision(decision, legal_actions)
+        if errors:
+            sim_state.logger.log_event(
+                sim_state.time,
+                "brain_decision_rejected",
+                {"agent": self.name, "errors": errors},
+            )
+            return BrainDecision(
+                selected_action=ExecutableActionType.WAIT,
+                reason_summary="Fallback due to decision validation failure.",
+                confidence=1.0,
+            )
+        return decision
+
+    def _translate_brain_decision_to_legacy_action(self, decision, environment):
+        mapping = {
+            ExecutableActionType.MOVE_TO_TARGET: {"type": "move_to", "duration": 1.0, "priority": 1},
+            ExecutableActionType.INSPECT_INFORMATION_SOURCE: {"type": "move_to", "duration": 1.0, "priority": 1},
+            ExecutableActionType.COMMUNICATE: {"type": "communicate", "duration": 0.5, "priority": 1},
+            ExecutableActionType.REQUEST_ASSISTANCE: {"type": "communicate", "duration": 0.5, "priority": 1},
+            ExecutableActionType.MEETING: {"type": "communicate", "duration": 0.8, "priority": 1},
+            ExecutableActionType.EXTERNALIZE_PLAN: {"type": "idle", "duration": 1.0, "priority": 1},
+            ExecutableActionType.CONSULT_TEAM_ARTIFACT: {"type": "idle", "duration": 1.0, "priority": 1},
+            ExecutableActionType.TRANSPORT_RESOURCES: {"type": "transport_resources", "duration": 30.0, "priority": 1},
+            ExecutableActionType.START_CONSTRUCTION: {"type": "construct", "duration": 2.0, "priority": 1},
+            ExecutableActionType.CONTINUE_CONSTRUCTION: {"type": "construct", "duration": 2.0, "priority": 1},
+            ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION: {"type": "construct", "duration": 2.0, "priority": 1},
+            ExecutableActionType.VALIDATE_CONSTRUCTION: {"type": "idle", "duration": 1.0, "priority": 1},
+            ExecutableActionType.OBSERVE_ENVIRONMENT: {"type": "idle", "duration": 0.8, "priority": 1},
+            ExecutableActionType.REASSESS_PLAN: {"type": "idle", "duration": 0.8, "priority": 1},
+            ExecutableActionType.WAIT: {"type": "idle", "duration": 1.0, "priority": 1},
+        }
+        action = dict(mapping[decision.selected_action])
+
+        if decision.target_id:
+            interaction_target = environment.get_interaction_target_position(decision.target_id, from_position=self.position)
+            if interaction_target is not None:
+                action["target"] = interaction_target
+        if decision.selected_action == ExecutableActionType.TRANSPORT_RESOURCES:
+            action["duration"] = 30.0
+        return [action]
 
     def perceive_environment(self, sim_state):
         self_visible_range = 2.0
@@ -512,10 +572,18 @@ class Agent:
         self._evaluate_goal_state(environment)
         self.current_action = self._plan_actions_for_current_goal()
 
-    def update(self, dt, environment):
+    def update(self, dt, environment, sim_state=None):
         self.update_physiology(exertion=0.5)
         self.update_knowledge(environment)
-        self._run_goal_management_pipeline(dt, environment)
+        if sim_state is None:
+            self._run_goal_management_pipeline(dt, environment)
+        else:
+            if self.active_actions:
+                self._advance_active_actions(dt)
+            else:
+                decision = self._build_rule_based_brain_decision(sim_state)
+                self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment)
+                self._advance_active_actions(dt)
 
         if self.target:
             self.move_toward(self.target, dt, environment)
@@ -567,7 +635,7 @@ class Agent:
         if self.mental_model["knowledge"].rules:
             messages.append({"type": "TKP", "content": list(self.mental_model["knowledge"].rules), "sender": self.name})
         if not self.mental_model["knowledge"].rules:
-            messages.append({"type": "TKR", "content": "Requesting help with rules", "sender": self.name})
+            messages.append({"type": "TKRQ", "content": ["Requesting help with rules"], "sender": self.name})
         if self.current_goal():
             messages.append({"type": "TGTO", "content": self.current_goal()["goal"], "sender": self.name})
         return messages
@@ -652,6 +720,7 @@ class Agent:
             self.theory_of_mind[sender] = {"goals": [], "knowledge_ids": set(), "last_seen": None}
 
         mtype = message.get("type")
+        mtype = LEGACY_COMMUNICATION_TYPE_MAP.get(mtype, mtype)
         content = message.get("content", [])
 
         if mtype == "TDP":

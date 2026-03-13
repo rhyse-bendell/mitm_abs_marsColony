@@ -2,8 +2,11 @@
 
 import math
 from modules.agent import Agent
+from modules.brain_context import BrainContextBuilder
+from modules.brain_provider import RuleBrain
 from modules.environment import Environment
 from modules.logging_tools import SimulationLogger
+from modules.team_knowledge import TeamKnowledgeManager
 
 
 class SimulationState:
@@ -21,6 +24,9 @@ class SimulationState:
         self.flash_mode = flash_mode
         self.time = 0.0
         self.logger = SimulationLogger(experiment_name=experiment_name or "experiment", project_root=project_root)
+        self.team_knowledge_manager = TeamKnowledgeManager()
+        self.brain_context_builder = BrainContextBuilder()
+        self.brain_provider = RuleBrain()
         self.save_interval = 10.0
         self._last_save_time = 0.0
 
@@ -69,7 +75,7 @@ class SimulationState:
 
         for agent in self.agents:
             agent.current_time = self.time
-            agent.update(dt, self.environment)
+            agent.update(dt, self.environment, sim_state=self)
             agent.compare_and_repair_construction(self.environment.construction)
             self.logger.log_agent_state(self.time, agent)
 

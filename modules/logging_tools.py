@@ -71,6 +71,7 @@ class SimulationLogger:
         self.filename = filename
         self.interval = interval
         self.buffer = []
+        self.event_buffer = []
         self.last_dump_time = 0.0
 
     def log_agent_state(self, time, agent):
@@ -96,6 +97,15 @@ class SimulationLogger:
             self.save_csv()
             self.last_dump_time = current_time
 
+    def log_event(self, time, event_type, payload):
+        self.event_buffer.append(
+            {
+                "time": round(time, 2),
+                "event_type": event_type,
+                "payload": json.dumps(payload, default=str),
+            }
+        )
+
     def save_csv(self):
         if not self.buffer:
             return
@@ -108,6 +118,16 @@ class SimulationLogger:
             if write_header:
                 writer.writeheader()
             writer.writerows(self.buffer)
+
+        if self.event_buffer:
+            event_path = self.output_session.build_log_path("events.csv")
+            event_header = not event_path.exists()
+            with event_path.open("a", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=self.event_buffer[0].keys())
+                if event_header:
+                    writer.writeheader()
+                writer.writerows(self.event_buffer)
+            self.event_buffer = []
 
         self.buffer = []
         print(f"✅ Agent logs saved to {save_path}")
