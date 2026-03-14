@@ -100,6 +100,7 @@ class LocalHTTPBrain(BrainProvider):
     def __init__(self, config: BrainBackendConfig, fallback: BrainProvider):
         self.config = config
         self.fallback = fallback
+        self.last_outcome = {"fallback": False, "reason": None, "latency_ms": None}
 
     def _log_debug(self, message: str, payload: Dict[str, Any]) -> None:
         if self.config.debug:
@@ -170,6 +171,7 @@ class LocalHTTPBrain(BrainProvider):
                     "latency_ms": latency_ms,
                 },
             )
+            self.last_outcome = {"fallback": False, "reason": None, "latency_ms": latency_ms}
             return decision
         except (TimeoutError, error.URLError, error.HTTPError, ValueError, KeyError, json.JSONDecodeError) as exc:
             fallback_reason = str(exc)
@@ -188,6 +190,7 @@ class LocalHTTPBrain(BrainProvider):
                 "latency_ms": latency_ms,
             },
         )
+        self.last_outcome = {"fallback": True, "reason": fallback_reason, "latency_ms": latency_ms}
         return self.fallback.decide(context_packet)
 
 

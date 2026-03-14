@@ -221,6 +221,19 @@ class Agent:
             },
         )
         decision = sim_state.brain_provider.decide(context)
+        provider_outcome = getattr(sim_state.brain_provider, "last_outcome", None)
+        if provider_outcome and provider_outcome.get("fallback"):
+            sim_state.logger.log_event(
+                sim_state.time,
+                "brain_provider_fallback",
+                {
+                    "agent": self.name,
+                    "provider": provider_name,
+                    "fallback_provider": "RuleBrain",
+                    "reason": provider_outcome.get("reason"),
+                    "latency_ms": provider_outcome.get("latency_ms"),
+                },
+            )
         legal_actions = [ExecutableActionType(a["action_type"]) for a in context.action_affordances]
 
         repaired = False
