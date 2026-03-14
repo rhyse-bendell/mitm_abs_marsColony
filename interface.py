@@ -16,6 +16,7 @@ class MarsColonyInterface:
     STATE_PAUSED = "paused"
     STATE_STOPPED = "stopped"
     EXPERIMENT_MAX_CONTENT_WIDTH = 940
+    EXPERIMENT_PANEL_BORDER = "#586271"
 
     def __init__(self):
         self.root = tk.Tk()
@@ -238,7 +239,11 @@ class MarsColonyInterface:
                 for trait_key, var in self.agent_traits[role].items():
                     traits[trait_key] = var.get()  # override with current slider value
 
-                selected_packets = [self.packet_access[role].get(i) for i in self.packet_access[role].curselection()]
+                selected_packets = [
+                    packet_name
+                    for packet_name, is_enabled in self.packet_access[role].items()
+                    if is_enabled.get()
+                ]
 
                 agent_configs.append({
                     "name": role,
@@ -532,8 +537,19 @@ class MarsColonyInterface:
         )
 
     def _create_experiment_global_settings(self, parent):
-        settings_frame = ttk.LabelFrame(parent, text="Global Experiment Settings", padding=(10, 8))
-        settings_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 6))
+        settings_panel = tk.LabelFrame(
+            parent,
+            text="Global Experiment Settings",
+            padx=10,
+            pady=8,
+            relief="groove",
+            borderwidth=2,
+            highlightbackground=self.EXPERIMENT_PANEL_BORDER,
+            highlightthickness=1,
+        )
+        settings_panel.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 6))
+        settings_frame = ttk.Frame(settings_panel)
+        settings_frame.grid(row=0, column=0, sticky="ew")
         settings_frame.columnconfigure(1, weight=1)
 
         ttk.Label(settings_frame, text="Speed Multiplier").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
@@ -585,7 +601,16 @@ class MarsColonyInterface:
         ).grid(row=1, column=0, sticky="w")
 
     def _create_agent_card(self, parent, role, row, trait_labels, update_traits_from_profile):
-        card = ttk.LabelFrame(parent, text=f"{role} Configuration", padding=(10, 8))
+        card = tk.LabelFrame(
+            parent,
+            text=f"{role} Configuration",
+            padx=10,
+            pady=8,
+            relief="groove",
+            borderwidth=2,
+            highlightbackground=self.EXPERIMENT_PANEL_BORDER,
+            highlightthickness=1,
+        )
         card.grid(row=row, column=0, sticky="ew", padx=10, pady=6)
         card.columnconfigure(0, weight=1)
         card.columnconfigure(1, weight=1)
@@ -656,17 +681,17 @@ class MarsColonyInterface:
         packet_frame.grid(row=4, column=0, columnspan=2, sticky="ew")
         packet_frame.columnconfigure(0, weight=1)
 
-        self.packet_access[role] = tk.Listbox(
-            packet_frame,
-            selectmode="multiple",
-            exportselection=False,
-            height=4,
-            width=30,
-        )
-        for pkt in ["Team_Packet", "Architect_Packet", "Engineer_Packet", "Botanist_Packet"]:
-            self.packet_access[role].insert(tk.END, pkt)
-        self.packet_access[role].select_set(0)
-        self.packet_access[role].grid(row=0, column=0, sticky="w")
+        packet_names = ["Team_Packet", "Architect_Packet", "Engineer_Packet", "Botanist_Packet"]
+        self.packet_access[role] = {}
+        for idx, pkt in enumerate(packet_names):
+            pkt_enabled = BooleanVar(value=(idx == 0))
+            self.packet_access[role][pkt] = pkt_enabled
+            ttk.Checkbutton(packet_frame, text=pkt, variable=pkt_enabled).grid(
+                row=idx,
+                column=0,
+                sticky="w",
+                pady=1,
+            )
 
     def create_experiment_tab(self):
         container = ttk.Frame(self.notebook)
