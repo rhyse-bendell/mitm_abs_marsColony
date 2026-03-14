@@ -247,6 +247,7 @@ class AgentDefault:
     taskwork_potential: float
     mechanism_overrides: Dict[str, float]
     source_access_override: List[str]
+    planner_config: Dict[str, object]
     enabled: bool
 
 
@@ -674,6 +675,7 @@ class TaskModelLoader:
                 taskwork_potential=_parse_float(row.get("taskwork_potential", ""), default=0.5),
                 mechanism_overrides=json.loads(row.get("mechanism_overrides_json", "{}") or "{}"),
                 source_access_override=_split_pipe(row.get("source_access_override", "")),
+                planner_config=json.loads(row.get("planner_config_json", "{}") or "{}"),
                 enabled=_parse_bool(row.get("enabled", "true")),
             )
             defaults.append(default)

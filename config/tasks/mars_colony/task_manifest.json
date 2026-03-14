@@ -3,5 +3,19 @@
   "name": "Minerva Mars Colony",
   "version": "2.0",
   "description": "MITM Mars Colony task package containing DIK + environment/action/task context.",
-  "default": true
+  "default": true,
+  "planner_defaults": {
+    "planner_enabled": true,
+    "planner_interval_steps": 4,
+    "planner_interval_time": 3.0,
+    "planner_trigger_mask": [
+      "phase_transition",
+      "new_dik_acquired",
+      "contradiction_detected",
+      "build_readiness_changed"
+    ],
+    "planner_timeout_seconds": 1.5,
+    "planner_fallback_backend": "rule_brain",
+    "planner_max_retries": 0
+  }
 }

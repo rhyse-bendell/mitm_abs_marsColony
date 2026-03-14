@@ -51,8 +51,39 @@ class PlanRecord:
     invalidation_reason: str | None = None
 
 
+@dataclass
+class PlannerCadenceConfig:
+    planner_enabled: bool = True
+    planner_interval_steps: int = 4
+    planner_interval_time: float = 3.0
+    planner_trigger_mask: set[str] | None = None
+    planner_timeout_seconds: float = 1.5
+    planner_fallback_backend: str = "rule_brain"
+    planner_max_retries: int = 0
+
+    @classmethod
+    def from_dict(cls, payload):
+        payload = dict(payload or {})
+        mask = payload.get("planner_trigger_mask")
+        if isinstance(mask, str):
+            mask = {m.strip() for m in mask.split("|") if m.strip()}
+        elif isinstance(mask, (list, tuple, set)):
+            mask = {str(m) for m in mask if str(m).strip()}
+        else:
+            mask = None
+        return cls(
+            planner_enabled=bool(payload.get("planner_enabled", True)),
+            planner_interval_steps=max(1, int(payload.get("planner_interval_steps", 4))),
+            planner_interval_time=max(0.0, float(payload.get("planner_interval_time", 3.0))),
+            planner_trigger_mask=mask,
+            planner_timeout_seconds=max(0.1, float(payload.get("planner_timeout_seconds", 1.5))),
+            planner_fallback_backend=str(payload.get("planner_fallback_backend", "rule_brain")),
+            planner_max_retries=max(0, int(payload.get("planner_max_retries", 0))),
+        )
+
+
 class Agent:
-    def __init__(self, name, role, position=(0.0, 0.0), orientation=0.0, speed=1.0):
+    def __init__(self, name, role, position=(0.0, 0.0), orientation=0.0, speed=1.0, planner_config=None):
         self.name = name
         self.role = role
         self.position = position
@@ -121,6 +152,12 @@ class Agent:
             "plan_evolution": [],
             "compaction_count": 0,
         }
+        self.planner_cadence = PlannerCadenceConfig.from_dict(planner_config)
+        self.sim_step_count = 0
+        self.last_planner_step = -1
+        self.last_planner_time = -1.0
+        self.planner_call_count = 0
+
 
         # Experiment-facing trait defaults
         self.communication_propensity = 0.5
@@ -489,6 +526,7 @@ class Agent:
     def _build_rule_based_brain_decision(self, sim_state, trigger_reason):
         context = sim_state.brain_context_builder.build(sim_state, self)
         provider_name = sim_state.brain_provider.__class__.__name__
+        sim_state.logger.log_event(sim_state.time, "planner_call_triggered", {"agent": self.name, "reason": trigger_reason, "backend": provider_name})
         sim_state.logger.log_event(
             sim_state.time,
             "brain_decision_query",
@@ -505,6 +543,9 @@ class Agent:
             },
         )
         decision = sim_state.brain_provider.decide(context)
+        self.planner_call_count += 1
+        self.last_planner_step = self.sim_step_count
+        self.last_planner_time = sim_state.time
         decision = self._apply_trait_bias_to_decision(decision, context, sim_state, trigger_reason)
         provider_outcome = getattr(sim_state.brain_provider, "last_outcome", None)
         if provider_outcome and provider_outcome.get("fallback"):
@@ -561,6 +602,8 @@ class Agent:
                 "errors": errors,
                 "validation_repaired": repaired,
                 "validation_fallback_to_wait": decision.selected_action == ExecutableActionType.WAIT and bool(errors),
+                "planner_call_count": self.planner_call_count,
+                "latency_ms": (provider_outcome or {}).get("latency_ms"),
             },
         )
         return decision, status
@@ -688,6 +731,54 @@ class Agent:
         self.last_build_blockers = list(build_blockers)
         self.last_team_update_count = team_updates
         return reason
+
+    def _planner_decision_allowed(self, sim_state, trigger_reason):
+        cfg = self.planner_cadence
+        if not cfg.planner_enabled:
+            return False, "planner_disabled"
+
+        if trigger_reason and trigger_reason in {"no_active_plan", "plan_completed", "plan_invalidated"}:
+            return True, trigger_reason
+
+        if trigger_reason and cfg.planner_trigger_mask and trigger_reason in cfg.planner_trigger_mask:
+            return True, f"trigger:{trigger_reason}"
+
+        steps_since = self.sim_step_count - self.last_planner_step if self.last_planner_step >= 0 else self.sim_step_count
+        time_since = sim_state.time - self.last_planner_time if self.last_planner_time >= 0 else sim_state.time
+        step_due = steps_since >= cfg.planner_interval_steps
+        time_due = time_since >= cfg.planner_interval_time
+        if step_due or time_due:
+            due_bits = []
+            if step_due:
+                due_bits.append("step_interval")
+            if time_due:
+                due_bits.append("time_interval")
+            return True, "+".join(due_bits)
+        return False, "cadence_not_due"
+
+    def _refresh_goal_plan_state(self, decision, sim_state, trigger_reason):
+        if decision.goal_update:
+            if not self.goal_stack or self.goal_stack[-1].get("goal") != decision.goal_update:
+                self.goal_stack.append({"goal": decision.goal_update, "target": decision.target_id})
+                if len(self.goal_stack) > 5:
+                    self.goal_stack = self.goal_stack[-5:]
+            self.update_current_goal()
+
+        next_steps = decision.next_steps or decision.plan_steps
+        if next_steps:
+            self.activity_log.append(f"Planner next steps ({trigger_reason}): {' -> '.join(next_steps[:3])}")
+
+        sim_state.logger.log_event(
+            sim_state.time,
+            "planner_goal_plan_refresh",
+            {
+                "agent": self.name,
+                "trigger_reason": trigger_reason,
+                "goal_update": decision.goal_update,
+                "plan_method_id": decision.plan_method_id,
+                "next_steps": list(next_steps[:5]),
+            },
+        )
 
     def _adopt_new_plan(self, decision, trigger_reason, sim_time):
         if self.current_plan is not None and self.current_plan.invalidation_reason is None:
@@ -1182,18 +1273,23 @@ class Agent:
             self._run_goal_management_pipeline(dt, environment)
         else:
             self.perceive_environment(sim_state)
+            self.sim_step_count += 1
             if self.active_actions:
                 self._advance_active_actions(dt)
             else:
                 trigger_reason = self._plan_trigger_reason(sim_state, environment)
-                if trigger_reason is None and self._continue_cached_plan(sim_state, environment):
-                    pass
-                else:
-                    if trigger_reason is None:
-                        trigger_reason = "no_active_plan"
-                    decision, _status = self._build_rule_based_brain_decision(sim_state, trigger_reason)
-                    self._adopt_new_plan(decision, trigger_reason, sim_state.time)
+                planner_allowed, planner_reason = self._planner_decision_allowed(sim_state, trigger_reason)
+                if planner_allowed:
+                    decision, _status = self._build_rule_based_brain_decision(sim_state, planner_reason)
+                    self._adopt_new_plan(decision, planner_reason, sim_state.time)
+                    self._refresh_goal_plan_state(decision, sim_state, planner_reason)
                     self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment)
+                elif self._continue_cached_plan(sim_state, environment):
+                    sim_state.logger.log_event(sim_state.time, "planner_skipped_due_to_cadence", {"agent": self.name, "reason": planner_reason})
+                else:
+                    decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="no active cached plan while planner cadence skips", confidence=1.0)
+                    self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment)
+                    sim_state.logger.log_event(sim_state.time, "planner_skipped_without_plan", {"agent": self.name, "reason": planner_reason})
                 self._advance_active_actions(dt)
 
             self._apply_externalization_and_construction_effects(environment, sim_state, dt)

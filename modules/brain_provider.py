@@ -21,6 +21,8 @@ class BrainBackendConfig:
     local_endpoint: str = "/v1/chat/completions"
     local_model: str = "local-model"
     timeout_s: float = 1.5
+    max_retries: int = 0
+    fallback_backend: str = "rule_brain"
     debug: bool = False
 
 
@@ -30,7 +32,8 @@ def create_brain_provider(config: BrainBackendConfig | None = None) -> BrainProv
     if selected == "local_stub":
         return LocalLLMBrainStub()
     if selected in {"local_http", "openai_compatible_local"}:
-        return LocalHTTPBrain(config=config, fallback=RuleBrain())
+        fallback = RuleBrain() if config.fallback_backend.lower() == "rule_brain" else RuleBrain()
+        return LocalHTTPBrain(config=config, fallback=fallback)
     if selected == "cloud_stub":
         return CloudBrainStub()
     return RuleBrain()
@@ -59,6 +62,8 @@ def _decision_from_payload(payload: Dict[str, Any]) -> BrainDecision:
         confidence=float(payload.get("confidence", 0.0)),
         assumptions=list(payload.get("assumptions", [])),
         requests_for_context=list(payload.get("requests_for_context", [])),
+        plan_method_id=payload.get("plan_method_id"),
+        next_steps=list(payload.get("next_steps", payload.get("plan_steps", []))),
     )
 
 
@@ -258,7 +263,12 @@ class LocalHTTPBrain(BrainProvider):
             return content
         if not isinstance(content, str):
             raise ValueError("local backend response content is not JSON string")
-        return json.loads(content)
+        cleaned = content.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:].strip()
+        return json.loads(cleaned)
 
     def decide(self, context_packet):
         started_at = time.perf_counter()
@@ -271,34 +281,39 @@ class LocalHTTPBrain(BrainProvider):
 
         endpoint = f"{self.config.local_base_url.rstrip('/')}{self.config.local_endpoint}"
         fallback_reason = None
-        try:
-            payload = self._build_request_payload(context_packet)
-            req = request.Request(
-                endpoint,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with request.urlopen(req, timeout=self.config.timeout_s) as response:
-                raw = response.read().decode("utf-8")
-            parsed = json.loads(raw)
-            decision_payload = self._parse_response(parsed)
-            decision = _decision_from_payload(decision_payload)
-            latency_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
-            self._log_debug(
-                "brain_local_outcome",
-                {
-                    "provider": "local_http",
-                    "fallback": False,
-                    "selected_action": decision.selected_action.value,
-                    "confidence": decision.confidence,
-                    "latency_ms": latency_ms,
-                },
-            )
-            self.last_outcome = {"fallback": False, "reason": None, "latency_ms": latency_ms}
-            return decision
-        except (TimeoutError, error.URLError, error.HTTPError, ValueError, KeyError, json.JSONDecodeError) as exc:
-            fallback_reason = str(exc)
+        attempts = max(1, int(self.config.max_retries) + 1)
+        for attempt in range(1, attempts + 1):
+            try:
+                payload = self._build_request_payload(context_packet)
+                req = request.Request(
+                    endpoint,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with request.urlopen(req, timeout=self.config.timeout_s) as response:
+                    raw = response.read().decode("utf-8")
+                parsed = json.loads(raw)
+                decision_payload = self._parse_response(parsed)
+                decision = _decision_from_payload(decision_payload)
+                latency_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
+                self._log_debug(
+                    "brain_local_outcome",
+                    {
+                        "provider": "local_http",
+                        "fallback": False,
+                        "selected_action": decision.selected_action.value,
+                        "confidence": decision.confidence,
+                        "latency_ms": latency_ms,
+                        "attempt": attempt,
+                    },
+                )
+                self.last_outcome = {"fallback": False, "reason": None, "latency_ms": latency_ms}
+                return decision
+            except (TimeoutError, error.URLError, error.HTTPError, ValueError, KeyError, json.JSONDecodeError) as exc:
+                fallback_reason = f"attempt={attempt}/{attempts} error={exc}"
+                if attempt >= attempts:
+                    break
 
         latency_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
         LOGGER.warning(

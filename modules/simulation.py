@@ -31,6 +31,7 @@ class SimulationState:
         project_root=None,
         brain_backend="rule_brain",
         brain_backend_options=None,
+        planner_config=None,
         task_id="mars_colony",
     ):
         self.task_model = load_task_model(task_id=task_id)
@@ -55,7 +56,16 @@ class SimulationState:
         self.logger = SimulationLogger(experiment_name=experiment_name or "experiment", project_root=project_root)
         self.team_knowledge_manager = TeamKnowledgeManager()
         self.brain_context_builder = BrainContextBuilder()
-        backend_options = brain_backend_options or {}
+        self.planner_defaults = dict(self.task_model.manifest.get("planner_defaults", {}))
+        if planner_config:
+            self.planner_defaults.update(dict(planner_config))
+        backend_options = dict(brain_backend_options or {})
+        if "timeout_s" not in backend_options and "planner_timeout_seconds" in self.planner_defaults:
+            backend_options["timeout_s"] = self.planner_defaults.get("planner_timeout_seconds")
+        if "max_retries" not in backend_options and "planner_max_retries" in self.planner_defaults:
+            backend_options["max_retries"] = self.planner_defaults.get("planner_max_retries")
+        if "fallback_backend" not in backend_options and "planner_fallback_backend" in self.planner_defaults:
+            backend_options["fallback_backend"] = self.planner_defaults.get("planner_fallback_backend")
         self.brain_backend_config = BrainBackendConfig(backend=brain_backend, **backend_options)
         self.brain_provider = create_brain_provider(self.brain_backend_config)
         self.logger.log_event(
@@ -76,6 +86,11 @@ class SimulationState:
             self.time,
             "brain_backend_selected",
             {"backend": self.brain_backend_config.backend, "provider_class": self.brain_provider.__class__.__name__},
+        )
+        self.logger.log_event(
+            self.time,
+            "planner_cadence_configured",
+            {"planner_defaults": self.planner_defaults},
         )
         self.save_interval = 10.0
         self._last_save_time = 0.0
@@ -114,6 +129,7 @@ class SimulationState:
                             "mechanism_overrides": dict(d.mechanism_overrides),
                             "traits": dict(d.mechanism_overrides),
                             "packet_access": list(d.source_access_override),
+                            "planner_config": dict(d.planner_config),
                         }
                     )
             else:
@@ -126,10 +142,13 @@ class SimulationState:
 
         for config in agent_configs:
             position = self.environment.get_spawn_point(config["role"])
+            merged_planner_config = dict(self.planner_defaults)
+            merged_planner_config.update(dict(config.get("planner_config", {})))
             agent = Agent(
                 name=config["name"],
                 role=config["role"],
-                position=position
+                position=position,
+                planner_config=merged_planner_config,
             )
             incoming_traits = dict(config.get("traits", {}))
             construct_values = dict(config.get("constructs", {}))
