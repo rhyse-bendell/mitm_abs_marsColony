@@ -72,7 +72,14 @@ class SimulationLogger:
         self.interval = interval
         self.buffer = []
         self.event_buffer = []
+        self.recent_events = []
+        self.max_recent_events = 300
         self.last_dump_time = 0.0
+
+    def _append_recent_event(self, event):
+        self.recent_events.append(event)
+        if len(self.recent_events) > self.max_recent_events:
+            self.recent_events = self.recent_events[-self.max_recent_events:]
 
     def log_agent_state(self, time, agent):
         self.buffer.append({
@@ -98,13 +105,16 @@ class SimulationLogger:
             self.last_dump_time = current_time
 
     def log_event(self, time, event_type, payload):
-        self.event_buffer.append(
-            {
-                "time": round(time, 2),
-                "event_type": event_type,
-                "payload": json.dumps(payload, default=str),
-            }
-        )
+        event = {
+            "time": round(time, 2),
+            "event_type": event_type,
+            "payload": json.dumps(payload, default=str),
+        }
+        self.event_buffer.append(event)
+        self._append_recent_event(event)
+
+    def get_recent_events(self, count=80):
+        return self.recent_events[-count:]
 
     def save_csv(self):
         if not self.buffer:
@@ -119,6 +129,7 @@ class SimulationLogger:
                 writer.writeheader()
             writer.writerows(self.buffer)
 
+        event_rows = len(self.event_buffer)
         if self.event_buffer:
             event_path = self.output_session.build_log_path("events.csv")
             event_header = not event_path.exists()
@@ -128,6 +139,14 @@ class SimulationLogger:
                     writer.writeheader()
                 writer.writerows(self.event_buffer)
             self.event_buffer = []
+
+        self._append_recent_event(
+            {
+                "time": self.buffer[-1]["time"],
+                "event_type": "outputs_saved",
+                "payload": json.dumps({"path": str(save_path), "rows": len(self.buffer), "event_rows": event_rows}),
+            }
+        )
 
         self.buffer = []
         print(f"✅ Agent logs saved to {save_path}")

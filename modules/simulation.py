@@ -40,6 +40,11 @@ class SimulationState:
         backend_options = brain_backend_options or {}
         self.brain_backend_config = BrainBackendConfig(backend=brain_backend, **backend_options)
         self.brain_provider = create_brain_provider(self.brain_backend_config)
+        self.logger.log_event(
+            self.time,
+            "brain_backend_selected",
+            {"backend": self.brain_backend_config.backend, "provider_class": self.brain_provider.__class__.__name__},
+        )
         self.save_interval = 10.0
         self._last_save_time = 0.0
 
@@ -74,6 +79,16 @@ class SimulationState:
             speed=speed,
             flash_mode=self.flash_mode,
             active_agents=[{"name": agent.name, "role": agent.role} for agent in self.agents],
+        )
+        self.logger.log_event(
+            self.time,
+            "session_initialized",
+            {
+                "session_folder": str(self.logger.output_session.session_folder),
+                "speed": speed,
+                "flash_mode": self.flash_mode,
+                "agents": [agent.name for agent in self.agents],
+            },
         )
 
     def update(self, base_dt):

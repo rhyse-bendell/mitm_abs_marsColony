@@ -29,18 +29,110 @@ class MarsColonyInterface:
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True)
         self.create_experiment_tab()
+        self.create_dashboard_tab()
         self.create_main_tab()
         self.create_construction_tab()
         self.create_agents_tab()
         self.create_event_monitor_tab()
 
+    def _build_environment_canvas(self, parent):
+        fig, ax = plt.subplots(figsize=(6, 6))
+        canvas = FigureCanvasTkAgg(fig, master=parent)
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+        return fig, ax, canvas
+
+    def create_dashboard_tab(self):
+        self.tab_dashboard = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_dashboard, text="Dashboard")
+
+        self.dashboard_panes = ttk.PanedWindow(self.tab_dashboard, orient="horizontal")
+        self.dashboard_panes.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+
+        left_frame = ttk.Frame(self.dashboard_panes)
+        right_frame = ttk.Frame(self.dashboard_panes)
+        self.dashboard_panes.add(left_frame, weight=3)
+        self.dashboard_panes.add(right_frame, weight=2)
+
+        env_frame = ttk.LabelFrame(left_frame, text="Environment Overview", padding=6)
+        env_frame.grid(row=0, column=0, sticky="nsew")
+        self.dashboard_fig, self.dashboard_ax, self.dashboard_canvas = self._build_environment_canvas(env_frame)
+
+        bottom_frame = ttk.Frame(left_frame)
+        bottom_frame.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+
+        summary_pane = ttk.PanedWindow(bottom_frame, orient="horizontal")
+        summary_pane.pack(fill="both", expand=True)
+
+        agent_frame = ttk.LabelFrame(summary_pane, text="Agent State Summary", padding=6)
+        self.dashboard_agent_state = ttk.Treeview(
+            agent_frame,
+            columns=("Agent", "Goal", "HR", "CO2"),
+            show="headings",
+            height=6,
+        )
+        for col in self.dashboard_agent_state["columns"]:
+            self.dashboard_agent_state.heading(col, text=col)
+            self.dashboard_agent_state.column(col, width=90, anchor="center")
+        self.dashboard_agent_state.pack(fill="both", expand=True)
+
+        construction_frame = ttk.LabelFrame(summary_pane, text="Construction Summary", padding=6)
+        self.dashboard_construction_text = tk.Text(construction_frame, height=8, wrap="word")
+        self.dashboard_construction_text.pack(side="left", fill="both", expand=True)
+        cons_scroll = ttk.Scrollbar(construction_frame, orient="vertical", command=self.dashboard_construction_text.yview)
+        cons_scroll.pack(side="right", fill="y")
+        self.dashboard_construction_text.configure(yscrollcommand=cons_scroll.set)
+
+        summary_pane.add(agent_frame, weight=3)
+        summary_pane.add(construction_frame, weight=2)
+
+        left_frame.rowconfigure(0, weight=4)
+        left_frame.rowconfigure(1, weight=2)
+        left_frame.columnconfigure(0, weight=1)
+
+        event_frame = ttk.LabelFrame(right_frame, text="Event Monitor", padding=6)
+        event_frame.grid(row=0, column=0, sticky="nsew")
+        self.dashboard_agent_activity_text = tk.Text(event_frame, wrap="word", height=8)
+        self.dashboard_interaction_state_text = tk.Text(event_frame, wrap="word", height=8)
+        self.dashboard_zone_state_text = tk.Text(event_frame, wrap="word", height=6)
+
+        ttk.Label(event_frame, text="Agent Activities").grid(row=0, column=0, sticky="w")
+        ttk.Label(event_frame, text="Interaction State Machine").grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(event_frame, text="Agent Zone States").grid(row=4, column=0, sticky="w", pady=(4, 0))
+
+        self.dashboard_agent_activity_text.grid(row=1, column=0, sticky="nsew")
+        self.dashboard_interaction_state_text.grid(row=3, column=0, sticky="nsew")
+        self.dashboard_zone_state_text.grid(row=5, column=0, sticky="nsew")
+
+        for r, widget in [(1, self.dashboard_agent_activity_text), (3, self.dashboard_interaction_state_text), (5, self.dashboard_zone_state_text)]:
+            scroll = ttk.Scrollbar(event_frame, orient="vertical", command=widget.yview)
+            scroll.grid(row=r, column=1, sticky="ns")
+            widget.configure(yscrollcommand=scroll.set)
+
+        event_frame.rowconfigure(1, weight=3)
+        event_frame.rowconfigure(3, weight=2)
+        event_frame.rowconfigure(5, weight=1)
+        event_frame.columnconfigure(0, weight=1)
+
+        system_log_frame = ttk.LabelFrame(right_frame, text="Simulator / System Log", padding=6)
+        system_log_frame.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        self.system_log_text = tk.Text(system_log_frame, wrap="word", height=10)
+        self.system_log_text.pack(side="left", fill="both", expand=True)
+        log_scroll = ttk.Scrollbar(system_log_frame, orient="vertical", command=self.system_log_text.yview)
+        log_scroll.pack(side="right", fill="y")
+        self.system_log_text.configure(yscrollcommand=log_scroll.set)
+
+        right_frame.rowconfigure(0, weight=3)
+        right_frame.rowconfigure(1, weight=2)
+        right_frame.columnconfigure(0, weight=1)
+
+        self.tab_dashboard.rowconfigure(0, weight=1)
+        self.tab_dashboard.columnconfigure(0, weight=1)
+
     def create_main_tab(self):
         self.tab_main = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_main, text="Environment")
 
-        self.fig, self.ax = plt.subplots(figsize=(6, 6))
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self.tab_main)
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        self.fig, self.ax, self.canvas = self._build_environment_canvas(self.tab_main)
 
         self.anim = None  # Don’t start animation until experiment is started
 
@@ -168,46 +260,37 @@ class MarsColonyInterface:
         self.anim = animation.FuncAnimation(self.fig, self.update_environment_plot, interval=100)
 
         self.stop_button.config(state="normal")
+        self._sync_construction_summaries()
+        self._update_system_log()
 
-    def update_environment_plot(self, frame):
-        if not self.sim:
-            return  # Don't try to update before simulation starts
-
-        self.ax.clear()
-        self.sim.update(0.1)  # This will now be scaled internally
-
-        self.ax.set_xlim(0, 10)
-        self.ax.set_ylim(0, 10)
-        self.ax.set_aspect('equal')
-        self.ax.set_title("Mars Colony Environment")
+    def _render_environment_plot(self, ax, canvas):
+        ax.clear()
+        ax.set_xlim(0, 10)
+        ax.set_ylim(0, 10)
+        ax.set_aspect('equal')
+        ax.set_title("Mars Colony Environment")
 
         for obj in self.sim.environment.objects.values():
             if obj["type"] == "circle":
                 x, y = obj["position"]
                 r = obj["radius"]
-                self.ax.add_patch(plt.Circle((x, y), r, edgecolor='black', facecolor='lightblue'))
-                self.ax.text(x, y, obj.get("label", ""), ha='center', va='center')
+                ax.add_patch(plt.Circle((x, y), r, edgecolor='black', facecolor='lightblue'))
+                ax.text(x, y, obj.get("label", ""), ha='center', va='center')
             elif obj["type"] == "rect":
                 x, y = obj["position"]
                 w, h = obj["size"]
-                self.ax.add_patch(plt.Rectangle((x, y), w, h, edgecolor='black', facecolor='lightgray'))
-                self.ax.text(x + w / 2, y + h / 2, obj.get("label", ""), ha='center', va='center')
+                ax.add_patch(plt.Rectangle((x, y), w, h, edgecolor='black', facecolor='lightgray'))
+                ax.text(x + w / 2, y + h / 2, obj.get("label", ""), ha='center', va='center')
             elif obj["type"] == "line":
                 sx, sy = obj["start"]
                 ex, ey = obj["end"]
-                self.ax.plot([sx, ex], [sy, ey], color='gray', linewidth=4)
+                ax.plot([sx, ex], [sy, ey], color='gray', linewidth=4)
             elif obj["type"] == "blocked":
                 (x1, y1), (x2, y2) = obj["corners"]
                 x_min, x_max = min(x1, x2), max(x1, x2)
                 y_min, y_max = min(y1, y2), max(y1, y2)
-                self.ax.add_patch(plt.Rectangle(
-                    (x_min, y_min),
-                    x_max - x_min,
-                    y_max - y_min,
-                    edgecolor='black',
-                    facecolor='darkgray'
-                ))
-                self.ax.text((x1 + x2) / 2, (y1 + y2) / 2, obj.get("label", ""), ha='center', va='center', fontsize=9)
+                ax.add_patch(plt.Rectangle((x_min, y_min), x_max - x_min, y_max - y_min, edgecolor='black', facecolor='darkgray'))
+                ax.text((x1 + x2) / 2, (y1 + y2) / 2, obj.get("label", ""), ha='center', va='center', fontsize=9)
 
         for project in self.sim.environment.construction.get_visual_data():
             cx, cy = project["position"]
@@ -216,16 +299,148 @@ class MarsColonyInterface:
             fill = project["fill_color"]
             fill_pct = project["progress"]
 
-            self.ax.add_patch(plt.Circle((cx, cy), r, edgecolor=border, facecolor=fill, linewidth=2))
-            self.ax.add_patch(plt.Circle((cx, cy), r * fill_pct, color=border, alpha=0.3))
-            self.ax.text(cx, cy, project["label"], ha='center', va='center', fontsize=7)
+            ax.add_patch(plt.Circle((cx, cy), r, edgecolor=border, facecolor=fill, linewidth=2))
+            ax.add_patch(plt.Circle((cx, cy), r * fill_pct, color=border, alpha=0.3))
+            ax.text(cx, cy, project["label"], ha='center', va='center', fontsize=7)
 
         for agent in self.sim.agents:
-            agent.draw(self.ax)
+            agent.draw(ax)
 
-        self.canvas.draw()
+        canvas.draw()
+
+    def _populate_event_monitor_widgets(self, activity_widget, interaction_widget, zone_widget):
+        activity_widget.delete("1.0", tk.END)
+        for agent in self.sim.agents:
+            activity_widget.insert(tk.END, f"--- {agent.name} ({agent.role}) ---\n")
+            activity_widget.insert(tk.END, f"Goal: {agent.goal}\n")
+            activity_widget.insert(tk.END, f"Target: {agent.target}\n")
+            if agent.activity_log:
+                activity_widget.insert(tk.END, f"Last Action: {agent.activity_log[-1]}\n")
+            if agent.mental_model["data"]:
+                activity_widget.insert(tk.END, f"Data: {[d.id for d in agent.mental_model['data']]}\n")
+            if agent.mental_model["information"]:
+                activity_widget.insert(tk.END, f"Info: {[i.id for i in agent.mental_model['information']]}\n")
+            if agent.mental_model["knowledge"].rules:
+                activity_widget.insert(tk.END, f"Rules: {[r for r in agent.mental_model['knowledge'].rules]}\n")
+            activity_widget.insert(tk.END, "\n")
+
+        interaction_widget.delete("1.0", tk.END)
+        for agent in self.sim.agents:
+            current_states = []
+            if agent.target:
+                current_states.append("Moving")
+            if agent.goal == "share" and not agent.has_shared:
+                current_states.append("Communicating")
+            if agent.goal == "get_team_info":
+                current_states.append("Accessing Info")
+            if agent.goal == "build":
+                current_states.append("Building")
+
+            interaction_widget.insert(tk.END, f"{agent.name} ({agent.role}):\n")
+            interaction_widget.insert(tk.END, f"  Current State(s): {', '.join(current_states) or 'Idle'}\n")
+            interaction_widget.insert(tk.END, "  Transitions:\n")
+            interaction_widget.insert(tk.END, "    - Idle → Accessing Info\n")
+            interaction_widget.insert(tk.END, "    - Accessing Info → Sharing\n")
+            interaction_widget.insert(tk.END, "    - Sharing → Building\n")
+            interaction_widget.insert(tk.END, "    - Any → Moving (if target exists)\n\n")
+
+        zone_widget.delete("1.0", tk.END)
+        for agent in self.sim.agents:
+            current_zone = "Transition"
+            for zone_name, obj in self.sim.environment.zones.items():
+                if "corners" not in obj:
+                    continue
+                if self.sim.environment._point_in_zone(agent.position, obj["corners"]):
+                    current_zone = zone_name
+                    break
+            zone_widget.insert(tk.END, f"{agent.name} ({agent.role}): {current_zone}\n")
+
+    def _sync_construction_summaries(self):
+        self.construction_text.delete("1.0", tk.END)
+        self.dashboard_construction_text.delete("1.0", tk.END)
+        projects = list(self.sim.environment.construction.projects.values())
+        if not projects:
+            msg = "No active construction projects."
+            self.construction_text.insert(tk.END, msg)
+            self.dashboard_construction_text.insert(tk.END, msg)
+            return
+
+        for project in projects:
+            req = project.get("required_resources", {}).get("bricks", 0)
+            delivered = project.get("delivered_resources", {}).get("bricks", 0)
+            status = project.get("status", "unknown")
+            builders = sorted(project.get("builders", []))
+            line = f"{project.get('id', 'unknown')}: status={status}, bricks={delivered}/{req}, builders={', '.join(builders) or 'none'}\n"
+            self.construction_text.insert(tk.END, line)
+            self.dashboard_construction_text.insert(tk.END, line)
+
+    def update_dashboard(self):
+        self._render_environment_plot(self.dashboard_ax, self.dashboard_canvas)
+        self._populate_event_monitor_widgets(
+            self.dashboard_agent_activity_text,
+            self.dashboard_interaction_state_text,
+            self.dashboard_zone_state_text,
+        )
+
+        for i in self.dashboard_agent_state.get_children():
+            self.dashboard_agent_state.delete(i)
+        for agent in self.sim.agents:
+            self.dashboard_agent_state.insert(
+                "",
+                "end",
+                values=(agent.name, agent.goal or "None", agent.heart_rate, round(agent.co2_output, 3)),
+            )
+
+        self._update_system_log()
+
+    def _format_system_event(self, event):
+        try:
+            import json
+            payload = json.loads(event.get("payload", "{}"))
+        except Exception:
+            payload = {}
+
+        event_type = event.get("event_type", "event")
+        sim_time = event.get("time", 0.0)
+
+        if event_type == "session_initialized":
+            return f"t={sim_time:05.2f} Session created: {payload.get('session_folder', 'unknown')}"
+        if event_type == "outputs_saved":
+            return f"t={sim_time:05.2f} Outputs saved ({payload.get('rows', 0)} state rows, {payload.get('event_rows', 0)} events)."
+        if event_type == "brain_decision_query":
+            meta = payload.get("context_meta", {})
+            return f"t={sim_time:05.2f} {payload.get('agent')} query via {payload.get('provider')} ({payload.get('trigger_reason')}); affordances={meta.get('affordance_count', 0)}."
+        if event_type == "brain_decision_outcome":
+            return f"t={sim_time:05.2f} {payload.get('agent')} decision {payload.get('decision_status')} -> {payload.get('selected_action')} ({payload.get('provider')})."
+        if event_type == "brain_provider_fallback":
+            return f"t={sim_time:05.2f} WARNING fallback {payload.get('provider')} -> {payload.get('fallback_provider')}: {payload.get('reason')}"
+        if event_type == "brain_plan_continued":
+            return f"t={sim_time:05.2f} {payload.get('agent')} continuing {payload.get('plan_id')} (remaining={payload.get('remaining_executions')})."
+        return f"t={sim_time:05.2f} {event_type}: {payload}"
+
+    def _update_system_log(self):
+        if not self.sim or not hasattr(self.sim, "logger"):
+            return
+
+        events = self.sim.logger.get_recent_events(60)
+        self.system_log_text.delete("1.0", tk.END)
+        for event in events:
+            self.system_log_text.insert(tk.END, self._format_system_event(event) + "\n")
+
+        if self.system_log_text.tag_ranges("sel"):
+            return
+        self.system_log_text.see(tk.END)
+
+    def update_environment_plot(self, frame):
+        if not self.sim:
+            return  # Don't try to update before simulation starts
+
+        self.sim.update(0.1)  # This will now be scaled internally
+        self._render_environment_plot(self.ax, self.canvas)
         self.update_agent_table()
         self.update_event_monitor()
+        self.update_dashboard()
+        self._sync_construction_summaries()
 
     def update_agent_table(self):
         for i in self.agent_state_table.get_children():
@@ -241,55 +456,11 @@ class MarsColonyInterface:
         self.root.destroy()
 
     def update_event_monitor(self):
-        # Section 1: Agent Activities
-        self.agent_activity_text.delete("1.0", tk.END)
-        for agent in self.sim.agents:
-            self.agent_activity_text.insert(tk.END, f"--- {agent.name} ({agent.role}) ---\n")
-            self.agent_activity_text.insert(tk.END, f"Goal: {agent.goal}\n")
-            self.agent_activity_text.insert(tk.END, f"Target: {agent.target}\n")
-            if agent.activity_log:
-                self.agent_activity_text.insert(tk.END, f"Last Action: {agent.activity_log[-1]}\n")
-            if agent.mental_model["data"]:
-                self.agent_activity_text.insert(tk.END, f"Data: {[d.id for d in agent.mental_model['data']]}\n")
-            if agent.mental_model["information"]:
-                self.agent_activity_text.insert(tk.END, f"Info: {[i.id for i in agent.mental_model['information']]}\n")
-            if agent.mental_model["knowledge"].rules:
-                self.agent_activity_text.insert(tk.END, f"Rules: {[r for r in agent.mental_model['knowledge'].rules]}\n")
-            self.agent_activity_text.insert(tk.END, "\n")
-
-        # Section 2: Interaction State Machines
-        self.interaction_state_text.delete("1.0", tk.END)
-        for agent in self.sim.agents:
-            current_states = []
-            if agent.target:
-                current_states.append("Moving")
-            if agent.goal == "share" and not agent.has_shared:
-                current_states.append("Communicating")
-            if agent.goal == "get_team_info":
-                current_states.append("Accessing Info")
-            if agent.goal == "build":
-                current_states.append("Building")
-
-            self.interaction_state_text.insert(tk.END, f"{agent.name} ({agent.role}):\n")
-            self.interaction_state_text.insert(tk.END, f"  Current State(s): {', '.join(current_states) or 'Idle'}\n")
-            self.interaction_state_text.insert(tk.END, "  Transitions:\n")
-            self.interaction_state_text.insert(tk.END, "    - Idle → Accessing Info\n")
-            self.interaction_state_text.insert(tk.END, "    - Accessing Info → Sharing\n")
-            self.interaction_state_text.insert(tk.END, "    - Sharing → Building\n")
-            self.interaction_state_text.insert(tk.END, "    - Any → Moving (if target exists)\n")
-            self.interaction_state_text.insert(tk.END, "\n")
-
-        # Section 3: Zone States
-        self.zone_state_text.delete("1.0", tk.END)
-        for agent in self.sim.agents:
-            current_zone = "Transition"
-            for zone_name, obj in self.sim.environment.zones.items():
-                if "corners" not in obj:
-                    continue
-                if self.sim.environment._point_in_zone(agent.position, obj["corners"]):
-                    current_zone = zone_name
-                    break
-            self.zone_state_text.insert(tk.END, f"{agent.name} ({agent.role}): {current_zone}\n")
+        self._populate_event_monitor_widgets(
+            self.agent_activity_text,
+            self.interaction_state_text,
+            self.zone_state_text,
+        )
 
     def create_experiment_tab(self):
         container = ttk.Frame(self.notebook)
