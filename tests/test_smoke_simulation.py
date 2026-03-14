@@ -174,6 +174,36 @@ class TestMovementAndInfoAccessRepairs(unittest.TestCase):
         point = (8.95, 6.85)
         self.assertTrue(env.can_access_info(point, "Team_Info", role="Engineer"))
 
+    def test_viewport_bounds_tighten_to_playable_space(self):
+        env = Environment(phases=[])
+        (x_min, x_max), (y_min, y_max) = env.get_viewport_bounds()
+        self.assertAlmostEqual(x_min, -0.2)
+        self.assertAlmostEqual(x_max, 10.2)
+        self.assertAlmostEqual(y_min, -0.2)
+        self.assertAlmostEqual(y_max, 7.6)
+
+    def test_team_info_zone_nearest_point_proximity_allows_walk_up_access(self):
+        env = Environment(phases=[])
+        # Just below team info zone by less than DEFAULT_INFO_ACCESS_RADIUS.
+        point = (8.0, 6.1)
+        self.assertTrue(env.can_access_info(point, "Team_Info", role="Engineer"))
+
+    def test_table_interaction_is_possible_from_reasonable_adjacent_space(self):
+        env = Environment(phases=[])
+        point = (6.5, 2.7)
+        self.assertTrue(env.can_interact_with_table(point, "Table_A"))
+
+    def test_interaction_access_reason_reports_zone_vs_distance(self):
+        env = Environment(phases=[])
+        in_zone = env.get_interaction_access((8.0, 6.5), "Team_Info", role="Engineer")
+        near_zone = env.get_interaction_access((8.0, 6.1), "Team_Info", role="Engineer")
+        self.assertEqual(in_zone["reason"], "in_zone")
+        self.assertEqual(near_zone["reason"], "near_zone")
+
+    def test_blocked_regions_remain_impassable(self):
+        env = Environment(phases=[])
+        self.assertFalse(env.is_point_navigable((5.0, 3.0)))
+
     def test_roles_leave_spawn_and_are_not_immediately_stuck(self):
         sim = SimulationState(phases=[])
         starts = {a.role: a.position for a in sim.agents}

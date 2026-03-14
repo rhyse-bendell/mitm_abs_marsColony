@@ -28,9 +28,10 @@ from modules.knowledge import init_dik_packets
 
 # Default proximity radius required to access information packets,
 # used when the object does not specify its own `access_radius`.
-DEFAULT_INFO_ACCESS_RADIUS = 0.25
+DEFAULT_INFO_ACCESS_RADIUS = 0.4
 
-TABLE_INTERACTION_RADIUS = 0.2
+TABLE_INTERACTION_RADIUS = 0.35
+VIEWPORT_MARGIN = 0.2
 
 
 RAW_OBJECTS = {
@@ -184,6 +185,55 @@ class Environment:
             (cx, cy),
         ]
 
+    def _nearest_distance_to_zone(self, point, zone_name):
+        corners = self._zone_corners(zone_name)
+        if not corners:
+            return float("inf")
+        (x1, y1), (x2, y2) = corners
+        x_min, x_max = min(x1, x2), max(x1, x2)
+        y_min, y_max = min(y1, y2), max(y1, y2)
+        px, py = point
+        nearest_x = max(x_min, min(px, x_max))
+        nearest_y = max(y_min, min(py, y_max))
+        return math.hypot(px - nearest_x, py - nearest_y)
+
+    def get_viewport_bounds(self, margin=VIEWPORT_MARGIN):
+        extents = []
+
+        for obj in self.objects.values():
+            obj_type = obj.get("type")
+            if obj_type == "rect":
+                x, y = obj["position"]
+                w, h = obj["size"]
+                extents.append((x, x + w, y, y + h))
+            elif obj_type == "circle":
+                x, y = obj["position"]
+                r = obj["radius"]
+                extents.append((x - r, x + r, y - r, y + r))
+            elif obj_type == "line":
+                sx, sy = obj["start"]
+                ex, ey = obj["end"]
+                extents.append((min(sx, ex), max(sx, ex), min(sy, ey), max(sy, ey)))
+            elif obj_type == "blocked":
+                (x1, y1), (x2, y2) = obj["corners"]
+                extents.append((min(x1, x2), max(x1, x2), min(y1, y2), max(y1, y2)))
+
+        for zone in self.zones.values():
+            corners = zone.get("corners")
+            if not corners:
+                continue
+            (x1, y1), (x2, y2) = corners
+            extents.append((min(x1, x2), max(x1, x2), min(y1, y2), max(y1, y2)))
+
+        if not extents:
+            return (0.0, 10.0), (0.0, 10.0)
+
+        x_min = min(e[0] for e in extents) - margin
+        x_max = max(e[1] for e in extents) + margin
+        y_min = min(e[2] for e in extents) - margin
+        y_max = max(e[3] for e in extents) + margin
+        return (x_min, x_max), (y_min, y_max)
+
     def is_point_navigable(self, point, threshold=0.15):
         for name, obj in self.objects.items():
             if obj.get("type") in {"rect", "circle", "blocked"} and not obj.get("passable", False):
@@ -299,10 +349,8 @@ class Environment:
 
         target_meta = self.interaction_targets.get(object_key, {})
         zone_name = target_meta.get("zone")
-        if zone_name:
-            corners = self._zone_corners(zone_name)
-            if corners and self._point_in_zone(position, corners):
-                return True
+        if zone_name and self._nearest_distance_to_zone(position, zone_name) <= access_radius:
+            return True
 
         if obj.get("type") == "rect":
             ox, oy = obj["position"]
@@ -330,7 +378,38 @@ class Environment:
         return True
 
     def can_interact_with_table(self, agent_pos, table_name):
+        table_zone_name = f"Zone_{table_name}"
+        if table_zone_name in self.zones and self._point_in_zone(agent_pos, self.zones[table_zone_name]["corners"]):
+            return True
         return self.is_near_object(agent_pos, table_name, threshold=TABLE_INTERACTION_RADIUS)
+
+    def get_interaction_access(self, position, target_name, role=None):
+        target = self.interaction_targets.get(target_name)
+        if not target:
+            return {"accessible": False, "reason": "unknown_target"}
+
+        if target.get("kind") == "information":
+            zone_name = target.get("zone")
+            obj = self.objects.get(target_name)
+            access_radius = (obj or {}).get("access_radius", DEFAULT_INFO_ACCESS_RADIUS)
+            if zone_name and self._point_in_zone(position, self.zones[zone_name]["corners"]):
+                return {"accessible": True, "reason": "in_zone"}
+            if zone_name and self._nearest_distance_to_zone(position, zone_name) <= access_radius:
+                return {"accessible": True, "reason": "near_zone"}
+            role_ok = self.can_access_info(position, target_name, role=role)
+            return {"accessible": role_ok, "reason": "distance_threshold" if role_ok else "too_far_or_role_mismatch"}
+
+        if target.get("kind") == "build":
+            table_name = target.get("object")
+            if not table_name:
+                return {"accessible": False, "reason": "missing_build_object"}
+            if self.can_interact_with_table(position, table_name):
+                if self._point_in_zone(position, self.zones[f"Zone_{table_name}"]["corners"]):
+                    return {"accessible": True, "reason": "in_work_zone"}
+                return {"accessible": True, "reason": "near_table"}
+            return {"accessible": False, "reason": "not_in_work_zone_or_radius"}
+
+        return {"accessible": False, "reason": "unsupported_target_kind"}
 
     def get_visible_resources(self, agent_pos, radius=1.0):
         visible = []
@@ -401,8 +480,9 @@ def get_screen_size_inches(dpi=100):
 if __name__ == "__main__" and plt is not None:
     if SHOW_LAYOUT:
         fig, ax = plt.subplots(figsize=(10, 10))
-        ax.set_xlim(0, 10)
-        ax.set_ylim(0, 10)
+        (x_min, x_max), (y_min, y_max) = Environment().get_viewport_bounds()
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
         ax.set_aspect('equal')
         ax.set_title("Environment Layout Viewer")
 

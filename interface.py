@@ -343,8 +343,9 @@ class MarsColonyInterface:
 
     def _render_environment_plot(self, ax, canvas):
         ax.clear()
-        ax.set_xlim(0, 10)
-        ax.set_ylim(0, 10)
+        (x_min, x_max), (y_min, y_max) = self.sim.environment.get_viewport_bounds()
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
         ax.set_aspect('equal')
         ax.set_title("Mars Colony Environment")
 
