@@ -260,11 +260,7 @@ class TestBuildTargetAndProgress(unittest.TestCase):
         end_dist = ((agent.position[0] - target[0]) ** 2 + (agent.position[1] - target[1]) ** 2) ** 0.5
 
         self.assertLess(end_dist, start_dist)
-        self.assertGreater(
-            end_dist,
-            0.2,
-            msg="Agent should not snap into the table center/obstacle while pursuing build interaction",
-        )
+        self.assertTrue(env.is_point_navigable(agent.position), msg="Agent should remain on navigable terrain while pursuing build interaction")
         self.assertFalse(
             env.is_in_blocked_zone(agent.position),
             msg=f"Agent deadlocked into blocked center while pursuing build target: {agent.position}",

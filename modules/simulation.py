@@ -49,6 +49,7 @@ class SimulationState:
         )
         self.save_interval = 10.0
         self._last_save_time = 0.0
+        self._last_phase_index = self.environment.current_phase_index
         self.construct_mapper = ConstructMapper()
         if self.construct_mapper.validation_issues:
             self.logger.log_event(self.time, "construct_mapping_validation_issues", {"issues": self.construct_mapper.validation_issues})
@@ -129,7 +130,21 @@ class SimulationState:
 
     def update(self, base_dt):
         dt = base_dt * self.speed_multiplier
+        previous_phase_index = self.environment.current_phase_index
+        previous_phase = self.environment.get_current_phase() or {"name": "default"}
         self.environment.update(self.time)
+        if self.environment.current_phase_index != previous_phase_index:
+            current_phase = self.environment.get_current_phase() or {"name": "default"}
+            self.logger.log_event(
+                self.time,
+                "phase_transition",
+                {
+                    "from_phase": previous_phase.get("name", "default"),
+                    "to_phase": current_phase.get("name", "default"),
+                    "from_index": previous_phase_index,
+                    "to_index": self.environment.current_phase_index,
+                },
+            )
         for project in self.environment.construction.projects.values():
             if isinstance(project, dict):
                 self.team_knowledge_manager.upsert_construction_artifact(project, self.time)

@@ -113,6 +113,9 @@ class Agent:
         self.last_build_readiness = 0
         self.last_team_update_count = 0
         self.last_replan_time = None
+        self.last_phase_stage = "early"
+        self.last_build_blockers = []
+        self.inventory_resources = {"bricks": 0}
         self.history_compaction = {
             "recent_history_summary": "",
             "plan_evolution": [],
@@ -322,14 +325,50 @@ class Agent:
     def _build_readiness_score(self):
         info_count = len(self.mental_model["information"])
         knowledge_count = len(self.mental_model["knowledge"].rules)
-        return info_count + (2 * knowledge_count)
+        inspected_sources = sum(1 for state in self.source_inspection_state.values() if state == "inspected")
+        artifact_count = len([p for p in self.memory_seen_packets if isinstance(p, str) and p.startswith("whiteboard:")])
+        return info_count + (2 * knowledge_count) + inspected_sources + min(artifact_count, 1)
 
-    def _is_build_eligible(self):
-        # Lightweight threshold: build should not start from a trivial information fragment.
-        return self._build_readiness_score() >= self._readiness_threshold()
+    def _build_readiness_blockers(self, environment):
+        blockers = []
+        if len(self.mental_model["information"]) < 2:
+            blockers.append("insufficient_information_inspection")
+        if len(self.mental_model["knowledge"].rules) < 1:
+            blockers.append("insufficient_rule_knowledge")
+        if not any(state == "inspected" for state in self.source_inspection_state.values()):
+            blockers.append("no_inspected_information_source")
+        if self._select_build_target(environment, require_readiness=False) is None:
+            blockers.append("no_navigable_build_target")
+        return blockers
 
-    def _select_build_target(self, environment):
-        return environment.get_interaction_target_position("Build_Table_B", from_position=self.position)
+    def _is_build_eligible(self, environment):
+        return self._build_readiness_score() >= self._readiness_threshold() and not self._build_readiness_blockers(environment)
+
+    def _select_build_target(self, environment, require_readiness=False, include_project=False):
+        candidates = []
+        for target_name, target in environment.interaction_targets.items():
+            if target.get("kind") != "build":
+                continue
+            point = environment.get_interaction_target_position(target_name, from_position=self.position)
+            if point is None:
+                continue
+            project = environment.construction.projects.get(target_name, {})
+            required = project.get("required_resources", {}).get("bricks", 0)
+            delivered = project.get("delivered_resources", {}).get("bricks", 0)
+            remaining = max(0, required - delivered)
+            score = remaining + (0 if project.get("status") == "in_progress" else 100)
+            candidates.append((score, target_name, point))
+
+        if not candidates:
+            return None
+        if require_readiness and not self._is_build_eligible(environment):
+            return None
+
+        candidates.sort(key=lambda row: row[0])
+        _score, target_name, point = candidates[0]
+        if include_project:
+            return {"project_id": target_name, "target": point}
+        return point
 
     def current_goal(self):
         return self.goal_stack[-1] if self.goal_stack else None
@@ -516,9 +555,12 @@ class Agent:
     def _plan_trigger_reason(self, sim_state, environment):
         now = sim_state.time
         phase_name = (environment.get_current_phase() or {}).get("name")
+        phase_profile = sim_state.brain_context_builder._phase_profile(environment)
+        phase_stage = phase_profile.get("stage", "execution")
         info_count = len(self.mental_model["information"])
         knowledge_count = len(self.mental_model["knowledge"].rules)
         build_readiness = self._build_readiness_score()
+        build_blockers = self._build_readiness_blockers(environment)
         team_updates = len(sim_state.team_knowledge_manager.recent_updates)
         recent_log = " ".join(self.activity_log[-4:]).lower()
 
@@ -528,7 +570,7 @@ class Agent:
             reason = "plan_completed"
         elif self.current_plan.invalidation_reason:
             reason = "plan_invalidated"
-        elif phase_name != self.last_phase_name and self.last_phase_name is not None:
+        elif (phase_name != self.last_phase_name and self.last_phase_name is not None) or phase_stage != self.last_phase_stage:
             reason = "phase_transition"
         elif info_count > self.last_info_count or knowledge_count > self.last_knowledge_count:
             reason = "new_dik_acquired"
@@ -538,7 +580,7 @@ class Agent:
             reason = "path_blocked_or_stalled"
         elif team_updates > self.last_team_update_count:
             reason = "communication_update_received"
-        elif build_readiness != self.last_build_readiness:
+        elif build_readiness != self.last_build_readiness or build_blockers != self.last_build_blockers:
             reason = "build_readiness_changed"
         elif self.current_plan and (now - self.current_plan.created_at) >= (self.plan_expiry_s * (1.0 + self._hook_value("plan_control", "continue_current_plan", "persistence_weight", default=0.0))):
             reason = "plan_invalidated"
@@ -548,9 +590,11 @@ class Agent:
             reason = None
 
         self.last_phase_name = phase_name
+        self.last_phase_stage = phase_stage
         self.last_info_count = info_count
         self.last_knowledge_count = knowledge_count
         self.last_build_readiness = build_readiness
+        self.last_build_blockers = list(build_blockers)
         self.last_team_update_count = team_updates
         return reason
 
@@ -605,6 +649,7 @@ class Agent:
             ExecutableActionType.WAIT: {"type": "idle", "duration": 1.0, "priority": 1},
         }
         action = dict(mapping[decision.selected_action])
+        action["decision_action"] = decision.selected_action.value
 
         if decision.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
             source_id, interaction_target = self._resolve_inspect_target(decision, environment)
@@ -621,8 +666,18 @@ class Agent:
             interaction_target = environment.get_interaction_target_position(decision.target_id, from_position=self.position)
             if interaction_target is not None:
                 action["target"] = interaction_target
+            if decision.selected_action in {
+                ExecutableActionType.START_CONSTRUCTION,
+                ExecutableActionType.CONTINUE_CONSTRUCTION,
+                ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
+            }:
+                action["project_id"] = decision.target_id
         if decision.selected_action == ExecutableActionType.TRANSPORT_RESOURCES:
             action["duration"] = self._scaled_duration(30.0) * self._duration_scale("transport_resources")
+            build_selection = self._select_build_target(environment, require_readiness=False, include_project=True)
+            if isinstance(build_selection, dict):
+                action["project_id"] = build_selection.get("project_id")
+                action["target"] = build_selection.get("target")
 
         if decision.selected_action in {
             ExecutableActionType.START_CONSTRUCTION,
@@ -697,26 +752,27 @@ class Agent:
                 return
 
             self.pop_goal()
-            if self._is_build_eligible():
-                build_target = self._select_build_target(environment)
-                if build_target is not None:
-                    self.push_goal("build", build_target)
+            if self._is_build_eligible(environment):
+                build_selection = self._select_build_target(environment, include_project=True)
+                if build_selection is not None:
+                    self.push_goal("build", build_selection)
                 else:
                     self.activity_log.append("No accessible build interaction target found; gathering more info")
                     self.push_goal("seek_info", self._choose_info_target(environment))
             else:
                 self.activity_log.append(
-                    f"Build deferred (readiness={self._build_readiness_score()}); continuing information gathering"
+                    f"Build deferred (readiness={self._build_readiness_score()}, blockers={self._build_readiness_blockers(environment)}); continuing information gathering"
                 )
                 self.push_goal("seek_info", self._choose_info_target(environment))
 
         elif goal == "build":
             if self.target is None:
-                self.target = self._select_build_target(environment)
+                selected = self._select_build_target(environment, include_project=True)
+                self.target = selected["target"] if isinstance(selected, dict) else selected
 
             if self.mental_model["knowledge"].rules:
                 self.activity_log.append("Building task engaged")
-            elif not self._is_build_eligible():
+            elif not self._is_build_eligible(environment):
                 self.pop_goal()
                 self.push_goal("seek_info", self._choose_info_target(environment))
 
@@ -736,7 +792,10 @@ class Agent:
         if goal == "share":
             return [{"type": "communicate", "duration": 0.5, "priority": 1}]
         if goal == "build":
-            return [{"type": "construct", "duration": 2.0, "priority": 1}]
+            goal_target = self.goal_stack[-1].get("target")
+            project_id = goal_target.get("project_id") if isinstance(goal_target, dict) else None
+            target_point = goal_target.get("target") if isinstance(goal_target, dict) else goal_target
+            return [{"type": "construct", "duration": 2.0, "priority": 1, "project_id": project_id, "target": target_point}]
 
         return [{"type": "idle", "duration": 1.0, "priority": 0}]
 
@@ -770,7 +829,8 @@ class Agent:
             elif action["type"] == "construct":
                 self.activity_log.append("Building...")
             elif action["type"] == "transport_resources":
-                self.activity_log.append("Transporting resources...")
+                self.inventory_resources["bricks"] = self.inventory_resources.get("bricks", 0) + 1
+                self.activity_log.append("Transporting resources... (+1 bricks inventory)")
             elif action["type"] == "idle":
                 self.activity_log.append("Idling...")
 
@@ -1090,14 +1150,27 @@ class Agent:
                 sim_state.logger.log_event(sim_state.time, "assistance_requested", {"agent": self.name})
 
             if action["type"] == "construct" and action["progress"] == 0:
-                project_id = "Build_Table_B"
+                project_id = action.get("project_id") or "Build_Table_B"
                 project = environment.construction.projects.get(project_id)
                 if project:
+                    decision_action = action.get("decision_action")
+                    legacy_direct = decision_action is None
+                    if not legacy_direct and self.inventory_resources.get("bricks", 0) <= 0:
+                        self.activity_log.append("Construction paused: missing transported bricks")
+                        sim_state.logger.log_event(sim_state.time, "construction_waiting_for_logistics", {"agent": self.name, "project_id": project_id})
+                        continue
+
+                    if not legacy_direct:
+                        self.inventory_resources["bricks"] = max(0, self.inventory_resources.get("bricks", 0) - 1)
                     environment.construction.assign_builder(project_id, self.name)
                     environment.construction.deliver_resource(project_id, "bricks", quantity=1)
+
                     fidelity = max(self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5), self._trait_value("rule_accuracy"))
                     if random.random() > fidelity:
                         project["correct"] = False
+
+                    if decision_action == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value:
+                        project["correct"] = True
                     sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
                     sim_state.logger.log_event(
                         sim_state.time,
@@ -1108,6 +1181,8 @@ class Agent:
                             "correct": project.get("correct", True),
                             "structure_type": project.get("type", "unknown"),
                             "status": project.get("status", "in_progress"),
+                            "decision_action": decision_action,
+                            "inventory_bricks_remaining": self.inventory_resources.get("bricks", 0),
                         },
                     )
 
@@ -1134,7 +1209,11 @@ class Agent:
                     "target": action.get("target"),
                     "duration": action.get("duration", 1.0),
                     "progress": 0.0,
-                    "priority": action.get("priority", 1)
+                    "priority": action.get("priority", 1),
+                    "project_id": action.get("project_id"),
+                    "artifact_action": action.get("artifact_action"),
+                    "assist_action": action.get("assist_action"),
+                    "decision_action": action.get("decision_action"),
                 })
             self.current_action = []
 

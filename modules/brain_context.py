@@ -71,44 +71,111 @@ class BrainContextBuilder:
 
         return summaries
 
-    def _build_readiness(self, agent, structure_summary: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _phase_profile(self, environment) -> Dict[str, Any]:
+        current_phase = environment.get_current_phase() or {"name": "default"}
+        if not environment.phases:
+            elapsed = float(environment.get_time())
+            stage = "early" if elapsed < 40 else ("execution" if elapsed < 90 else "late")
+            return {"name": current_phase.get("name", "default"), "stage": stage, "progress": min(1.0, elapsed / 120.0)}
+
+        elapsed = float(environment.get_time())
+        cursor = 0.0
+        for idx, phase in enumerate(environment.phases):
+            duration = float(phase.get("duration_minutes", 0.0) * 60.0)
+            phase_start = cursor
+            phase_end = phase_start + duration
+            if idx == environment.current_phase_index:
+                progress = 0.0 if duration <= 0 else max(0.0, min(1.0, (elapsed - phase_start) / duration))
+                stage = "early" if progress < 0.35 else ("execution" if progress < 0.8 else "late")
+                return {"name": phase.get("name", "default"), "stage": stage, "progress": progress}
+            cursor = phase_end
+
+        return {"name": current_phase.get("name", "default"), "stage": "late", "progress": 1.0}
+
+    def _build_readiness(self, agent, structure_summary: List[Dict[str, Any]], environment, team_state: Dict[str, Any] | None = None) -> Dict[str, Any]:
         info_count = len(agent.mental_model["information"])
         knowledge_count = len(agent.mental_model["knowledge"].rules)
-        score = info_count + (2 * knowledge_count)
+        inspected_sources = sum(1 for state in getattr(agent, "source_inspection_state", {}).values() if state == "inspected")
+        available_build_targets = [
+            target_name
+            for target_name, target in environment.interaction_targets.items()
+            if target.get("kind") == "build" and environment.get_interaction_target_position(target_name, from_position=agent.position) is not None
+        ]
+        has_team_artifact = bool((team_state or {}).get("externalized_artifacts"))
+        score = info_count + (2 * knowledge_count) + inspected_sources + (1 if has_team_artifact else 0)
         in_progress = sum(1 for s in structure_summary if s["state"] == "in_progress")
         absent = sum(1 for s in structure_summary if s["state"] == "absent")
+        blockers = []
 
-        if score < 3:
+        if info_count < 2:
+            blockers.append("insufficient_information_inspection")
+        if knowledge_count < 1:
+            blockers.append("insufficient_rule_knowledge")
+        if inspected_sources < 1:
+            blockers.append("no_inspected_information_source")
+        if not available_build_targets:
+            blockers.append("no_navigable_build_target")
+
+        if score < 4 or blockers:
             status = "premature"
-            blockers = ["insufficient_validated_dik"]
         elif in_progress > 0:
             status = "plausible"
-            blockers = []
         elif absent == 0:
             status = "blocked"
-            blockers = ["no_remaining_absent_structure_targets"]
+            blockers = blockers + ["no_remaining_absent_structure_targets"]
         else:
             status = "plausible"
-            blockers = []
 
         return {
             "status": status,
             "score": score,
             "blockers": blockers,
             "ready_for_build": status == "plausible",
+            "inspected_sources": inspected_sources,
+            "build_targets_available": len(available_build_targets),
         }
 
-    def _affordances(self, agent, environment) -> List[Dict[str, Any]]:
+    def _affordances(self, agent, environment, build_readiness: Dict[str, Any] | None = None, phase_profile: Dict[str, Any] | None = None, team_state: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
+        if phase_profile is None:
+            phase_profile = self._phase_profile(environment)
+        if build_readiness is None:
+            build_readiness = self._build_readiness(agent, self._summarize_structures(environment), environment, team_state=team_state or {})
+        stage = phase_profile.get("stage", "execution")
+        readiness_ok = bool(build_readiness.get("ready_for_build"))
+        mismatch_pressure = any("mismatch" in e.lower() for e in (agent.activity_log[-6:] if agent.activity_log else []))
+        has_artifacts = bool((team_state or {}).get("externalized_artifacts"))
+
+        def utility_for(action: ExecutableActionType, target_kind: str | None = None):
+            if action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
+                return 0.95 if stage == "early" else (0.55 if not readiness_ok else 0.25)
+            if action in {ExecutableActionType.COMMUNICATE, ExecutableActionType.REQUEST_ASSISTANCE}:
+                return 0.75 if stage in {"early", "late"} else 0.45
+            if action == ExecutableActionType.EXTERNALIZE_PLAN:
+                return 0.8 if stage in {"early", "execution"} else 0.45
+            if action == ExecutableActionType.CONSULT_TEAM_ARTIFACT:
+                return 0.6 if has_artifacts else 0.2
+            if action == ExecutableActionType.TRANSPORT_RESOURCES:
+                return 0.75 if readiness_ok and stage != "early" else 0.25
+            if action in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION}:
+                if not readiness_ok:
+                    return 0.05
+                return 0.85 if stage in {"execution", "late"} else 0.3
+            if action in {ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, ExecutableActionType.VALIDATE_CONSTRUCTION}:
+                return 0.9 if mismatch_pressure or stage == "late" or target_kind == "build" else 0.3
+            if action in {ExecutableActionType.REASSESS_PLAN, ExecutableActionType.OBSERVE_ENVIRONMENT}:
+                return 0.4 if stage == "early" else 0.3
+            return 0.2
+
         legal = [
-            {"action_type": ExecutableActionType.OBSERVE_ENVIRONMENT.value, "target_id": None, "target_class": "self"},
-            {"action_type": ExecutableActionType.REASSESS_PLAN.value, "target_id": None, "target_class": "self"},
-            {"action_type": ExecutableActionType.WAIT.value, "target_id": None, "target_class": "self"},
-            {"action_type": ExecutableActionType.COMMUNICATE.value, "target_id": "nearby_agent", "target_class": "team"},
-            {"action_type": ExecutableActionType.REQUEST_ASSISTANCE.value, "target_id": "nearby_agent", "target_class": "team"},
-            {"action_type": ExecutableActionType.EXTERNALIZE_PLAN.value, "target_id": "whiteboard", "target_class": "artifact"},
-            {"action_type": ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, "target_id": "team_artifact", "target_class": "artifact"},
-            {"action_type": ExecutableActionType.VALIDATE_CONSTRUCTION.value, "target_id": "active_construction", "target_class": "build"},
-            {"action_type": ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value, "target_id": "active_construction", "target_class": "build"},
+            {"action_type": ExecutableActionType.OBSERVE_ENVIRONMENT.value, "target_id": None, "target_class": "self", "utility": utility_for(ExecutableActionType.OBSERVE_ENVIRONMENT)},
+            {"action_type": ExecutableActionType.REASSESS_PLAN.value, "target_id": None, "target_class": "self", "utility": utility_for(ExecutableActionType.REASSESS_PLAN)},
+            {"action_type": ExecutableActionType.WAIT.value, "target_id": None, "target_class": "self", "utility": 0.1},
+            {"action_type": ExecutableActionType.COMMUNICATE.value, "target_id": "nearby_agent", "target_class": "team", "utility": utility_for(ExecutableActionType.COMMUNICATE)},
+            {"action_type": ExecutableActionType.REQUEST_ASSISTANCE.value, "target_id": "nearby_agent", "target_class": "team", "utility": utility_for(ExecutableActionType.REQUEST_ASSISTANCE)},
+            {"action_type": ExecutableActionType.EXTERNALIZE_PLAN.value, "target_id": "whiteboard", "target_class": "artifact", "utility": utility_for(ExecutableActionType.EXTERNALIZE_PLAN)},
+            {"action_type": ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, "target_id": "team_artifact", "target_class": "artifact", "utility": utility_for(ExecutableActionType.CONSULT_TEAM_ARTIFACT)},
+            {"action_type": ExecutableActionType.VALIDATE_CONSTRUCTION.value, "target_id": "active_construction", "target_class": "build", "utility": utility_for(ExecutableActionType.VALIDATE_CONSTRUCTION, target_kind="build")},
+            {"action_type": ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value, "target_id": "active_construction", "target_class": "build", "utility": utility_for(ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, target_kind="build")},
         ]
 
         for target_name, target in environment.interaction_targets.items():
@@ -135,6 +202,7 @@ class BrainContextBuilder:
                     "target_class": target.get("kind"),
                     "reachable": reachable,
                     "source_state": source_state,
+                    "utility": utility_for(action_type, target_kind=target.get("kind")),
                 }
             )
 
@@ -144,6 +212,7 @@ class BrainContextBuilder:
                 "target_id": "resource_zone_to_work_zone",
                 "target_class": "logistics",
                 "duration_s": 30.0,
+                "utility": utility_for(ExecutableActionType.TRANSPORT_RESOURCES),
             }
         )
         return legal
@@ -211,34 +280,9 @@ class BrainContextBuilder:
         repeated_stalls = sum(1 for e in history_events if "blocked while moving" in e.lower())
         recent_plan_evolution = list(history_bands.get("recent_plan_history", []))
 
+        phase_profile = self._phase_profile(environment)
         structure_summary = self._summarize_structures(environment)
         affordance_summary = self._world_affordance_summary(agent, environment)
-        action_affordances = self._affordances(agent, environment)
-        build_readiness = self._build_readiness(agent, structure_summary)
-
-        static_task_context = {
-            "mission": self.scenario_name,
-            "current_phase": current_phase.get("name", "default"),
-            "role": agent.role,
-            "role_access_constraints": getattr(agent, "allowed_packet", []),
-            "high_level_objectives": ["build required colony infrastructure", "maintain legal construction"],
-            "hard_constraints": [
-                "simulator validates legality",
-                "simulator validates world truth",
-                "simulator enforces phase restrictions",
-            ],
-        }
-
-        world_snapshot = {
-            "sim_time": sim_state.time,
-            "phase_state": current_phase,
-            "agent_position": agent.position,
-            "nearby_agents": nearby_agents,
-            "built_state": structure_summary,
-            "affordance_map": affordance_summary,
-            "resource_status": {"visible_resources": environment.get_visible_resources(agent.position)},
-            "legal_actions": action_affordances,
-        }
 
         active_plan = getattr(agent, "current_plan", None)
         inspected_artifact_ids = {
@@ -261,6 +305,58 @@ class BrainContextBuilder:
                     "adopted_by_agent": aid in inspected_artifact_ids,
                 }
             )
+
+        validated_plan_exists = any(a.artifact_type == "plan" for a in sim_state.team_knowledge_manager.artifacts.values())
+        teammate_help_signals = {
+            other.name: (
+                bool(other.known_gaps)
+                or "blocked" in (getattr(other, "status_last_action", "").lower())
+                or "stalled" in (getattr(other, "status_last_action", "").lower())
+            )
+            for other in sim_state.agents
+            if other.name != agent.name
+        }
+
+        team_state = {
+            "team_shared_knowledge": sim_state.team_knowledge_manager.summarize(),
+            "teammate_roles": {other.name: other.role for other in sim_state.agents if other.name != agent.name},
+            "teammate_inferred_goals": {
+                teammate: model.get("goals", []) for teammate, model in agent.theory_of_mind.items()
+            },
+            "tom_summary": agent.theory_of_mind,
+            "recent_shared_updates": sim_state.team_knowledge_manager.recent_updates[-5:],
+            "plan_readiness": "validated_shared_plan" if validated_plan_exists else "partial_or_fragmentary_plan",
+            "externalized_artifacts": artifact_summaries,
+            "teammate_help_signals": teammate_help_signals,
+        }
+
+        build_readiness = self._build_readiness(agent, structure_summary, environment, team_state=team_state)
+        action_affordances = self._affordances(agent, environment, build_readiness=build_readiness, phase_profile=phase_profile, team_state=team_state)
+
+        static_task_context = {
+            "mission": self.scenario_name,
+            "current_phase": current_phase.get("name", "default"),
+            "role": agent.role,
+            "role_access_constraints": getattr(agent, "allowed_packet", []),
+            "high_level_objectives": ["build required colony infrastructure", "maintain legal construction"],
+            "hard_constraints": [
+                "simulator validates legality",
+                "simulator validates world truth",
+                "simulator enforces phase restrictions",
+            ],
+        }
+
+        world_snapshot = {
+            "sim_time": sim_state.time,
+            "phase_state": current_phase,
+            "phase_profile": phase_profile,
+            "agent_position": agent.position,
+            "nearby_agents": nearby_agents,
+            "built_state": structure_summary,
+            "affordance_map": affordance_summary,
+            "resource_status": {"visible_resources": environment.get_visible_resources(agent.position)},
+            "legal_actions": action_affordances,
+        }
 
         individual_cognitive_state = {
             "goal_stack": list(agent.goal_stack),
@@ -295,30 +391,6 @@ class BrainContextBuilder:
                 "invalidation_reason": getattr(active_plan, "invalidation_reason", None),
                 "remaining_executions": getattr(active_plan, "remaining_executions", None),
             },
-        }
-
-        validated_plan_exists = any(a.artifact_type == "plan" for a in sim_state.team_knowledge_manager.artifacts.values())
-        teammate_help_signals = {
-            other.name: (
-                bool(other.known_gaps)
-                or "blocked" in (getattr(other, "status_last_action", "").lower())
-                or "stalled" in (getattr(other, "status_last_action", "").lower())
-            )
-            for other in sim_state.agents
-            if other.name != agent.name
-        }
-
-        team_state = {
-            "team_shared_knowledge": sim_state.team_knowledge_manager.summarize(),
-            "teammate_roles": {other.name: other.role for other in sim_state.agents if other.name != agent.name},
-            "teammate_inferred_goals": {
-                teammate: model.get("goals", []) for teammate, model in agent.theory_of_mind.items()
-            },
-            "tom_summary": agent.theory_of_mind,
-            "recent_shared_updates": sim_state.team_knowledge_manager.recent_updates[-5:],
-            "plan_readiness": "validated_shared_plan" if validated_plan_exists else "partial_or_fragmentary_plan",
-            "externalized_artifacts": artifact_summaries,
-            "teammate_help_signals": teammate_help_signals,
         }
 
         history_bands["semantic_plan_evolution"] = {
