@@ -1,0 +1,466 @@
+import csv
+import json
+from collections import Counter, defaultdict
+from pathlib import Path
+
+from modules.agent import DIK_LOG
+
+
+class MetricsCollector:
+    """Runtime metrics accumulator for comparison-ready run outputs."""
+
+    ZONE_MAP = {
+        "Zone_Architect_Info": "architect_info",
+        "Zone_Engineer_Info": "engineer_info",
+        "Zone_Botanist_Info": "botanist_info",
+        "Zone_Team_Info": "team_info",
+        "Zone_Table_A": "table_a",
+        "Zone_Table_B": "table_b",
+        "Zone_Table_C": "table_c",
+    }
+
+    def __init__(self, simulation):
+        self.simulation = simulation
+        self.started_at = simulation.time
+        self._last_phase_index = None
+        self._phase_open_time = simulation.time
+
+        self.events_by_type = Counter()
+        self.communication_by_type = Counter()
+        self.dik_counts = defaultdict(Counter)
+        self.externalization_by_type = Counter()
+        self.construction_externalizations_by_type = Counter()
+
+        self.agent_stats = {
+            agent.name: {
+                "agent": agent.name,
+                "role": agent.role,
+                "traits": {
+                    "communication_propensity": getattr(agent, "communication_propensity", 0.5),
+                    "goal_alignment": getattr(agent, "goal_alignment", 0.5),
+                    "help_tendency": getattr(agent, "help_tendency", 0.5),
+                    "build_speed": getattr(agent, "build_speed", 0.5),
+                    "rule_accuracy": getattr(agent, "rule_accuracy", 0.5),
+                },
+                "packet_access": list(getattr(agent, "allowed_packet", [])),
+                "time_moving": 0.0,
+                "time_stalled": 0.0,
+                "time_inspecting_info": 0.0,
+                "time_communicating": 0.0,
+                "time_transporting": 0.0,
+                "time_constructing": 0.0,
+                "time_validating_or_repairing": 0.0,
+                "retarget_count": 0,
+                "mismatch_detected": 0,
+                "repair_episodes": 0,
+                "help_requests": 0,
+                "plan_externalizations": 0,
+                "artifact_consultations": 0,
+                "zone_time": Counter(),
+                "dik": Counter(),
+                "knowledge_rules_end": 0,
+            }
+            for agent in simulation.agents
+        }
+
+        self.phase_stats = []
+        self._open_phase()
+
+    def _open_phase(self):
+        phase = self.simulation.environment.get_current_phase() or {"name": "default"}
+        self._last_phase_index = self.simulation.environment.current_phase_index
+        self._phase_open_time = self.simulation.time
+        self.phase_stats.append(
+            {
+                "phase_name": phase.get("name", "default"),
+                "phase_index": self._last_phase_index,
+                "start_time": round(self.simulation.time, 3),
+                "end_time": None,
+                "events": Counter(),
+                "structures_completed": 0,
+                "structures_validated_correct": 0,
+                "communication_events": 0,
+                "externalization_events": 0,
+                "artifact_consultations": 0,
+                "repair_episodes": 0,
+                "mismatch_detected": 0,
+            }
+        )
+
+    def _close_phase(self):
+        if not self.phase_stats:
+            return
+        current = self.phase_stats[-1]
+        current["end_time"] = round(self.simulation.time, 3)
+
+    def on_event(self, event):
+        event_type = event.get("event_type", "unknown")
+        payload = event.get("payload_data", {})
+        self.events_by_type[event_type] += 1
+        self.phase_stats[-1]["events"][event_type] += 1
+
+        if event_type == "communication_exchange":
+            for mtype in payload.get("message_types", []):
+                self.communication_by_type[mtype] += 1
+            self.phase_stats[-1]["communication_events"] += 1
+
+        if event_type in {"externalization_created", "construction_externalization_update"}:
+            self.phase_stats[-1]["externalization_events"] += 1
+
+        if event_type == "externalization_created":
+            artifact_type = payload.get("type", "unknown")
+            self.externalization_by_type[artifact_type] += 1
+            agent = payload.get("agent")
+            if agent in self.agent_stats:
+                self.agent_stats[agent]["plan_externalizations"] += 1
+
+        if event_type == "construction_externalization_update":
+            structure_type = payload.get("structure_type", "unknown")
+            self.construction_externalizations_by_type[structure_type] += 1
+
+        if event_type == "artifact_consulted":
+            self.phase_stats[-1]["artifact_consultations"] += 1
+            agent = payload.get("agent")
+            if agent in self.agent_stats:
+                self.agent_stats[agent]["artifact_consultations"] += 1
+
+        if event_type == "assistance_requested":
+            agent = payload.get("agent")
+            if agent in self.agent_stats:
+                self.agent_stats[agent]["help_requests"] += 1
+
+        if event_type == "construction_mismatch_detected":
+            self.phase_stats[-1]["mismatch_detected"] += 1
+            agent = payload.get("agent")
+            if agent in self.agent_stats:
+                self.agent_stats[agent]["mismatch_detected"] += 1
+
+        if event_type == "construction_repair_episode":
+            self.phase_stats[-1]["repair_episodes"] += 1
+            agent = payload.get("agent")
+            if agent in self.agent_stats:
+                self.agent_stats[agent]["repair_episodes"] += 1
+
+    def on_step(self, dt):
+        current_phase_index = self.simulation.environment.current_phase_index
+        if current_phase_index != self._last_phase_index:
+            self._close_phase()
+            self.simulation.logger.log_event(
+                self.simulation.time,
+                "phase_summary_captured",
+                {
+                    "phase_name": self.phase_stats[-1]["phase_name"],
+                    "start_time": self.phase_stats[-1]["start_time"],
+                    "end_time": self.phase_stats[-1]["end_time"],
+                },
+            )
+            self._open_phase()
+
+        for agent in self.simulation.agents:
+            entry = self.agent_stats[agent.name]
+            self._update_agent_time_buckets(agent, entry, dt)
+            self._update_agent_zone(agent, entry, dt)
+            status = getattr(agent, "status_last_action", "") or ""
+            if "retargeted" in status.lower():
+                entry["retarget_count"] += 1
+
+    def _update_agent_zone(self, agent, entry, dt):
+        zone_name = self.simulation.environment.get_zone(agent.position)
+        zone_key = self.ZONE_MAP.get(zone_name, "transition")
+        entry["zone_time"][zone_key] += dt
+
+    def _update_agent_time_buckets(self, agent, entry, dt):
+        active = list(getattr(agent, "active_actions", []))
+        if not active:
+            entry["time_stalled"] += dt
+            return
+
+        seen_bucket = False
+        status = (getattr(agent, "status_last_action", "") or "").lower()
+        for action in active:
+            atype = action.get("type")
+            if atype == "move_to":
+                entry["time_moving"] += dt
+                seen_bucket = True
+                if "source" in status or "inspect" in status:
+                    entry["time_inspecting_info"] += dt
+            elif atype == "communicate":
+                entry["time_communicating"] += dt
+                seen_bucket = True
+            elif atype == "transport_resources":
+                entry["time_transporting"] += dt
+                seen_bucket = True
+            elif atype == "construct":
+                entry["time_constructing"] += dt
+                seen_bucket = True
+            elif atype == "idle" and "repair" in status:
+                entry["time_validating_or_repairing"] += dt
+                seen_bucket = True
+
+        if not seen_bucket:
+            entry["time_stalled"] += dt
+
+    def _collect_dik_counts(self):
+        for row in DIK_LOG:
+            self.dik_counts[row.get("agent", "unknown")][row.get("type", "Unknown")] += 1
+        for name, stats in self.agent_stats.items():
+            stats["dik"] = dict(self.dik_counts.get(name, {}))
+
+    def _structure_summary(self):
+        projects = self.simulation.environment.construction.projects.values()
+        summary = {
+            "attempted": 0,
+            "completed": 0,
+            "validated_correct": 0,
+            "repaired_or_corrected": self.events_by_type["construction_repair_episode"],
+            "by_type": defaultdict(lambda: {"attempted": 0, "completed": 0, "validated_correct": 0}),
+        }
+        for project in projects:
+            ptype = project.get("type", "unknown")
+            summary["attempted"] += 1
+            summary["by_type"][ptype]["attempted"] += 1
+            if project.get("status") == "complete":
+                summary["completed"] += 1
+                summary["by_type"][ptype]["completed"] += 1
+            if project.get("correct", True):
+                summary["validated_correct"] += 1
+                summary["by_type"][ptype]["validated_correct"] += 1
+        summary["by_type"] = dict(summary["by_type"])
+        return summary
+
+    def _team_knowledge_summary(self):
+        artifacts = self.simulation.team_knowledge_manager.artifacts
+        validated = sum(1 for a in artifacts.values() if a.validation_state == "validated")
+        revised = self.events_by_type["construction_repair_episode"]
+        consulted = self.events_by_type["artifact_consulted"]
+        adoption = sum(a.uptake_count for a in artifacts.values())
+        overlap = self._team_overlap_index()
+        return {
+            "artifact_count": len(artifacts),
+            "validated_artifacts": validated,
+            "artifact_validation_rate": round(validated / len(artifacts), 4) if artifacts else 0.0,
+            "artifact_revision_or_repair_count": revised,
+            "artifact_consultation_count": consulted,
+            "artifact_adoption_count": adoption,
+            "team_knowledge_overlap_index": overlap,
+            "shared_validated_knowledge_count": len(self.simulation.team_knowledge_manager.validated_knowledge),
+        }
+
+    def _team_overlap_index(self):
+        rule_sets = []
+        for agent in self.simulation.agents:
+            rule_sets.append(set(agent.mental_model["knowledge"].rules))
+        if not rule_sets:
+            return 0.0
+        union = set().union(*rule_sets)
+        if not union:
+            return 0.0
+        intersection = set(rule_sets[0])
+        for rs in rule_sets[1:]:
+            intersection &= rs
+        return round(len(intersection) / len(union), 4)
+
+    def _run_metadata(self):
+        env = self.simulation.environment
+        phase_config = [
+            {"name": p.get("name"), "duration_minutes": p.get("duration_minutes")}
+            for p in (env.phases or [])
+        ]
+        return {
+            "experiment_name": self.simulation.logger.output_session.experiment_name,
+            "timestamp": self.simulation.logger.output_session.timestamp,
+            "session_folder": str(self.simulation.logger.output_session.session_folder),
+            "speed_multiplier": self.simulation.speed_multiplier,
+            "flash_mode": self.simulation.flash_mode,
+            "seed": getattr(self.simulation, "seed", None),
+            "num_agents": len(self.simulation.agents),
+            "active_roles": [a.role for a in self.simulation.agents],
+            "phase_timing": phase_config,
+            "brain_backend": self.simulation.brain_backend_config.backend,
+            "agent_traits": {
+                a.name: {
+                    "role": a.role,
+                    "traits": {
+                        "communication_propensity": getattr(a, "communication_propensity", 0.5),
+                        "goal_alignment": getattr(a, "goal_alignment", 0.5),
+                        "help_tendency": getattr(a, "help_tendency", 0.5),
+                        "build_speed": getattr(a, "build_speed", 0.5),
+                        "rule_accuracy": getattr(a, "rule_accuracy", 0.5),
+                    },
+                    "packet_access": list(getattr(a, "allowed_packet", [])),
+                }
+                for a in self.simulation.agents
+            },
+        }
+
+    def _phase_summary_rows(self):
+        rows = []
+        for phase in self.phase_stats:
+            rows.append(
+                {
+                    "phase_name": phase["phase_name"],
+                    "phase_index": phase["phase_index"],
+                    "start_time": phase["start_time"],
+                    "end_time": phase["end_time"],
+                    "events": dict(phase["events"]),
+                    "communication_events": phase["communication_events"],
+                    "externalization_events": phase["externalization_events"],
+                    "artifact_consultations": phase["artifact_consultations"],
+                    "repair_episodes": phase["repair_episodes"],
+                    "mismatch_detected": phase["mismatch_detected"],
+                }
+            )
+        return rows
+
+    def finalize(self):
+        self._close_phase()
+        self._collect_dik_counts()
+
+        for agent in self.simulation.agents:
+            self.agent_stats[agent.name]["knowledge_rules_end"] = len(agent.mental_model["knowledge"].rules)
+
+        structure_summary = self._structure_summary()
+        team_knowledge_summary = self._team_knowledge_summary()
+
+        run_summary = {
+            "run_metadata": self._run_metadata(),
+            "outcomes": {
+                "total_structures_attempted": structure_summary["attempted"],
+                "total_structures_completed": structure_summary["completed"],
+                "total_structures_validated_correct": structure_summary["validated_correct"],
+                "total_structures_repaired_or_corrected": structure_summary["repaired_or_corrected"],
+                "structures_by_type": structure_summary["by_type"],
+                "colony_survivability_proxy": {
+                    "completed_structures": structure_summary["completed"],
+                    "validated_structure_ratio": round(
+                        structure_summary["validated_correct"] / structure_summary["attempted"], 4
+                    ) if structure_summary["attempted"] else 0.0,
+                },
+                "phase_objective_completion": {
+                    phase["phase_name"]: phase["events"].get("construction_externalization_update", 0) > 0
+                    for phase in self.phase_stats
+                },
+            },
+            "process": {
+                "dik_acquisition_counts_by_agent": {a: dict(v) for a, v in self.dik_counts.items()},
+                "dik_transformation_count": int(sum(v.get("Knowledge", 0) for v in self.dik_counts.values())),
+                "communication_counts_by_type": dict(self.communication_by_type),
+                "help_requests": self.events_by_type["assistance_requested"],
+                "plan_externalizations": self.events_by_type["externalization_created"],
+                "artifact_consultations": self.events_by_type["artifact_consulted"],
+                "construction_externalization_creations_or_updates": self.events_by_type[
+                    "construction_externalization_update"
+                ],
+                "mismatch_detections": self.events_by_type["construction_mismatch_detected"],
+                "repair_or_correction_episodes": self.events_by_type["construction_repair_episode"],
+                "team_knowledge": team_knowledge_summary,
+            },
+            "externalization_metrics": {
+                "externalized_artifacts_created_by_type": dict(self.externalization_by_type),
+                "construction_artifacts_created_by_type": dict(self.construction_externalizations_by_type),
+                "artifact_validation_rate": team_knowledge_summary["artifact_validation_rate"],
+                "artifact_revision_or_repair_rate": round(
+                    self.events_by_type["construction_repair_episode"] / max(1, len(self.simulation.team_knowledge_manager.artifacts)),
+                    4,
+                ),
+                "artifact_consultation_or_use_rate": round(
+                    self.events_by_type["artifact_consulted"] / max(1, len(self.simulation.agents)),
+                    4,
+                ),
+                "knowledge_artifact_mismatch_count": self.events_by_type["construction_mismatch_detected"],
+                "artifact_uptake_or_adoption_count": team_knowledge_summary["artifact_adoption_count"],
+            },
+            "behavioral": {
+                "time_buckets_by_agent": {
+                    name: {
+                        key: round(stats[key], 3)
+                        for key in [
+                            "time_moving",
+                            "time_stalled",
+                            "time_inspecting_info",
+                            "time_communicating",
+                            "time_transporting",
+                            "time_constructing",
+                            "time_validating_or_repairing",
+                        ]
+                    }
+                    for name, stats in self.agent_stats.items()
+                },
+                "zone_occupancy_by_agent": {
+                    name: {k: round(v, 3) for k, v in stats["zone_time"].items()}
+                    for name, stats in self.agent_stats.items()
+                },
+                "retarget_counts_by_agent": {name: stats["retarget_count"] for name, stats in self.agent_stats.items()},
+            },
+            "events": dict(self.events_by_type),
+            "end_state": {
+                "sim_time": round(self.simulation.time, 3),
+                "team_artifact_count": len(self.simulation.team_knowledge_manager.artifacts),
+            },
+        }
+
+        phase_summary = self._phase_summary_rows()
+        agent_rows = []
+        for name, stats in self.agent_stats.items():
+            row = {
+                "agent": name,
+                "role": stats["role"],
+                "time_moving": round(stats["time_moving"], 3),
+                "time_stalled": round(stats["time_stalled"], 3),
+                "time_inspecting_info": round(stats["time_inspecting_info"], 3),
+                "time_communicating": round(stats["time_communicating"], 3),
+                "time_transporting": round(stats["time_transporting"], 3),
+                "time_constructing": round(stats["time_constructing"], 3),
+                "time_validating_or_repairing": round(stats["time_validating_or_repairing"], 3),
+                "retarget_count": stats["retarget_count"],
+                "mismatch_detected": stats["mismatch_detected"],
+                "repair_episodes": stats["repair_episodes"],
+                "help_requests": stats["help_requests"],
+                "plan_externalizations": stats["plan_externalizations"],
+                "artifact_consultations": stats["artifact_consultations"],
+                "dik_data": stats["dik"].get("Data", 0),
+                "dik_information": stats["dik"].get("Information", 0),
+                "dik_knowledge": stats["dik"].get("Knowledge", 0),
+                "knowledge_rules_end": stats["knowledge_rules_end"],
+            }
+            agent_rows.append(row)
+
+        team_summary = {
+            "team_knowledge": team_knowledge_summary,
+            "externalization_metrics": run_summary["externalization_metrics"],
+            "communication_counts_by_type": run_summary["process"]["communication_counts_by_type"],
+            "events": dict(self.events_by_type),
+        }
+
+        self._write_outputs(run_summary, phase_summary, agent_rows, team_summary)
+        return run_summary
+
+    def _write_outputs(self, run_summary, phase_summary, agent_rows, team_summary):
+        measures_dir = self.simulation.logger.output_session.measures_dir
+        measures_dir.mkdir(parents=True, exist_ok=True)
+
+        self._write_json(measures_dir / "run_summary.json", run_summary)
+        self._write_json(measures_dir / "phase_summary.json", phase_summary)
+        self._write_json(measures_dir / "team_summary.json", team_summary)
+        self._write_agent_csv(measures_dir / "agent_summary.csv", agent_rows)
+
+        self.simulation.logger.log_event(
+            self.simulation.time,
+            "run_summary_saved",
+            {"path": str(measures_dir / "run_summary.json")},
+        )
+
+    @staticmethod
+    def _write_json(path: Path, payload):
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+    @staticmethod
+    def _write_agent_csv(path: Path, rows):
+        if not rows:
+            return
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+

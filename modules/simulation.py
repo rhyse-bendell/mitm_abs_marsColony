@@ -6,6 +6,7 @@ from modules.brain_context import BrainContextBuilder
 from modules.brain_provider import BrainBackendConfig, create_brain_provider
 from modules.environment import Environment
 from modules.logging_tools import SimulationLogger
+from modules.metrics import MetricsCollector
 from modules.team_knowledge import TeamKnowledgeManager
 
 
@@ -86,6 +87,8 @@ class SimulationState:
             self.agents.append(agent)
 
         self.environment.agents = self.agents
+        self.metrics = MetricsCollector(self)
+        self.logger.register_event_listener(self.metrics.on_event)
         self.logger.initialize_session_outputs(
             speed=speed,
             flash_mode=self.flash_mode,
@@ -113,13 +116,15 @@ class SimulationState:
             for j in range(i + 1, len(self.agents)):
                 other = self.agents[j]
                 if self._distance(agent.position, other.position) < 1.5:
-                    agent.communicate_with(other)
+                    agent.communicate_with(other, sim_state=self)
 
         for agent in self.agents:
             agent.current_time = self.time
             agent.update(dt, self.environment, sim_state=self)
-            agent.compare_and_repair_construction(self.environment.construction)
+            agent.compare_and_repair_construction(self.environment.construction, sim_state=self)
             self.logger.log_agent_state(self.time, agent)
+
+        self.metrics.on_step(dt)
 
         self.time += dt
 
@@ -128,6 +133,7 @@ class SimulationState:
             self._last_save_time = self.time
 
     def stop(self):
+        self.metrics.finalize()
         self.logger.save_csv()
 
 
