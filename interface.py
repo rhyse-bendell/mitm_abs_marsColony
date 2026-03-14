@@ -3,7 +3,6 @@
 import tkinter as tk
 from tkinter import ttk
 import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from modules.simulation import SimulationState
 from tkinter import StringVar, BooleanVar, DoubleVar, IntVar
@@ -12,6 +11,11 @@ from modules.phase_definitions import MISSION_PHASES
 
 
 class MarsColonyInterface:
+    STATE_IDLE = "idle"
+    STATE_RUNNING = "running"
+    STATE_PAUSED = "paused"
+    STATE_STOPPED = "stopped"
+
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Mars Colony Simulation")
@@ -21,11 +25,28 @@ class MarsColonyInterface:
 
         self.sim = None
         self.construction = ConstructionManager()
+        self.run_state = self.STATE_IDLE
+        self._run_loop_job = None
+        self.run_loop_interval_ms = 100
+        self.base_dt = 0.1
 
         self.create_widgets()
+        self._update_control_states()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def create_widgets(self):
+        self.control_frame = ttk.Frame(self.root, padding=(8, 6))
+        self.control_frame.pack(fill="x")
+        self.start_button = ttk.Button(self.control_frame, text="Start", command=self.start_experiment)
+        self.pause_button = ttk.Button(self.control_frame, text="Pause", command=self.pause_experiment)
+        self.stop_button = ttk.Button(self.control_frame, text="Stop", command=self.stop_experiment)
+        self.lifecycle_label = ttk.Label(self.control_frame, text="State: idle")
+
+        self.start_button.pack(side="left", padx=(0, 6))
+        self.pause_button.pack(side="left", padx=6)
+        self.stop_button.pack(side="left", padx=6)
+        self.lifecycle_label.pack(side="right")
+
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True)
         self.create_experiment_tab()
@@ -133,9 +154,6 @@ class MarsColonyInterface:
         self.notebook.add(self.tab_main, text="Environment")
 
         self.fig, self.ax, self.canvas = self._build_environment_canvas(self.tab_main)
-
-        self.anim = None  # Don’t start animation until experiment is started
-
 
     def create_construction_tab(self):
         self.tab_construction = ttk.Frame(self.notebook)
@@ -251,17 +269,62 @@ class MarsColonyInterface:
             flash_mode=self.flash_mode.get()
         )
 
-        # Refresh main tab to reflect new sim state
-        # Stop old animation if it exists
-        if self.anim:
-            self.anim.event_source.stop()
+        self.run_state = self.STATE_IDLE
+        self._cancel_run_loop()
+        self._update_control_states()
 
-        # Start new animation
-        self.anim = animation.FuncAnimation(self.fig, self.update_environment_plot, interval=100)
-
-        self.stop_button.config(state="normal")
+        self.update_environment_plot()
         self._sync_construction_summaries()
         self._update_system_log()
+
+    def _cancel_run_loop(self):
+        if self._run_loop_job is not None:
+            self.root.after_cancel(self._run_loop_job)
+            self._run_loop_job = None
+
+    def _schedule_next_tick(self):
+        self._cancel_run_loop()
+        self._run_loop_job = self.root.after(self.run_loop_interval_ms, self._run_loop_tick)
+
+    def _run_loop_tick(self):
+        self._run_loop_job = None
+        if self.run_state != self.STATE_RUNNING or not self.sim:
+            return
+
+        self.sim.update(self.base_dt)
+        self.update_environment_plot()
+        self.update_agent_table()
+        self.update_event_monitor()
+        self.update_dashboard()
+        self._sync_construction_summaries()
+        self._schedule_next_tick()
+
+    def _update_control_states(self):
+        start_enabled = self.run_state in {self.STATE_IDLE, self.STATE_PAUSED, self.STATE_STOPPED}
+        pause_enabled = self.run_state == self.STATE_RUNNING
+        stop_enabled = self.run_state in {self.STATE_RUNNING, self.STATE_PAUSED}
+        self.start_button.config(state="normal" if start_enabled else "disabled")
+        self.pause_button.config(state="normal" if pause_enabled else "disabled")
+        self.stop_button.config(state="normal" if stop_enabled else "disabled")
+        self.lifecycle_label.config(text=f"State: {self.run_state}")
+
+    def start_experiment(self):
+        if self.run_state == self.STATE_RUNNING:
+            return
+
+        if self.run_state in {self.STATE_IDLE, self.STATE_STOPPED} or self.sim is None:
+            self.apply_experiment_settings()
+
+        self.run_state = self.STATE_RUNNING
+        self._update_control_states()
+        self._schedule_next_tick()
+
+    def pause_experiment(self):
+        if self.run_state != self.STATE_RUNNING:
+            return
+        self.run_state = self.STATE_PAUSED
+        self._cancel_run_loop()
+        self._update_control_states()
 
     def _render_environment_plot(self, ax, canvas):
         ax.clear()
@@ -432,16 +495,10 @@ class MarsColonyInterface:
             return
         self.system_log_text.see(tk.END)
 
-    def update_environment_plot(self, frame):
+    def update_environment_plot(self, frame=None):
         if not self.sim:
             return  # Don't try to update before simulation starts
-
-        self.sim.update(0.1)  # This will now be scaled internally
         self._render_environment_plot(self.ax, self.canvas)
-        self.update_agent_table()
-        self.update_event_monitor()
-        self.update_dashboard()
-        self._sync_construction_summaries()
 
     def update_agent_table(self):
         for i in self.agent_state_table.get_children():
@@ -453,6 +510,7 @@ class MarsColonyInterface:
         self.root.mainloop()
 
     def on_closing(self):
+        self.stop_experiment()
         self.root.quit()
         self.root.destroy()
 
@@ -578,24 +636,22 @@ class MarsColonyInterface:
         ttk.Entry(self.tab_experiment, textvariable=self.num_runs).grid(row=row, column=1)
         row += 1
 
-        ttk.Button(self.tab_experiment, text="Start Experiment", command=self.apply_experiment_settings).grid(
-            row=row, column=0, columnspan=2, pady=10
-        )
-        row += 1  # move down one row for the stop button
-
-        self.stop_button = ttk.Button(self.tab_experiment, text="Stop Experiment", command=self.stop_experiment,
-                                      state="disabled")
-        self.stop_button.grid(row=row, column=0, columnspan=2, pady=10)
+        ttk.Label(
+            self.tab_experiment,
+            text="Use the shared Start / Pause / Stop controls at the top to run the simulation.",
+        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=10)
 
 
 
     def stop_experiment(self):
-        if hasattr(self, 'anim'):
-            self.anim.event_source.stop()
-        if hasattr(self.sim, 'logger'):
-            self.sim.logger.save_csv()
-        if hasattr(self, 'stop_button'):
-            self.stop_button.config(state="disabled")
+        self._cancel_run_loop()
+        if self.sim:
+            self.sim.stop()
+        if self.sim is not None:
+            self.run_state = self.STATE_STOPPED
+        else:
+            self.run_state = self.STATE_IDLE
+        self._update_control_states()
         print("Simulation stopped and data saved.")
 
 
