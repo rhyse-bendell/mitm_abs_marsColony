@@ -526,14 +526,36 @@ class MarsColonyInterface:
         canvas = tk.Canvas(container)
         scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
         self.tab_experiment = ttk.Frame(canvas)
+        canvas_window = canvas.create_window((0, 0), window=self.tab_experiment, anchor="nw")
+
+        def _scroll_experiment_canvas(event):
+            if event.delta:
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            elif event.num == 4:
+                canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                canvas.yview_scroll(1, "units")
+
+        def _bind_mousewheel(_):
+            canvas.bind_all("<MouseWheel>", _scroll_experiment_canvas)
+            canvas.bind_all("<Button-4>", _scroll_experiment_canvas)
+            canvas.bind_all("<Button-5>", _scroll_experiment_canvas)
+
+        def _unbind_mousewheel(_):
+            canvas.unbind_all("<MouseWheel>")
+            canvas.unbind_all("<Button-4>")
+            canvas.unbind_all("<Button-5>")
 
         self.tab_experiment.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=self.tab_experiment, anchor="nw")
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(canvas_window, width=e.width))
+        canvas.bind("<Enter>", _bind_mousewheel)
+        canvas.bind("<Leave>", _unbind_mousewheel)
         canvas.configure(yscrollcommand=scrollbar.set)
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         self.notebook.add(container, text="Experiment")
+        self.tab_experiment.columnconfigure(1, weight=1)
 
         row = 0
         ttk.Label(self.tab_experiment, text="Speed Multiplier (0.5x to 10x):").grid(row=row, column=0, sticky="w")
@@ -590,45 +612,57 @@ class MarsColonyInterface:
         for role in roles:
             agent_frame = ttk.LabelFrame(self.tab_experiment, text=f"{role} Settings", padding=10)
             agent_frame.grid(row=row, column=0, columnspan=3, sticky="ew", padx=10, pady=5)
+            agent_frame.columnconfigure(0, weight=1)
+            agent_frame.columnconfigure(1, weight=1)
             row += 1
 
             self.active_roles[role] = BooleanVar(value=True)
-            ttk.Label(agent_frame, text=f"{role} Active:").grid(row=0, column=0, sticky="w")
-            ttk.Checkbutton(agent_frame, variable=self.active_roles[role]).grid(row=0, column=1)
+            ttk.Checkbutton(
+                agent_frame,
+                text=f"Enable {role}",
+                variable=self.active_roles[role],
+            ).grid(row=0, column=0, columnspan=2, sticky="w")
 
-            ttk.Label(agent_frame, text="Teamwork Potential:").grid(row=1, column=0, sticky="w")
-            ttk.Label(agent_frame, text="Taskwork Potential:").grid(row=1, column=1, sticky="w")
+            ttk.Label(agent_frame, text="Teamwork Potential:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+            ttk.Label(agent_frame, text="Taskwork Potential:").grid(row=1, column=1, sticky="w", pady=(6, 0))
 
             team_potential = StringVar(value="High")
             task_potential = StringVar(value="High")
             self.agent_profiles[role] = {"team": team_potential, "task": task_potential}
 
             ttk.OptionMenu(agent_frame, team_potential, "High", "High", "Low",
-                           command=lambda _, r=role: update_traits_from_profile(r)).grid(row=2, column=0, sticky="ew")
+                           command=lambda _, r=role: update_traits_from_profile(r)).grid(row=2, column=0, sticky="ew", padx=(0, 6))
             ttk.OptionMenu(agent_frame, task_potential, "High", "High", "Low",
                            command=lambda _, r=role: update_traits_from_profile(r)).grid(row=2, column=1, sticky="ew")
+
+            traits_frame = ttk.LabelFrame(agent_frame, text="Traits", padding=8)
+            traits_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+            for col in range(4):
+                traits_frame.columnconfigure(col, weight=1)
 
             self.agent_traits[role] = {}
             trait_names = list(trait_labels.keys())
             for i, trait in enumerate(trait_names):
-                ttk.Label(agent_frame, text=trait_labels[trait] + ":").grid(row=3 + i, column=0, sticky="w")
+                trait_row = i // 2
+                trait_col = (i % 2) * 2
+                ttk.Label(traits_frame, text=trait_labels[trait] + ":").grid(row=trait_row, column=trait_col, sticky="w", padx=(0, 4))
                 self.agent_traits[role][trait] = DoubleVar(value=0.5)
                 tk.Scale(
-                    agent_frame,
+                    traits_frame,
                     variable=self.agent_traits[role][trait],
                     from_=0.0,
                     to=1.0,
                     resolution=0.1,
                     orient="horizontal"
-                ).grid(row=3 + i, column=1, columnspan=2, sticky="ew")
+                ).grid(row=trait_row, column=trait_col + 1, sticky="ew", padx=(0, 8))
 
             # Packet access via listbox
-            ttk.Label(agent_frame, text=f"{role} Packet Access:").grid(row=3 + len(trait_names), column=0, sticky="w")
+            ttk.Label(agent_frame, text=f"{role} Packet Access:").grid(row=4, column=0, sticky="w", pady=(8, 0))
             self.packet_access[role] = tk.Listbox(agent_frame, selectmode="multiple", exportselection=False, height=4)
             for pkt in ["Team_Packet", "Architect_Packet", "Engineer_Packet", "Botanist_Packet"]:
                 self.packet_access[role].insert(tk.END, pkt)
             self.packet_access[role].select_set(0)  # Default to "Team_Packet"
-            self.packet_access[role].grid(row=3 + len(trait_names), column=1, columnspan=2, sticky="ew")
+            self.packet_access[role].grid(row=4, column=1, sticky="ew", pady=(8, 0))
 
         # Final controls
         ttk.Label(self.tab_experiment, text="Number of Simulation Runs:").grid(row=row, column=0, sticky="w")
