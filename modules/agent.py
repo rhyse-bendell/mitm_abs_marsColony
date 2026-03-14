@@ -82,6 +82,10 @@ class Agent:
         self.known_gaps = set()
         self.communication_log = []
         self.memory_seen_packets = set()
+        self.source_inspection_state = {}
+        self.inspect_stall_counts = {}
+        self.current_inspect_target_id = None
+        self.status_last_action = ""
 
         # Team dynamics
         self.shared_knowledge = set()
@@ -163,6 +167,114 @@ class Agent:
         chosen = candidates[0]
         self.activity_log.append(f"Selected info target {chosen[1]} (score={chosen[0]:.2f})")
         return chosen[2]
+
+    def _set_status(self, message, log_activity=True):
+        self.status_last_action = message
+        if log_activity:
+            self.activity_log.append(message)
+
+    def _ensure_source_state(self, environment):
+        for packet_name in environment.knowledge_packets.keys():
+            self.source_inspection_state.setdefault(packet_name, "unseen")
+
+    def _candidate_information_sources(self, environment):
+        self._ensure_source_state(environment)
+        candidates = []
+        for packet_name in environment.knowledge_packets.keys():
+            if not self._has_packet_access(packet_name):
+                continue
+            point = environment.get_interaction_target_position(packet_name, from_position=self.position)
+            if point is None:
+                continue
+
+            status = self.source_inspection_state.get(packet_name, "unseen")
+            stalled = self.inspect_stall_counts.get(packet_name, 0)
+            score = 0.0
+            if status == "unseen":
+                score += 5.0
+            elif status == "revisitable_due_to_gap":
+                score += 4.0
+            elif status == "in_progress":
+                score += 2.0
+            elif status == "inspected":
+                score -= 4.0
+            if packet_name == f"{self.role}_Info":
+                score += 1.5
+            if packet_name == "Team_Info":
+                score += 1.0
+            score -= stalled * 1.5
+            score -= math.hypot(point[0] - self.position[0], point[1] - self.position[1]) * 0.2
+            candidates.append((score, packet_name, point, status, stalled))
+
+        candidates.sort(key=lambda c: c[0], reverse=True)
+        return candidates
+
+    def _resolve_inspect_target(self, decision, environment):
+        self._ensure_source_state(environment)
+        explicit_target = decision.target_id
+        if explicit_target:
+            point = environment.get_interaction_target_position(explicit_target, from_position=self.position)
+            if point is not None:
+                self._set_status(f"Inspect target selected: {explicit_target}")
+                return explicit_target, point
+
+        candidates = self._candidate_information_sources(environment)
+        if not candidates:
+            self._set_status("Inspect target resolution failed: no accessible information sources")
+            return None, None
+
+        # Conservative retargeting away from repeatedly stalled targets when alternatives exist.
+        non_stalled = [c for c in candidates if c[4] < 3]
+        chosen = non_stalled[0] if non_stalled else candidates[0]
+        if explicit_target is None:
+            self._set_status(
+                f"Inspect decision missing explicit target; resolved to {chosen[1]} (status={chosen[3]}, stalled={chosen[4]})"
+            )
+        elif chosen[1] != explicit_target:
+            self._set_status(
+                f"Inspect target {explicit_target} unreachable; retargeted to {chosen[1]} (status={chosen[3]}, stalled={chosen[4]})"
+            )
+        return chosen[1], chosen[2]
+
+    def mark_source_revisitable(self, source_id, reason="identified_gap"):
+        self.source_inspection_state[source_id] = "revisitable_due_to_gap"
+        self._set_status(f"Source marked revisitable due to gap: {source_id} ({reason})")
+
+    def _inspect_source(self, environment, source_id):
+        packet = environment.knowledge_packets.get(source_id)
+        if packet is None:
+            self._set_status(f"Inspect failed: unknown source {source_id}")
+            return False
+
+        self.source_inspection_state[source_id] = "in_progress"
+        target_pos = environment.get_interaction_target_position(source_id, from_position=self.position)
+        if target_pos is None:
+            self._set_status(f"Inspect failed: no navigable target for {source_id}")
+            return False
+        if not environment.can_access_info(self.position, source_id, role=self.role):
+            self._set_status(f"Inspect pending: not yet in source zone for {source_id}")
+            return False
+
+        self._set_status(f"Arrived at source zone: {source_id}")
+        before_ids = {info.id for info in self.mental_model["information"]}
+        self.absorb_packet(packet, accuracy=0.95)
+        after_ids = {info.id for info in self.mental_model["information"]}
+        packet_info_ids = {info.id for info in packet.get("information", [])}
+        new_ids = after_ids - before_ids
+        self.memory_seen_packets.add(source_id)
+
+        if new_ids:
+            self._set_status(f"Source access succeeded: {source_id} (+{len(new_ids)} new items)")
+        elif packet_info_ids.issubset(after_ids):
+            self._set_status(f"Source already inspected: {source_id}")
+        else:
+            self._set_status(f"Source access had no uptake: {source_id}")
+
+        if packet_info_ids.issubset(after_ids):
+            self.source_inspection_state[source_id] = "inspected"
+        else:
+            self.source_inspection_state[source_id] = "in_progress"
+        return bool(new_ids)
 
 
     def _build_readiness_score(self):
@@ -407,6 +519,17 @@ class Agent:
         }
         action = dict(mapping[decision.selected_action])
 
+        if decision.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
+            source_id, interaction_target = self._resolve_inspect_target(decision, environment)
+            if source_id is None or interaction_target is None:
+                return [{"type": "idle", "duration": 1.0, "priority": 1}]
+            action["target"] = interaction_target
+            action["source_target_id"] = source_id
+            self.current_inspect_target_id = source_id
+            if self.source_inspection_state.get(source_id) == "inspected":
+                self._set_status(f"Source skipped due to completion: {source_id}")
+            return [action]
+
         if decision.target_id:
             interaction_target = environment.get_interaction_target_position(decision.target_id, from_position=self.position)
             if interaction_target is not None:
@@ -538,6 +661,8 @@ class Agent:
         for action in actions:
             if action["type"] == "move_to":
                 self.target = action["target"]
+                if action.get("source_target_id"):
+                    self.current_inspect_target_id = action["source_target_id"]
             elif action["type"] == "communicate":
                 self.has_shared = True
                 self.activity_log.append("Shared with teammates")
@@ -707,8 +832,15 @@ class Agent:
                     self.activity_log.append(f"Detouring around obstacle via {detour}")
                 else:
                     self.activity_log.append(f"Blocked while moving toward {target}")
+                    if self.current_inspect_target_id:
+                        self.inspect_stall_counts[self.current_inspect_target_id] = self.inspect_stall_counts.get(self.current_inspect_target_id, 0) + 1
+                        self._set_status(
+                            f"Inspect stalled for {self.current_inspect_target_id}; stall_count={self.inspect_stall_counts[self.current_inspect_target_id]}"
+                        )
             else:
                 self.activity_log.append(f"Blocked while moving toward {active_target}")
+                if self.current_inspect_target_id:
+                    self.inspect_stall_counts[self.current_inspect_target_id] = self.inspect_stall_counts.get(self.current_inspect_target_id, 0) + 1
 
         self.heart_rate += 1
 
@@ -725,24 +857,30 @@ class Agent:
         self.temperature = max(96.0, min(self.temperature, 101.0))
         self.co2_output = 0.04 + 0.01 * abs(self.heart_rate - 70)
 
-    def update_knowledge(self, environment):
-        for packet_name, packet_content in environment.knowledge_packets.items():
-            if packet_name in self.mental_model["information"]:
-                continue
-            if not self._has_packet_access(packet_name):
-                continue
-            if self.role not in packet_name and "Team" not in packet_name:
-                continue
-            if environment.can_access_info(self.position, packet_name):
-                before = len(self.mental_model["information"])
-                self.absorb_packet(packet_content, accuracy=0.95)
-                after = len(self.mental_model["information"])
-                if after > before:
-                    self.activity_log.append(f"Ingested packet from {packet_name}")
-                else:
-                    self.activity_log.append(f"Attempted access to {packet_name} but absorbed no new info")
-            else:
-                self.activity_log.append(f"Could not access packet {packet_name} (too far or unauthorized)")
+    def update_knowledge(self, environment, full_packet_sweep=True):
+        self._ensure_source_state(environment)
+        if full_packet_sweep:
+            for packet_name, packet_content in environment.knowledge_packets.items():
+                if packet_name in self.mental_model["information"]:
+                    continue
+                if not self._has_packet_access(packet_name):
+                    continue
+                if self.role not in packet_name and "Team" not in packet_name:
+                    continue
+                if environment.can_access_info(self.position, packet_name, role=self.role):
+                    before = len(self.mental_model["information"])
+                    self.absorb_packet(packet_content, accuracy=0.95)
+                    after = len(self.mental_model["information"])
+                    if after > before:
+                        self.source_inspection_state[packet_name] = "inspected"
+                        self._set_status(f"Legacy sweep ingested packet from {packet_name}")
+                # Deliberately suppress per-tick access-failure spam from legacy sweep.
+
+        elif self.current_inspect_target_id:
+            self._inspect_source(environment, self.current_inspect_target_id)
+
+        if "mismatch with construction" in " ".join(self.activity_log[-6:]).lower() and self.current_inspect_target_id:
+            self.mark_source_revisitable(self.current_inspect_target_id, reason="construction_mismatch")
 
         known_info = list(self.mental_model["information"])
         if known_info:
@@ -764,7 +902,7 @@ class Agent:
 
     def update(self, dt, environment, sim_state=None):
         self.update_physiology(exertion=0.5)
-        self.update_knowledge(environment)
+        self.update_knowledge(environment, full_packet_sweep=(sim_state is None))
         if sim_state is None:
             # Legacy compatibility path for unit-level agent calls outside full simulation state.
             self._run_goal_management_pipeline(dt, environment)

@@ -314,8 +314,9 @@ class MarsColonyInterface:
             activity_widget.insert(tk.END, f"--- {agent.name} ({agent.role}) ---\n")
             activity_widget.insert(tk.END, f"Goal: {agent.goal}\n")
             activity_widget.insert(tk.END, f"Target: {agent.target}\n")
-            if agent.activity_log:
-                activity_widget.insert(tk.END, f"Last Action: {agent.activity_log[-1]}\n")
+            last_action = getattr(agent, "status_last_action", "") or (agent.activity_log[-1] if agent.activity_log else "")
+            if last_action:
+                activity_widget.insert(tk.END, f"Last Action: {last_action}\n")
             if agent.mental_model["data"]:
                 activity_widget.insert(tk.END, f"Data: {[d.id for d in agent.mental_model['data']]}\n")
             if agent.mental_model["information"]:

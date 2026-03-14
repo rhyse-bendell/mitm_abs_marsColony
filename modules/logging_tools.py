@@ -96,7 +96,7 @@ class SimulationLogger:
             "num_data": len(agent.mental_model["data"]),
             "num_info": len(agent.mental_model["information"]),
             "num_rules": len(agent.mental_model["knowledge"].rules),
-            "last_action": agent.activity_log[-1] if agent.activity_log else ""
+            "last_action": getattr(agent, "status_last_action", "") or (agent.activity_log[-1] if agent.activity_log else "")
         })
 
     def maybe_dump(self, current_time):

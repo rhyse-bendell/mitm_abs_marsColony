@@ -168,6 +168,12 @@ class TestMovementAndInfoAccessRepairs(unittest.TestCase):
         far_from_rect = (architect_station["position"][0] + 1.0, architect_station["position"][1] + 1.0)
         self.assertFalse(env.can_access_info(far_from_rect, "Architect_Info", role="Architect"))
 
+    def test_team_info_rectangle_access_is_not_corner_only(self):
+        env = Environment(phases=[])
+        # Near top-right area of Team_Info rectangle; should still be valid interaction.
+        point = (8.95, 6.85)
+        self.assertTrue(env.can_access_info(point, "Team_Info", role="Engineer"))
+
     def test_roles_leave_spawn_and_are_not_immediately_stuck(self):
         sim = SimulationState(phases=[])
         starts = {a.role: a.position for a in sim.agents}
@@ -263,3 +269,67 @@ class TestBuildTargetAndProgress(unittest.TestCase):
             env.is_in_blocked_zone(agent.position),
             msg=f"Agent deadlocked into blocked center while pursuing build target: {agent.position}",
         )
+
+
+class TestInspectSemanticsAndLegacySeparation(unittest.TestCase):
+    def setUp(self):
+        random.seed(0)
+
+    def test_inspect_decision_without_explicit_target_resolves_to_source_target(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Engineer", role="Engineer", position=env.get_spawn_point("Engineer"))
+        decision = type("D", (), {"selected_action": None, "target_id": None})()
+        from modules.action_schema import ExecutableActionType
+        decision.selected_action = ExecutableActionType.INSPECT_INFORMATION_SOURCE
+
+        actions = agent._translate_brain_decision_to_legacy_action(decision, env)
+        self.assertEqual(actions[0]["type"], "move_to")
+        self.assertIn("source_target_id", actions[0])
+        self.assertIsNotNone(actions[0].get("target"))
+
+    def test_fully_inspected_source_is_not_endlessly_reselected(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Architect", role="Architect", position=env.get_spawn_point("Architect"))
+        agent.source_inspection_state["Team_Info"] = "inspected"
+
+        class D:
+            selected_action = None
+            target_id = None
+
+        from modules.action_schema import ExecutableActionType
+        D.selected_action = ExecutableActionType.INSPECT_INFORMATION_SOURCE
+        actions = agent._translate_brain_decision_to_legacy_action(D, env)
+        self.assertNotEqual(actions[0].get("source_target_id"), "Team_Info")
+
+    def test_contradiction_marks_source_revisitable(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Botanist", role="Botanist", position=env.get_spawn_point("Botanist"))
+        agent.source_inspection_state["Team_Info"] = "inspected"
+        agent.current_inspect_target_id = "Team_Info"
+        agent.activity_log.append("Mismatch with construction: reevaluating knowledge")
+
+        agent.update_knowledge(env, full_packet_sweep=False)
+        self.assertEqual(agent.source_inspection_state["Team_Info"], "revisitable_due_to_gap")
+
+    def test_repeated_stalls_drive_conservative_retargeting(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Architect", role="Architect", position=env.get_spawn_point("Architect"))
+        agent.inspect_stall_counts["Team_Info"] = 4
+        agent.source_inspection_state["Team_Info"] = "unseen"
+
+        class D:
+            selected_action = None
+            target_id = None
+
+        from modules.action_schema import ExecutableActionType
+        D.selected_action = ExecutableActionType.INSPECT_INFORMATION_SOURCE
+        actions = agent._translate_brain_decision_to_legacy_action(D, env)
+        self.assertNotEqual(actions[0].get("source_target_id"), "Team_Info")
+
+    def test_legacy_packet_sweep_failure_noise_is_suppressed_from_last_action(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Engineer", role="Engineer", position=env.get_spawn_point("Engineer"))
+        agent.update_knowledge(env, full_packet_sweep=True)
+
+        # Old behavior spammed "Could not access packet ..."; this should no longer become status text.
+        self.assertNotIn("Could not access packet", agent.status_last_action)

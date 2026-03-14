@@ -70,6 +70,20 @@ class TestBrainContextAndDecision(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertIsInstance(decision.reason_summary, str)
 
+    def test_inspect_affordances_include_explicit_targets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir)
+            agent = sim.agents[0]
+            packet = BrainContextBuilder().build(sim, agent)
+            inspect_affordances = [
+                a
+                for a in packet.action_affordances
+                if a["action_type"] == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value
+            ]
+            self.assertTrue(inspect_affordances)
+            self.assertTrue(all(a.get("target_id") for a in inspect_affordances))
+            self.assertTrue(all(a.get("target_zone") for a in inspect_affordances))
+
 
 class TestTeamKnowledgeManagerAndIntegration(unittest.TestCase):
     def test_team_knowledge_manager_store_and_retrieve_artifact(self):

@@ -28,7 +28,7 @@ from modules.knowledge import init_dik_packets
 
 # Default proximity radius required to access information packets,
 # used when the object does not specify its own `access_radius`.
-DEFAULT_INFO_ACCESS_RADIUS = 0.15
+DEFAULT_INFO_ACCESS_RADIUS = 0.25
 
 TABLE_INTERACTION_RADIUS = 0.2
 
@@ -297,6 +297,13 @@ class Environment:
         obj = self.objects[object_key]
         access_radius = obj.get("access_radius", DEFAULT_INFO_ACCESS_RADIUS)
 
+        target_meta = self.interaction_targets.get(object_key, {})
+        zone_name = target_meta.get("zone")
+        if zone_name:
+            corners = self._zone_corners(zone_name)
+            if corners and self._point_in_zone(position, corners):
+                return True
+
         if obj.get("type") == "rect":
             ox, oy = obj["position"]
             w, h = obj["size"]
@@ -316,8 +323,8 @@ class Environment:
             return False
 
         # If packet has a role restriction, ensure agent has the correct role
-        if "role" in self.objects[packet_name]:
-            if role is None or self.objects[packet_name]["role"] != role:
+        if "role" in self.objects[object_key]:
+            if role is None or self.objects[object_key]["role"] != role:
                 return False
 
         return True
