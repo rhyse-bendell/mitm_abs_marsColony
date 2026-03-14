@@ -200,6 +200,10 @@ class MarsColonyInterface:
 
     def build_agent_configs(self):
         agent_configs = []
+        profile_constructs = {
+            "High": 1.0,
+            "Low": 0.0,
+        }
         profile_traits = {
             "High_Team": {
                 "communication_propensity": 0.9,
@@ -238,6 +242,11 @@ class MarsColonyInterface:
                 agent_configs.append({
                     "name": role,
                     "role": role,
+                    "constructs": {
+                        "teamwork_potential": profile_constructs[team_pot],
+                        "taskwork_potential": profile_constructs[task_pot],
+                    },
+                    "mechanism_overrides": dict(traits),
                     "traits": traits,
                     "packet_access": selected_packets
                 })

@@ -126,6 +126,10 @@ class Agent:
         self.build_speed = 0.5
         self.rule_accuracy = 0.5
 
+        self.construct_values = {}
+        self.mechanism_profile = {}
+        self.hook_effects = {}
+
         self.last_dik_change_time = -1.0
 
     def _normalize_packet_name(self, packet_name):
@@ -185,6 +189,19 @@ class Agent:
     def _trait_value(self, name, default=0.5):
         value = getattr(self, name, default)
         return max(0.0, min(1.0, float(value)))
+
+    def _hook_value(self, hook_type, hook_target, parameter, default=None):
+        if default is None:
+            default = 0.0 if parameter in {"utility_weight", "priority_weight", "externalization_weight", "persistence_weight", "adoption_weight", "sensitivity"} else 1.0
+        return float(getattr(self, "hook_effects", {}).get((hook_type, hook_target, parameter), default))
+
+    def _duration_scale(self, action_name):
+        scale = self._hook_value("action_duration", action_name, "duration_scale", default=1.0)
+        return max(0.2, float(scale))
+
+    def _readiness_threshold(self):
+        shift = self._hook_value("decision_threshold", "start_construction", "readiness_threshold", default=0.0)
+        return max(1.0, 3.0 + shift)
 
     def _scaled_duration(self, base_duration):
         build_speed = self._trait_value("build_speed", 0.5)
@@ -309,7 +326,7 @@ class Agent:
 
     def _is_build_eligible(self):
         # Lightweight threshold: build should not start from a trivial information fragment.
-        return self._build_readiness_score() >= 3
+        return self._build_readiness_score() >= self._readiness_threshold()
 
     def _select_build_target(self, environment):
         return environment.get_interaction_target_position("Build_Table_B", from_position=self.position)
@@ -425,17 +442,20 @@ class Agent:
 
         selected = decision.selected_action
         reason_bits = []
-        force_externalize = trigger_reason == "new_dik_acquired" and comm >= 0.7 and random.random() < comm
+        ext_utility = self._hook_value("action_utility", "externalize_plan", "utility_weight", default=0.5)
+        consult_utility = self._hook_value("action_utility", "consult_team_artifact", "utility_weight", default=0.5)
+        assist_utility = self._hook_value("action_utility", "request_assistance", "utility_weight", default=0.5)
+        force_externalize = trigger_reason == "new_dik_acquired" and comm >= 0.7 and random.random() < ((comm + ext_utility) / 2.0)
 
         if force_externalize:
             selected = ExecutableActionType.EXTERNALIZE_PLAN
             reason_bits.append("communication_propensity pushed externalization after DIK change")
 
-        if align >= 0.75 and context.team_state.get("plan_readiness") == "validated_shared_plan" and random.random() < align:
+        if align >= 0.75 and context.team_state.get("plan_readiness") == "validated_shared_plan" and random.random() < ((align + consult_utility) / 2.0):
             selected = ExecutableActionType.CONSULT_TEAM_ARTIFACT
             reason_bits.append("goal_alignment favored validated team artifact consultation")
 
-        if help_t >= 0.7 and self._help_context_available(sim_state) and random.random() < help_t:
+        if help_t >= 0.7 and self._help_context_available(sim_state) and random.random() < ((help_t + assist_utility) / 2.0):
             selected = ExecutableActionType.REQUEST_ASSISTANCE
             reason_bits.append("help_tendency redirected toward assistance exchange")
 
@@ -520,7 +540,7 @@ class Agent:
             reason = "communication_update_received"
         elif build_readiness != self.last_build_readiness:
             reason = "build_readiness_changed"
-        elif self.current_plan and (now - self.current_plan.created_at) >= self.plan_expiry_s:
+        elif self.current_plan and (now - self.current_plan.created_at) >= (self.plan_expiry_s * (1.0 + self._hook_value("plan_control", "continue_current_plan", "persistence_weight", default=0.0))):
             reason = "plan_invalidated"
         elif self.current_plan and (now - self.current_plan.last_reviewed_at) >= self.plan_review_interval_s:
             reason = "periodic_reassessment"
@@ -602,7 +622,7 @@ class Agent:
             if interaction_target is not None:
                 action["target"] = interaction_target
         if decision.selected_action == ExecutableActionType.TRANSPORT_RESOURCES:
-            action["duration"] = self._scaled_duration(30.0)
+            action["duration"] = self._scaled_duration(30.0) * self._duration_scale("transport_resources")
 
         if decision.selected_action in {
             ExecutableActionType.START_CONSTRUCTION,
@@ -610,7 +630,7 @@ class Agent:
             ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
             ExecutableActionType.VALIDATE_CONSTRUCTION,
         }:
-            action["duration"] = self._scaled_duration(action["duration"])
+            action["duration"] = self._scaled_duration(action["duration"]) * self._duration_scale(decision.selected_action.value)
 
         if decision.selected_action in {ExecutableActionType.EXTERNALIZE_PLAN, ExecutableActionType.CONSULT_TEAM_ARTIFACT}:
             action["artifact_action"] = decision.selected_action.value
@@ -755,7 +775,8 @@ class Agent:
                 self.activity_log.append("Idling...")
 
     def absorb_packet(self, packet, accuracy=1.0):
-        effective_accuracy = max(0.05, min(1.0, accuracy * (0.6 + 0.4 * self._trait_value("rule_accuracy"))))
+        effective_base = max(self._hook_value("dik_update", "absorb_packet", "success_probability", default=0.5), self._trait_value("rule_accuracy"))
+        effective_accuracy = max(0.05, min(1.0, accuracy * (0.6 + 0.4 * effective_base)))
         for d in packet.get("data", []):
             if random.random() <= effective_accuracy:
                 if d not in self.mental_model["data"]:
@@ -977,7 +998,8 @@ class Agent:
                     candidate_tags.setdefault(tag, []).append(info)
             for tag, group in candidate_tags.items():
                 if len(group) >= 2:
-                    infer_prob = 0.35 + 0.6 * self._trait_value("rule_accuracy")
+                    infer_base = max(self._hook_value("dik_update", "transform_information_to_knowledge", "success_probability", default=0.5), self._trait_value("rule_accuracy"))
+                    infer_prob = 0.35 + 0.6 * infer_base
                     if random.random() < infer_prob:
                         self.mental_model["knowledge"].try_infer_rules(group, agent_name=self.name)
                         self.last_dik_change_time = getattr(self, "current_time", 0.0)
@@ -1034,7 +1056,7 @@ class Agent:
             if action["type"] == "idle" and action.get("artifact_action") == ExecutableActionType.EXTERNALIZE_PLAN.value and action["progress"] == 0:
                 artifact_id = f"whiteboard:{self.name}:{int(sim_state.time*10)}"
                 rules = list(self.mental_model["knowledge"].rules)[-3:]
-                fidelity = self._trait_value("rule_accuracy")
+                fidelity = max(self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5), self._trait_value("rule_accuracy"))
                 if rules and fidelity < 0.5:
                     rules = rules[:-1]
                 sim_state.team_knowledge_manager.externalize_artifact(
@@ -1058,7 +1080,9 @@ class Agent:
                         key=lambda a: ((a.validation_state == "validated") and self._trait_value("goal_alignment"), a.uptake_count),
                         reverse=True,
                     )[0]
-                    sim_state.team_knowledge_manager.adopt_artifact(preferred.artifact_id, self.name, sim_state.time)
+                    adopt_prob = self._hook_value("artifact_use", "adopt_externalized_knowledge", "adoption_weight", default=0.5)
+                    if random.random() <= adopt_prob:
+                        sim_state.team_knowledge_manager.adopt_artifact(preferred.artifact_id, self.name, sim_state.time)
                     self.activity_log.append(f"Consulted shared artifact {preferred.artifact_id}")
                     sim_state.logger.log_event(sim_state.time, "artifact_consulted", {"agent": self.name, "artifact_id": preferred.artifact_id})
 
@@ -1071,7 +1095,7 @@ class Agent:
                 if project:
                     environment.construction.assign_builder(project_id, self.name)
                     environment.construction.deliver_resource(project_id, "bricks", quantity=1)
-                    fidelity = self._trait_value("rule_accuracy")
+                    fidelity = max(self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5), self._trait_value("rule_accuracy"))
                     if random.random() > fidelity:
                         project["correct"] = False
                     sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
@@ -1308,7 +1332,8 @@ class Agent:
                     rule_matches = True
                     break
             if not rule_matches:
-                mismatch_detect_prob = 0.25 + 0.7 * self._trait_value("rule_accuracy")
+                mismatch_sensitivity = max(self._hook_value("validation_check", "detect_mismatch", "sensitivity", default=0.5), self._trait_value("rule_accuracy"))
+                mismatch_detect_prob = min(1.0, 0.25 + 0.7 * mismatch_sensitivity)
                 if random.random() <= mismatch_detect_prob:
                     self.activity_log.append(f"Disagrees with approach for {project.get('name', 'Unknown')}")
                     if sim_state is not None:

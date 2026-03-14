@@ -8,6 +8,7 @@ from modules.environment import Environment
 from modules.logging_tools import SimulationLogger
 from modules.metrics import MetricsCollector
 from modules.team_knowledge import TeamKnowledgeManager
+from modules.construct_mapping import ConstructMapper
 
 
 class SimulationState:
@@ -48,6 +49,18 @@ class SimulationState:
         )
         self.save_interval = 10.0
         self._last_save_time = 0.0
+        self.construct_mapper = ConstructMapper()
+        if self.construct_mapper.validation_issues:
+            self.logger.log_event(self.time, "construct_mapping_validation_issues", {"issues": self.construct_mapper.validation_issues})
+        self.logger.log_event(
+            self.time,
+            "construct_mapping_loaded",
+            {
+                "construct_count": len(self.construct_mapper.constructs),
+                "construct_to_mechanism_rows": len(self.construct_mapper.construct_to_mechanism),
+                "mechanism_to_hook_rows": len(self.construct_mapper.mechanism_to_hook),
+            },
+        )
 
         # Determine speed multiplier
         if isinstance(speed, (float, int)):
@@ -70,18 +83,27 @@ class SimulationState:
                 role=config["role"],
                 position=position
             )
-            for trait, value in config["traits"].items():
-                setattr(agent, trait, value)
+            incoming_traits = dict(config.get("traits", {}))
+            construct_values = dict(config.get("constructs", {}))
+            mechanism_overrides = dict(config.get("mechanism_overrides", incoming_traits))
+            resolved_constructs, resolved_mechanisms, resolved_hooks = self.construct_mapper.resolve_agent_profile(
+                construct_values=construct_values,
+                mechanism_overrides=mechanism_overrides,
+            )
+            agent.construct_values = resolved_constructs
+            agent.mechanism_profile = resolved_mechanisms
+            agent.hook_effects = resolved_hooks
+            for mechanism, value in resolved_mechanisms.items():
+                setattr(agent, mechanism, value)
             self.logger.log_event(
                 self.time,
-                "agent_trait_profile",
-                {"agent": agent.name, "traits": {
-                    "communication_propensity": getattr(agent, "communication_propensity", 0.5),
-                    "goal_alignment": getattr(agent, "goal_alignment", 0.5),
-                    "help_tendency": getattr(agent, "help_tendency", 0.5),
-                    "build_speed": getattr(agent, "build_speed", 0.5),
-                    "rule_accuracy": getattr(agent, "rule_accuracy", 0.5),
-                }},
+                "agent_construct_profile",
+                {"agent": agent.name, "constructs": resolved_constructs},
+            )
+            self.logger.log_event(
+                self.time,
+                "agent_mechanism_profile",
+                {"agent": agent.name, "mechanisms": resolved_mechanisms},
             )
             agent.allowed_packet = config["packet_access"]
             self.agents.append(agent)
