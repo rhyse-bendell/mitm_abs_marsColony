@@ -1,0 +1,3 @@
+phase_id,name,duration_minutes,colonist_manifest_json,unlocks,required_structures_json,description,enabled
+phase1,Phase 1,30,"{""civilians"": 50, ""VIPs"": 0}",,"{""housing"": {""civilians"": 50, ""VIPs"": 0}}",Prepare for the arrival of 50 civilians.,True
+phase2,Phase 2,20,"{""civilians"": 40, ""VIPs"": 20}",bridge_to_zone_C,"{""housing"": {""civilians"": 40, ""VIPs"": 20}}",Expand to support 40 more civilians and 20 VIPs.,True

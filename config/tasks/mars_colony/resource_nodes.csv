@@ -1,0 +1,2 @@
+node_id,zone_id,resource_type,quantity,x,y,transport_time_scale,enabled
+RN_BRICKS_MAIN,Zone_Resource_Field,bricks,999,1.6,5.7,1.0,True

@@ -1,0 +1,9 @@
+code,label,enabled
+TDP,Team Data Provision,True
+TIP,Team Information Provision,True
+TKP,Team Knowledge Provision,True
+TGTO,Team Goal/Task Objective,True
+TKRQ,Team Knowledge Request,True
+TCR,Team Correction or Repair,True
+TPP,Team Plan Proposal,True
+TPA,Team Plan Agreement,True

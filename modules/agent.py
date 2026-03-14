@@ -722,6 +722,11 @@ class Agent:
         )
         return True
     def _translate_brain_decision_to_legacy_action(self, decision, environment):
+        if self.task_model is not None:
+            enabled = set(self.task_model.enabled_actions_for_role(self.role))
+            if decision.selected_action.value not in enabled:
+                return [{"type": "idle", "duration": 1.0, "priority": 1, "decision_action": ExecutableActionType.WAIT.value}]
+
         mapping = {
             ExecutableActionType.MOVE_TO_TARGET: {"type": "move_to", "duration": 1.0, "priority": 1},
             ExecutableActionType.INSPECT_INFORMATION_SOURCE: {"type": "move_to", "duration": 1.0, "priority": 1},
@@ -741,6 +746,11 @@ class Agent:
         }
         action = dict(mapping[decision.selected_action])
         action["decision_action"] = decision.selected_action.value
+        if self.task_model is not None:
+            params = self.task_model.action_parameters.get(decision.selected_action.value)
+            if params is not None:
+                action["duration"] = params.duration_s
+                action["task_parameters"] = dict(params.metadata)
 
         if decision.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
             source_id, interaction_target = self._resolve_inspect_target(decision, environment)
@@ -764,7 +774,7 @@ class Agent:
             }:
                 action["project_id"] = decision.target_id
         if decision.selected_action == ExecutableActionType.TRANSPORT_RESOURCES:
-            action["duration"] = self._scaled_duration(30.0) * self._duration_scale("transport_resources")
+            action["duration"] = self._scaled_duration(action.get("duration", 30.0)) * self._duration_scale("transport_resources")
             build_selection = self._select_build_target(environment, require_readiness=False, include_project=True)
             if isinstance(build_selection, dict):
                 action["project_id"] = build_selection.get("project_id")

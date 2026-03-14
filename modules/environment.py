@@ -148,6 +148,61 @@ INTERACTION_TARGETS = {
 
 OBJECTS = RAW_OBJECTS
 
+
+def _objects_from_task_model(task_model):
+    out = {}
+    for obj in task_model.environment_objects.values():
+        if not obj.enabled:
+            continue
+        row = {"type": obj.object_type, "label": obj.label}
+        if obj.object_type == "rect":
+            row["position"] = (obj.x, obj.y)
+            row["size"] = (obj.width, obj.height)
+        elif obj.object_type == "circle":
+            row["position"] = (obj.x, obj.y)
+            row["radius"] = obj.radius
+        elif obj.object_type == "line":
+            row["start"] = (obj.x, obj.y)
+            row["end"] = (obj.end_x, obj.end_y)
+        elif obj.object_type == "blocked":
+            row["corners"] = [(obj.x, obj.y), (obj.end_x, obj.end_y)]
+        if obj.passable:
+            row["passable"] = True
+        if obj.access_radius:
+            row["access_radius"] = obj.access_radius
+        if obj.orientation:
+            row["orientation"] = obj.orientation
+        if obj.role_restriction:
+            row["role"] = obj.role_restriction
+        out[obj.object_id] = row
+    return out
+
+
+def _zones_from_task_model(task_model):
+    out = {}
+    for zone in task_model.zones.values():
+        if not zone.enabled:
+            continue
+        if zone.default_zone:
+            out[zone.zone_id] = {"default": True}
+        else:
+            out[zone.zone_id] = {"corners": [(zone.x1, zone.y1), (zone.x2, zone.y2)]}
+    return out
+
+
+def _targets_from_task_model(task_model):
+    out = {}
+    for target in task_model.interaction_targets.values():
+        if not target.enabled:
+            continue
+        row = {"kind": target.kind, "zone": target.zone_id}
+        if target.object_id:
+            row["object"] = target.object_id
+        if target.role_scope:
+            row["role_scope"] = target.role_scope
+        out[target.target_id] = row
+    return out
+
 class Environment:
     SOURCE_PACKET_NAME_MAP = {
         "SRC_TEAM_SHARED": "Team_Info",
@@ -157,8 +212,8 @@ class Environment:
     }
 
     def __init__(self, phases=None, task_model: TaskModel | None = None):
-        self.objects = OBJECTS
-        self.zones = ZONES
+        self.objects = _objects_from_task_model(task_model) if task_model and task_model.environment_objects else OBJECTS
+        self.zones = _zones_from_task_model(task_model) if task_model and task_model.zones else ZONES
         self.phases = phases if phases else []
         self.current_phase_index = 0
         self.gas_environment = {"co2_level": 400}
@@ -173,7 +228,7 @@ class Environment:
             )
         else:
             self.knowledge_packets = init_dik_packets()
-        self.interaction_targets = INTERACTION_TARGETS
+        self.interaction_targets = _targets_from_task_model(task_model) if task_model and task_model.interaction_targets else INTERACTION_TARGETS
         self._time = 0.0
 
     def _zone_corners(self, zone_name):
@@ -296,10 +351,12 @@ class Environment:
         return min(candidates, key=lambda p: math.hypot(p[0] - from_position[0], p[1] - from_position[1]))
 
     def get_spawn_points(self):
+        if self.task_model and self.task_model.spawn_points:
+            return [(sp.x, sp.y) for sp in self.task_model.spawn_points if sp.enabled]
         return [
-            (6.0, 1.0),  # Near Architect Info
-            (5.0, 1.0),  # Between tables but clear
-            (4.0, 1.0)  # Near Engineer Info
+            (6.0, 1.0),
+            (5.0, 1.0),
+            (4.0, 1.0)
         ]
 
     def update(self, time):
@@ -442,19 +499,22 @@ class Environment:
         return min(x1, x2) <= x <= max(x1, x2) and min(y1, y2) <= y <= max(y1, y2)
 
     def get_spawn_point(self, role):
-        """
-        Returns a safe, role-specific spawn point not inside any blocked zone.
-        """
+        """Returns a safe, role-specific spawn point not inside any blocked zone."""
+        if self.task_model and self.task_model.spawn_points:
+            candidates = [sp for sp in self.task_model.spawn_points if sp.enabled and (sp.role_id == role or sp.role_id == "all")]
+            for sp in candidates:
+                pos = (sp.x, sp.y)
+                if not self.is_in_blocked_zone(pos):
+                    return pos
+
         candidate_spawns = {
-            "Architect": (6.9, 1.2),  # Near Architect_Info, outside station geometry
-            "Engineer": (3.9, 1.2),  # Near Engineer_Info, outside station geometry
-            "Botanist": (5.0, 1.0)  # Between them
+            "Architect": (6.9, 1.2),
+            "Engineer": (3.9, 1.2),
+            "Botanist": (5.0, 1.0)
         }
         pos = candidate_spawns.get(role, (6.0, 3.0))
         if not self.is_in_blocked_zone(pos):
             return pos
-
-        # Fallback safe spot
         return (5.0, 5.0)
 
     def is_in_blocked_zone(self, pos):

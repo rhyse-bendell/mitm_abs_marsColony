@@ -1,0 +1,7 @@
+{
+  "task_id": "mars_colony",
+  "name": "Minerva Mars Colony",
+  "version": "2.0",
+  "description": "MITM Mars Colony task package containing DIK + environment/action/task context.",
+  "default": true
+}

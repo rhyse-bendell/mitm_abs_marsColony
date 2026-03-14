@@ -1,0 +1,4 @@
+project_id,name,structure_type,target_id,location_x,location_y,required_resources_json,expected_rules,artifact_type,enabled
+Build_Table_A,Table A Construction,greenhouse,Build_Table_A,6.5,3.4,"{""bricks"": 12}",rule:greenhouse_requires_water,greenhouse_construction,True
+Build_Table_B,Table B Construction,house,Build_Table_B,5.0,4.4,"{""bricks"": 14}",rule:house_enclosed,house_construction,True
+Build_Table_C,Table C Construction,water_generator,Build_Table_C,3.5,3.4,"{""bricks"": 10}",rule:water_generator_2x2,water_generator_construction,True
