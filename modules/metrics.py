@@ -63,6 +63,10 @@ class MetricsCollector:
                 "help_requests": 0,
                 "plan_externalizations": 0,
                 "artifact_consultations": 0,
+                "phase_transitions_seen": 0,
+                "planning_or_externalization_actions": 0,
+                "execution_actions": 0,
+                "correction_validation_actions": 0,
                 "zone_time": Counter(),
                 "dik": Counter(),
                 "knowledge_rules_end": 0,
@@ -97,6 +101,11 @@ class MetricsCollector:
                 "construction_externalization_create_events": 0,
                 "construction_externalization_revision_events": 0,
                 "validation_events": 0,
+                "phase_transitions": 0,
+                "planning_actions": 0,
+                "execution_actions": 0,
+                "correction_actions": 0,
+                "logistics_wait_events": 0,
                 "_seen_projects": set(),
             }
         )
@@ -127,6 +136,34 @@ class MetricsCollector:
             agent = payload.get("agent")
             if agent in self.agent_stats:
                 self.agent_stats[agent]["plan_externalizations"] += 1
+
+
+        if event_type == "phase_transition":
+            self.phase_stats[-1]["phase_transitions"] += 1
+            for stats in self.agent_stats.values():
+                stats["phase_transitions_seen"] += 1
+
+        if event_type == "brain_decision_outcome":
+            selected = payload.get("selected_action", "")
+            planning = {"inspect_information_source", "communicate", "externalize_plan", "consult_team_artifact", "request_assistance"}
+            execution = {"transport_resources", "start_construction", "continue_construction"}
+            correction = {"repair_or_correct_construction", "validate_construction"}
+            agent = payload.get("agent")
+            if selected in planning:
+                self.phase_stats[-1]["planning_actions"] += 1
+                if agent in self.agent_stats:
+                    self.agent_stats[agent]["planning_or_externalization_actions"] += 1
+            elif selected in execution:
+                self.phase_stats[-1]["execution_actions"] += 1
+                if agent in self.agent_stats:
+                    self.agent_stats[agent]["execution_actions"] += 1
+            elif selected in correction:
+                self.phase_stats[-1]["correction_actions"] += 1
+                if agent in self.agent_stats:
+                    self.agent_stats[agent]["correction_validation_actions"] += 1
+
+        if event_type == "construction_waiting_for_logistics":
+            self.phase_stats[-1]["logistics_wait_events"] += 1
 
         if event_type == "construction_externalization_update":
             structure_type = payload.get("structure_type", "unknown")

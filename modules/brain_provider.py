@@ -74,10 +74,34 @@ class RuleBrain(BrainProvider):
         goal_alignment = float(traits.get("goal_alignment", 0.5))
         help_tendency = float(traits.get("help_tendency", 0.5))
 
+        phase_profile = context_packet.world_snapshot.get("phase_profile", {})
+        stage = phase_profile.get("stage", "execution")
+        readiness = context_packet.individual_cognitive_state.get("build_readiness", {})
+        ready_for_build = bool(readiness.get("ready_for_build"))
+
         has_validated_artifact = any(
             a.get("validation_state") == "validated" for a in context_packet.team_state.get("externalized_artifacts", [])
         )
         has_known_gaps = bool(context_packet.individual_cognitive_state.get("known_gaps"))
+        mismatch_signals = context_packet.history_bands.get("semantic_plan_evolution", {}).get("unresolved_contradictions", [])
+
+        sorted_affordances = sorted(affordances, key=lambda a: float(a.get("utility", 0.0)), reverse=True)
+        top_affordance = sorted_affordances[0] if sorted_affordances else None
+
+        if (
+            stage in {"early", "execution"}
+            and ExecutableActionType.EXTERNALIZE_PLAN.value in affordance_types
+            and communication_propensity >= 0.7
+            and context_packet.individual_cognitive_state.get("knowledge_summary")
+        ):
+            return BrainDecision(
+                selected_action=ExecutableActionType.EXTERNALIZE_PLAN,
+                goal_update="share_plan",
+                communication_intent=CommunicationIntent.TPP,
+                plan_steps=["externalize rule summary", "invite uptake"],
+                reason_summary="Communication propensity favors whiteboard/team externalization.",
+                confidence=0.78,
+            )
 
         if (
             ExecutableActionType.CONSULT_TEAM_ARTIFACT.value in affordance_types
@@ -90,7 +114,7 @@ class RuleBrain(BrainProvider):
                 plan_steps=["consult validated artifact", "align local plan"],
                 reason_summary="Goal alignment favors consulting validated team artifacts.",
                 confidence=0.82,
-                assumptions=["validated shared artifact exists"],
+                assumptions=[f"phase_stage={stage}"],
             )
 
         if (
@@ -107,23 +131,18 @@ class RuleBrain(BrainProvider):
                 confidence=0.76,
             )
 
-        if (
-            ExecutableActionType.EXTERNALIZE_PLAN.value in affordance_types
-            and communication_propensity >= 0.7
-            and context_packet.individual_cognitive_state.get("knowledge_summary")
-        ):
+        if stage == "late" and mismatch_signals and ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value in affordance_types:
             return BrainDecision(
-                selected_action=ExecutableActionType.EXTERNALIZE_PLAN,
-                goal_update="share_plan",
-                communication_intent=CommunicationIntent.TPP,
-                plan_steps=["externalize rule summary", "invite uptake"],
-                reason_summary="Communication propensity favors whiteboard/team externalization.",
-                confidence=0.78,
+                selected_action=ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
+                goal_update="repair_detected_mismatch",
+                plan_steps=["locate contradiction", "apply corrective construction"],
+                reason_summary="Late-phase contradictions increase correction priority.",
+                confidence=0.83,
             )
 
-        if ExecutableActionType.INSPECT_INFORMATION_SOURCE.value in affordance_types:
+        if stage == "early" and ExecutableActionType.INSPECT_INFORMATION_SOURCE.value in affordance_types:
             target = next(
-                (a for a in affordances if a["action_type"] == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value),
+                (a for a in sorted_affordances if a["action_type"] == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value),
                 None,
             )
             return BrainDecision(
@@ -133,9 +152,62 @@ class RuleBrain(BrainProvider):
                 goal_update="seek_info",
                 plan_steps=["inspect team/role information", "share useful findings"],
                 communication_intent=CommunicationIntent.TIP,
-                reason_summary="Prioritize gathering information before construction.",
-                confidence=0.8,
-                assumptions=["simulator validates packet access"],
+                reason_summary="Early phase prioritizes information gathering.",
+                confidence=0.82,
+            )
+
+        if ready_for_build and stage in {"execution", "late"}:
+            transport = next((a for a in sorted_affordances if a["action_type"] == ExecutableActionType.TRANSPORT_RESOURCES.value), None)
+            if transport and float(transport.get("utility", 0.0)) >= 0.6:
+                return BrainDecision(
+                    selected_action=ExecutableActionType.TRANSPORT_RESOURCES,
+                    goal_update="satisfy_build_logistics",
+                    plan_steps=["move resources to active work zone"],
+                    reason_summary="Execution phase elevates logistics before construction.",
+                    confidence=0.79,
+                    assumptions=["duration_s=30"],
+                )
+
+            start = next((a for a in sorted_affordances if a["action_type"] == ExecutableActionType.START_CONSTRUCTION.value), None)
+            if start:
+                return BrainDecision(
+                    selected_action=ExecutableActionType.START_CONSTRUCTION,
+                    target_id=start.get("target_id"),
+                    target_zone=start.get("target_zone"),
+                    goal_update="execute_build",
+                    plan_steps=["start construction at viable work zone"],
+                    reason_summary="Build readiness and phase progression support execution.",
+                    confidence=0.8,
+                )
+
+        if ExecutableActionType.INSPECT_INFORMATION_SOURCE.value in affordance_types and not ready_for_build:
+            target = next(
+                (a for a in sorted_affordances if a["action_type"] == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value),
+                None,
+            )
+            return BrainDecision(
+                selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                target_id=target.get("target_id") if target else None,
+                target_zone=target.get("target_zone") if target else None,
+                goal_update="seek_info",
+                plan_steps=["inspect needed source", "update build readiness"],
+                communication_intent=CommunicationIntent.TIP,
+                reason_summary="Continue information gathering until readiness is plausible.",
+                confidence=0.77,
+            )
+
+        if top_affordance and top_affordance.get("action_type") in affordance_types:
+            selected = ExecutableActionType(top_affordance["action_type"])
+            assumptions = []
+            if selected == ExecutableActionType.TRANSPORT_RESOURCES:
+                assumptions.append("duration_s=30")
+            return BrainDecision(
+                selected_action=selected,
+                target_id=top_affordance.get("target_id"),
+                target_zone=top_affordance.get("target_zone"),
+                reason_summary="Selected highest-utility legal affordance.",
+                confidence=0.7,
+                assumptions=assumptions,
             )
 
         return BrainDecision(
