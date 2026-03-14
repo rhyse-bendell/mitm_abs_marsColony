@@ -9,6 +9,7 @@ from modules.logging_tools import SimulationLogger
 from modules.metrics import MetricsCollector
 from modules.team_knowledge import TeamKnowledgeManager
 from modules.construct_mapping import ConstructMapper
+from modules.task_model import load_task_model
 
 
 class SimulationState:
@@ -30,8 +31,10 @@ class SimulationState:
         project_root=None,
         brain_backend="rule_brain",
         brain_backend_options=None,
+        task_id="mars_colony",
     ):
-        self.environment = Environment(phases=phases)
+        self.task_model = load_task_model(task_id=task_id)
+        self.environment = Environment(phases=phases, task_model=self.task_model)
         self.agents = []
         self.num_runs = num_runs
         self.flash_mode = flash_mode
@@ -42,6 +45,20 @@ class SimulationState:
         backend_options = brain_backend_options or {}
         self.brain_backend_config = BrainBackendConfig(backend=brain_backend, **backend_options)
         self.brain_provider = create_brain_provider(self.brain_backend_config)
+        self.logger.log_event(
+            self.time,
+            "task_model_loaded",
+            {
+                "task_id": self.task_model.task_id,
+                "source_count": len(self.task_model.sources),
+                "dik_element_count": len(self.task_model.dik_elements),
+                "derivation_count": len(self.task_model.derivations),
+                "rule_count": len(self.task_model.rules),
+                "goal_count": len(self.task_model.goals),
+                "plan_method_count": len(self.task_model.plan_methods),
+                "artifact_count": len(self.task_model.artifacts),
+            },
+        )
         self.logger.log_event(
             self.time,
             "brain_backend_selected",
@@ -71,9 +88,9 @@ class SimulationState:
 
         if agent_configs is None:
             agent_configs = [
-                {"name": "Architect", "role": "Architect", "traits": {}, "packet_access": ["Team_Packet", "Architect_Packet"]},
-                {"name": "Engineer", "role": "Engineer", "traits": {}, "packet_access": ["Team_Packet", "Engineer_Packet"]},
-                {"name": "Botanist", "role": "Botanist", "traits": {}, "packet_access": ["Team_Packet", "Botanist_Packet"]},
+                {"name": "Architect", "role": "Architect", "traits": {}},
+                {"name": "Engineer", "role": "Engineer", "traits": {}},
+                {"name": "Botanist", "role": "Botanist", "traits": {}},
             ]
 
 
@@ -106,7 +123,15 @@ class SimulationState:
                 "agent_mechanism_profile",
                 {"agent": agent.name, "mechanisms": resolved_mechanisms},
             )
-            agent.allowed_packet = config["packet_access"]
+            role_sources = self.task_model.source_ids_for_role(config["role"])
+            mapped_packets = [
+                self.environment.source_packet_name_map.get(source_id, source_id)
+                for source_id in role_sources
+                if self.environment.source_packet_name_map.get(source_id, source_id) in self.environment.knowledge_packets
+            ]
+            fallback = config.get("packet_access")
+            agent.allowed_packet = mapped_packets or fallback
+            agent.task_model = self.task_model
             self.agents.append(agent)
 
         self.environment.agents = self.agents

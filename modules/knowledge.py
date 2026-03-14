@@ -1,5 +1,11 @@
 # File: modules/knowledge.py
 
+from __future__ import annotations
+
+from typing import Dict, Optional
+
+from modules.task_model import TaskModel
+
 class Data:
     def __init__(self, id, content, source=None, tags=None):
         self.id = id
@@ -57,7 +63,41 @@ class Knowledge:
         return f"<Knowledge with {len(self.rules)} rules>"
 
 
-def init_dik_packets():
+def _element_to_packet_item(element):
+    tags = [element.role_scope, element.phase_scope, element.element_type]
+    if element.element_type == "data":
+        return Data(element.element_id, element.description, tags=tags)
+    if element.element_type == "information":
+        return Information(element.element_id, element.description, tags=tags)
+    return None
+
+
+def init_dik_packets_from_task_model(task_model: TaskModel, source_name_map: Optional[Dict[str, str]] = None):
+    """Build environment knowledge packets from a generalized task model package."""
+    source_name_map = source_name_map or {}
+    packets = {}
+
+    for source in task_model.enabled_sources():
+        if source.source_type != "packet":
+            continue
+        packet_name = source_name_map.get(source.source_id, source.source_id)
+        packet = {"data": [], "information": []}
+        for element in task_model.elements_for_source(source.source_id):
+            item = _element_to_packet_item(element)
+            if item is None:
+                continue
+            item.source = packet_name
+            bucket = "data" if element.element_type == "data" else "information"
+            packet[bucket].append(item)
+        packets[packet_name] = packet
+
+    return packets
+
+
+def init_dik_packets(task_model: Optional[TaskModel] = None, source_name_map: Optional[Dict[str, str]] = None):
+    if task_model is not None:
+        return init_dik_packets_from_task_model(task_model, source_name_map=source_name_map)
+
     def with_source(items, source):
         for item in items:
             item.source = source

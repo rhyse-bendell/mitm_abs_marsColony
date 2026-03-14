@@ -2,7 +2,8 @@
 
 
 class ConstructionManager:
-    def __init__(self):
+    def __init__(self, task_model=None):
+        self.task_model = task_model
         self.projects = {
             "Build_Table_A": {
                 "id": "Build_Table_A",
@@ -17,6 +18,7 @@ class ConstructionManager:
                 "expected_rules": ["rule:greenhouse_requires_water"],
                 "builders": set(),
                 "author": "system",
+                "artifact_type": "greenhouse_construction",
             },
             "Build_Table_B": {
                 "id": "Build_Table_B",
@@ -31,6 +33,7 @@ class ConstructionManager:
                 "expected_rules": ["rule:house_enclosed"],
                 "builders": set(),
                 "author": "system",
+                "artifact_type": "house_construction",
             },
             "Build_Table_C": {
                 "id": "Build_Table_C",
@@ -45,6 +48,7 @@ class ConstructionManager:
                 "expected_rules": ["rule:water_generator_2x2"],
                 "builders": set(),
                 "author": "system",
+                "artifact_type": "water_generator_construction",
             },
         }
 

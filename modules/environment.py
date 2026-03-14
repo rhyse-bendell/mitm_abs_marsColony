@@ -2,6 +2,7 @@
 
 import math
 from modules.construction import ConstructionManager
+from modules.task_model import TaskModel
 
 
 SHOW_LAYOUT = True
@@ -148,15 +149,30 @@ INTERACTION_TARGETS = {
 OBJECTS = RAW_OBJECTS
 
 class Environment:
-    def __init__(self, phases=None):
+    SOURCE_PACKET_NAME_MAP = {
+        "SRC_TEAM_SHARED": "Team_Info",
+        "SRC_ARCHITECT_BRIEF": "Architect_Info",
+        "SRC_ENGINEER_BRIEF": "Engineer_Info",
+        "SRC_BOTANIST_BRIEF": "Botanist_Info",
+    }
+
+    def __init__(self, phases=None, task_model: TaskModel | None = None):
         self.objects = OBJECTS
         self.zones = ZONES
         self.phases = phases if phases else []
         self.current_phase_index = 0
         self.gas_environment = {"co2_level": 400}
         self.resources = []
-        self.construction = ConstructionManager()
-        self.knowledge_packets = init_dik_packets()
+        self.construction = ConstructionManager(task_model=task_model)
+        self.task_model = task_model
+        self.source_packet_name_map = dict(self.SOURCE_PACKET_NAME_MAP)
+        if self.task_model is not None:
+            self.knowledge_packets = init_dik_packets(
+                task_model=self.task_model,
+                source_name_map=self.source_packet_name_map,
+            )
+        else:
+            self.knowledge_packets = init_dik_packets()
         self.interaction_targets = INTERACTION_TARGETS
         self._time = 0.0
 
