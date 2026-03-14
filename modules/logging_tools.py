@@ -74,6 +74,7 @@ class SimulationLogger:
         self.event_buffer = []
         self.recent_events = []
         self.max_recent_events = 300
+        self.event_listeners = []
         self.last_dump_time = 0.0
 
     def _append_recent_event(self, event):
@@ -109,9 +110,15 @@ class SimulationLogger:
             "time": round(time, 2),
             "event_type": event_type,
             "payload": json.dumps(payload, default=str),
+            "payload_data": payload,
         }
         self.event_buffer.append(event)
         self._append_recent_event(event)
+        for listener in self.event_listeners:
+            listener(event)
+
+    def register_event_listener(self, listener):
+        self.event_listeners.append(listener)
 
     def get_recent_events(self, count=80):
         return self.recent_events[-count:]
@@ -134,10 +141,11 @@ class SimulationLogger:
             event_path = self.output_session.build_log_path("events.csv")
             event_header = not event_path.exists()
             with event_path.open("a", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=self.event_buffer[0].keys())
+                write_rows = [{k: v for k, v in row.items() if k != "payload_data"} for row in self.event_buffer]
+                writer = csv.DictWriter(f, fieldnames=write_rows[0].keys())
                 if event_header:
                     writer.writeheader()
-                writer.writerows(self.event_buffer)
+                writer.writerows(write_rows)
             self.event_buffer = []
 
         self._append_recent_event(

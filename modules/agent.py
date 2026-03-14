@@ -614,6 +614,8 @@ class Agent:
 
         if decision.selected_action in {ExecutableActionType.EXTERNALIZE_PLAN, ExecutableActionType.CONSULT_TEAM_ARTIFACT}:
             action["artifact_action"] = decision.selected_action.value
+        if decision.selected_action == ExecutableActionType.REQUEST_ASSISTANCE:
+            action["assist_action"] = decision.selected_action.value
 
         return [action]
 
@@ -1022,7 +1024,7 @@ class Agent:
             if dist <= COMMUNICATION_RADIUS:
                 if any(a["type"] == "communicate" for a in self.active_actions) or \
                    any(a["type"] == "communicate" for a in agent.active_actions):
-                    self.communicate_with(agent)
+                    self.communicate_with(agent, sim_state=sim_state)
 
     def _apply_externalization_and_construction_effects(self, environment, sim_state, dt):
         if sim_state is None:
@@ -1060,6 +1062,9 @@ class Agent:
                     self.activity_log.append(f"Consulted shared artifact {preferred.artifact_id}")
                     sim_state.logger.log_event(sim_state.time, "artifact_consulted", {"agent": self.name, "artifact_id": preferred.artifact_id})
 
+            if action["type"] == "communicate" and action.get("assist_action") == ExecutableActionType.REQUEST_ASSISTANCE.value and action["progress"] == 0:
+                sim_state.logger.log_event(sim_state.time, "assistance_requested", {"agent": self.name})
+
             if action["type"] == "construct" and action["progress"] == 0:
                 project_id = "Build_Table_B"
                 project = environment.construction.projects.get(project_id)
@@ -1073,7 +1078,12 @@ class Agent:
                     sim_state.logger.log_event(
                         sim_state.time,
                         "construction_externalization_update",
-                        {"agent": self.name, "project_id": project_id, "correct": project.get("correct", True)},
+                        {
+                            "agent": self.name,
+                            "project_id": project_id,
+                            "correct": project.get("correct", True),
+                            "structure_type": project.get("type", "unknown"),
+                        },
                     )
 
     def update_active_actions(self, dt):
@@ -1117,9 +1127,11 @@ class Agent:
             messages.append({"type": "TGTO", "content": self.current_goal()["goal"], "sender": self.name})
         return messages
 
-    def communicate_with(self, other_agent):
+    def communicate_with(self, other_agent, sim_state=None):
         messages = self.generate_message()
+        message_types = []
         for msg in messages:
+            message_types.append(msg.get("type"))
             other_agent.receive_message(msg, from_agent=self.name)
 
         # Directly transfer unseen Data
@@ -1187,6 +1199,12 @@ class Agent:
         other_agent.update_physiology(exertion=0.1, speaking=True)
 
         self.activity_log.append(f"Communicated with {other_agent.name}")
+        if sim_state is not None:
+            sim_state.logger.log_event(
+                sim_state.time,
+                "communication_exchange",
+                {"sender": self.name, "receiver": other_agent.name, "message_types": message_types},
+            )
 
     def receive_message(self, message, from_agent=None):
         sender = message.get("sender")
@@ -1275,7 +1293,7 @@ class Agent:
         return False
 
 
-    def compare_and_repair_construction(self, construction):
+    def compare_and_repair_construction(self, construction, sim_state=None):
         for project in construction.projects.values():
             if not isinstance(project, dict):
                 continue
@@ -1293,9 +1311,21 @@ class Agent:
                 mismatch_detect_prob = 0.25 + 0.7 * self._trait_value("rule_accuracy")
                 if random.random() <= mismatch_detect_prob:
                     self.activity_log.append(f"Disagrees with approach for {project.get('name', 'Unknown')}")
+                    if sim_state is not None:
+                        sim_state.logger.log_event(
+                            sim_state.time,
+                            "construction_mismatch_detected",
+                            {"agent": self.name, "project_id": project.get("id", "unknown")},
+                        )
                     if random.random() < self._trait_value("help_tendency"):
                         project["correct"] = True
                         self.activity_log.append("Triggered correction/repair on construction externalization")
+                        if sim_state is not None:
+                            sim_state.logger.log_event(
+                                sim_state.time,
+                                "construction_repair_episode",
+                                {"agent": self.name, "project_id": project.get("id", "unknown")},
+                            )
                     else:
                         project["correct"] = False
 

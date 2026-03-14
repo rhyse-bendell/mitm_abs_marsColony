@@ -377,6 +377,13 @@ class Environment:
     def get_time(self):
         return getattr(self, "_time", 0.0)
 
+    def get_zone(self, pos):
+        for zone_name, zone in self.zones.items():
+            corners = zone.get("corners")
+            if corners and self._point_in_zone(pos, corners):
+                return zone_name
+        return "Zone_Transition"
+
 
 # ----------------------------
 # Layout Visualizer for Tweaking
