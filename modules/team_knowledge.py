@@ -107,7 +107,7 @@ class TeamKnowledgeManager:
         if artifact is None:
             artifact = self.externalize_artifact(
                 artifact_id=artifact_id,
-                artifact_type=f"construction_{structure_type}",
+                artifact_type=project.get("artifact_type", f"construction_{structure_type}"),
                 summary=summary,
                 content=content,
                 author=project.get("author", "system"),

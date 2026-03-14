@@ -134,6 +134,9 @@ class Agent:
         self.hook_effects = {}
 
         self.last_dik_change_time = -1.0
+        self.executed_derivations = set()
+        self.derivation_events = []
+        self.task_model = None
 
     def _normalize_packet_name(self, packet_name):
         """Map UI packet labels and aliases to canonical environment packet keys."""
@@ -322,6 +325,86 @@ class Agent:
         return bool(new_ids)
 
 
+
+    def _held_dik_ids(self):
+        data_ids = {d.id for d in self.mental_model["data"]}
+        info_ids = {i.id for i in self.mental_model["information"]}
+        knowledge_ids = set(self.mental_model["knowledge"].rules)
+        return data_ids, info_ids, knowledge_ids
+
+    def _create_dik_object_from_element(self, element, source_id):
+        tags = [element.role_scope, element.phase_scope, element.element_type]
+        if element.element_type == "data":
+            return Data(element.element_id, element.description, source=source_id, tags=tags)
+        if element.element_type == "information":
+            return Information(element.element_id, element.description, source=source_id, tags=tags)
+        return None
+
+    def _apply_task_derivations(self, sim_state=None):
+        if not getattr(self, "task_model", None):
+            return
+
+        now = getattr(self, "current_time", 0.0)
+        data_ids, info_ids, knowledge_ids = self._held_dik_ids()
+        held_ids = data_ids | info_ids | knowledge_ids
+
+        for derivation in self.task_model.derivations.values():
+            if not derivation.enabled or derivation.derivation_id in self.executed_derivations:
+                continue
+
+            required = set(derivation.required_inputs)
+            if required and not required.issubset(held_ids):
+                continue
+            if derivation.min_required_count and len(required & held_ids) < derivation.min_required_count:
+                continue
+
+            output_id = derivation.output_element_id
+            element = self.task_model.dik_elements.get(output_id)
+            if element is None or not element.enabled:
+                continue
+
+            produced = False
+            if derivation.output_type == "knowledge" or element.element_type == "knowledge":
+                if output_id not in self.mental_model["knowledge"].rules:
+                    self.mental_model["knowledge"].add_rule(output_id, sorted(required), inferred_by_agents=[self.name])
+                    produced = True
+            elif derivation.output_type == "information" or element.element_type == "information":
+                if output_id not in info_ids:
+                    info_obj = self._create_dik_object_from_element(element, source_id=f"DRV:{derivation.derivation_id}")
+                    if info_obj is not None:
+                        self.mental_model["information"].add(info_obj)
+                        produced = True
+            elif derivation.output_type == "data" or element.element_type == "data":
+                if output_id not in data_ids:
+                    data_obj = self._create_dik_object_from_element(element, source_id=f"DRV:{derivation.derivation_id}")
+                    if data_obj is not None:
+                        self.mental_model["data"].add(data_obj)
+                        produced = True
+
+            if produced:
+                event = {
+                    "time": now,
+                    "agent": self.name,
+                    "derivation_id": derivation.derivation_id,
+                    "output_element_id": output_id,
+                    "derivation_kind": derivation.derivation_kind,
+                    "required_inputs": sorted(required),
+                }
+                self.executed_derivations.add(derivation.derivation_id)
+                self.derivation_events.append(event)
+                self.activity_log.append(f"Executed derivation {derivation.derivation_id} -> {output_id}")
+                DIK_LOG.append({
+                    "time": now,
+                    "agent": self.name,
+                    "type": "Derivation",
+                    "id": derivation.derivation_id,
+                    "mode": "derived",
+                    "from": sorted(required),
+                })
+                self.last_dik_change_time = now
+                if sim_state is not None:
+                    sim_state.logger.log_event(now, "dik_derivation_executed", event)
+
     def _build_readiness_score(self):
         info_count = len(self.mental_model["information"])
         knowledge_count = len(self.mental_model["knowledge"].rules)
@@ -335,6 +418,14 @@ class Agent:
             blockers.append("insufficient_information_inspection")
         if len(self.mental_model["knowledge"].rules) < 1:
             blockers.append("insufficient_rule_knowledge")
+
+        if getattr(self, "task_model", None):
+            role_rules = [
+                r.rule_id for r in self.task_model.rules.values()
+                if r.enabled and r.role_scope in {"team", self.role.lower()}
+            ]
+            if role_rules and not set(role_rules).intersection(set(self.mental_model["knowledge"].rules)):
+                blockers.append("missing_task_prerequisite_rules")
         if not any(state == "inspected" for state in self.source_inspection_state.values()):
             blockers.append("no_inspected_information_source")
         if self._select_build_target(environment, require_readiness=False) is None:
@@ -1049,6 +1140,8 @@ class Agent:
         if "mismatch with construction" in " ".join(self.activity_log[-6:]).lower() and self.current_inspect_target_id:
             self.mark_source_revisitable(self.current_inspect_target_id, reason="construction_mismatch")
 
+        self._apply_task_derivations(sim_state=None)
+
         known_info = list(self.mental_model["information"])
         if known_info:
             from itertools import combinations
@@ -1073,6 +1166,7 @@ class Agent:
     def update(self, dt, environment, sim_state=None):
         self.update_physiology(exertion=0.5)
         self.update_knowledge(environment, full_packet_sweep=(sim_state is None))
+        self._apply_task_derivations(sim_state=sim_state)
         if sim_state is None:
             # Legacy compatibility path for unit-level agent calls outside full simulation state.
             self._run_goal_management_pipeline(dt, environment)

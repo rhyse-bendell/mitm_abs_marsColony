@@ -317,6 +317,7 @@ class BrainContextBuilder:
             if other.name != agent.name
         }
 
+        task_model = getattr(sim_state, "task_model", None)
         team_state = {
             "team_shared_knowledge": sim_state.team_knowledge_manager.summarize(),
             "teammate_roles": {other.name: other.role for other in sim_state.agents if other.name != agent.name},
@@ -328,6 +329,10 @@ class BrainContextBuilder:
             "plan_readiness": "validated_shared_plan" if validated_plan_exists else "partial_or_fragmentary_plan",
             "externalized_artifacts": artifact_summaries,
             "teammate_help_signals": teammate_help_signals,
+            "derivation_events": list(getattr(agent, "derivation_events", [])[-5:]),
+            "task_rules": [r.rule_id for r in task_model.rules.values() if r.enabled] if task_model else [],
+            "task_goals": [g.goal_id for g in task_model.goals.values() if g.enabled] if task_model else [],
+            "task_plan_methods": [m.method_id for m in task_model.plan_methods.values() if m.enabled] if task_model else [],
         }
 
         build_readiness = self._build_readiness(agent, structure_summary, environment, team_state=team_state)
@@ -338,7 +343,7 @@ class BrainContextBuilder:
             "current_phase": current_phase.get("name", "default"),
             "role": agent.role,
             "role_access_constraints": getattr(agent, "allowed_packet", []),
-            "high_level_objectives": ["build required colony infrastructure", "maintain legal construction"],
+            "high_level_objectives": [g.label for g in task_model.goals.values() if g.enabled and g.goal_level in {"mission", "phase"}] if task_model else ["build required colony infrastructure", "maintain legal construction"],
             "hard_constraints": [
                 "simulator validates legality",
                 "simulator validates world truth",
