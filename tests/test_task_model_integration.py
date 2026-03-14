@@ -7,7 +7,7 @@ from pathlib import Path
 from modules.agent import Agent
 from modules.environment import Environment
 from modules.simulation import SimulationState
-from modules.task_model import TaskModelError, load_task_model
+from modules.task_model import REQUIRED_TASK_FILES, TaskModelError, load_task_model
 
 
 class TaskModelIntegrationTests(unittest.TestCase):
@@ -20,21 +20,43 @@ class TaskModelIntegrationTests(unittest.TestCase):
         self.assertGreater(len(model.goals), 0)
         self.assertGreater(len(model.plan_methods), 0)
         self.assertGreater(len(model.artifacts), 0)
+        self.assertGreater(len(model.environment_objects), 0)
+        self.assertGreater(len(model.zones), 0)
+        self.assertGreater(len(model.interaction_targets), 0)
+        self.assertGreater(len(model.spawn_points), 0)
+        self.assertGreater(len(model.resource_nodes), 0)
+        self.assertGreater(len(model.phases), 0)
+        self.assertGreater(len(model.roles), 0)
+        self.assertGreater(len(model.agent_defaults), 0)
+        self.assertGreater(len(model.action_availability), 0)
+        self.assertGreater(len(model.action_parameters), 0)
+        self.assertGreater(len(model.communication_catalog), 0)
+        self.assertGreater(len(model.construction_templates), 0)
 
     def test_missing_required_file_raises_clear_error(self):
         temp_dir = tempfile.mkdtemp(prefix="task_model_missing_")
         try:
             base = Path(temp_dir) / "tmp_task"
             base.mkdir(parents=True, exist_ok=True)
-            for csv_path in Path("config/tasks/mars_colony").glob("*.csv"):
-                if csv_path.name != "rule_definitions.csv":
-                    shutil.copy(csv_path, base / csv_path.name)
+            src = Path("config/tasks/mars_colony")
+            for _, fname in REQUIRED_TASK_FILES.items():
+                if fname == "rule_definitions.csv":
+                    continue
+                shutil.copy(src / fname, base / fname)
 
             with self.assertRaises(TaskModelError) as ctx:
                 load_task_model("tmp_task", config_root=temp_dir)
             self.assertIn("rule_definitions.csv", str(ctx.exception))
         finally:
             shutil.rmtree(temp_dir)
+
+    def test_environment_initializes_from_task_package_content(self):
+        model = load_task_model("mars_colony")
+        env = Environment(task_model=model)
+        self.assertIn("Team_Info", env.objects)
+        self.assertIn("Zone_Table_B", env.zones)
+        self.assertIn("Build_Table_B", env.interaction_targets)
+        self.assertEqual(env.get_spawn_point("Architect"), (6.9, 1.2))
 
     def test_source_inspection_yields_task_backed_dik_elements(self):
         model = load_task_model("mars_colony")
@@ -90,6 +112,15 @@ class TaskModelIntegrationTests(unittest.TestCase):
         for project in env.construction.projects.values():
             artifact_type = project.get("artifact_type")
             self.assertIn(artifact_type, model.artifacts)
+
+    def test_phases_roles_actions_and_construction_are_task_driven(self):
+        sim = SimulationState(speed="Fast", flash_mode=True)
+        self.assertEqual(sim.environment.phases[0]["name"], "Phase 1")
+        self.assertEqual([a.role for a in sim.agents], ["Architect", "Engineer", "Botanist"])
+        action_ids = sim.task_model.enabled_actions_for_role("Architect")
+        self.assertIn("transport_resources", action_ids)
+        self.assertIn("Build_Table_B", sim.environment.construction.projects)
+        sim.stop()
 
     def test_headless_simulation_runs_with_task_model(self):
         sim = SimulationState(speed="Fast", flash_mode=True)

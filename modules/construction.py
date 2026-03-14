@@ -4,7 +4,47 @@
 class ConstructionManager:
     def __init__(self, task_model=None):
         self.task_model = task_model
-        self.projects = {
+        self.resource_nodes = {}
+        self.projects = self._build_projects()
+
+    def _build_projects(self):
+        if self.task_model and getattr(self.task_model, "construction_templates", None):
+            projects = {}
+            for template in self.task_model.construction_templates.values():
+                if not template.enabled:
+                    continue
+                projects[template.project_id] = {
+                    "id": template.project_id,
+                    "name": template.name,
+                    "type": template.structure_type,
+                    "location": (template.location_x, template.location_y),
+                    "status": "in_progress",
+                    "in_progress": True,
+                    "correct": True,
+                    "required_resources": dict(template.required_resources),
+                    "delivered_resources": {k: 0 for k in template.required_resources},
+                    "expected_rules": list(template.expected_rules),
+                    "builders": set(),
+                    "author": "system",
+                    "artifact_type": template.artifact_type,
+                    "target_id": template.target_id,
+                }
+            self.resource_nodes = {
+                node.node_id: {
+                    "id": node.node_id,
+                    "zone_id": node.zone_id,
+                    "resource_type": node.resource_type,
+                    "quantity": node.quantity,
+                    "position": (node.x, node.y),
+                    "transport_time_scale": node.transport_time_scale,
+                }
+                for node in self.task_model.resource_nodes.values()
+                if node.enabled
+            }
+            if projects:
+                return projects
+
+        return {
             "Build_Table_A": {
                 "id": "Build_Table_A",
                 "name": "Table A Construction",
@@ -55,8 +95,8 @@ class ConstructionManager:
     def update(self):
         for project in self.projects.values():
             if project["status"] == "in_progress":
-                required = project["required_resources"]["bricks"]
-                delivered = project["delivered_resources"]["bricks"]
+                required = project["required_resources"].get("bricks", 0)
+                delivered = project["delivered_resources"].get("bricks", 0)
                 if delivered >= required:
                     project["status"] = "complete"
                     project["in_progress"] = False
@@ -78,8 +118,8 @@ class ConstructionManager:
     def get_visual_data(self):
         visuals = []
         for p in self.get_active_projects():
-            required = p["required_resources"]["bricks"]
-            delivered = p["delivered_resources"]["bricks"]
+            required = p["required_resources"].get("bricks", 0)
+            delivered = p["delivered_resources"].get("bricks", 0)
             progress = min(1.0, delivered / required) if required > 0 else 0.0
 
             border = {

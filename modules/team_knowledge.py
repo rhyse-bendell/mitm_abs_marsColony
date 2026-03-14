@@ -105,9 +105,12 @@ class TeamKnowledgeManager:
 
         artifact = self.artifacts.get(artifact_id)
         if artifact is None:
+            artifact_type = project.get("artifact_type", f"construction_{structure_type}")
+            if isinstance(artifact_type, str) and not artifact_type.startswith("construction_"):
+                artifact_type = f"construction_{structure_type}"
             artifact = self.externalize_artifact(
                 artifact_id=artifact_id,
-                artifact_type=project.get("artifact_type", f"construction_{structure_type}"),
+                artifact_type=artifact_type,
                 summary=summary,
                 content=content,
                 author=project.get("author", "system"),

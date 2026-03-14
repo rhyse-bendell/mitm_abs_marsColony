@@ -215,7 +215,30 @@ class BrainContextBuilder:
                 "utility": utility_for(ExecutableActionType.TRANSPORT_RESOURCES),
             }
         )
-        return legal
+
+        task_model = getattr(agent, "task_model", None)
+        if not task_model:
+            return legal
+
+        enabled_action_ids = set(task_model.enabled_actions_for_role(agent.role))
+        filtered = []
+        for affordance in legal:
+            action_id = affordance.get("action_type")
+            if action_id not in enabled_action_ids:
+                continue
+            target_id = affordance.get("target_id")
+            if target_id in environment.interaction_targets:
+                target_cfg = environment.interaction_targets[target_id]
+                role_scope = [r.lower() for r in target_cfg.get("role_scope", [])]
+                if role_scope and "all" not in role_scope and agent.role.lower() not in role_scope:
+                    continue
+            params = task_model.action_parameters.get(action_id)
+            if params:
+                affordance = dict(affordance)
+                affordance["duration_s"] = params.duration_s
+                affordance["task_parameters"] = dict(params.metadata)
+            filtered.append(affordance)
+        return filtered
 
     def _world_affordance_summary(self, agent, environment) -> Dict[str, Any]:
         physical_obstacles = [

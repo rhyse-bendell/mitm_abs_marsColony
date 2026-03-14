@@ -1,0 +1,8 @@
+target_id,kind,zone_id,object_id,role_scope,enabled
+Team_Info,information,Zone_Team_Info,Team_Info,all,True
+Engineer_Info,information,Zone_Engineer_Info,Engineer_Info,all,True
+Botanist_Info,information,Zone_Botanist_Info,Botanist_Info,all,True
+Architect_Info,information,Zone_Architect_Info,Architect_Info,all,True
+Build_Table_A,build,Zone_Table_A,Table_A,all,True
+Build_Table_B,build,Zone_Table_B,Table_B,all,True
+Build_Table_C,build,Zone_Table_C,Table_C,all,True

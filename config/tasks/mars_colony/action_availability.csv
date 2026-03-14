@@ -1,0 +1,16 @@
+action_id,enabled,role_scope,target_kinds
+move_to_target,True,all,
+inspect_information_source,True,all,information
+communicate,True,all,team
+request_assistance,True,all,team
+meeting,True,all,team
+externalize_plan,True,all,artifact
+consult_team_artifact,True,all,artifact
+transport_resources,True,all,logistics
+start_construction,True,all,build
+continue_construction,True,all,build
+repair_or_correct_construction,True,all,build
+validate_construction,True,all,build
+observe_environment,True,all,self
+reassess_plan,True,all,self
+wait,True,all,self

@@ -34,6 +34,19 @@ class SimulationState:
         task_id="mars_colony",
     ):
         self.task_model = load_task_model(task_id=task_id)
+        if phases is None and self.task_model.phases:
+            phases = [
+                {
+                    "id": p.phase_id,
+                    "name": p.name,
+                    "duration_minutes": p.duration_minutes,
+                    "colonist_manifest": dict(p.colonist_manifest),
+                    "unlocks": list(p.unlocks),
+                    "required_structures": dict(p.required_structures),
+                    "description": p.description,
+                }
+                for p in self.task_model.phases
+            ]
         self.environment = Environment(phases=phases, task_model=self.task_model)
         self.agents = []
         self.num_runs = num_runs
@@ -87,11 +100,28 @@ class SimulationState:
             self.speed_multiplier = self.SPEED_MULTIPLIERS.get(speed, 1.0)
 
         if agent_configs is None:
-            agent_configs = [
-                {"name": "Architect", "role": "Architect", "traits": {}},
-                {"name": "Engineer", "role": "Engineer", "traits": {}},
-                {"name": "Botanist", "role": "Botanist", "traits": {}},
-            ]
+            if self.task_model.agent_defaults:
+                agent_configs = []
+                for d in self.task_model.agent_defaults:
+                    agent_configs.append(
+                        {
+                            "name": d.agent_name,
+                            "role": d.role_id,
+                            "constructs": {
+                                "teamwork_potential": d.teamwork_potential,
+                                "taskwork_potential": d.taskwork_potential,
+                            },
+                            "mechanism_overrides": dict(d.mechanism_overrides),
+                            "traits": dict(d.mechanism_overrides),
+                            "packet_access": list(d.source_access_override),
+                        }
+                    )
+            else:
+                agent_configs = [
+                    {"name": "Architect", "role": "Architect", "traits": {}},
+                    {"name": "Engineer", "role": "Engineer", "traits": {}},
+                    {"name": "Botanist", "role": "Botanist", "traits": {}},
+                ]
 
 
         for config in agent_configs:

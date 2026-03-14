@@ -1,0 +1,4 @@
+role_id,label,default_active,spawn_id,source_scope,enabled
+Architect,Architect,True,spawn_architect,SRC_TEAM_SHARED|SRC_ARCHITECT_BRIEF,True
+Engineer,Engineer,True,spawn_engineer,SRC_TEAM_SHARED|SRC_ENGINEER_BRIEF,True
+Botanist,Botanist,True,spawn_botanist,SRC_TEAM_SHARED|SRC_BOTANIST_BRIEF,True

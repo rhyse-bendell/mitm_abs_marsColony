@@ -1,0 +1,5 @@
+spawn_id,role_id,x,y,priority,enabled
+spawn_architect,Architect,6.9,1.2,1,True
+spawn_engineer,Engineer,3.9,1.2,1,True
+spawn_botanist,Botanist,5.0,1.0,1,True
+spawn_fallback,all,6.0,3.0,99,True

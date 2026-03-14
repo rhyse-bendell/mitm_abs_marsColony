@@ -1,0 +1,10 @@
+zone_id,x1,y1,x2,y2,default_zone,enabled
+Zone_Team_Info,7.0,6.4,9.0,6.9,False,True
+Zone_Engineer_Info,3.25,0.9,3.65,1.3,False,True
+Zone_Botanist_Info,4.75,0.4,5.15,0.8,False,True
+Zone_Architect_Info,6.25,0.9,6.65,1.3,False,True
+Zone_Table_A,5.9,2.8,7.1,4.0,False,True
+Zone_Table_B,4.4,3.8,5.6,5.0,False,True
+Zone_Table_C,2.9,2.8,4.1,4.0,False,True
+Zone_Transition,0,0,0,0,True,True
+Zone_Resource_Field,1.0,5.2,2.3,6.2,False,True
