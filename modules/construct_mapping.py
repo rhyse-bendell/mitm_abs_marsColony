@@ -81,6 +81,17 @@ class ConstructMapper:
     def _parse_bool(self, value: str) -> bool:
         return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
+    def _parse_float(self, row: dict[str, str], key: str, context: str, default: float | None = None) -> float:
+        raw = row.get(key, "")
+        if raw is None or str(raw).strip() == "":
+            if default is not None:
+                return default
+            raise ConstructMappingError(f"Missing numeric field '{key}' in {context}")
+        try:
+            return float(raw)
+        except ValueError as exc:
+            raise ConstructMappingError(f"Invalid numeric field '{key}'='{raw}' in {context}") from exc
+
     def _load_csv(self, file_name: str) -> list[dict[str, str]]:
         path = self.config_dir / file_name
         with path.open("r", encoding="utf-8", newline="") as f:
@@ -93,14 +104,25 @@ class ConstructMapper:
 
     def _load_constructs(self) -> None:
         rows = self._load_csv("constructs.csv")
-        for row in rows:
+        for idx, row in enumerate(rows, start=2):
+            context = f"constructs.csv row {idx}"
+            try:
+                scale_min = self._parse_float(row, "scale_min", context)
+                scale_max = self._parse_float(row, "scale_max", context)
+                default_value = self._parse_float(row, "default_value", context)
+            except ConstructMappingError as err:
+                self.validation_issues.append(str(err))
+                continue
+            if scale_max < scale_min:
+                self.validation_issues.append(f"Invalid bounds in {context}: scale_max < scale_min")
+                continue
             construct = ConstructDefinition(
                 construct_id=row["construct_id"].strip(),
                 label=row["label"].strip(),
                 description=row.get("description", "").strip(),
-                scale_min=float(row["scale_min"]),
-                scale_max=float(row["scale_max"]),
-                default_value=float(row["default_value"]),
+                scale_min=scale_min,
+                scale_max=scale_max,
+                default_value=clamp(default_value, scale_min, scale_max),
                 construct_group=row.get("construct_group", "").strip(),
                 enabled=self._parse_bool(row.get("enabled", "true")),
             )
@@ -108,32 +130,54 @@ class ConstructMapper:
 
     def _load_construct_to_mechanism(self) -> None:
         rows = self._load_csv("construct_to_mechanism.csv")
-        for row in rows:
+        for idx, row in enumerate(rows, start=2):
+            context = f"construct_to_mechanism.csv row {idx}"
             transform = row["transform"].strip()
             if transform not in TRANSFORMS:
-                self.validation_issues.append(f"Unknown transform '{transform}' in construct_to_mechanism")
+                self.validation_issues.append(f"Unknown transform '{transform}' in {context}")
+                continue
+            try:
+                effect_weight = self._parse_float(row, "effect_weight", context)
+                intercept = self._parse_float(row, "intercept", context, default=0.0)
+                min_output = self._parse_float(row, "min_output", context, default=0.0)
+                max_output = self._parse_float(row, "max_output", context, default=1.0)
+            except ConstructMappingError as err:
+                self.validation_issues.append(str(err))
+                continue
+            if max_output < min_output:
+                self.validation_issues.append(f"Invalid bounds in {context}: max_output < min_output")
                 continue
             rule = ConstructMechanismRule(
                 construct_id=row["construct_id"].strip(),
                 mechanism_id=row["mechanism_id"].strip(),
-                effect_weight=float(row["effect_weight"]),
+                effect_weight=effect_weight,
                 transform=transform,
-                intercept=float(row.get("intercept", 0.0)),
-                min_output=float(row.get("min_output", 0.0)),
-                max_output=float(row.get("max_output", 1.0)),
+                intercept=intercept,
+                min_output=min_output,
+                max_output=max_output,
                 enabled=self._parse_bool(row.get("enabled", "true")),
             )
             if rule.construct_id not in self.constructs:
-                self.validation_issues.append(f"Unknown construct '{rule.construct_id}' in construct_to_mechanism")
+                self.validation_issues.append(f"Unknown construct '{rule.construct_id}' in {context}")
                 continue
             self.construct_to_mechanism.append(rule)
 
     def _load_mechanism_to_hook(self) -> None:
         rows = self._load_csv("mechanism_to_hook.csv")
-        for row in rows:
+        for idx, row in enumerate(rows, start=2):
+            context = f"mechanism_to_hook.csv row {idx}"
             formula_name = row["formula_name"].strip()
             if formula_name not in FORMULAS:
-                self.validation_issues.append(f"Unknown formula '{formula_name}' in mechanism_to_hook")
+                self.validation_issues.append(f"Unknown formula '{formula_name}' in {context}")
+                continue
+            try:
+                min_effect = self._parse_float(row, "min_effect", context, default=0.0)
+                max_effect = self._parse_float(row, "max_effect", context, default=1.0)
+            except ConstructMappingError as err:
+                self.validation_issues.append(str(err))
+                continue
+            if max_effect < min_effect:
+                self.validation_issues.append(f"Invalid bounds in {context}: max_effect < min_effect")
                 continue
             self.mechanism_to_hook.append(
                 MechanismHookRule(
@@ -143,8 +187,8 @@ class ConstructMapper:
                     operator=row.get("operator", "").strip(),
                     parameter=row.get("parameter", "").strip(),
                     formula_name=formula_name,
-                    min_effect=float(row.get("min_effect", 0.0)),
-                    max_effect=float(row.get("max_effect", 1.0)),
+                    min_effect=min_effect,
+                    max_effect=max_effect,
                     enabled=self._parse_bool(row.get("enabled", "true")),
                 )
             )
