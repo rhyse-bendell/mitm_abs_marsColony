@@ -104,6 +104,11 @@ class BrainContextBuilder:
             {"action_type": ExecutableActionType.REASSESS_PLAN.value, "target_id": None, "target_class": "self"},
             {"action_type": ExecutableActionType.WAIT.value, "target_id": None, "target_class": "self"},
             {"action_type": ExecutableActionType.COMMUNICATE.value, "target_id": "nearby_agent", "target_class": "team"},
+            {"action_type": ExecutableActionType.REQUEST_ASSISTANCE.value, "target_id": "nearby_agent", "target_class": "team"},
+            {"action_type": ExecutableActionType.EXTERNALIZE_PLAN.value, "target_id": "whiteboard", "target_class": "artifact"},
+            {"action_type": ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, "target_id": "team_artifact", "target_class": "artifact"},
+            {"action_type": ExecutableActionType.VALIDATE_CONSTRUCTION.value, "target_id": "active_construction", "target_class": "build"},
+            {"action_type": ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value, "target_id": "active_construction", "target_class": "build"},
         ]
 
         for target_name, target in environment.interaction_targets.items():
@@ -247,7 +252,11 @@ class BrainContextBuilder:
                     "type": artifact.artifact_type,
                     "summary": artifact.summary,
                     "author": artifact.author,
+                    "contributors": list(getattr(artifact, "contributors", [])),
+                    "knowledge_summary": list(getattr(artifact, "knowledge_summary", [])),
+                    "validation_state": getattr(artifact, "validation_state", "unvalidated"),
                     "uptake_count": artifact.uptake_count,
+                    "consulted_by": list(getattr(artifact, "consulted_by", [])),
                     "inspected_by_agent": aid in inspected_artifact_ids,
                     "adopted_by_agent": aid in inspected_artifact_ids,
                 }
@@ -272,6 +281,13 @@ class BrainContextBuilder:
             "recent_failed_attempts": [
                 e for e in history_events if "blocked" in e.lower() or "could not" in e.lower() or "mismatch" in e.lower()
             ],
+            "traits": {
+                "communication_propensity": getattr(agent, "communication_propensity", 0.5),
+                "goal_alignment": getattr(agent, "goal_alignment", 0.5),
+                "help_tendency": getattr(agent, "help_tendency", 0.5),
+                "build_speed": getattr(agent, "build_speed", 0.5),
+                "rule_accuracy": getattr(agent, "rule_accuracy", 0.5),
+            },
             "active_plan": {
                 "plan_id": getattr(active_plan, "plan_id", None),
                 "created_at": getattr(active_plan, "created_at", None),
@@ -282,6 +298,16 @@ class BrainContextBuilder:
         }
 
         validated_plan_exists = any(a.artifact_type == "plan" for a in sim_state.team_knowledge_manager.artifacts.values())
+        teammate_help_signals = {
+            other.name: (
+                bool(other.known_gaps)
+                or "blocked" in (getattr(other, "status_last_action", "").lower())
+                or "stalled" in (getattr(other, "status_last_action", "").lower())
+            )
+            for other in sim_state.agents
+            if other.name != agent.name
+        }
+
         team_state = {
             "team_shared_knowledge": sim_state.team_knowledge_manager.summarize(),
             "teammate_roles": {other.name: other.role for other in sim_state.agents if other.name != agent.name},
@@ -292,6 +318,7 @@ class BrainContextBuilder:
             "recent_shared_updates": sim_state.team_knowledge_manager.recent_updates[-5:],
             "plan_readiness": "validated_shared_plan" if validated_plan_exists else "partial_or_fragmentary_plan",
             "externalized_artifacts": artifact_summaries,
+            "teammate_help_signals": teammate_help_signals,
         }
 
         history_bands["semantic_plan_evolution"] = {

@@ -119,6 +119,15 @@ class Agent:
             "compaction_count": 0,
         }
 
+        # Experiment-facing trait defaults
+        self.communication_propensity = 0.5
+        self.goal_alignment = 0.5
+        self.help_tendency = 0.5
+        self.build_speed = 0.5
+        self.rule_accuracy = 0.5
+
+        self.last_dik_change_time = -1.0
+
     def _normalize_packet_name(self, packet_name):
         """Map UI packet labels and aliases to canonical environment packet keys."""
         mapping = {
@@ -172,6 +181,22 @@ class Agent:
         self.status_last_action = message
         if log_activity:
             self.activity_log.append(message)
+
+    def _trait_value(self, name, default=0.5):
+        value = getattr(self, name, default)
+        return max(0.0, min(1.0, float(value)))
+
+    def _scaled_duration(self, base_duration):
+        build_speed = self._trait_value("build_speed", 0.5)
+        factor = 1.25 - (0.75 * build_speed)
+        return max(0.2, round(base_duration * factor, 3))
+
+    def _help_context_available(self, sim_state):
+        for teammate_name, model in self.theory_of_mind.items():
+            goals = model.get("goals", [])
+            if any(g in {"stalled", "idle"} for g in goals):
+                return True
+        return bool(sim_state and len(self.known_gaps) > 0)
 
     def _ensure_source_state(self, environment):
         for packet_name in environment.knowledge_packets.keys():
@@ -333,6 +358,7 @@ class Agent:
             },
         )
         decision = sim_state.brain_provider.decide(context)
+        decision = self._apply_trait_bias_to_decision(decision, context, sim_state, trigger_reason)
         provider_outcome = getattr(sim_state.brain_provider, "last_outcome", None)
         if provider_outcome and provider_outcome.get("fallback"):
             sim_state.logger.log_event(
@@ -391,6 +417,47 @@ class Agent:
             },
         )
         return decision, status
+
+    def _apply_trait_bias_to_decision(self, decision, context, sim_state, trigger_reason):
+        comm = self._trait_value("communication_propensity")
+        align = self._trait_value("goal_alignment")
+        help_t = self._trait_value("help_tendency")
+
+        selected = decision.selected_action
+        reason_bits = []
+        force_externalize = trigger_reason == "new_dik_acquired" and comm >= 0.7 and random.random() < comm
+
+        if force_externalize:
+            selected = ExecutableActionType.EXTERNALIZE_PLAN
+            reason_bits.append("communication_propensity pushed externalization after DIK change")
+
+        if align >= 0.75 and context.team_state.get("plan_readiness") == "validated_shared_plan" and random.random() < align:
+            selected = ExecutableActionType.CONSULT_TEAM_ARTIFACT
+            reason_bits.append("goal_alignment favored validated team artifact consultation")
+
+        if help_t >= 0.7 and self._help_context_available(sim_state) and random.random() < help_t:
+            selected = ExecutableActionType.REQUEST_ASSISTANCE
+            reason_bits.append("help_tendency redirected toward assistance exchange")
+
+        if selected != decision.selected_action:
+            decision.selected_action = selected
+            decision.reason_summary = (decision.reason_summary + " | " + "; ".join(reason_bits)).strip(" |")
+            sim_state.logger.log_event(
+                sim_state.time,
+                "trait_influenced_decision",
+                {
+                    "agent": self.name,
+                    "trigger": trigger_reason,
+                    "to": selected.value,
+                    "rationale": reason_bits,
+                    "traits": {
+                        "communication_propensity": comm,
+                        "goal_alignment": align,
+                        "help_tendency": help_t,
+                    },
+                },
+            )
+        return decision
 
     def _next_plan_id(self):
         self.plan_counter += 1
@@ -535,7 +602,19 @@ class Agent:
             if interaction_target is not None:
                 action["target"] = interaction_target
         if decision.selected_action == ExecutableActionType.TRANSPORT_RESOURCES:
-            action["duration"] = 30.0
+            action["duration"] = self._scaled_duration(30.0)
+
+        if decision.selected_action in {
+            ExecutableActionType.START_CONSTRUCTION,
+            ExecutableActionType.CONTINUE_CONSTRUCTION,
+            ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
+            ExecutableActionType.VALIDATE_CONSTRUCTION,
+        }:
+            action["duration"] = self._scaled_duration(action["duration"])
+
+        if decision.selected_action in {ExecutableActionType.EXTERNALIZE_PLAN, ExecutableActionType.CONSULT_TEAM_ARTIFACT}:
+            action["artifact_action"] = decision.selected_action.value
+
         return [action]
 
     def perceive_environment(self, sim_state):
@@ -668,12 +747,15 @@ class Agent:
                 self.activity_log.append("Shared with teammates")
             elif action["type"] == "construct":
                 self.activity_log.append("Building...")
+            elif action["type"] == "transport_resources":
+                self.activity_log.append("Transporting resources...")
             elif action["type"] == "idle":
                 self.activity_log.append("Idling...")
 
     def absorb_packet(self, packet, accuracy=1.0):
+        effective_accuracy = max(0.05, min(1.0, accuracy * (0.6 + 0.4 * self._trait_value("rule_accuracy"))))
         for d in packet.get("data", []):
-            if random.random() <= accuracy:
+            if random.random() <= effective_accuracy:
                 if d not in self.mental_model["data"]:
                     self.mental_model["data"].add(d)
                     d.acquired_by[self.name] = {"mode": "direct", "from": d.source}
@@ -686,9 +768,10 @@ class Agent:
                         "from": d.source
                     })
                     self.activity_log.append(f"Absorbed data: {d.id} (from {d.source})")
+                    self.last_dik_change_time = getattr(self, "current_time", 0.0)
 
         for info in packet.get("information", []):
-            if random.random() <= accuracy:
+            if random.random() <= effective_accuracy:
                 if info not in self.mental_model["information"]:
                     self.mental_model["information"].add(info)
                     info.acquired_by[self.name] = {"mode": "direct", "from": info.source}
@@ -701,6 +784,7 @@ class Agent:
                         "from": info.source
                     })
                     self.activity_log.append(f"Absorbed info: {info.id} (from {info.source})")
+                    self.last_dik_change_time = getattr(self, "current_time", 0.0)
 
     def move_toward(self, target, dt, environment):
         def is_blocking_object(obj):
@@ -891,9 +975,11 @@ class Agent:
                     candidate_tags.setdefault(tag, []).append(info)
             for tag, group in candidate_tags.items():
                 if len(group) >= 2:
-                    if random.random() < 0.9:
-                        self.mental_model["knowledge"].try_infer_rules(group)
-                        self.activity_log.append(f"Inferred rule from tag [{tag}]")
+                    infer_prob = 0.35 + 0.6 * self._trait_value("rule_accuracy")
+                    if random.random() < infer_prob:
+                        self.mental_model["knowledge"].try_infer_rules(group, agent_name=self.name)
+                        self.last_dik_change_time = getattr(self, "current_time", 0.0)
+                        self.activity_log.append(f"Inferred rule from tag [{tag}] (p={infer_prob:.2f})")
 
     def decide_next_action(self, environment):
         """Deprecated compatibility wrapper for legacy callers."""
@@ -922,6 +1008,8 @@ class Agent:
                     self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment)
                 self._advance_active_actions(dt)
 
+            self._apply_externalization_and_construction_effects(environment, sim_state, dt)
+
         if self.target:
             self.move_toward(self.target, dt, environment)
 
@@ -935,6 +1023,58 @@ class Agent:
                 if any(a["type"] == "communicate" for a in self.active_actions) or \
                    any(a["type"] == "communicate" for a in agent.active_actions):
                     self.communicate_with(agent)
+
+    def _apply_externalization_and_construction_effects(self, environment, sim_state, dt):
+        if sim_state is None:
+            return
+
+        for action in self.active_actions:
+            if action["type"] == "idle" and action.get("artifact_action") == ExecutableActionType.EXTERNALIZE_PLAN.value and action["progress"] == 0:
+                artifact_id = f"whiteboard:{self.name}:{int(sim_state.time*10)}"
+                rules = list(self.mental_model["knowledge"].rules)[-3:]
+                fidelity = self._trait_value("rule_accuracy")
+                if rules and fidelity < 0.5:
+                    rules = rules[:-1]
+                sim_state.team_knowledge_manager.externalize_artifact(
+                    artifact_id=artifact_id,
+                    artifact_type="whiteboard_plan",
+                    summary=f"Plan externalized by {self.name}",
+                    content={"rules": rules, "goal": self.goal},
+                    author=self.name,
+                    sim_time=sim_state.time,
+                    contributors=[self.name],
+                    knowledge_summary=rules,
+                    validation_state="validated" if fidelity >= 0.7 else "tentative",
+                )
+                sim_state.logger.log_event(sim_state.time, "externalization_created", {"agent": self.name, "artifact_id": artifact_id, "type": "whiteboard_plan"})
+
+            if action["type"] == "idle" and action.get("artifact_action") == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value and action["progress"] == 0:
+                artifacts = sim_state.team_knowledge_manager.artifacts
+                if artifacts:
+                    preferred = sorted(
+                        artifacts.values(),
+                        key=lambda a: ((a.validation_state == "validated") and self._trait_value("goal_alignment"), a.uptake_count),
+                        reverse=True,
+                    )[0]
+                    sim_state.team_knowledge_manager.adopt_artifact(preferred.artifact_id, self.name, sim_state.time)
+                    self.activity_log.append(f"Consulted shared artifact {preferred.artifact_id}")
+                    sim_state.logger.log_event(sim_state.time, "artifact_consulted", {"agent": self.name, "artifact_id": preferred.artifact_id})
+
+            if action["type"] == "construct" and action["progress"] == 0:
+                project_id = "Build_Table_B"
+                project = environment.construction.projects.get(project_id)
+                if project:
+                    environment.construction.assign_builder(project_id, self.name)
+                    environment.construction.deliver_resource(project_id, "bricks", quantity=1)
+                    fidelity = self._trait_value("rule_accuracy")
+                    if random.random() > fidelity:
+                        project["correct"] = False
+                    sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
+                    sim_state.logger.log_event(
+                        sim_state.time,
+                        "construction_externalization_update",
+                        {"agent": self.name, "project_id": project_id, "correct": project.get("correct", True)},
+                    )
 
     def update_active_actions(self, dt):
         """Deprecated wrapper: use `_advance_active_actions(...)` in live path."""
@@ -1136,19 +1276,28 @@ class Agent:
 
 
     def compare_and_repair_construction(self, construction):
-        for project in construction.projects:
+        for project in construction.projects.values():
             if not isinstance(project, dict):
                 continue
             if not project.get("in_progress", False):
                 continue
+            known_rules = self.mental_model["knowledge"].rules
+            if not known_rules:
+                continue
             rule_matches = False
-            for rule in self.mental_model["knowledge"].rules:
+            for rule in known_rules:
                 if rule in project.get("expected_rules", []):
                     rule_matches = True
                     break
             if not rule_matches:
-                self.activity_log.append(f"Disagrees with approach for {project.get('name', 'Unknown')}")
-                project["correct"] = False
+                mismatch_detect_prob = 0.25 + 0.7 * self._trait_value("rule_accuracy")
+                if random.random() <= mismatch_detect_prob:
+                    self.activity_log.append(f"Disagrees with approach for {project.get('name', 'Unknown')}")
+                    if random.random() < self._trait_value("help_tendency"):
+                        project["correct"] = True
+                        self.activity_log.append("Triggered correction/repair on construction externalization")
+                    else:
+                        project["correct"] = False
 
 
     def draw(self, ax):
