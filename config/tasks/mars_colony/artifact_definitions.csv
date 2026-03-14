@@ -1,0 +1,5 @@
+artifact_type,label,description,represents,validation_enabled,consultable,revisable,enabled,notes
+whiteboard_plan,Whiteboard plan,"Shared symbolic externalization of plans, layout sketches, or rule summaries.",plan|rule_summary|task_allocation,True,True,True,True,Team artifact.
+house_construction,House construction,Physical externalization claiming a valid house/support structure.,house_rule_externalization,True,True,True,True,Construction as externalization.
+greenhouse_construction,Greenhouse construction,Physical externalization claiming a valid greenhouse/food structure.,greenhouse_rule_externalization,True,True,True,True,Construction as externalization.
+water_generator_construction,Water generator construction,Physical externalization claiming a valid water generator/water support structure.,water_rule_externalization,True,True,True,True,Construction as externalization.

@@ -1,0 +1,75 @@
+element_id,element_type,label,description,role_scope,phase_scope,canonical,enabled,canonical_source,notes
+D_SHARED_TEAM_MISSION,data,Team mission is maximize colonist survival,The team goal is to save as many colonists as possible within the allotted time.,team,all,True,True,SRC_TEAM_SHARED,Shared objective statement.
+D_SHARED_PLANNING_REVIEW_ORDER,data,Review shared folders then role brief,"Players should review shared information, then role information, then plan/execute.",team,planning,True,True,SRC_TEAM_SHARED,Used for normative planning progression.
+D_SHARED_PHASE1_TARGET_50_CIV,data,Phase 1 target = 50 civilians,First wave target is 50 civilians.,team,phase1,True,True,SRC_TEAM_SHARED,Phase 1 objective.
+D_SHARED_PHASE2_TARGET_40_CIV_20_VIP,data,Phase 2 target = 40 civilians + 20 VIPs,Second wave target is 40 civilians and 20 VIPs.,team,phase2,True,True,SRC_TEAM_SHARED,Task-design-backed phase target.
+D_SHARED_BUILD_TYPES,data,Core structure types,"Colony requires Water Generators, Greenhouses, and Housing.",team,all,True,True,SRC_TEAM_SHARED,Shared task framing.
+D_SHARED_ANY_MEMBER_CAN_BUILD_ANY_STRUCTURE,data,Any member may build any structure type,Any team member may contribute to any structure type in the construction zone.,team,phase1,True,True,SRC_TEAM_SHARED,Important for generalized action selection.
+D_SHARED_WHITEBOARD_AVAILABLE,data,Whiteboard available,"Team may use whiteboard to make notes, sketch plans, and design a functioning colony.",team,all,True,True,SRC_WHITEBOARD,Shared externalization medium.
+D_SHARED_BRIDGE_OPTION_EXISTS,data,Bridge option exists,Bridge may be built to access the second building/resource zone.,team,all,True,True,SRC_TEAM_SHARED,Environment/layout option.
+D_SHARED_RESOURCES_REQUIRE_TRANSPORT_TIME,data,Resources must be moved from piles to work sites,Resources are not free at construction locations; movement from resource piles to work sites takes time/effort.,team,all,True,True,SRC_TEAM_SHARED,Abstracted transport-time rule; carts not explicitly simulated.
+D_ARCH_SPACING_6_STUDS,data,Structures need 6 studs spacing,All structures must be placed at least 6 studs away from other structures.,architect,all,True,True,SRC_ARCHITECT_BRIEF,Canonical spacing rule.
+D_ARCH_STRUCTURES_ARE_INDIVIDUAL,data,Each structure is separate,"Each water generator, greenhouse, and house is its own individual structure.",architect,all,True,True,SRC_ARCHITECT_BRIEF,Structure identity rule.
+D_ARCH_CAPACITY_PER_2X2,data,House capacity per 2x2 floorspace,One 2x2 brick of floorspace supports 3 civilians or 2 VIPs.,architect,all,True,True,SRC_ARCHITECT_BRIEF,Housing capacity atom.
+D_ARCH_HEADROOM_1_BRICK,data,House needs 1 brick headroom,Housing must include at least one brick of space between the floor and ceiling.,architect,all,True,True,SRC_ARCHITECT_BRIEF,Role-brief canonical headroom value.
+D_ARCH_AIRLOCK_SIZE,data,House airlock opening,Housing requires an opening 1 brick (2 studs) wide and 1 brick high.,architect,all,True,True,SRC_ARCHITECT_BRIEF,Airlock spec.
+D_ARCH_HOUSE_ENCLOSED,data,House enclosed otherwise,Housing must otherwise be completely enclosed.,architect,all,True,True,SRC_ARCHITECT_BRIEF,Enclosure rule.
+D_ARCH_FLOOR_SINGLE_COLOR,data,House floor single solid color,Floors inside a home must be a single solid color.,architect,all,True,True,SRC_ARCHITECT_BRIEF,Aesthetic rule.
+D_ARCH_WALLS_CEILING_DIFF_COLOR,data,Walls/ceiling differ from floor,Walls and ceilings must be a different color than the floor and can be multi-colored.,architect,all,True,True,SRC_ARCHITECT_BRIEF,Aesthetic rule.
+D_ARCH_VIP_FLOOR_PINK,data,VIP floors pink,VIPs only want solid pink floors.,architect,all,True,True,SRC_ARCHITECT_BRIEF,VIP-specific housing rule.
+D_ARCH_DIFF_FLOORS_SEPARATE_HOUSES,data,Different floor colors imply separate houses,Two different floor colors cannot belong to one house.,architect,all,True,True,SRC_ARCHITECT_BRIEF,Structure identity refinement.
+D_ARCH_HOUSE_NEEDS_FOOD_AND_WATER,data,Houses need food and water,Each housing structure must be connected to food and water resources.,architect,all,True,True,SRC_ARCHITECT_BRIEF,Resource dependency.
+D_BOT_SOIL_BROWN_2X2,data,Soil needs brown 2x2 dirt,Soil requires one 2x2 brown brick of dirt.,botanist,all,True,True,SRC_BOTANIST_BRIEF,Soil spec.
+D_BOT_SOIL_GREEN_2X2,data,Soil needs green 2x2 grass,Soil requires one 2x2 green plate of grass.,botanist,all,True,True,SRC_BOTANIST_BRIEF,Soil spec.
+D_BOT_SOIL_IN_GREENHOUSE,data,Soil must be in greenhouse,Soil must be contained in a Greenhouse.,botanist,all,True,True,SRC_BOTANIST_BRIEF,Containment rule.
+D_BOT_GREENHOUSE_NEEDS_WATER,data,Greenhouse needs water,Greenhouses/plants require enough water.,botanist,all,True,True,SRC_BOTANIST_BRIEF,Resource dependency.
+D_BOT_SOIL_SUPPORT_CAPACITY,data,One soil unit supports 5 civilians or 2 VIPs,One unit of soil supports 5 civilians or 2 VIPs.,botanist,all,True,True,SRC_BOTANIST_BRIEF,Food capacity atom.
+D_BOT_GREENHOUSE_GLASS_CEILING,data,Greenhouse needs clear glass ceiling,Greenhouse requires clear glass bricks for the ceiling/covering.,botanist,all,True,True,SRC_BOTANIST_BRIEF,Geometry/material rule.
+D_BOT_GREENHOUSE_BREEZEWAY,data,Greenhouse two walls two open sides,Greenhouse has walls on two opposite sides and two open sides.,botanist,all,True,True,SRC_BOTANIST_BRIEF,Geometry rule.
+D_BOT_GREENHOUSE_AIR_GAP,data,Greenhouse needs air gap,Greenhouse should have at least a small air-gap between soil and ceiling.,botanist,all,True,True,SRC_BOTANIST_BRIEF,Geometry rule.
+D_BOT_GREENHOUSE_CONNECTED_TO_HOUSING,data,Greenhouse contributes when connected to housing,Properly constructed and watered greenhouses contribute when connected to housing.,botanist,all,True,True,SRC_BOTANIST_BRIEF,Role objective implies dependency.
+D_ENG_WATERGEN_REQUIRED,data,Water generators required,Water Generators are required to supply Greenhouses and Housing with water.,engineer,all,True,True,SRC_ENGINEER_BRIEF,Shared water dependency from engineer brief.
+D_ENG_WATERGEN_60_UNITS,data,Water generator supplies 60 units,Each Water Generator supplies a maximum of 60 units of water.,engineer,all,True,True,SRC_ENGINEER_BRIEF,Capacity atom.
+D_ENG_30CIV_60_WATER,data,30 civilians require 60 water units,30 civilians require 60 units of water.,engineer,all,True,True,SRC_ENGINEER_BRIEF,Capacity demand atom.
+D_ENG_20VIP_60_WATER,data,20 VIPs require 60 water units,20 VIPs require 60 units of water.,engineer,all,True,True,SRC_ENGINEER_BRIEF,Capacity demand atom.
+D_ENG_10SOIL_60_WATER,data,10 soil blocks require 60 water units,10 blocks of soil require 60 units of water.,engineer,all,True,True,SRC_ENGINEER_BRIEF,Capacity demand atom.
+D_ENG_WATERGEN_MAX_2_STRUCTURES,data,Water generator max 2 structures,Each Water Generator can support a maximum of 2 structures.,engineer,all,True,True,SRC_ENGINEER_BRIEF,Capacity topology.
+D_ENG_WATER_SPLIT_EVENLY,data,Water split evenly,Water production is split evenly across connected structures.,engineer,all,True,True,SRC_ENGINEER_BRIEF,Distribution rule atom.
+D_ENG_WATERGEN_GRAY_FOUNDATION,data,Water generator needs gray foundation,Water Generators must have a foundation of gray blocks.,engineer,all,True,True,SRC_ENGINEER_BRIEF,Geometry/material rule.
+D_ENG_WATERGEN_BLUE_ON_GRAY,data,Blue water bricks on gray foundation,Translucent blue bricks must be placed on a gray block foundation.,engineer,all,True,True,SRC_ENGINEER_BRIEF,Geometry/material rule.
+D_ENG_WATERGEN_TWO_2X2_STACKED_2_HIGH,data,Water generator stack spec,Two 2x2 translucent water bricks wide & long stacked 2 bricks high.,engineer,all,True,True,SRC_ENGINEER_BRIEF,Geometry/material rule.
+D_ENG_WATERGEN_CAPPED,data,Water generator capped,Water Generators must be topped/capped with a layer of bricks.,engineer,all,True,True,SRC_ENGINEER_BRIEF,Geometry/material rule.
+D_ENG_FOOD_CONNECTOR_GREENHOUSE_TO_HOUSING,data,Food connectors move food greenhouse to housing,Dark green food connectors must transport food from greenhouses to housing.,engineer,all,True,True,SRC_ENGINEER_BRIEF,Connector rule.
+D_ENG_WATER_CONNECTOR_GENERATOR_TO_HOUSING_OR_GREENHOUSE,data,Water connectors move water,Dark blue water connectors move water from generators to housing or greenhouses.,engineer,all,True,True,SRC_ENGINEER_BRIEF,Connector rule.
+D_ENG_DIRECT_CONNECTION_ONLY,data,Direct connection only,Resources only flow if there is a direct connection; cannot pass resources through one structure to another.,engineer,all,True,True,SRC_ENGINEER_BRIEF,Topology rule.
+I_SHARED_PHASE_OBJECTIVES,information,Phase objectives bundle,"Shared understanding of planning, phase 1, and phase 2 objectives.",team,all,True,True,SRC_TEAM_SHARED,Derived from shared phase data.
+I_SHARED_COLONY_BUILD_REQUIREMENTS,information,Colony requires housing greenhouse water generator,"Shared understanding that survivability depends on shelter, food, and water structures.",team,all,True,True,SRC_TEAM_SHARED,Derived from shared mission/build data.
+I_SHARED_PLANNING_NORM,information,Plan after reviewing shared and role information,Shared understanding that planning should follow review of shared and role packets.,team,planning,True,True,SRC_TEAM_SHARED,Normative planning information.
+I_SHARED_RESOURCE_MOVEMENT_COST,information,Resources require movement effort/time,Shared understanding that resources are acquired at piles and moved to work sites with effort/time.,team,all,True,True,SRC_TEAM_SHARED,Abstracted logistics info.
+I_SHARED_SECOND_ZONE_OPTION,information,Bridge and second zone option,Shared understanding that second-zone access is possible via bridge.,team,all,True,True,SRC_TEAM_SHARED,Environment/layout info.
+I_ARCH_HOUSING_GEOMETRY,information,Housing geometry bundle,"Housing geometry requirements: headroom, airlock, enclosure, separate structures, spacing.",architect,all,True,True,SRC_ARCHITECT_BRIEF,Architect bundle.
+I_ARCH_HOUSING_CAPACITY,information,Housing capacity bundle,Housing floorspace capacity for civilians/VIPs.,architect,all,True,True,SRC_ARCHITECT_BRIEF,Architect bundle.
+I_ARCH_HOUSING_AESTHETICS,information,Housing aesthetics bundle,"Floor and wall/ceiling color constraints, VIP pink rule, separate floors imply separate houses.",architect,all,True,True,SRC_ARCHITECT_BRIEF,Architect bundle.
+I_ARCH_HOUSING_DEPENDENCIES,information,Housing dependency bundle,Housing requires food and water connections.,architect,all,True,True,SRC_ARCHITECT_BRIEF,Architect bundle.
+I_BOT_SOIL_COMPOSITION,information,Soil composition bundle,Soil requires brown dirt + green grass 2x2 elements.,botanist,all,True,True,SRC_BOTANIST_BRIEF,Botanist bundle.
+I_BOT_GREENHOUSE_GEOMETRY,information,Greenhouse geometry bundle,"Glass ceiling, breezeway structure, air gap, soil in greenhouse.",botanist,all,True,True,SRC_BOTANIST_BRIEF,Botanist bundle.
+I_BOT_GREENHOUSE_CAPACITY,information,Greenhouse food capacity bundle,One soil unit supports 5 civilians or 2 VIPs.,botanist,all,True,True,SRC_BOTANIST_BRIEF,Botanist bundle.
+I_BOT_GREENHOUSE_DEPENDENCIES,information,Greenhouse dependency bundle,Greenhouses need water and contribute when connected to housing.,botanist,all,True,True,SRC_BOTANIST_BRIEF,Botanist bundle.
+I_ENG_WATER_CAPACITY,information,Water capacity bundle,Water generator output and colonist/soil demand relationships.,engineer,all,True,True,SRC_ENGINEER_BRIEF,Engineer bundle.
+I_ENG_WATERGEN_GEOMETRY,information,Water generator geometry bundle,"Foundation, translucent bricks, stack, and cap requirements.",engineer,all,True,True,SRC_ENGINEER_BRIEF,Engineer bundle.
+I_ENG_CONNECTOR_RULES,information,Connector bundle,Food connector and water connector rules.,engineer,all,True,True,SRC_ENGINEER_BRIEF,Engineer bundle.
+I_ENG_DISTRIBUTION_TOPOLOGY,information,Water distribution topology bundle,"Max two structures, even split, direct connection only.",engineer,all,True,True,SRC_ENGINEER_BRIEF,Engineer bundle.
+K_COLONY_SURVIVAL_REQUIRES_HOUSING_FOOD_WATER,knowledge,Colony survival requires housing food and water,"Integrated understanding that colony viability depends jointly on shelter, food, and water.",team,all,True,True,derived,Core integrative knowledge.
+K_PHASE1_SUPPORT_TARGET,knowledge,Phase 1 support target,Understanding that current colony must support 50 civilians in phase 1.,team,phase1,True,True,derived,Phase target knowledge.
+K_PHASE2_SUPPORT_TARGET,knowledge,Phase 2 support target,Understanding that colony must support 40 civilians and 20 VIPs in phase 2.,team,phase2,True,True,derived,Phase target knowledge.
+K_HOUSE_VALIDITY_REQUIREMENTS,knowledge,Valid house requirements,Integrated understanding of what makes a house valid.,architect,all,True,True,derived,Can support validation and construction.
+K_HOUSE_SUPPORT_DEPENDENCIES,knowledge,House support dependencies,Integrated understanding that a house contributes only when connected to food and water.,architect,all,True,True,derived,Housing dependency knowledge.
+K_GREENHOUSE_VALIDITY_REQUIREMENTS,knowledge,Valid greenhouse requirements,Integrated understanding of what makes a greenhouse valid.,botanist,all,True,True,derived,Can support validation and construction.
+K_GREENHOUSE_SUPPORT_DEPENDENCIES,knowledge,Greenhouse support dependencies,Integrated understanding that greenhouse support depends on water and housing linkage.,botanist,all,True,True,derived,Greenhouse dependency knowledge.
+K_WATERGEN_VALIDITY_REQUIREMENTS,knowledge,Valid water generator requirements,Integrated understanding of what makes a water generator valid.,engineer,all,True,True,derived,Can support validation and construction.
+K_WATER_SUPPORT_CAPACITY_MODEL,knowledge,Water support capacity model,"Integrated understanding of generator output, split, and support limits.",engineer,all,True,True,derived,Water planning knowledge.
+K_CONNECTORS_ENABLE_RESOURCE_FLOW,knowledge,Connectors enable resource flow,Integrated understanding that food and water connectors are required to move resources between structures.,team,all,True,True,derived,Cross-role integrative knowledge.
+K_DIRECT_CONNECTION_MATTERS,knowledge,Direct connection matters,Integrated understanding that resources cannot be passed through intermediate structures.,team,all,True,True,derived,Topology knowledge.
+K_LAYOUT_MUST_RESPECT_SPACING,knowledge,Layout respects spacing rule,Integrated understanding that structure placement constrains colony layout.,team,all,True,True,derived,Spatial planning knowledge.
+K_SECOND_ZONE_CAN_EXPAND_OPTIONS,knowledge,Second zone can expand options,Integrated understanding that the bridge/second zone can expand resource/build options.,team,all,True,True,derived,Optional layout knowledge.
+K_SHARED_PLANNING_AND_EXTERNALIZATION_HELP,knowledge,Shared planning and externalization help,Integrated understanding that sharing and whiteboard externalization can improve team coordination.,team,planning,True,True,derived,Macrocognitive knowledge.

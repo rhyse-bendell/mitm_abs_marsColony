@@ -1,0 +1,9 @@
+source_id,source_type,role_scope,access_scope,canonical,enabled,description,source_doc
+SRC_TEAM_SHARED,packet,team,all,True,True,Shared team packet / team & task information available to all agents.,3 Mars Colony - Team Shared Information.docx
+SRC_ARCHITECT_BRIEF,packet,architect,architect,True,True,Architect role brief shown only to Architect participants/agents.,4a Mars Colony - Architect Information.docx
+SRC_BOTANIST_BRIEF,packet,botanist,botanist,True,True,Botanist role brief shown only to Botanist participants/agents.,4b Mars Colony - Botanist Information.docx
+SRC_ENGINEER_BRIEF,packet,engineer,engineer,True,True,Engineer role brief shown only to Engineer participants/agents.,4c Mars Colony - Engineer Information.docx
+SRC_WHITEBOARD,artifact,team,all,True,True,Shared whiteboard / planning artifact medium.,2 Mars Colony - Experimenter Script.docx
+SRC_CONSTRUCTION_HOUSE,artifact,team,all,True,True,House construction externalization artifact type.,derived
+SRC_CONSTRUCTION_GREENHOUSE,artifact,team,all,True,True,Greenhouse construction externalization artifact type.,derived
+SRC_CONSTRUCTION_WATER_GENERATOR,artifact,team,all,True,True,Water generator construction externalization artifact type.,derived
