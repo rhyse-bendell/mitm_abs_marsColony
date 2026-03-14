@@ -69,6 +69,58 @@ class RuleBrain(BrainProvider):
         affordances = context_packet.action_affordances
         affordance_types = [item["action_type"] for item in affordances]
 
+        traits = context_packet.individual_cognitive_state.get("traits", {})
+        communication_propensity = float(traits.get("communication_propensity", 0.5))
+        goal_alignment = float(traits.get("goal_alignment", 0.5))
+        help_tendency = float(traits.get("help_tendency", 0.5))
+
+        has_validated_artifact = any(
+            a.get("validation_state") == "validated" for a in context_packet.team_state.get("externalized_artifacts", [])
+        )
+        has_known_gaps = bool(context_packet.individual_cognitive_state.get("known_gaps"))
+
+        if (
+            ExecutableActionType.CONSULT_TEAM_ARTIFACT.value in affordance_types
+            and goal_alignment >= 0.65
+            and has_validated_artifact
+        ):
+            return BrainDecision(
+                selected_action=ExecutableActionType.CONSULT_TEAM_ARTIFACT,
+                goal_update="align_with_team_plan",
+                plan_steps=["consult validated artifact", "align local plan"],
+                reason_summary="Goal alignment favors consulting validated team artifacts.",
+                confidence=0.82,
+                assumptions=["validated shared artifact exists"],
+            )
+
+        if (
+            ExecutableActionType.REQUEST_ASSISTANCE.value in affordance_types
+            and help_tendency >= 0.7
+            and has_known_gaps
+        ):
+            return BrainDecision(
+                selected_action=ExecutableActionType.REQUEST_ASSISTANCE,
+                goal_update="request_or_offer_help",
+                communication_intent=CommunicationIntent.TKRQ,
+                plan_steps=["ask for clarification", "integrate support"],
+                reason_summary="Help tendency and known gaps prompt assistance-seeking.",
+                confidence=0.76,
+            )
+
+        if (
+            ExecutableActionType.EXTERNALIZE_PLAN.value in affordance_types
+            and communication_propensity >= 0.7
+            and context_packet.individual_cognitive_state.get("knowledge_summary")
+        ):
+            return BrainDecision(
+                selected_action=ExecutableActionType.EXTERNALIZE_PLAN,
+                goal_update="share_plan",
+                communication_intent=CommunicationIntent.TPP,
+                plan_steps=["externalize rule summary", "invite uptake"],
+                reason_summary="Communication propensity favors whiteboard/team externalization.",
+                confidence=0.78,
+            )
+
         if ExecutableActionType.INSPECT_INFORMATION_SOURCE.value in affordance_types:
             target = next(
                 (a for a in affordances if a["action_type"] == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value),

@@ -1,9 +1,51 @@
 # File: modules/construction.py
 
+
 class ConstructionManager:
     def __init__(self):
         self.projects = {
-
+            "Build_Table_A": {
+                "id": "Build_Table_A",
+                "name": "Table A Construction",
+                "type": "greenhouse",
+                "location": (6.5, 3.4),
+                "status": "in_progress",
+                "in_progress": True,
+                "correct": True,
+                "required_resources": {"bricks": 12},
+                "delivered_resources": {"bricks": 0},
+                "expected_rules": ["rule:greenhouse_requires_water"],
+                "builders": set(),
+                "author": "system",
+            },
+            "Build_Table_B": {
+                "id": "Build_Table_B",
+                "name": "Table B Construction",
+                "type": "house",
+                "location": (5.0, 4.4),
+                "status": "in_progress",
+                "in_progress": True,
+                "correct": True,
+                "required_resources": {"bricks": 14},
+                "delivered_resources": {"bricks": 0},
+                "expected_rules": ["rule:house_enclosed"],
+                "builders": set(),
+                "author": "system",
+            },
+            "Build_Table_C": {
+                "id": "Build_Table_C",
+                "name": "Table C Construction",
+                "type": "water_generator",
+                "location": (3.5, 3.4),
+                "status": "in_progress",
+                "in_progress": True,
+                "correct": True,
+                "required_resources": {"bricks": 10},
+                "delivered_resources": {"bricks": 0},
+                "expected_rules": ["rule:water_generator_2x2"],
+                "builders": set(),
+                "author": "system",
+            },
         }
 
     def update(self):
@@ -13,6 +55,7 @@ class ConstructionManager:
                 delivered = project["delivered_resources"]["bricks"]
                 if delivered >= required:
                     project["status"] = "complete"
+                    project["in_progress"] = False
 
     def get_active_projects(self):
         return [p for p in self.projects.values() if p["status"] != "complete"]
@@ -38,7 +81,7 @@ class ConstructionManager:
             border = {
                 "bridge": "blue",
                 "greenhouse": "green",
-                "water_gen": "teal",
+                "water_generator": "teal",
                 "house": "brown"
             }.get(p["type"], "gray")
 

@@ -71,6 +71,17 @@ class SimulationState:
             )
             for trait, value in config["traits"].items():
                 setattr(agent, trait, value)
+            self.logger.log_event(
+                self.time,
+                "agent_trait_profile",
+                {"agent": agent.name, "traits": {
+                    "communication_propensity": getattr(agent, "communication_propensity", 0.5),
+                    "goal_alignment": getattr(agent, "goal_alignment", 0.5),
+                    "help_tendency": getattr(agent, "help_tendency", 0.5),
+                    "build_speed": getattr(agent, "build_speed", 0.5),
+                    "rule_accuracy": getattr(agent, "rule_accuracy", 0.5),
+                }},
+            )
             agent.allowed_packet = config["packet_access"]
             self.agents.append(agent)
 
@@ -94,6 +105,9 @@ class SimulationState:
     def update(self, base_dt):
         dt = base_dt * self.speed_multiplier
         self.environment.update(self.time)
+        for project in self.environment.construction.projects.values():
+            if isinstance(project, dict):
+                self.team_knowledge_manager.upsert_construction_artifact(project, self.time)
 
         for i, agent in enumerate(self.agents):
             for j in range(i + 1, len(self.agents)):
