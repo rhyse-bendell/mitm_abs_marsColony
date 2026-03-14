@@ -2,6 +2,7 @@ import csv
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from modules.action_schema import BrainDecision, ExecutableActionType
 from modules.construct_mapping import ConstructMapper
@@ -52,6 +53,63 @@ class TestConstructMapping(unittest.TestCase):
         mapper = ConstructMapper(config_dir="config")
         mechanisms = mapper.resolve_mechanisms({"conscientiousness": 1.0}, mechanism_overrides={})
         self.assertNotIn("plan_persistence", mechanisms)
+
+    def test_invalid_numeric_row_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp)
+            (cfg / "constructs.csv").write_text(
+                "construct_id,label,description,scale_min,scale_max,default_value,construct_group,enabled,notes,citation\n"
+                "teamwork_potential,Teamwork Potential,d,0,1,0.5,baseline,true,n,c\n",
+                encoding="utf-8",
+            )
+            (cfg / "construct_to_mechanism.csv").write_text(
+                "construct_id,mechanism_id,effect_weight,transform,intercept,min_output,max_output,phase_scope,condition_group,enabled,notes\n"
+                "teamwork_potential,communication_propensity,not_a_number,linear,0,0,1,all,default,true,n\n",
+                encoding="utf-8",
+            )
+            (cfg / "mechanism_to_hook.csv").write_text(
+                "mechanism_id,hook_type,hook_target,operator,parameter,formula_name,min_effect,max_effect,enabled,notes\n"
+                "communication_propensity,action_utility,communicate,add,utility_weight,bounded_add,0,1,true,n\n",
+                encoding="utf-8",
+            )
+            mapper = ConstructMapper(config_dir=cfg)
+            self.assertTrue(any("Invalid numeric field 'effect_weight'" in issue for issue in mapper.validation_issues))
+            self.assertEqual(mapper.construct_to_mechanism, [])
+
+    def test_hooks_affect_action_utility_bias_direction(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir)
+            agent = sim.agents[0]
+            base = BrainDecision(
+                selected_action=ExecutableActionType.WAIT,
+                reason_summary="baseline",
+                confidence=1.0,
+            )
+            context = SimpleNamespace(team_state={"plan_readiness": "validated_shared_plan"})
+            # Trait gate open; hook drives probability via midpoint average in _apply_trait_bias_to_decision.
+            agent.goal_alignment = 0.9
+            agent.help_tendency = 0.0
+            agent.communication_propensity = 0.0
+
+            import modules.agent as agent_module
+            original_random = agent_module.random.random
+            try:
+                agent.hook_effects[("action_utility", "consult_team_artifact", "utility_weight")] = 1.0
+                agent_module.random.random = lambda: 0.95
+                unchanged = agent._apply_trait_bias_to_decision(base, context, sim, "no_active_plan")
+                self.assertEqual(unchanged.selected_action, ExecutableActionType.WAIT)
+
+                decision2 = BrainDecision(
+                    selected_action=ExecutableActionType.WAIT,
+                    reason_summary="baseline",
+                    confidence=1.0,
+                )
+                agent.hook_effects[("action_utility", "consult_team_artifact", "utility_weight")] = 1.0
+                agent_module.random.random = lambda: 0.94
+                changed = agent._apply_trait_bias_to_decision(decision2, context, sim, "no_active_plan")
+                self.assertEqual(changed.selected_action, ExecutableActionType.CONSULT_TEAM_ARTIFACT)
+            finally:
+                agent_module.random.random = original_random
 
     def test_hooks_affect_duration_and_fidelity_directions(self):
         with tempfile.TemporaryDirectory() as tmpdir:
