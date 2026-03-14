@@ -1107,6 +1107,7 @@ class Agent:
                             "project_id": project_id,
                             "correct": project.get("correct", True),
                             "structure_type": project.get("type", "unknown"),
+                            "status": project.get("status", "in_progress"),
                         },
                     )
 

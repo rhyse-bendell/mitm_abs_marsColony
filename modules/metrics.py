@@ -30,6 +30,11 @@ class MetricsCollector:
         self.dik_counts = defaultdict(Counter)
         self.externalization_by_type = Counter()
         self.construction_externalizations_by_type = Counter()
+        self.construction_creation_by_type = Counter()
+        self.construction_revision_by_type = Counter()
+        self.construction_validation_by_type = Counter()
+        self._seen_construction_projects = set()
+        self._artifact_state = {}
 
         self.agent_stats = {
             agent.name: {
@@ -48,9 +53,11 @@ class MetricsCollector:
                 "time_inspecting_info": 0.0,
                 "time_communicating": 0.0,
                 "time_transporting": 0.0,
+                "time_externalizing": 0.0,
                 "time_constructing": 0.0,
                 "time_validating_or_repairing": 0.0,
                 "retarget_count": 0,
+                "stall_episode_count": 0,
                 "mismatch_detected": 0,
                 "repair_episodes": 0,
                 "help_requests": 0,
@@ -59,6 +66,7 @@ class MetricsCollector:
                 "zone_time": Counter(),
                 "dik": Counter(),
                 "knowledge_rules_end": 0,
+                "_last_status": "",
             }
             for agent in simulation.agents
         }
@@ -79,11 +87,17 @@ class MetricsCollector:
                 "events": Counter(),
                 "structures_completed": 0,
                 "structures_validated_correct": 0,
+                "structures_repaired_or_corrected": 0,
                 "communication_events": 0,
                 "externalization_events": 0,
                 "artifact_consultations": 0,
                 "repair_episodes": 0,
                 "mismatch_detected": 0,
+                "dik_counts": Counter(),
+                "construction_externalization_create_events": 0,
+                "construction_externalization_revision_events": 0,
+                "validation_events": 0,
+                "_seen_projects": set(),
             }
         )
 
@@ -116,7 +130,24 @@ class MetricsCollector:
 
         if event_type == "construction_externalization_update":
             structure_type = payload.get("structure_type", "unknown")
+            project_id = payload.get("project_id")
             self.construction_externalizations_by_type[structure_type] += 1
+            if project_id and project_id not in self._seen_construction_projects:
+                self._seen_construction_projects.add(project_id)
+                self.construction_creation_by_type[structure_type] += 1
+                self.phase_stats[-1]["construction_externalization_create_events"] += 1
+            else:
+                self.construction_revision_by_type[structure_type] += 1
+                self.phase_stats[-1]["construction_externalization_revision_events"] += 1
+            if project_id:
+                self.phase_stats[-1]["_seen_projects"].add(project_id)
+
+            if payload.get("status") == "complete":
+                self.phase_stats[-1]["structures_completed"] += 1
+            if payload.get("correct") is True:
+                self.phase_stats[-1]["structures_validated_correct"] += 1
+                self.phase_stats[-1]["validation_events"] += 1
+                self.construction_validation_by_type[structure_type] += 1
 
         if event_type == "artifact_consulted":
             self.phase_stats[-1]["artifact_consultations"] += 1
@@ -137,6 +168,7 @@ class MetricsCollector:
 
         if event_type == "construction_repair_episode":
             self.phase_stats[-1]["repair_episodes"] += 1
+            self.phase_stats[-1]["structures_repaired_or_corrected"] += 1
             agent = payload.get("agent")
             if agent in self.agent_stats:
                 self.agent_stats[agent]["repair_episodes"] += 1
@@ -161,8 +193,21 @@ class MetricsCollector:
             self._update_agent_time_buckets(agent, entry, dt)
             self._update_agent_zone(agent, entry, dt)
             status = getattr(agent, "status_last_action", "") or ""
-            if "retargeted" in status.lower():
+            if "retargeted" in status.lower() and entry["_last_status"] != status:
                 entry["retarget_count"] += 1
+            entry["_last_status"] = status
+
+        self._track_artifact_validation_transitions()
+
+    def _track_artifact_validation_transitions(self):
+        artifacts = self.simulation.team_knowledge_manager.artifacts
+        for artifact_id, artifact in artifacts.items():
+            prev = self._artifact_state.get(artifact_id)
+            curr = artifact.validation_state
+            self._artifact_state[artifact_id] = curr
+            if prev is not None and prev != curr and curr == "validated":
+                self.events_by_type["artifact_validated"] += 1
+                self.phase_stats[-1]["validation_events"] += 1
 
     def _update_agent_zone(self, agent, entry, dt):
         zone_name = self.simulation.environment.get_zone(agent.position)
@@ -173,6 +218,7 @@ class MetricsCollector:
         active = list(getattr(agent, "active_actions", []))
         if not active:
             entry["time_stalled"] += dt
+            entry["stall_episode_count"] += 1
             return
 
         seen_bucket = False
@@ -193,18 +239,36 @@ class MetricsCollector:
             elif atype == "construct":
                 entry["time_constructing"] += dt
                 seen_bucket = True
-            elif atype == "idle" and "repair" in status:
+            elif atype == "idle" and action.get("artifact_action") == "externalize_plan":
+                entry["time_externalizing"] += dt
+                seen_bucket = True
+            elif atype == "idle" and action.get("artifact_action") == "consult_team_artifact":
+                entry["time_inspecting_info"] += dt
+                seen_bucket = True
+            elif atype == "idle" and ("repair" in status or "validate" in status):
                 entry["time_validating_or_repairing"] += dt
                 seen_bucket = True
 
         if not seen_bucket:
             entry["time_stalled"] += dt
+            entry["stall_episode_count"] += 1
 
     def _collect_dik_counts(self):
         for row in DIK_LOG:
             self.dik_counts[row.get("agent", "unknown")][row.get("type", "Unknown")] += 1
         for name, stats in self.agent_stats.items():
             stats["dik"] = dict(self.dik_counts.get(name, {}))
+
+    def _compute_phase_dik_counts(self):
+        for phase in self.phase_stats:
+            start = phase.get("start_time", 0.0) or 0.0
+            end = phase.get("end_time")
+            if end is None:
+                end = self.simulation.time
+            for row in DIK_LOG:
+                t = float(row.get("time", 0.0) or 0.0)
+                if start <= t < end:
+                    phase["dik_counts"][row.get("type", "Unknown")] += 1
 
     def _structure_summary(self):
         projects = self.simulation.environment.construction.projects.values()
@@ -270,6 +334,7 @@ class MetricsCollector:
             "experiment_name": self.simulation.logger.output_session.experiment_name,
             "timestamp": self.simulation.logger.output_session.timestamp,
             "session_folder": str(self.simulation.logger.output_session.session_folder),
+            "run_id": getattr(self.simulation, "run_id", None),
             "speed_multiplier": self.simulation.speed_multiplier,
             "flash_mode": self.simulation.flash_mode,
             "seed": getattr(self.simulation, "seed", None),
@@ -287,6 +352,8 @@ class MetricsCollector:
                         "build_speed": getattr(a, "build_speed", 0.5),
                         "rule_accuracy": getattr(a, "rule_accuracy", 0.5),
                     },
+                    "construct_values": dict(getattr(a, "construct_values", {})),
+                    "mechanism_profile": dict(getattr(a, "mechanism_profile", {})),
                     "packet_access": list(getattr(a, "allowed_packet", [])),
                 }
                 for a in self.simulation.agents
@@ -303,11 +370,19 @@ class MetricsCollector:
                     "start_time": phase["start_time"],
                     "end_time": phase["end_time"],
                     "events": dict(phase["events"]),
+                    "structures_attempted": len(phase["_seen_projects"]),
+                    "structures_completed": phase["structures_completed"],
+                    "structures_validated_correct": phase["structures_validated_correct"],
+                    "structures_repaired_or_corrected": phase["structures_repaired_or_corrected"],
                     "communication_events": phase["communication_events"],
                     "externalization_events": phase["externalization_events"],
                     "artifact_consultations": phase["artifact_consultations"],
                     "repair_episodes": phase["repair_episodes"],
                     "mismatch_detected": phase["mismatch_detected"],
+                    "dik_counts": dict(phase["dik_counts"]),
+                    "construction_externalization_create_events": phase["construction_externalization_create_events"],
+                    "construction_externalization_revision_events": phase["construction_externalization_revision_events"],
+                    "validation_events": phase["validation_events"],
                 }
             )
         return rows
@@ -315,6 +390,7 @@ class MetricsCollector:
     def finalize(self):
         self._close_phase()
         self._collect_dik_counts()
+        self._compute_phase_dik_counts()
 
         for agent in self.simulation.agents:
             self.agent_stats[agent.name]["knowledge_rules_end"] = len(agent.mental_model["knowledge"].rules)
@@ -351,13 +427,22 @@ class MetricsCollector:
                 "construction_externalization_creations_or_updates": self.events_by_type[
                     "construction_externalization_update"
                 ],
+                "construction_externalization_creations_by_type": dict(self.construction_creation_by_type),
+                "construction_externalization_revisions_by_type": dict(self.construction_revision_by_type),
+                "validation_events": self.events_by_type["artifact_validated"],
                 "mismatch_detections": self.events_by_type["construction_mismatch_detected"],
                 "repair_or_correction_episodes": self.events_by_type["construction_repair_episode"],
                 "team_knowledge": team_knowledge_summary,
             },
             "externalization_metrics": {
                 "externalized_artifacts_created_by_type": dict(self.externalization_by_type),
+                "whiteboard_artifacts_created_by_type": {
+                    k: v for k, v in self.externalization_by_type.items() if "whiteboard" in k
+                },
                 "construction_artifacts_created_by_type": dict(self.construction_externalizations_by_type),
+                "construction_artifact_creation_by_type": dict(self.construction_creation_by_type),
+                "construction_artifact_revision_by_type": dict(self.construction_revision_by_type),
+                "construction_artifact_validation_by_type": dict(self.construction_validation_by_type),
                 "artifact_validation_rate": team_knowledge_summary["artifact_validation_rate"],
                 "artifact_revision_or_repair_rate": round(
                     self.events_by_type["construction_repair_episode"] / max(1, len(self.simulation.team_knowledge_manager.artifacts)),
@@ -380,6 +465,7 @@ class MetricsCollector:
                             "time_inspecting_info",
                             "time_communicating",
                             "time_transporting",
+                            "time_externalizing",
                             "time_constructing",
                             "time_validating_or_repairing",
                         ]
@@ -391,6 +477,7 @@ class MetricsCollector:
                     for name, stats in self.agent_stats.items()
                 },
                 "retarget_counts_by_agent": {name: stats["retarget_count"] for name, stats in self.agent_stats.items()},
+                "stall_episode_counts_by_agent": {name: stats["stall_episode_count"] for name, stats in self.agent_stats.items()},
             },
             "events": dict(self.events_by_type),
             "end_state": {
@@ -410,9 +497,11 @@ class MetricsCollector:
                 "time_inspecting_info": round(stats["time_inspecting_info"], 3),
                 "time_communicating": round(stats["time_communicating"], 3),
                 "time_transporting": round(stats["time_transporting"], 3),
+                "time_externalizing": round(stats["time_externalizing"], 3),
                 "time_constructing": round(stats["time_constructing"], 3),
                 "time_validating_or_repairing": round(stats["time_validating_or_repairing"], 3),
                 "retarget_count": stats["retarget_count"],
+                "stall_episode_count": stats["stall_episode_count"],
                 "mismatch_detected": stats["mismatch_detected"],
                 "repair_episodes": stats["repair_episodes"],
                 "help_requests": stats["help_requests"],
@@ -449,6 +538,16 @@ class MetricsCollector:
             "run_summary_saved",
             {"path": str(measures_dir / "run_summary.json")},
         )
+        self.simulation.logger.log_event(
+            self.simulation.time,
+            "phase_summary_saved",
+            {"path": str(measures_dir / "phase_summary.json"), "phase_count": len(phase_summary)},
+        )
+        self.simulation.logger.log_event(
+            self.simulation.time,
+            "team_summary_saved",
+            {"path": str(measures_dir / "team_summary.json")},
+        )
 
     @staticmethod
     def _write_json(path: Path, payload):
@@ -463,4 +562,3 @@ class MetricsCollector:
             writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
             writer.writeheader()
             writer.writerows(rows)
-

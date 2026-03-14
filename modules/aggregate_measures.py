@@ -52,6 +52,8 @@ def aggregate_run_summaries(outputs_root, output_basename="aggregate_run_summari
     else:
         aggregate_csv.write_text("", encoding="utf-8")
 
+    print(f"✅ aggregate summary written: json={aggregate_json} csv={aggregate_csv} rows={len(rows)}")
+
     return {"json": str(aggregate_json), "csv": str(aggregate_csv), "count": len(rows)}
 
 
