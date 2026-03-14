@@ -15,6 +15,7 @@ class MarsColonyInterface:
     STATE_RUNNING = "running"
     STATE_PAUSED = "paused"
     STATE_STOPPED = "stopped"
+    EXPERIMENT_MAX_CONTENT_WIDTH = 940
 
     def __init__(self):
         self.root = tk.Tk()
@@ -692,8 +693,17 @@ class MarsColonyInterface:
             canvas.unbind_all("<Button-4>")
             canvas.unbind_all("<Button-5>")
 
-        self.tab_experiment.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(canvas_window, width=e.width))
+        def _update_experiment_scrollregion(_):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _update_experiment_width(event):
+            content_width = min(event.width, self.EXPERIMENT_MAX_CONTENT_WIDTH)
+            side_gutter = max((event.width - content_width) // 2, 0)
+            canvas.coords(canvas_window, side_gutter, 0)
+            canvas.itemconfigure(canvas_window, width=content_width)
+
+        self.tab_experiment.bind("<Configure>", _update_experiment_scrollregion)
+        canvas.bind("<Configure>", _update_experiment_width)
         canvas.bind("<Enter>", _bind_mousewheel)
         canvas.bind("<Leave>", _unbind_mousewheel)
         canvas.configure(yscrollcommand=scrollbar.set)
@@ -738,7 +748,7 @@ class MarsColonyInterface:
         self._create_experiment_global_settings(self.tab_experiment)
 
         cards_container = ttk.Frame(self.tab_experiment)
-        cards_container.grid(row=1, column=0, sticky="ew", padx=2)
+        cards_container.grid(row=1, column=0, sticky="ew", padx=10)
         cards_container.columnconfigure(0, weight=1)
 
         for row, role in enumerate(roles):
