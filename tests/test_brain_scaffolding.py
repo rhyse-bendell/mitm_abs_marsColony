@@ -47,7 +47,7 @@ class TestBrainContextAndDecision(unittest.TestCase):
 
     def test_brain_context_builds_in_headless_mode(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            sim = SimulationState(phases=[], project_root=tmpdir)
+            sim = SimulationState(phases=[], project_root=tmpdir, planner_config={"planner_interval_steps": 50, "planner_interval_time": 999.0, "planner_trigger_mask": []})
             agent = sim.agents[0]
             packet = sim.brain_context_builder.build(sim, agent)
             self.assertIn("mission", packet.static_task_context)
@@ -157,6 +157,56 @@ class TestDecisionRoutingAndPlanning(unittest.TestCase):
 
             self.assertEqual(len(query_calls), 1)
 
+
+    def test_planner_cadence_interval_prevents_per_tick_calls(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                planner_config={
+                    "planner_interval_steps": 50,
+                    "planner_interval_time": 999.0,
+                    "planner_trigger_mask": [],
+                },
+            )
+            agent = sim.agents[0]
+            query_calls = []
+            original = agent._build_rule_based_brain_decision
+
+            def wrapped(sim_state, trigger_reason):
+                query_calls.append(trigger_reason)
+                return original(sim_state, trigger_reason)
+
+            agent._build_rule_based_brain_decision = wrapped
+            sim.update(0.2)
+            for _ in range(6):
+                sim.update(0.2)
+
+            self.assertEqual(len(query_calls), 1)
+
+    def test_trigger_mask_replans_when_enabled_trigger_fires(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                planner_config={
+                    "planner_interval_steps": 50,
+                    "planner_interval_time": 999.0,
+                    "planner_trigger_mask": ["new_dik_acquired"],
+                },
+            )
+            agent = sim.agents[0]
+            sim.update(0.2)
+            first_plan_id = agent.current_plan.plan_id
+
+            agent.mental_model["knowledge"].rules.append("synthetic_rule_for_replan")
+            for _ in range(8):
+                sim.update(0.2)
+                if agent.current_plan.plan_id != first_plan_id:
+                    break
+
+            self.assertNotEqual(agent.current_plan.plan_id, first_plan_id)
+
     def test_trigger_policy_replans_on_new_dik(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = SimulationState(phases=[], project_root=tmpdir)
@@ -176,7 +226,11 @@ class TestDecisionRoutingAndPlanning(unittest.TestCase):
 
     def test_plan_persistence_carries_action_across_ticks(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            sim = SimulationState(phases=[], project_root=tmpdir)
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                planner_config={"planner_interval_steps": 50, "planner_interval_time": 999.0, "planner_trigger_mask": []},
+            )
             agent = sim.agents[0]
 
             sim.update(0.2)
@@ -190,6 +244,28 @@ class TestDecisionRoutingAndPlanning(unittest.TestCase):
 
             self.assertEqual(agent.current_plan.plan_id, plan_id)
             self.assertLess(agent.current_plan.remaining_executions, remaining_before)
+
+
+    def test_planner_refresh_updates_goal_stack_from_decision(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir)
+            agent = sim.agents[0]
+
+            def fake_decide(_context):
+                return BrainDecision(
+                    selected_action=ExecutableActionType.WAIT,
+                    goal_update="align_with_team_plan",
+                    plan_method_id="pm_consult_and_align",
+                    next_steps=["consult artifact", "align local schedule"],
+                    reason_summary="test planner output",
+                    confidence=0.9,
+                )
+
+            sim.brain_provider.decide = fake_decide
+            sim.update(0.2)
+
+            self.assertEqual(agent.goal, "align_with_team_plan")
+            self.assertTrue(any("Planner next steps" in e for e in agent.activity_log))
 
     def test_memory_compaction_exposes_three_history_bands(self):
         agent = Agent(name="Architect", role="Architect")
@@ -284,6 +360,30 @@ class TestLocalBackendFallback(unittest.TestCase):
 
             self.assertIsInstance(decision, BrainDecision)
             self.assertNotEqual(decision.reason_summary, "")
+
+
+    def test_invalid_local_decision_payload_falls_back_safely(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, brain_backend="local_http")
+            agent = sim.agents[0]
+            packet = sim.brain_context_builder.build(sim, agent)
+
+            class FakeResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self):
+                    payload = {"choices": [{"message": {"content": '{"selected_action":"not_real"}'}}]}
+                    return json.dumps(payload).encode("utf-8")
+
+            with patch("modules.brain_provider.request.urlopen", return_value=FakeResponse()):
+                decision = sim.brain_provider.decide(packet)
+
+            self.assertIsInstance(decision, BrainDecision)
+            self.assertTrue(sim.brain_provider.last_outcome.get("fallback"))
 
     def test_local_backend_selection_does_not_break_headless_simulation(self):
         with tempfile.TemporaryDirectory() as tmpdir:

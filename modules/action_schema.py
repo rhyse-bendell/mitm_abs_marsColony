@@ -78,6 +78,8 @@ class BrainDecision:
     target_zone: Optional[str] = None
     goal_update: Optional[str] = None
     plan_steps: List[str] = field(default_factory=list)
+    plan_method_id: Optional[str] = None
+    next_steps: List[str] = field(default_factory=list)
     communication_intent: Optional[CommunicationIntent] = None
     reason_summary: str = ""
     confidence: float = 0.0
