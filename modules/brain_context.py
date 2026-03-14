@@ -116,6 +116,11 @@ class BrainContextBuilder:
                 if target.get("kind") == "information"
                 else ExecutableActionType.START_CONSTRUCTION
             )
+            source_state = None
+            if target.get("kind") == "information":
+                source_state = getattr(agent, "source_inspection_state", {}).get(target_name, "unseen")
+                if source_state == "inspected":
+                    continue
             legal.append(
                 {
                     "action_type": action_type.value,
@@ -124,6 +129,7 @@ class BrainContextBuilder:
                     "target_point": accessible_point,
                     "target_class": target.get("kind"),
                     "reachable": reachable,
+                    "source_state": source_state,
                 }
             )
 
