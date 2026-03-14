@@ -1,6 +1,8 @@
+import json
 import random
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from modules.action_schema import (
     BrainDecision,
@@ -12,6 +14,8 @@ from modules.brain_context import BrainContextBuilder
 from modules.brain_provider import BrainBackendConfig, RuleBrain, create_brain_provider
 from modules.environment import Environment
 from modules.simulation import SimulationState
+from urllib import error
+
 from modules.team_knowledge import TeamKnowledgeManager
 
 
@@ -198,6 +202,81 @@ class TestBackendConfiguration(unittest.TestCase):
             self.assertEqual(sim.brain_backend_config.backend, "local_stub")
             self.assertEqual(sim.brain_provider.__class__.__name__, "LocalLLMBrainStub")
 
+
+
+class TestContextGroundingAndAffordances(unittest.TestCase):
+    def test_brain_context_contains_grounded_state_and_uncertainty_summaries(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir)
+            agent = sim.agents[0]
+            packet = sim.brain_context_builder.build(sim, agent)
+
+            self.assertIn("built_state", packet.world_snapshot)
+            self.assertIn("affordance_map", packet.world_snapshot)
+            self.assertIn("build_readiness", packet.individual_cognitive_state)
+            self.assertIn("certainty_signals", packet.individual_cognitive_state)
+            self.assertIn("externalized_artifacts", packet.team_state)
+            self.assertIn("semantic_plan_evolution", packet.history_bands)
+
+    def test_legal_affordances_use_accessible_targets_not_impassable_object_centers(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Engineer", role="Engineer", position=env.get_spawn_point("Engineer"))
+        affordances = BrainContextBuilder()._affordances(agent, env)
+
+        interaction_affordances = [
+            a for a in affordances
+            if a.get("action_type") in {
+                ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
+                ExecutableActionType.START_CONSTRUCTION.value,
+            }
+        ]
+        self.assertTrue(interaction_affordances)
+        for affordance in interaction_affordances:
+            self.assertIsNotNone(affordance.get("target_point"))
+            self.assertTrue(env.is_point_navigable(tuple(affordance["target_point"])))
+
+
+class TestLocalBackendFallback(unittest.TestCase):
+    def test_local_backend_failure_falls_back_to_rule_brain(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, brain_backend="local_http")
+            agent = sim.agents[0]
+            packet = sim.brain_context_builder.build(sim, agent)
+
+            with patch("modules.brain_provider.request.urlopen", side_effect=error.URLError("offline")):
+                decision = sim.brain_provider.decide(packet)
+
+            self.assertIsInstance(decision, BrainDecision)
+            self.assertIn(decision.selected_action, list(ExecutableActionType))
+
+    def test_malformed_local_backend_response_is_handled_safely(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, brain_backend="local_http")
+            agent = sim.agents[0]
+            packet = sim.brain_context_builder.build(sim, agent)
+
+            class FakeResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self):
+                    return json.dumps({"choices": [{"message": {"content": "{}"}}]}).encode("utf-8")
+
+            with patch("modules.brain_provider.request.urlopen", return_value=FakeResponse()):
+                decision = sim.brain_provider.decide(packet)
+
+            self.assertIsInstance(decision, BrainDecision)
+            self.assertNotEqual(decision.reason_summary, "")
+
+    def test_local_backend_selection_does_not_break_headless_simulation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, brain_backend="local_http")
+            with patch("modules.brain_provider.request.urlopen", side_effect=error.URLError("offline")):
+                sim.update(0.2)
+            self.assertGreater(sim.time, 0.0)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,18 @@ class SimulationState:
         "Fast": 2.0
     }
 
-    def __init__(self, agent_configs=None, num_runs=1, speed="Normal", experiment_name=None, phases=None, flash_mode=False, project_root=None, brain_backend="rule_brain"):
+    def __init__(
+        self,
+        agent_configs=None,
+        num_runs=1,
+        speed="Normal",
+        experiment_name=None,
+        phases=None,
+        flash_mode=False,
+        project_root=None,
+        brain_backend="rule_brain",
+        brain_backend_options=None,
+    ):
         self.environment = Environment(phases=phases)
         self.agents = []
         self.num_runs = num_runs
@@ -26,7 +37,8 @@ class SimulationState:
         self.logger = SimulationLogger(experiment_name=experiment_name or "experiment", project_root=project_root)
         self.team_knowledge_manager = TeamKnowledgeManager()
         self.brain_context_builder = BrainContextBuilder()
-        self.brain_backend_config = BrainBackendConfig(backend=brain_backend)
+        backend_options = brain_backend_options or {}
+        self.brain_backend_config = BrainBackendConfig(backend=brain_backend, **backend_options)
         self.brain_provider = create_brain_provider(self.brain_backend_config)
         self.save_interval = 10.0
         self._last_save_time = 0.0
