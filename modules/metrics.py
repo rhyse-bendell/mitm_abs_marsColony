@@ -26,6 +26,8 @@ class MetricsCollector:
         self._phase_open_time = simulation.time
 
         self.events_by_type = Counter()
+        self.breakdown_counts = defaultdict(Counter)
+        self.reason_distributions = defaultdict(Counter)
         self.communication_by_type = Counter()
         self.dik_counts = defaultdict(Counter)
         self.externalization_by_type = Counter()
@@ -121,6 +123,36 @@ class MetricsCollector:
         payload = event.get("payload_data", {})
         self.events_by_type[event_type] += 1
         self.phase_stats[-1]["events"][event_type] += 1
+
+        reason = payload.get("reason") or payload.get("trigger_reason") or payload.get("failure_category") or payload.get("blocker_category")
+        if reason:
+            self.reason_distributions[event_type][str(reason)] += 1
+
+        if event_type in {"planner_invocation_requested", "planner_invocation_completed"}:
+            trig = payload.get("trigger_reason", "unknown")
+            self.breakdown_counts["planner_invocations_by_trigger"][trig] += 1
+        if event_type in {"brain_provider_fallback", "brain_provider_timeout", "brain_provider_error"}:
+            self.breakdown_counts["planner_fallback_by_reason"][payload.get("reason", "unknown")] += 1
+        if event_type in {"brain_provider_response_invalid", "brain_response_rejected"}:
+            self.breakdown_counts["invalid_brain_responses"][payload.get("schema_parsing_succeeded", "unknown")] += 1
+        if event_type in {"plan_adopted", "plan_adopted_low_trust", "plan_invalidated"}:
+            self.breakdown_counts["plan_method_outcomes"][event_type] += 1
+        if event_type.startswith("goal_"):
+            self.breakdown_counts["goal_transitions"][event_type] += 1
+            gtype = payload.get("goal_type", "unknown")
+            self.breakdown_counts["goal_type_adoptions"][gtype] += 1
+        if event_type == "action_translation_failed":
+            self.breakdown_counts["translation_failures_by_category"][payload.get("failure_category", "unknown")] += 1
+        if event_type == "target_resolution_failed":
+            self.breakdown_counts["target_resolution_failures_by_category"][payload.get("failure_category", "unknown")] += 1
+        if event_type == "execution_readiness_failed":
+            self.breakdown_counts["readiness_failures_by_category"][payload.get("failure_category", "unknown")] += 1
+        if event_type in {"movement_blocked", "movement_failed"}:
+            self.breakdown_counts["movement_failures_by_category"][payload.get("blocker_category", payload.get("failure_category", "unknown"))] += 1
+        if event_type in {"stall_started", "stall_continued", "stall_recovered", "repeated_stall_detected"}:
+            self.breakdown_counts["stall_events_by_category"][payload.get("stall_reason", "unknown")] += 1
+        if event_type in {"repeated_action_loop_detected", "repeated_plan_loop_detected", "repeated_target_failure_detected", "repeated_backend_fallback_detected"}:
+            self.breakdown_counts["loop_detections"][event_type] += 1
 
         if event_type == "communication_exchange":
             for mtype in payload.get("message_types", []):
@@ -361,6 +393,11 @@ class MetricsCollector:
             intersection &= rs
         return round(len(intersection) / len(union), 4)
 
+
+    @staticmethod
+    def _top_reasons(counter, n=5):
+        return [{"reason": k, "count": v} for k, v in counter.most_common(n)]
+
     def _run_metadata(self):
         env = self.simulation.environment
         phase_config = [
@@ -414,6 +451,7 @@ class MetricsCollector:
                     "start_time": phase["start_time"],
                     "end_time": phase["end_time"],
                     "events": dict(phase["events"]),
+                    "breakdown_events": {k: v for k, v in phase["events"].items() if any(k.startswith(p) for p in ["planner_", "brain_", "goal_", "action_translation", "target_resolution", "movement_", "stall_", "repeated_"])},
                     "structures_attempted": len(phase["_seen_projects"]),
                     "structures_completed": phase["structures_completed"],
                     "structures_validated_correct": phase["structures_validated_correct"],
@@ -524,6 +562,8 @@ class MetricsCollector:
                 "stall_episode_counts_by_agent": {name: stats["stall_episode_count"] for name, stats in self.agent_stats.items()},
             },
             "events": dict(self.events_by_type),
+            "breakdown_metrics": {k: dict(v) for k, v in self.breakdown_counts.items()},
+            "reason_top_n": {k: self._top_reasons(v) for k, v in self.reason_distributions.items() if v},
             "end_state": {
                 "sim_time": round(self.simulation.time, 3),
                 "team_artifact_count": len(self.simulation.team_knowledge_manager.artifacts),
@@ -563,6 +603,8 @@ class MetricsCollector:
             "externalization_metrics": run_summary["externalization_metrics"],
             "communication_counts_by_type": run_summary["process"]["communication_counts_by_type"],
             "events": dict(self.events_by_type),
+            "breakdown_metrics": {k: dict(v) for k, v in self.breakdown_counts.items()},
+            "reason_top_n": {k: self._top_reasons(v) for k, v in self.reason_distributions.items() if v},
             "backend": {
                 "configured_brain_backend": run_summary["run_metadata"].get("configured_brain_backend"),
                 "effective_brain_backend": run_summary["run_metadata"].get("effective_brain_backend"),

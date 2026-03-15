@@ -296,6 +296,18 @@ class SimulationState:
                     "fallback_count": self.backend_fallback_count,
                 },
             )
+            if self.backend_fallback_count >= 3:
+                self.logger.log_event(
+                    self.time,
+                    "repeated_backend_fallback_detected",
+                    {
+                        "configured_brain_backend": configured,
+                        "effective_brain_backend": effective,
+                        "reason": fallback_reason,
+                        "repetition_count": self.backend_fallback_count,
+                        "window_size": 3,
+                    },
+                )
         previous_effective = self.effective_brain_backend
         self.effective_brain_backend = effective
         if previous_effective != self.effective_brain_backend:
