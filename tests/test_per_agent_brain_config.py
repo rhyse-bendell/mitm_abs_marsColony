@@ -104,6 +104,35 @@ class TestPerAgentBrainConfig(unittest.TestCase):
             finally:
                 sim.stop()
 
+
+    def test_blank_brain_overrides_inherit_global_backend_model_and_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                brain_backend="ollama",
+                brain_backend_options={
+                    "local_model": "qwen3.5:9b",
+                    "fallback_backend": "rule_brain",
+                    "timeout_s": 15.0,
+                },
+                agent_configs=[
+                    {
+                        "name": "Architect",
+                        "role": "Architect",
+                        "traits": {},
+                        "brain_config": {},
+                        "planner_config": {},
+                    }
+                ],
+            )
+            try:
+                runtime = sim.get_agent_brain_runtime(sim.agents[0])
+                self.assertEqual(runtime["configured_backend"], "ollama")
+                self.assertEqual(runtime["config"].local_model, "qwen3.5:9b")
+                self.assertEqual(runtime["config"].fallback_backend, "rule_brain")
+            finally:
+                sim.stop()
     def test_default_agent_rows_still_initialize(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = SimulationState(phases=[], project_root=tmpdir)
@@ -230,11 +259,61 @@ class TestInterfacePerAgentDefaults(unittest.TestCase):
             self.assertEqual(app.num_agents_var.get(), 3)
             self.assertEqual(app.agent_planner_settings["Architect"]["planner_interval_steps"].get(), 4)
             self.assertEqual(app.agent_planner_settings["Engineer"]["planner_timeout_seconds"].get(), 15.0)
+            self.assertEqual(app.agent_planner_settings["Architect"]["planner_max_retries"].get(), 0)
+            self.assertEqual(app.agent_brain_settings["Architect"]["max_retries"].get(), 0)
+            self.assertEqual(app.agent_planner_settings["Botanist"]["degraded_consecutive_failures_threshold"].get(), 3)
             self.assertEqual(app.agent_planner_settings["Botanist"]["degraded_cooldown_seconds"].get(), 12.0)
         finally:
             app.stop_experiment()
             app.root.destroy()
 
+
+    def test_inheritance_and_effective_summary_labels_are_exposed_in_ui(self):
+        try:
+            import tkinter as tk
+            from interface import MarsColonyInterface
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"GUI dependencies unavailable: {exc}")
+            return
+
+        try:
+            app = MarsColonyInterface()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk unavailable in test environment: {exc}")
+            return
+
+        try:
+            app.root.withdraw()
+            role = "Architect"
+            app.agent_brain_settings[role]["backend"].set("")
+            app.agent_brain_settings[role]["local_model"].set("")
+            app.agent_brain_settings[role]["fallback_backend"].set("")
+            app._update_agent_inheritance_display(role)
+
+            self.assertIn("Inherited from global Backend: ollama", app.agent_inheritance_note_vars[role]["backend"].get())
+            self.assertIn("Inherited from global Model: qwen3.5:9b", app.agent_inheritance_note_vars[role]["local_model"].get())
+            self.assertIn("Inherited from global Fallback: rule_brain", app.agent_inheritance_note_vars[role]["fallback_backend"].get())
+            self.assertEqual(app.agent_effective_summary_vars[role]["backend"].get(), "Effective Backend: ollama")
+            self.assertEqual(app.agent_effective_summary_vars[role]["local_model"].get(), "Effective Model: qwen3.5:9b")
+            self.assertEqual(app.agent_effective_summary_vars[role]["fallback_backend"].get(), "Effective Fallback: rule_brain")
+
+            app.agent_brain_settings[role]["backend"].set("rule_brain")
+            app._update_agent_inheritance_display(role)
+            self.assertIn("Override active: rule_brain", app.agent_inheritance_note_vars[role]["backend"].get())
+            self.assertEqual(app.agent_effective_summary_vars[role]["backend"].get(), "Effective Backend: rule_brain")
+        finally:
+            app.stop_experiment()
+            app.root.destroy()
+
+    def test_retry_zero_help_text_is_explicit(self):
+        try:
+            from interface import MarsColonyInterface
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"GUI dependencies unavailable: {exc}")
+            return
+
+        self.assertIn("0 means make one attempt", MarsColonyInterface.RETRY_HELP_TEXT["backend_max_retries"])
+        self.assertIn("0 means the planning step is not immediately retried", MarsColonyInterface.RETRY_HELP_TEXT["planner_max_retries"])
     def test_build_agent_configs_respects_selected_agent_count_and_preserves_state(self):
         try:
             import tkinter as tk

@@ -35,6 +35,10 @@ class MarsColonyInterface:
         "degraded_cooldown_seconds": 12.0,
         "degraded_step_interval_multiplier": 2.0,
     }
+    RETRY_HELP_TEXT = {
+        "backend_max_retries": "0 means make one attempt and then rely on fallback/degraded behavior instead of retrying immediately.",
+        "planner_max_retries": "0 means the planning step is not immediately retried after a failure.",
+    }
     MAX_AGENT_PANELS = 6
     DEFAULT_AGENT_COUNT = 3
     DEFAULT_AGENT_IDENTITIES = [
@@ -351,6 +355,41 @@ class MarsColonyInterface:
             pady=(0, 3),
         )
 
+    def _resolve_agent_effective_brain_settings(self, role):
+        backend_override = self.agent_brain_settings[role]["backend"].get().strip()
+        model_override = self.agent_brain_settings[role]["local_model"].get().strip()
+        fallback_override = self.agent_brain_settings[role]["fallback_backend"].get().strip()
+        return {
+            "backend": backend_override or self.brain_backend_var.get().strip() or self.BACKEND_DEFAULTS["brain_backend"],
+            "local_model": model_override or self.local_model_var.get().strip() or self.BACKEND_DEFAULTS["local_model"],
+            "fallback_backend": fallback_override or self.fallback_backend_var.get().strip() or self.BACKEND_DEFAULTS["fallback_backend"],
+        }
+
+    def _refresh_all_agent_inheritance_display(self):
+        for role in getattr(self, "agent_card_order", []):
+            self._update_agent_inheritance_display(role)
+
+    def _update_agent_inheritance_display(self, role):
+        note_vars = self.agent_inheritance_note_vars.get(role)
+        if not note_vars:
+            return
+        effective = self._resolve_agent_effective_brain_settings(role)
+        for key, global_label in [
+            ("backend", "Backend"),
+            ("local_model", "Model"),
+            ("fallback_backend", "Fallback"),
+        ]:
+            override_value = self.agent_brain_settings[role][key].get().strip()
+            if override_value:
+                note_vars[key].set(f"Override active: {override_value}")
+            else:
+                note_vars[key].set(f"Inherited from global {global_label}: {effective[key]}")
+        summary_vars = self.agent_effective_summary_vars.get(role)
+        if summary_vars:
+            summary_vars["backend"].set(f"Effective Backend: {effective['backend']}")
+            summary_vars["local_model"].set(f"Effective Model: {effective['local_model']}")
+            summary_vars["fallback_backend"].set(f"Effective Fallback: {effective['fallback_backend']}")
+
     def _update_visible_agent_cards(self):
         if not hasattr(self, "agent_cards"):
             return
@@ -370,6 +409,7 @@ class MarsColonyInterface:
         state = "normal" if self._is_local_backend_selected() else "disabled"
         for widget in getattr(self, "_local_backend_widgets", []):
             widget.configure(state=state)
+        self._refresh_all_agent_inheritance_display()
 
     def _update_backend_status_display(self):
         if not hasattr(self, "backend_status_var"):
@@ -726,15 +766,18 @@ class MarsColonyInterface:
 
         ttk.Label(settings_frame, text="Brain Backend").grid(row=10, column=0, sticky="w", padx=(0, 8), pady=(6, 3))
         self.brain_backend_var = StringVar(value=self.BACKEND_DEFAULTS["brain_backend"])
+        self.brain_backend_var.trace_add("write", lambda *_: self._refresh_all_agent_inheritance_display())
         backend_combo = ttk.Combobox(settings_frame, textvariable=self.brain_backend_var, values=["rule_brain", "local_http", "ollama"], state="readonly", width=22)
         backend_combo.grid(row=10, column=1, sticky="w", pady=(6, 3))
         backend_combo.bind("<<ComboboxSelected>>", lambda _e: self._update_backend_field_states())
         self._add_help_text(settings_frame, 11, "Select which decision system agents use by default.")
 
         self.local_model_var = StringVar(value=self.BACKEND_DEFAULTS["local_model"])
+        self.local_model_var.trace_add("write", lambda *_: self._refresh_all_agent_inheritance_display())
         self.local_base_url_var = StringVar(value=self.BACKEND_DEFAULTS["local_base_url"])
         self.local_timeout_var = DoubleVar(value=self.BACKEND_DEFAULTS["timeout_s"])
         self.fallback_backend_var = StringVar(value=self.BACKEND_DEFAULTS["fallback_backend"])
+        self.fallback_backend_var.trace_add("write", lambda *_: self._refresh_all_agent_inheritance_display())
 
         ttk.Label(settings_frame, text="Local Model").grid(row=12, column=0, sticky="w", padx=(0, 8), pady=3)
         local_model_entry = ttk.Entry(settings_frame, textvariable=self.local_model_var, width=34)
@@ -871,26 +914,58 @@ class MarsColonyInterface:
             "degraded_step_interval_multiplier": DoubleVar(value=float(default_planner.get("degraded_step_interval_multiplier", self.PLANNER_DEFAULTS["degraded_step_interval_multiplier"]))),
         }
 
+        self.agent_inheritance_note_vars[role] = {
+            "backend": StringVar(value=""),
+            "local_model": StringVar(value=""),
+            "fallback_backend": StringVar(value=""),
+        }
+        self.agent_effective_summary_vars[role] = {
+            "backend": StringVar(value=""),
+            "local_model": StringVar(value=""),
+            "fallback_backend": StringVar(value=""),
+        }
+
         fields = [
-            ("Backend Override", ttk.Combobox(settings_frame, textvariable=self.agent_brain_settings[role]["backend"], values=["", "rule_brain", "local_http", "ollama"], state="readonly", width=18), "Optional per-agent backend override. Leave blank to use global default."),
-            ("Model Override", ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["local_model"], width=20), "Optional model override for this agent."),
-            ("Fallback Override", ttk.Combobox(settings_frame, textvariable=self.agent_brain_settings[role]["fallback_backend"], values=["", "rule_brain"], state="readonly", width=18), "Fallback used by this agent if its selected backend fails."),
-            ("Planner Cadence (steps)", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_interval_steps"], width=8), "Higher values reduce how often this agent's brain is queried."),
-            ("Planner Timeout (s)", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_timeout_seconds"], width=8), "Maximum time allowed for this agent's planning step before it is treated as failed."),
-            ("Backend Timeout (s)", ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["timeout_s"], width=8), "Maximum backend request time for this agent."),
-            ("Backend Max Retries", ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["max_retries"], width=8), "How many backend retries are attempted before fallback/degraded behavior."),
-            ("Planner Max Retries", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_max_retries"], width=8), "How many times planning retries before the step is treated as failed."),
-            ("Degraded Threshold", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_consecutive_failures_threshold"], width=8), "Number of consecutive backend failures before degraded mode begins."),
-            ("Degraded Cooldown (s)", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_cooldown_seconds"], width=8), "How long this agent waits before retrying the backend after repeated failures."),
-            ("Degraded Step Multiplier", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_step_interval_multiplier"], width=8), "In degraded mode, increases the interval between planning attempts."),
+            ("Backend Override", ttk.Combobox(settings_frame, textvariable=self.agent_brain_settings[role]["backend"], values=["", "rule_brain", "local_http", "ollama"], state="readonly", width=18), "Optional per-agent backend override. Leave blank to inherit global default.", "backend"),
+            ("Model Override", ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["local_model"], width=20), "Optional model override for this agent. Leave blank to inherit global model.", "local_model"),
+            ("Fallback Override", ttk.Combobox(settings_frame, textvariable=self.agent_brain_settings[role]["fallback_backend"], values=["", "rule_brain"], state="readonly", width=18), "Fallback used by this agent if its selected backend fails. Leave blank to inherit global fallback.", "fallback_backend"),
+            ("Planner Cadence (steps)", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_interval_steps"], width=8), "Higher values reduce how often this agent's brain is queried.", None),
+            ("Planner Timeout (s)", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_timeout_seconds"], width=8), "Maximum time allowed for this agent's planning step before it is treated as failed.", None),
+            ("Backend Timeout (s)", ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["timeout_s"], width=8), "Maximum backend request time for this agent.", None),
+            ("Backend Max Retries", ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["max_retries"], width=8), self.RETRY_HELP_TEXT["backend_max_retries"], None),
+            ("Planner Max Retries", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_max_retries"], width=8), self.RETRY_HELP_TEXT["planner_max_retries"], None),
+            ("Degraded Threshold", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_consecutive_failures_threshold"], width=8), "Number of consecutive backend failures before degraded mode begins.", None),
+            ("Degraded Cooldown (s)", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_cooldown_seconds"], width=8), "How long this agent waits before retrying the backend after repeated failures.", None),
+            ("Degraded Step Multiplier", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_step_interval_multiplier"], width=8), "In degraded mode, increases the interval between planning attempts.", None),
         ]
 
-        for idx, (label, widget, help_text) in enumerate(fields):
-            row_base = idx * 2
-            ttk.Label(settings_frame, text=label).grid(row=row_base, column=0, sticky="w", pady=(2, 0))
-            widget.grid(row=row_base, column=1, sticky="w", pady=(2, 0))
-            self._add_help_text(settings_frame, row_base + 1, help_text)
+        current_row = 0
+        for label, widget, help_text, inheritance_key in fields:
+            ttk.Label(settings_frame, text=label).grid(row=current_row, column=0, sticky="w", pady=(2, 0))
+            widget.grid(row=current_row, column=1, sticky="w", pady=(2, 0))
+            current_row += 1
+            self._add_help_text(settings_frame, current_row, help_text)
+            current_row += 1
+            if inheritance_key:
+                ttk.Label(
+                    settings_frame,
+                    textvariable=self.agent_inheritance_note_vars[role][inheritance_key],
+                    foreground="#3f556e",
+                    wraplength=620,
+                    justify="left",
+                ).grid(row=current_row, column=0, columnspan=2, sticky="w", padx=(0, 8), pady=(0, 4))
+                current_row += 1
 
+        effective_frame = ttk.Frame(settings_frame)
+        effective_frame.grid(row=current_row, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        ttk.Label(effective_frame, text="Effective Settings", foreground="#1f3247").grid(row=0, column=0, sticky="w")
+        ttk.Label(effective_frame, textvariable=self.agent_effective_summary_vars[role]["backend"], foreground="#3f556e").grid(row=1, column=0, sticky="w")
+        ttk.Label(effective_frame, textvariable=self.agent_effective_summary_vars[role]["local_model"], foreground="#3f556e").grid(row=2, column=0, sticky="w")
+        ttk.Label(effective_frame, textvariable=self.agent_effective_summary_vars[role]["fallback_backend"], foreground="#3f556e").grid(row=3, column=0, sticky="w")
+
+        for key in ("backend", "local_model", "fallback_backend"):
+            self.agent_brain_settings[role][key].trace_add("write", lambda *_args, r=role: self._update_agent_inheritance_display(r))
+        self._update_agent_inheritance_display(role)
         return card
 
     def create_experiment_tab(self):
@@ -945,6 +1020,8 @@ class MarsColonyInterface:
         self.agent_identity = {}
         self.agent_brain_settings = {}
         self.agent_planner_settings = {}
+        self.agent_inheritance_note_vars = {}
+        self.agent_effective_summary_vars = {}
         self.agent_cards = {}
         self.agent_card_order = []
 
@@ -1011,6 +1088,7 @@ class MarsColonyInterface:
             self.agent_card_order.append(role)
             self.agent_cards[role] = self._create_agent_card(cards_container, agent_row, row, trait_labels, update_traits_from_profile)
 
+        self._refresh_all_agent_inheritance_display()
         self._update_visible_agent_cards()
 
         ttk.Label(
