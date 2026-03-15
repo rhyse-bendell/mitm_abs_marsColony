@@ -96,6 +96,10 @@ class TestPlannerTraceObservability(unittest.TestCase):
             self.assertIn("extracted_response_payload", row)
             self.assertIn("normalized_agent_brain_response", row)
             self.assertEqual(row.get("plan_disposition"), "adopted")
+            self.assertTrue(row.get("llm_response_received"))
+            self.assertTrue(row.get("llm_response_validated"))
+            self.assertEqual(row.get("trace_outcome_category"), "llm_success")
+            self.assertEqual(row.get("result_source"), "ollama")
 
     def test_timeout_or_failure_still_emits_trace(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -114,6 +118,9 @@ class TestPlannerTraceObservability(unittest.TestCase):
             failed = [r for r in rows if r.get("planner_result") in {"timed_out", "failed"}]
             self.assertTrue(failed)
             self.assertTrue(any(r.get("fallback") for r in failed))
+            self.assertTrue(any(r.get("timeout_occurred") for r in failed))
+            self.assertTrue(any(r.get("fallback_used") for r in failed))
+            self.assertTrue(any(r.get("trace_outcome_category") == "llm_timeout_with_fallback" for r in failed))
 
     def test_validation_failure_trace_keeps_partial_payload(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -130,6 +137,8 @@ class TestPlannerTraceObservability(unittest.TestCase):
             row = fallback_rows[-1]
             self.assertIsNotNone(row.get("raw_http_response_text"))
             self.assertIn("provider_attempts", row)
+            self.assertEqual(row.get("result_source"), "fallback_safe_policy")
+            self.assertTrue(row.get("fallback_used"))
 
     def test_events_link_to_trace_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:

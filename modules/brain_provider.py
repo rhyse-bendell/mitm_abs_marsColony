@@ -15,6 +15,40 @@ from modules.brain_contract import AgentBrainRequest, AgentBrainResponse, Planne
 LOGGER = logging.getLogger(__name__)
 
 
+def select_productive_fallback_action(allowed_actions: list[dict[str, Any]]) -> PlannedActionStep:
+    """Pick a deterministic safe fallback action with minimal forward progress bias."""
+    if not allowed_actions:
+        return PlannedActionStep(step_index=0, action_type=ExecutableActionType.WAIT, expected_purpose="fallback legal wait")
+
+    preference_order = [
+        ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
+        ExecutableActionType.CONSULT_TEAM_ARTIFACT.value,
+        ExecutableActionType.REQUEST_ASSISTANCE.value,
+        ExecutableActionType.OBSERVE_ENVIRONMENT.value,
+        ExecutableActionType.WAIT.value,
+    ]
+    affordances_by_type = {item.get("action_type"): item for item in allowed_actions if isinstance(item, dict)}
+    for action_type in preference_order:
+        choice = affordances_by_type.get(action_type)
+        if choice:
+            return PlannedActionStep(
+                step_index=0,
+                action_type=ExecutableActionType(action_type),
+                target_id=choice.get("target_id"),
+                target_zone=choice.get("target_zone"),
+                expected_purpose="safe productive fallback action",
+            )
+
+    first = allowed_actions[0]
+    return PlannedActionStep(
+        step_index=0,
+        action_type=ExecutableActionType(first.get("action_type", ExecutableActionType.WAIT.value)),
+        target_id=first.get("target_id"),
+        target_zone=first.get("target_zone"),
+        expected_purpose="deterministic first legal action fallback",
+    )
+
+
 @dataclass(frozen=True)
 class BrainBackendConfig:
     backend: str = "rule_brain"
@@ -296,8 +330,31 @@ class OllamaLocalBrainProvider(BrainProvider):
     def __init__(self, config: BrainBackendConfig, fallback: BrainProvider):
         self.config = config
         self.fallback = fallback
-        self.last_outcome = {"fallback": False, "reason": None, "latency_ms": None}
+        self.last_outcome = {"fallback": False, "reason": None, "latency_ms": None, "outcome_category": "llm_success", "result_source": "ollama"}
         self.last_trace: Dict[str, Any] = {}
+
+    def warmup_probe(self) -> Dict[str, Any]:
+        endpoint = f"{self.config.local_base_url.rstrip('/')}{self.config.local_endpoint}"
+        started = time.perf_counter()
+        payload = {
+            "model": self.config.local_model,
+            "messages": [{"role": "user", "content": "{}"}],
+            "temperature": 0,
+            "max_tokens": 8,
+            "response_format": {"type": "json_object"},
+        }
+        try:
+            req = request.Request(
+                endpoint,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with request.urlopen(req, timeout=min(float(self.config.timeout_s), 2.0)) as response:
+                raw = response.read().decode("utf-8")
+            return {"ok": bool(raw), "latency_ms": round((time.perf_counter() - started) * 1000.0, 2), "endpoint": endpoint, "model": self.config.local_model}
+        except Exception as exc:  # noqa: BLE001 - warmup probe should not fail simulation startup
+            return {"ok": False, "latency_ms": round((time.perf_counter() - started) * 1000.0, 2), "endpoint": endpoint, "model": self.config.local_model, "error": f"{type(exc).__name__}: {exc}"}
 
     def backend_settings(self) -> Dict[str, Any]:
         return {
@@ -351,6 +408,7 @@ class OllamaLocalBrainProvider(BrainProvider):
 
     def generate_plan(self, request_packet: AgentBrainRequest) -> AgentBrainResponse:
         started_at = time.perf_counter()
+        started_at_epoch_ms = int(time.time() * 1000)
         endpoint = f"{self.config.local_base_url.rstrip('/')}{self.config.local_endpoint}"
         fallback_reason = None
         fallback_hint = None
@@ -361,14 +419,26 @@ class OllamaLocalBrainProvider(BrainProvider):
             "model": self.config.local_model,
             "endpoint": endpoint,
             "timeout_s": self.config.timeout_s,
+            "request_started_epoch_ms": started_at_epoch_ms,
+            "agent_brain_request_size_chars": len(json.dumps(request_packet.to_dict(), default=str)),
             "provider_request_payload": None,
+            "provider_request_payload_size_chars": 0,
             "attempts": [],
+            "llm_response_received": False,
+            "llm_response_parsed": False,
+            "llm_response_validated": False,
+            "timeout_occurred": False,
+            "fallback_used": False,
+            "fallback_source": None,
+            "result_source": "ollama",
+            "trace_outcome_category": "no_result_generated",
         }
         attempts = max(1, int(self.config.max_retries) + 1)
         for attempt in range(1, attempts + 1):
             try:
                 payload = self._build_request_payload(request_packet)
                 trace["provider_request_payload"] = payload
+                trace["provider_request_payload_size_chars"] = len(json.dumps(payload, default=str))
                 attempt_trace: Dict[str, Any] = {"attempt": attempt}
                 req = request.Request(
                     endpoint,
@@ -378,9 +448,12 @@ class OllamaLocalBrainProvider(BrainProvider):
                 )
                 with request.urlopen(req, timeout=self.config.timeout_s) as response:
                     raw = response.read().decode("utf-8")
+                attempt_trace["http_body_non_empty"] = bool(raw.strip())
                 attempt_trace["raw_http_response_text"] = raw
+                trace["llm_response_received"] = True
                 parsed = json.loads(raw)
                 attempt_trace["parsed_response_json"] = parsed
+                trace["llm_response_parsed"] = True
                 response_payload = self._parse_response(parsed)
                 attempt_trace["extracted_response_payload"] = response_payload
                 if not isinstance(response_payload, dict) or "plan" not in response_payload:
@@ -395,13 +468,19 @@ class OllamaLocalBrainProvider(BrainProvider):
                 trace.update(
                     {
                         "fallback": False,
+                        "fallback_used": False,
                         "fallback_reason": None,
                         "fallback_hint": None,
                         "latency_ms": latency_ms,
+                        "latency_until_outcome_ms": latency_ms,
                         "response_payload_valid": True,
+                        "llm_response_validated": True,
+                        "result_source": "ollama",
+                        "trace_outcome_category": "llm_success",
                         "exception": None,
                     }
                 )
+                self.last_outcome.update({"outcome_category": "llm_success", "result_source": "ollama"})
                 self.last_trace = trace
                 return response_obj
             except (TimeoutError, error.URLError, error.HTTPError, ValueError, KeyError, json.JSONDecodeError) as exc:
@@ -413,6 +492,8 @@ class OllamaLocalBrainProvider(BrainProvider):
                 if "response_payload" in locals() and isinstance(response_payload, dict):
                     attempt_trace["extracted_response_payload"] = response_payload
                 trace["attempts"].append(attempt_trace)
+                if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
+                    trace["timeout_occurred"] = True
                 if isinstance(exc, error.HTTPError) and getattr(exc, "code", None) == 404:
                     fallback_hint = "HTTP 404 from local backend may indicate missing/incorrect model name"
                 fallback_reason = f"attempt={attempt}/{attempts} error={exc}"
@@ -424,6 +505,8 @@ class OllamaLocalBrainProvider(BrainProvider):
             "fallback": True,
             "reason": fallback_reason,
             "latency_ms": latency_ms,
+            "outcome_category": "llm_timeout_with_fallback" if trace.get("timeout_occurred") else "llm_error_with_fallback",
+            "result_source": "fallback_safe_policy",
             "hint": fallback_hint,
             "configured_backend": self.config.backend,
             "configured_model": self.config.local_model,
@@ -434,16 +517,45 @@ class OllamaLocalBrainProvider(BrainProvider):
         trace.update(
             {
                 "fallback": True,
+                "fallback_used": True,
                 "fallback_reason": fallback_reason,
                 "fallback_hint": fallback_hint,
+                "fallback_source": "fallback_safe_policy",
                 "latency_ms": latency_ms,
+                "latency_until_outcome_ms": latency_ms,
                 "response_payload_valid": False,
+                "result_source": "fallback_safe_policy",
+                "trace_outcome_category": "llm_timeout_with_fallback" if trace.get("timeout_occurred") else "llm_error_with_fallback",
                 "exception": trace.get("attempts", [{}])[-1].get("exception") if trace.get("attempts") else None,
             }
         )
         self.last_trace = trace
         LOGGER.warning("OllamaLocalBrainProvider fallback to RuleBrain: %s", self.last_outcome)
-        return self.fallback.generate_plan(request_packet)
+        step = select_productive_fallback_action(request_packet.allowed_actions)
+        payload = {
+            "response_id": f"fallback-{request_packet.request_id}",
+            "agent_id": request_packet.agent_id,
+            "plan": {
+                "plan_id": f"fallback-plan-{request_packet.request_id}",
+                "plan_horizon": int(request_packet.planning_horizon_config.get("max_steps", 3)),
+                "ordered_goals": [
+                    {
+                        "goal_id": "fallback_progress",
+                        "description": "maintain safe deterministic forward progress",
+                        "priority": 0.6,
+                        "status": "active",
+                        "source": "fallback",
+                    }
+                ],
+                "ordered_actions": [step.__dict__],
+                "next_action": step.__dict__,
+                "confidence": 0.6,
+                "notes": ["fallback_safe_policy"],
+            },
+            "explanation": "fallback safe policy selected legal action" if request_packet.request_explanation else None,
+            "confidence": 0.6,
+        }
+        return AgentBrainResponse.from_dict(payload)
 
 
 class LocalLLMBrainStub(BrainProvider):

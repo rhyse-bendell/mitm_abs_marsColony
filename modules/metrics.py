@@ -59,6 +59,16 @@ class MetricsCollector:
                 "planner_timeout_seconds": getattr(agent.planner_cadence, "planner_timeout_seconds", None),
                 "planner_fallback_events": 0,
                 "planner_degraded_episodes": 0,
+                "llm_success_count": 0,
+                "llm_timeout_count": 0,
+                "llm_invalid_count": 0,
+                "llm_transport_error_count": 0,
+                "fallback_generated_count": 0,
+                "fallback_adopted_count": 0,
+                "fallback_rejected_count": 0,
+                "productive_fallback_action_count": 0,
+                "idle_fallback_action_count": 0,
+                "fallback_only_ticks": 0,
                 "time_moving": 0.0,
                 "time_stalled": 0.0,
                 "time_inspecting_info": 0.0,
@@ -168,6 +178,47 @@ class MetricsCollector:
         if event_type in {"repeated_action_loop_detected", "repeated_plan_loop_detected", "repeated_target_failure_detected", "repeated_backend_fallback_detected"}:
             self.breakdown_counts["loop_detections"][event_type] += 1
 
+        if event_type == "llm_response_received":
+            self.breakdown_counts["planner_llm_outcomes"]["llm_response_received"] += 1
+        if event_type == "llm_response_valid":
+            self.breakdown_counts["planner_llm_outcomes"]["llm_response_valid"] += 1
+            agent = payload.get("agent")
+            if agent in self.agent_stats:
+                self.agent_stats[agent]["llm_success_count"] += 1
+        if event_type == "llm_response_invalid":
+            self.breakdown_counts["planner_llm_outcomes"]["llm_response_invalid"] += 1
+            agent = payload.get("agent")
+            if agent in self.agent_stats:
+                self.agent_stats[agent]["llm_invalid_count"] += 1
+        if event_type == "llm_timeout":
+            self.breakdown_counts["planner_llm_outcomes"]["llm_timeout"] += 1
+            agent = payload.get("agent")
+            if agent in self.agent_stats:
+                self.agent_stats[agent]["llm_timeout_count"] += 1
+        if event_type == "llm_transport_error":
+            self.breakdown_counts["planner_llm_outcomes"]["llm_transport_error"] += 1
+            agent = payload.get("agent")
+            if agent in self.agent_stats:
+                self.agent_stats[agent]["llm_transport_error_count"] += 1
+        if event_type == "fallback_result_generated":
+            self.breakdown_counts["planner_llm_outcomes"]["fallback_result_generated"] += 1
+            self.breakdown_counts["fallback_reason_distribution"][payload.get("fallback_source", "unknown")] += 1
+            agent = payload.get("agent")
+            if agent in self.agent_stats:
+                self.agent_stats[agent]["fallback_generated_count"] += 1
+        if event_type == "fallback_result_adopted":
+            self.breakdown_counts["planner_llm_outcomes"]["fallback_result_adopted"] += 1
+            agent = payload.get("agent")
+            if agent in self.agent_stats:
+                self.agent_stats[agent]["fallback_adopted_count"] += 1
+        if event_type == "fallback_result_rejected":
+            self.breakdown_counts["planner_llm_outcomes"]["fallback_result_rejected"] += 1
+            agent = payload.get("agent")
+            if agent in self.agent_stats:
+                self.agent_stats[agent]["fallback_rejected_count"] += 1
+        if event_type in {"planner_request_completed_with_llm", "planner_request_completed_with_fallback"}:
+            self.breakdown_counts["planner_request_completion_source"][event_type] += 1
+
         if event_type == "communication_exchange":
             for mtype in payload.get("message_types", []):
                 self.communication_by_type[mtype] += 1
@@ -201,6 +252,13 @@ class MetricsCollector:
 
         if event_type == "brain_decision_outcome":
             selected = payload.get("selected_action", "")
+            result_source = payload.get("result_source", "unknown")
+            self.breakdown_counts["plan_source_distribution"][result_source] += 1
+            if payload.get("fallback_used"):
+                if selected in {"observe_environment", "wait"}:
+                    self.breakdown_counts["idle_fallback_action_count"][selected] += 1
+                else:
+                    self.breakdown_counts["productive_fallback_action_count"][selected] += 1
             planning = {"inspect_information_source", "communicate", "externalize_plan", "consult_team_artifact", "request_assistance"}
             execution = {"transport_resources", "start_construction", "continue_construction"}
             correction = {"repair_or_correct_construction", "validate_construction"}
@@ -523,6 +581,18 @@ class MetricsCollector:
             "stale_plan_reuse_count": int(sum(int(s.get("stale_plan_reuse_count", 0) or 0) for s in planner_states)),
             "ui_safe_fallback_count": int(sum(int(s.get("ui_safe_fallback_count", 0) or 0) for s in planner_states)),
             "responses_discarded_as_stale": int(sum(int(s.get("total_stale_discarded", 0) or 0) for s in planner_states)),
+            "requests_completed_with_llm": int(sum(int(s.get("requests_completed_with_llm", 0) or 0) for s in planner_states)),
+            "requests_completed_with_fallback": int(sum(int(s.get("requests_completed_with_fallback", 0) or 0) for s in planner_states)),
+            "llm_success_count": int(sum(int(s.get("llm_success_count", 0) or 0) for s in planner_states)),
+            "llm_timeout_count": int(sum(int(s.get("llm_timeout_count", 0) or 0) for s in planner_states)),
+            "llm_invalid_count": int(sum(int(s.get("llm_invalid_count", 0) or 0) for s in planner_states)),
+            "llm_transport_error_count": int(sum(int(s.get("llm_transport_error_count", 0) or 0) for s in planner_states)),
+            "fallback_generated_count": int(sum(int(s.get("fallback_generated_count", 0) or 0) for s in planner_states)),
+            "fallback_adopted_count": int(sum(int(s.get("fallback_adopted_count", 0) or 0) for s in planner_states)),
+            "fallback_rejected_count": int(sum(int(s.get("fallback_rejected_count", 0) or 0) for s in planner_states)),
+            "fallback_only_ticks": int(sum(int(s.get("fallback_only_ticks", 0) or 0) for s in planner_states)),
+            "productive_fallback_action_count": int(sum(int(s.get("productive_fallback_action_count", 0) or 0) for s in planner_states)),
+            "idle_fallback_action_count": int(sum(int(s.get("idle_fallback_action_count", 0) or 0) for s in planner_states)),
         }
 
         run_summary = {
@@ -657,6 +727,8 @@ class MetricsCollector:
                 "fallback_backend": run_summary["run_metadata"].get("fallback_backend"),
                 "fallback_occurred": run_summary["run_metadata"].get("fallback_occurred"),
                 "fallback_count": run_summary["run_metadata"].get("fallback_count"),
+                "plan_source_distribution": dict(self.breakdown_counts.get("plan_source_distribution", {})),
+                "fallback_reason_distribution": dict(self.breakdown_counts.get("fallback_reason_distribution", {})),
             },
         }
 
