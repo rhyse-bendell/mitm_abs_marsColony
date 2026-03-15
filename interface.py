@@ -265,7 +265,7 @@ class MarsColonyInterface:
     def _collect_brain_backend_config(self):
         backend = (self.brain_backend_var.get() or "rule_brain").strip() or "rule_brain"
         options = {
-            "local_model": self.local_model_var.get().strip() or "local-model",
+            "local_model": self.local_model_var.get().strip() or "qwen3.5:9b",
             "local_base_url": self.local_base_url_var.get().strip() or "http://127.0.0.1:11434",
             "timeout_s": max(0.1, float(self.local_timeout_var.get())),
             "fallback_backend": (self.fallback_backend_var.get() or "rule_brain").strip() or "rule_brain",
@@ -530,16 +530,16 @@ class MarsColonyInterface:
         if event_type == "outputs_saved":
             return f"t={sim_time:05.2f} Outputs saved ({payload.get('rows', 0)} state rows, {payload.get('event_rows', 0)} events)."
         if event_type == "brain_backend_selected":
-            return f"t={sim_time:05.2f} backend configured={payload.get('configured_brain_backend')} effective={payload.get('effective_brain_backend')} provider={payload.get('provider_class')}."
+            return f"t={sim_time:05.2f} backend configured={payload.get('configured_brain_backend')} effective={payload.get('effective_brain_backend')} provider={payload.get('provider_class')} model={payload.get('local_model_name')} url={payload.get('local_base_url')} endpoint={payload.get('local_endpoint')} timeout={payload.get('timeout_s')}."
         if event_type == "brain_backend_runtime_status":
-            return f"t={sim_time:05.2f} backend runtime configured={payload.get('configured_brain_backend')} effective={payload.get('effective_brain_backend')} fallback={payload.get('fallback_backend')}."
+            return f"t={sim_time:05.2f} backend runtime configured={payload.get('configured_brain_backend')} effective={payload.get('effective_brain_backend')} fallback={payload.get('fallback_backend')} model={payload.get('local_model_name')} timeout={payload.get('timeout_s')}."
         if event_type == "brain_decision_query":
             meta = payload.get("context_meta", {})
             return f"t={sim_time:05.2f} {payload.get('agent')} query via {payload.get('provider')} cfg={payload.get('configured_brain_backend')} eff={payload.get('effective_brain_backend')} ({payload.get('trigger_reason')}); affordances={meta.get('affordance_count', 0)}."
         if event_type == "brain_decision_outcome":
             return f"t={sim_time:05.2f} {payload.get('agent')} decision {payload.get('decision_status')} -> {payload.get('selected_action')} ({payload.get('provider')}, cfg={payload.get('configured_brain_backend')}, eff={payload.get('effective_brain_backend')})."
         if event_type == "brain_provider_fallback":
-            return f"t={sim_time:05.2f} WARNING fallback cfg={payload.get('configured_brain_backend')} eff={payload.get('effective_brain_backend')} {payload.get('provider')} -> {payload.get('fallback_provider')}: {payload.get('reason')}"
+            return f"t={sim_time:05.2f} WARNING fallback cfg={payload.get('configured_brain_backend')} eff={payload.get('effective_brain_backend')} {payload.get('provider')} -> {payload.get('fallback_provider')}: {payload.get('reason')} model={payload.get('local_model_name')} hint={payload.get('fallback_hint')}"
         if event_type == "effective_brain_backend_updated":
             return f"t={sim_time:05.2f} backend effective updated to {payload.get('effective_brain_backend')} (configured={payload.get('configured_brain_backend')}, reason={payload.get('reason')})."
         if event_type == "brain_plan_continued":
@@ -645,9 +645,9 @@ class MarsColonyInterface:
         backend_combo.grid(row=4, column=1, sticky="w", pady=(6, 3))
         backend_combo.bind("<<ComboboxSelected>>", lambda _e: self._update_backend_field_states())
 
-        self.local_model_var = StringVar(value="local-model")
+        self.local_model_var = StringVar(value="qwen3.5:9b")
         self.local_base_url_var = StringVar(value="http://127.0.0.1:11434")
-        self.local_timeout_var = DoubleVar(value=1.5)
+        self.local_timeout_var = DoubleVar(value=15.0)
         self.fallback_backend_var = StringVar(value="rule_brain")
 
         ttk.Label(settings_frame, text="Local Model").grid(row=5, column=0, sticky="w", padx=(0, 8), pady=3)
