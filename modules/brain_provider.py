@@ -27,17 +27,19 @@ def select_productive_fallback_action(allowed_actions: list[dict[str, Any]]) -> 
         ExecutableActionType.OBSERVE_ENVIRONMENT.value,
         ExecutableActionType.WAIT.value,
     ]
-    affordances_by_type = {item.get("action_type"): item for item in allowed_actions if isinstance(item, dict)}
     for action_type in preference_order:
-        choice = affordances_by_type.get(action_type)
-        if choice:
-            return PlannedActionStep(
-                step_index=0,
-                action_type=ExecutableActionType(action_type),
-                target_id=choice.get("target_id"),
-                target_zone=choice.get("target_zone"),
-                expected_purpose="safe productive fallback action",
-            )
+        choices = [item for item in allowed_actions if isinstance(item, dict) and item.get("action_type") == action_type]
+        if not choices:
+            continue
+        reachable_first = sorted(choices, key=lambda item: 0 if item.get("reachable", True) else 1)
+        choice = reachable_first[0]
+        return PlannedActionStep(
+            step_index=0,
+            action_type=ExecutableActionType(action_type),
+            target_id=choice.get("target_id"),
+            target_zone=choice.get("target_zone"),
+            expected_purpose="safe productive fallback action",
+        )
 
     first = allowed_actions[0]
     return PlannedActionStep(

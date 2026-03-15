@@ -122,6 +122,7 @@ class Agent:
         self.goal_transition_counter = 0
         self.goal_manager = GoalManager(self)
         self.target = None
+        self.spawn_position = tuple(position)
         self.has_shared = False
         self.detour_target = None
 
@@ -215,10 +216,25 @@ class Agent:
             "productive_fallback_action_count": 0,
             "idle_fallback_action_count": 0,
             "fallback_only_ticks": 0,
+            "startup_target_resolution_failures": 0,
+            "startup_movement_blockers": 0,
+            "startup_plan_invalidations": 0,
         }
         self._planner_future = None
         self._planner_future_lock = threading.Lock()
         self._timed_out_request_ids = set()
+        self.startup_state = {
+            "initial_goal_selected": False,
+            "initial_plan_selected": False,
+            "first_productive_action_started": False,
+            "first_movement_started": False,
+            "left_spawn": False,
+            "initial_goal_time": None,
+            "initial_plan_time": None,
+            "first_productive_action_time": None,
+            "first_movement_time": None,
+            "left_spawn_time": None,
+        }
 
 
         # Experiment-facing trait defaults
@@ -297,6 +313,12 @@ class Agent:
         self.status_last_action = message
         if log_activity:
             self.activity_log.append(message)
+
+    def _emit_startup_once(self, sim_state, flag_name, event_type, payload=None):
+        if not self.startup_state.get(flag_name):
+            self.startup_state[flag_name] = True
+            self.startup_state[f"{flag_name}_time"] = float(sim_state.time) if sim_state is not None else None
+            self._emit_event(sim_state, event_type, payload or {})
 
     def _trait_value(self, name, default=0.5):
         value = getattr(self, name, default)
@@ -1308,7 +1330,7 @@ class Agent:
 
         self._adopt_new_plan(decision, trigger_reason, sim_state, response=response, trace_id=result.get("trace_id"), result_source=result.get("result_source"), fallback_used=bool(result.get("fallback_used")) )
         self._refresh_goal_plan_state(decision, sim_state, trigger_reason, response=response)
-        self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment)
+        self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment, sim_state=sim_state)
         self.planner_state["status"] = "completed"
         self.planner_state["consecutive_failure_sum"] += self.planner_state["consecutive_failures"]
         self.planner_state["consecutive_failure_samples"] += 1
@@ -1646,7 +1668,12 @@ class Agent:
         plan_obj = getattr(response, "plan", None)
         method_status = getattr(plan_obj, "_method_status", "unspecified") if plan_obj else "unspecified"
         method_notes = list(getattr(plan_obj, "_method_notes", [])) if plan_obj else []
-        associated_goal_ids = [g.goal_id for g in getattr(plan_obj, "ordered_goals", []) if getattr(g, "goal_id", None)] if plan_obj else []
+        active_goal_ids = {g.get("goal_id") for g in self.goal_stack if g.get("goal_id")}
+        associated_goal_ids = [
+            g.goal_id
+            for g in getattr(plan_obj, "ordered_goals", [])
+            if getattr(g, "goal_id", None) and (not active_goal_ids or g.goal_id in active_goal_ids)
+        ] if plan_obj else []
 
         next_plan_id = getattr(plan_obj, "plan_id", self._next_plan_id())
         if self.loop_counters.get("plan_signature") == next_plan_id:
@@ -1672,6 +1699,17 @@ class Agent:
             adoption_reason=f"trigger={trigger_reason};status={method_status}",
             validation_notes=method_notes,
             associated_goal_ids=associated_goal_ids,
+        )
+        self._emit_startup_once(
+            sim_state,
+            "initial_plan_selected",
+            "initial_plan_selected",
+            {
+                "plan_id": self.current_plan.plan_id,
+                "next_action_type": decision.selected_action.value,
+                "result_source": result_source,
+                "fallback_used": bool(fallback_used),
+            },
         )
         self._emit_event(sim_state, "plan_adopted", {"plan_id": self.current_plan.plan_id, "plan_method_id": self.current_plan.plan_method_id, "trust_tier": method_status, "canonical_goal_matches": len([g for g in (self.current_plan.associated_goal_ids or []) if g]), "ad_hoc_goal_count": len([g for g in (self.current_plan.ordered_goals or []) if not g.get("goal_id")]), "next_action_type": decision.selected_action.value, "trace_id": trace_id, "result_source": result_source, "fallback_used": bool(fallback_used)})
         sim_state.logger.log_event(
@@ -1699,6 +1737,9 @@ class Agent:
         plan_goal_ids = set(self.current_plan.associated_goal_ids or [])
         if plan_goal_ids and not (plan_goal_ids & active_goal_ids):
             self.current_plan.invalidation_reason = "plan_goal_mismatch"
+            if not self.startup_state.get("first_movement_started"):
+                self.planner_state["startup_plan_invalidations"] = int(self.planner_state.get("startup_plan_invalidations", 0)) + 1
+                self._emit_event(sim_state, "initial_plan_invalidated", {"plan_id": self.current_plan.plan_id, "reason": self.current_plan.invalidation_reason})
             sim_state.logger.log_event(sim_state.time, "plan_invalidated", {"agent": self.name, "plan_id": self.current_plan.plan_id, "reason": self.current_plan.invalidation_reason, "trace_id": self.planner_state.get("trace_id")})
             return False
 
@@ -1724,6 +1765,8 @@ class Agent:
             self._emit_event(sim_state, "repeated_action_loop_detected", {"repetition_count": self.loop_counters["action_repeats"], "window_size": 3, "plan_id": self.current_plan.plan_id, "selected_action": self.current_plan.decision.selected_action.value})
         return True
     def _translate_brain_decision_to_legacy_action(self, decision, environment, sim_state=None):
+        if not self.startup_state.get("first_productive_action_started"):
+            self._emit_event(sim_state, "first_action_translation_started", {"planner_action_type": decision.selected_action.value})
         self._emit_event(sim_state, "planner_next_action_selected", {"planner_action_type": decision.selected_action.value, "plan_id": getattr(self.current_plan, "plan_id", None)})
         if self.task_model is not None:
             enabled = set(self.task_model.enabled_actions_for_role(self.role))
@@ -1759,13 +1802,18 @@ class Agent:
         if decision.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
             source_id, interaction_target = self._resolve_inspect_target(decision, environment, sim_state=sim_state)
             if source_id is None or interaction_target is None:
+                if not self.startup_state.get("first_productive_action_started"):
+                    self.planner_state["startup_target_resolution_failures"] = int(self.planner_state.get("startup_target_resolution_failures", 0)) + 1
+                    self._emit_event(sim_state, "first_target_resolution_failed", {"target_type": "information_source", "requested_target_id": decision.target_id})
                 self._emit_event(sim_state, "action_translation_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "unresolved_target"})
+                self._emit_event(sim_state, "first_action_translation_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "unresolved_target"})
                 return [{"type": "idle", "duration": 1.0, "priority": 1}]
             action["target"] = interaction_target
             action["source_target_id"] = source_id
             self.current_inspect_target_id = source_id
             if self.source_inspection_state.get(source_id) == "inspected":
                 self._set_status(f"Source skipped due to completion: {source_id}")
+            self._emit_startup_once(sim_state, "first_productive_action_started", "first_productive_action_started", {"planner_action_type": decision.selected_action.value, "translated_action_type": action.get("type")})
             return [action]
 
         if decision.target_id:
@@ -1799,6 +1847,8 @@ class Agent:
             action["assist_action"] = decision.selected_action.value
 
         self._emit_event(sim_state, "action_translation_succeeded", {"planner_action_type": decision.selected_action.value, "translated_action_type": action.get("type"), "target_id": decision.target_id, "target_zone": decision.target_zone})
+        if action.get("type") in {"move_to", "communicate", "construct", "transport_resources"}:
+            self._emit_startup_once(sim_state, "first_productive_action_started", "first_productive_action_started", {"planner_action_type": decision.selected_action.value, "translated_action_type": action.get("type")})
         return [action]
 
     def perceive_environment(self, sim_state):
@@ -2090,6 +2140,8 @@ class Agent:
         dx, dy = tx - x, ty - y
         dist = math.hypot(dx, dy)
         self._emit_event(sim_state, "movement_started", {"origin": self.position, "destination": active_target, "distance": round(dist, 3)})
+        if not self.startup_state.get("first_movement_started"):
+            self._emit_startup_once(sim_state, "first_movement_started", "first_movement_started", {"destination": active_target, "distance": round(dist, 3)})
         if dist < 0.01:
             self._emit_event(sim_state, "movement_arrived", {"destination": active_target, "distance": round(dist, 3)})
             return
@@ -2112,6 +2164,9 @@ class Agent:
                 else:
                     self.activity_log.append(f"Blocked while moving toward {target}")
                     self._emit_event(sim_state, "movement_blocked", {"destination": target, "blocker_category": "path_blocked"})
+                    if not self.startup_state.get("left_spawn"):
+                        self.planner_state["startup_movement_blockers"] = int(self.planner_state.get("startup_movement_blockers", 0)) + 1
+                        self._emit_event(sim_state, "first_movement_blocked", {"destination": target, "blocker_category": "path_blocked"})
                     if self.current_inspect_target_id:
                         self.inspect_stall_counts[self.current_inspect_target_id] = self.inspect_stall_counts.get(self.current_inspect_target_id, 0) + 1
                         self._set_status(
@@ -2120,6 +2175,9 @@ class Agent:
             else:
                 self.activity_log.append(f"Blocked while moving toward {active_target}")
                 self._emit_event(sim_state, "movement_blocked", {"destination": active_target, "blocker_category": "path_blocked"})
+                if not self.startup_state.get("left_spawn"):
+                    self.planner_state["startup_movement_blockers"] = int(self.planner_state.get("startup_movement_blockers", 0)) + 1
+                    self._emit_event(sim_state, "first_movement_blocked", {"destination": active_target, "blocker_category": "path_blocked"})
                 if self.current_inspect_target_id:
                     self.inspect_stall_counts[self.current_inspect_target_id] = self.inspect_stall_counts.get(self.current_inspect_target_id, 0) + 1
 
@@ -2213,6 +2271,10 @@ class Agent:
                         self.planner_state["total_skipped_inflight"] += 1
                         runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend, "effective_backend": sim_state.effective_brain_backend, "provider": sim_state.brain_provider}
                         self._emit_event(sim_state, "planner_request_skipped_inflight", {"reason": planner_reason, "request_id": self.planner_state.get("request_id"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
+                        if self.current_plan is None and not self.active_actions and not self.current_action:
+                            startup_decision = BrainDecision(selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE, reason_summary="startup-safe action while planner request is in flight", confidence=0.4)
+                            self.current_action = self._translate_brain_decision_to_legacy_action(startup_decision, environment, sim_state=sim_state)
+                            self._emit_event(sim_state, "ui_safe_fallback_used", {"reason": "inflight_without_plan", "request_state": self.planner_state.get("status"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
                     else:
                         pending_trace_id = self._make_planner_trace_id(f"{self.agent_id}-{self.sim_step_count}")
                         self._emit_event(sim_state, "planner_invocation_started", {"trigger_reason": planner_reason, "tick": self.sim_step_count, "current_plan_id": getattr(self.current_plan, "plan_id", None), "trace_id": pending_trace_id})
@@ -2234,9 +2296,17 @@ class Agent:
 
             self._apply_externalization_and_construction_effects(environment, sim_state, dt)
             self._update_goal_states_from_runtime(sim_state, environment)
+            if not self.startup_state.get("initial_goal_selected"):
+                current = self.current_goal()
+                if current:
+                    self._emit_startup_once(sim_state, "initial_goal_selected", "initial_goal_selected", {"goal": current.get("goal"), "goal_id": current.get("goal_id")})
 
         if self.target:
             self.move_toward(self.target, dt, environment, sim_state=sim_state)
+        if sim_state is not None and not self.startup_state.get("left_spawn"):
+            moved = math.hypot(self.position[0] - self.spawn_position[0], self.position[1] - self.spawn_position[1])
+            if moved > 0.2:
+                self._emit_startup_once(sim_state, "left_spawn", "agent_left_spawn", {"distance": round(moved, 3)})
 
 
         # Communication attempt (talk while walking or standing still)
