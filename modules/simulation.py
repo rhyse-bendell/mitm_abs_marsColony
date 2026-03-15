@@ -199,9 +199,11 @@ class SimulationState:
             fallback = config.get("accessible_packet_ids") or config.get("packet_access")
             agent.allowed_packet = mapped_packets or fallback
             agent.task_model = self.task_model
-            for seed in config.get("initial_goal_seeds", [])[:3]:
-                if isinstance(seed, str) and seed.strip():
-                    agent.goal_stack.append({"goal": seed.strip(), "target": None})
+            agent.initial_goal_seeds = list(config.get("initial_goal_seeds", []) or [])
+            agent._seed_task_defined_goals(sim_state=self)
+            for seed in agent.initial_goal_seeds[:3]:
+                if isinstance(seed, str) and seed.strip() and seed not in agent.goal_registry:
+                    agent.push_goal(seed.strip(), target=None)
             agent.update_current_goal()
             self.agents.append(agent)
 

@@ -418,6 +418,10 @@ class BrainContextBuilder:
                 "last_reviewed_at": getattr(active_plan, "last_reviewed_at", None),
                 "invalidation_reason": getattr(active_plan, "invalidation_reason", None),
                 "remaining_executions": getattr(active_plan, "remaining_executions", None),
+                "plan_method_id": getattr(active_plan, "plan_method_id", None),
+                "plan_method_status": getattr(active_plan, "plan_method_status", None),
+                "validation_notes": list(getattr(active_plan, "validation_notes", []) or []),
+                "associated_goal_ids": list(getattr(active_plan, "associated_goal_ids", []) or []),
             },
         }
 
