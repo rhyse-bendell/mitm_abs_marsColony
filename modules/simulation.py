@@ -1,6 +1,7 @@
 # File: modules/simulation.py
 
 import math
+from concurrent.futures import ThreadPoolExecutor
 from modules.agent import Agent
 from modules.brain_context import BrainContextBuilder
 from modules.brain_provider import BrainBackendConfig, create_brain_provider
@@ -69,6 +70,8 @@ class SimulationState:
         self.brain_backend_config = BrainBackendConfig(backend=brain_backend, **backend_options)
         self.configured_brain_backend = self.brain_backend_config.backend
         self.brain_provider = create_brain_provider(self.brain_backend_config)
+        worker_count = int(self.planner_defaults.get("planner_async_workers", max(2, len(self.task_model.agent_defaults) if self.task_model.agent_defaults else 3)))
+        self.planner_executor = ThreadPoolExecutor(max_workers=max(1, worker_count), thread_name_prefix="planner")
         self.effective_brain_backend = self.configured_brain_backend
         self.fallback_occurred = False
         self.backend_fallback_count = 0
@@ -402,6 +405,7 @@ class SimulationState:
         self.metrics.finalize()
         self.logger.update_session_manifest(extra_metadata=self._backend_settings_for_manifest())
         self.logger.save_csv()
+        self.planner_executor.shutdown(wait=False, cancel_futures=True)
 
 
     def _distance(self, p1, p2):

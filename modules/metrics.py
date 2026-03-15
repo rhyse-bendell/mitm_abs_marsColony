@@ -135,6 +135,11 @@ class MetricsCollector:
             self.breakdown_counts["planner_fallback_by_reason"][payload.get("reason", "unknown")] += 1
         if event_type in {"brain_provider_response_invalid", "brain_response_rejected"}:
             self.breakdown_counts["invalid_brain_responses"][payload.get("schema_parsing_succeeded", "unknown")] += 1
+        if event_type in {"planner_request_skipped_inflight", "planner_request_skipped_cooldown", "planner_request_started_async", "planner_request_completed_async", "planner_request_result_arrived_stale", "planner_response_discarded_due_to_state_change", "backend_degraded_mode_started", "backend_degraded_mode_ended", "ui_safe_fallback_used"}:
+            self.breakdown_counts["planner_async_lifecycle"][event_type] += 1
+        if event_type == "planner_request_queue_depth":
+            depth = int(payload.get("queue_depth", 0) or 0)
+            self.breakdown_counts["planner_request_queue_depth"][str(depth)] += 1
         if event_type in {"plan_adopted", "plan_adopted_low_trust", "plan_invalidated"}:
             self.breakdown_counts["plan_method_outcomes"][event_type] += 1
         if event_type.startswith("goal_"):
@@ -479,6 +484,27 @@ class MetricsCollector:
 
         structure_summary = self._structure_summary()
         team_knowledge_summary = self._team_knowledge_summary()
+        planner_states = [getattr(agent, "planner_state", {}) for agent in self.simulation.agents]
+        avg_consecutive_failure_streak = 0.0
+        streak_samples = sum(int(s.get("consecutive_failure_samples", 0) or 0) for s in planner_states)
+        if streak_samples:
+            avg_consecutive_failure_streak = round(
+                sum(float(s.get("consecutive_failure_sum", 0) or 0.0) for s in planner_states) / streak_samples,
+                3,
+            )
+        planner_responsiveness = {
+            "requests_started": int(sum(int(s.get("total_started", 0) or 0) for s in planner_states)),
+            "requests_completed": int(sum(int(s.get("total_completed", 0) or 0) for s in planner_states)),
+            "requests_timed_out": int(sum(int(s.get("total_timed_out", 0) or 0) for s in planner_states)),
+            "requests_failed": int(sum(int(s.get("total_failed", 0) or 0) for s in planner_states)),
+            "requests_skipped_due_to_inflight": int(sum(int(s.get("total_skipped_inflight", 0) or 0) for s in planner_states)),
+            "requests_skipped_due_to_cooldown": int(sum(int(s.get("total_skipped_cooldown", 0) or 0) for s in planner_states)),
+            "degraded_mode_episodes": int(sum(int(s.get("degraded_mode_episodes", 0) or 0) for s in planner_states)),
+            "average_consecutive_failure_streak": avg_consecutive_failure_streak,
+            "stale_plan_reuse_count": int(sum(int(s.get("stale_plan_reuse_count", 0) or 0) for s in planner_states)),
+            "ui_safe_fallback_count": int(sum(int(s.get("ui_safe_fallback_count", 0) or 0) for s in planner_states)),
+            "responses_discarded_as_stale": int(sum(int(s.get("total_stale_discarded", 0) or 0) for s in planner_states)),
+        }
 
         run_summary = {
             "run_metadata": self._run_metadata(),
@@ -515,6 +541,7 @@ class MetricsCollector:
                 "mismatch_detections": self.events_by_type["construction_mismatch_detected"],
                 "repair_or_correction_episodes": self.events_by_type["construction_repair_episode"],
                 "team_knowledge": team_knowledge_summary,
+                "planner_responsiveness": planner_responsiveness,
             },
             "externalization_metrics": {
                 "externalized_artifacts_created_by_type": dict(self.externalization_by_type),
