@@ -134,6 +134,20 @@ class TestMetricsOutputs(unittest.TestCase):
             self.assertTrue(Path(result["json"]).exists())
             self.assertTrue(Path(result["csv"]).exists())
 
+    def test_summary_contains_planner_outcome_taxonomy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sim, session_dir = self._run_sim(tmpdir)
+            run_summary = json.loads((session_dir / "measures" / "run_summary.json").read_text(encoding="utf-8"))
+            planner = run_summary["process"]["planner_responsiveness"]
+            self.assertIn("requests_completed_with_llm", planner)
+            self.assertIn("requests_completed_with_fallback", planner)
+            self.assertIn("llm_success_count", planner)
+            self.assertIn("fallback_generated_count", planner)
+
+            team_summary = json.loads((session_dir / "measures" / "team_summary.json").read_text(encoding="utf-8"))
+            self.assertIn("plan_source_distribution", team_summary["backend"])
+            self.assertIn("fallback_reason_distribution", team_summary["backend"])
+
     def test_headless_simulation_still_runs_cleanly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)

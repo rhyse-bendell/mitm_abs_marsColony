@@ -73,8 +73,13 @@ class TestPlannerAsyncResilience(unittest.TestCase):
                 events = sim.logger.get_recent_events(250)
                 degraded_events = [e for e in events if e.get("event_type") == "backend_degraded_mode_started"]
                 cooldown_events = [e for e in events if e.get("event_type") == "planner_request_skipped_cooldown"]
+                timeout_events = [e for e in events if e.get("event_type") == "llm_timeout"]
+                fallback_events = [e for e in events if e.get("event_type") == "fallback_result_generated"]
                 self.assertTrue(degraded_events)
                 self.assertTrue(cooldown_events)
+                self.assertTrue(timeout_events)
+                self.assertTrue(fallback_events)
+                self.assertFalse([e for e in events if e.get("event_type") == "brain_provider_response_received"])
             sim.stop()
 
     def test_late_response_is_marked_stale_after_timeout(self):
@@ -107,6 +112,10 @@ class TestPlannerAsyncResilience(unittest.TestCase):
             self.assertIn("requests_started", planner_metrics)
             self.assertIn("requests_skipped_due_to_inflight", planner_metrics)
             self.assertIn("ui_safe_fallback_count", planner_metrics)
+            self.assertIn("requests_completed_with_llm", planner_metrics)
+            self.assertIn("requests_completed_with_fallback", planner_metrics)
+            self.assertIn("llm_timeout_count", planner_metrics)
+            self.assertIn("fallback_generated_count", planner_metrics)
 
 
 if __name__ == "__main__":

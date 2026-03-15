@@ -78,6 +78,9 @@ class SimulationState:
         self.brain_backend_config = BrainBackendConfig(backend=brain_backend, **backend_options)
         self.configured_brain_backend = self.brain_backend_config.backend
         self.brain_provider = create_brain_provider(self.brain_backend_config)
+        self.provider_warmup_status = None
+        if hasattr(self.brain_provider, "warmup_probe") and callable(getattr(self.brain_provider, "warmup_probe")):
+            self.provider_warmup_status = self.brain_provider.warmup_probe()
         self.agent_brain_runtime = {}
         worker_count = int(self.planner_defaults.get("planner_async_workers", max(2, len(self.task_model.agent_defaults) if self.task_model.agent_defaults else 3)))
         self.planner_executor = ThreadPoolExecutor(max_workers=max(1, worker_count), thread_name_prefix="planner")
@@ -112,6 +115,7 @@ class SimulationState:
                 "local_base_url": self.brain_backend_config.local_base_url if self.configured_brain_backend != "rule_brain" else None,
                 "local_endpoint": self.brain_backend_config.local_endpoint if self.configured_brain_backend != "rule_brain" else None,
                 "timeout_s": self.brain_backend_config.timeout_s if self.configured_brain_backend != "rule_brain" else None,
+                "backend_warmup": self.provider_warmup_status,
             },
         )
         self.logger.log_event(
@@ -131,6 +135,7 @@ class SimulationState:
                 "local_base_url": self.brain_backend_config.local_base_url if self.configured_brain_backend != "rule_brain" else None,
                 "local_endpoint": self.brain_backend_config.local_endpoint if self.configured_brain_backend != "rule_brain" else None,
                 "timeout_s": self.brain_backend_config.timeout_s if self.configured_brain_backend != "rule_brain" else None,
+                "backend_warmup": self.provider_warmup_status,
             },
         )
         self.save_interval = 10.0
@@ -344,6 +349,8 @@ class SimulationState:
             elif outcome.get("fallback") is False:
                 runtime["last_outcome_signature"] = None
         runtime["effective_backend"] = effective
+        if effective != configured:
+            agent.planner_state["fallback_only_ticks"] = int(agent.planner_state.get("fallback_only_ticks", 0)) + 1
 
         any_fallback = any(rt.get("effective_backend") != rt.get("configured_backend") for rt in self.agent_brain_runtime.values())
         self.effective_brain_backend = self.brain_backend_config.fallback_backend if any_fallback else self.configured_brain_backend
@@ -369,6 +376,7 @@ class SimulationState:
             "planner_trace_mode": str(self.planner_defaults.get("planner_trace_mode", "full") or "full"),
             "planner_trace_max_chars": int(self.planner_defaults.get("planner_trace_max_chars", 12000) or 12000),
             "planner_trace_artifact": "logs/planner_trace.jsonl" if bool(self.planner_defaults.get("enable_planner_trace", True)) else None,
+            "backend_warmup": self.provider_warmup_status,
         }
 
     def _refresh_backend_effective_state(self, reason="runtime_update"):
