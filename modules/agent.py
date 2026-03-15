@@ -879,6 +879,19 @@ class Agent:
         setattr(response.plan, "_method_notes", notes)
         return response
 
+    def _make_planner_trace_id(self, request_id):
+        return f"trace-{request_id}"
+
+    def _exception_payload(self, exc):
+        if exc is None:
+            return None
+        return {"type": type(exc).__name__, "message": str(exc), "repr": repr(exc)}
+
+    def _append_planner_trace(self, sim_state, payload):
+        if sim_state is None or not hasattr(sim_state, "logger"):
+            return
+        sim_state.logger.append_planner_trace(payload)
+
     def _build_brain_request(self, sim_state, context, request_explanation, trigger_reason):
         phase = context.world_snapshot.get("phase_profile", {}).get("name", context.world_snapshot.get("phase_state", {}).get("name", "default"))
         observations = [str(e) for e in context.history_bands.get("near_preceding_events", [])[-4:]]
@@ -912,7 +925,7 @@ class Agent:
             artifact_context=list(context.team_state.get("externalized_artifacts", []))[:4],
         )
 
-    def _execute_planner_request_sync(self, sim_state, trigger_reason, request_packet, request_explanation, request_started_at, request_sim_time):
+    def _execute_planner_request_sync(self, sim_state, trigger_reason, request_packet, request_explanation, request_started_at, request_sim_time, trace_id):
         context = sim_state.brain_context_builder.build(sim_state, self)
         runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"provider": sim_state.brain_provider, "config": sim_state.brain_backend_config, "configured_backend": getattr(sim_state, "configured_brain_backend", sim_state.brain_backend_config.backend), "effective_backend": getattr(sim_state, "effective_brain_backend", sim_state.brain_backend_config.backend)}
         provider = runtime["provider"]
@@ -922,6 +935,12 @@ class Agent:
         effective_backend = runtime.get("effective_backend", configured_backend)
 
         response = None
+        provider_trace = None
+        schema_validation_errors = []
+        legacy_validation_errors = []
+        validation_repaired = False
+        grounding_status = None
+        grounding_notes = []
         provider_decide = getattr(provider, "decide", None)
         if callable(provider_decide) and provider.__class__.__name__ == "RuleBrain":
             legacy_decision = provider_decide(context)
@@ -961,12 +980,18 @@ class Agent:
                 }
             )
 
+        provider_trace = getattr(provider, "last_trace", None)
         response = self._validate_and_ground_response_plan(response, context, request_packet)
+        plan_obj = getattr(response, "plan", None)
+        grounding_status = getattr(plan_obj, "_method_status", None) if plan_obj else None
+        grounding_notes = list(getattr(plan_obj, "_method_notes", [])) if plan_obj else []
         legal_action_ids = [a["action_type"] for a in context.action_affordances]
         errors = validate_agent_brain_response(response, legal_action_ids)
+        schema_validation_errors = list(errors)
         repaired = False
         if errors:
             repaired = True
+            validation_repaired = True
             response = AgentBrainResponse.from_dict(
                 {
                     "response_id": f"fallback-{request_packet.request_id}",
@@ -990,6 +1015,7 @@ class Agent:
         )
         decision = self._apply_trait_bias_to_decision(decision, context, sim_state, trigger_reason)
         legacy_errors = validate_brain_decision(decision, [ExecutableActionType(a) for a in legal_action_ids])
+        legacy_validation_errors = list(legacy_errors)
         status = "repaired" if repaired else "accepted"
         if legacy_errors:
             status = "rejected"
@@ -998,6 +1024,7 @@ class Agent:
         latency_s = max(0.0, sim_state.time - request_sim_time)
         return {
             "request_id": request_packet.request_id,
+            "trace_id": trace_id,
             "decision": decision,
             "status": status,
             "response": response,
@@ -1012,6 +1039,32 @@ class Agent:
             "latency_s": latency_s,
             "failed": False,
             "timed_out": False,
+            "trace": {
+                "trace_id": trace_id,
+                "schema_validation_succeeded": not bool(schema_validation_errors),
+                "schema_validation_errors": list(schema_validation_errors),
+                "legacy_decision_validation_errors": list(legacy_validation_errors),
+                "validation_repaired": bool(validation_repaired),
+                "grounding_status": grounding_status,
+                "grounding_notes": list(grounding_notes),
+                "provider_trace": provider_trace if isinstance(provider_trace, dict) else None,
+                "normalized_agent_brain_response": {
+                    "response_id": response.response_id,
+                    "agent_id": response.agent_id,
+                    "plan": {
+                        "plan_id": response.plan.plan_id,
+                        "plan_horizon": response.plan.plan_horizon,
+                        "ordered_goals": [g.__dict__ for g in response.plan.ordered_goals],
+                        "ordered_actions": [a.__dict__ for a in response.plan.ordered_actions],
+                        "next_action": response.plan.next_action.__dict__,
+                        "confidence": response.plan.confidence,
+                        "plan_method_id": response.plan.plan_method_id,
+                        "notes": list(response.plan.notes),
+                    },
+                    "confidence": response.confidence,
+                    "explanation": response.explanation,
+                },
+            },
         }
 
     def _submit_planner_request_async(self, sim_state, trigger_reason):
@@ -1022,18 +1075,25 @@ class Agent:
         effective_backend = runtime.get("effective_backend", configured_backend)
         request_explanation = self._should_request_explanation()
         request_packet = self._build_brain_request(sim_state, context, request_explanation, trigger_reason)
+        trace_id = self._make_planner_trace_id(request_packet.request_id)
         self._planner_request_seq += 1
         request_started_at = self.sim_step_count
         request_sim_time = float(sim_state.time)
         self.planner_state["status"] = "in_flight"
         self.planner_state["request_id"] = request_packet.request_id
+        self.planner_state["trace_id"] = trace_id
         self.planner_state["request_tick"] = self.sim_step_count
         self.planner_state["requested_at"] = request_sim_time
         self.planner_state["error"] = None
+        self.planner_state["trigger_reason"] = trigger_reason
+        self.planner_state["request_payload"] = request_packet.to_dict()
+        self.planner_state["configured_backend"] = configured_backend
+        self.planner_state["effective_backend"] = effective_backend
+        self.planner_state["model"] = provider_cfg.local_model
         self.planner_state["last_result"] = None
         self.planner_state["total_started"] += 1
-        self._emit_event(sim_state, "planner_request_started_async", {"request_id": request_packet.request_id, "trigger_reason": trigger_reason, "backend": configured_backend, "effective_backend": effective_backend, "timeout": self.planner_cadence.planner_timeout_seconds, "model": provider_cfg.local_model, "queue_depth": 1})
-        self._emit_event(sim_state, "planner_request_queue_depth", {"request_id": request_packet.request_id, "queue_depth": 1, "backend": configured_backend})
+        self._emit_event(sim_state, "planner_request_started_async", {"request_id": request_packet.request_id, "trace_id": trace_id, "trigger_reason": trigger_reason, "backend": configured_backend, "effective_backend": effective_backend, "timeout": self.planner_cadence.planner_timeout_seconds, "model": provider_cfg.local_model, "queue_depth": 1})
+        self._emit_event(sim_state, "planner_request_queue_depth", {"request_id": request_packet.request_id, "trace_id": trace_id, "queue_depth": 1, "backend": configured_backend})
 
         with self._planner_future_lock:
             self._planner_future = sim_state.planner_executor.submit(
@@ -1044,6 +1104,7 @@ class Agent:
                 request_explanation,
                 request_started_at,
                 request_sim_time,
+                trace_id,
             )
 
     def _planner_cooldown_remaining(self, sim_state):
@@ -1069,6 +1130,31 @@ class Agent:
             cooldown = self.planner_cadence.degraded_cooldown_seconds
             self.planner_state["cooldown_until"] = max(float(self.planner_state.get("cooldown_until", 0.0)), float(sim_state.time) + float(cooldown))
 
+        self._append_planner_trace(
+            sim_state,
+            {
+                "trace_id": self.planner_state.get("trace_id"),
+                "request_id": request_id,
+                "agent_id": self.agent_id,
+                "display_name": self.display_name,
+                "tick": self.sim_step_count,
+                "sim_time": float(sim_state.time),
+                "trigger_reason": self.planner_state.get("trigger_reason"),
+                "configured_backend": self.planner_state.get("configured_backend"),
+                "effective_backend": self.planner_state.get("effective_backend"),
+                "model": self.planner_state.get("model"),
+                "timeout_s": float(self.planner_cadence.planner_timeout_seconds),
+                "agent_brain_request_payload": self.planner_state.get("request_payload"),
+                "planner_result": "timed_out" if timed_out else "failed",
+                "fallback": True,
+                "fallback_reason": str(reason),
+                "exception": {"type": "TimeoutError" if timed_out else "PlannerExecutionError", "message": str(reason)},
+                "schema_validation_succeeded": False,
+                "plan_grounding_succeeded": False,
+                "plan_disposition": "failed_before_response",
+            },
+        )
+
     def _check_inflight_timeout(self, sim_state):
         if self.planner_state.get("status") != "in_flight":
             return
@@ -1081,7 +1167,7 @@ class Agent:
             return
         request_id = self.planner_state.get("request_id")
         self._register_planner_failure(sim_state, request_id, reason="timed out", timed_out=True)
-        self._emit_event(sim_state, "planner_request_completed_async", {"request_id": request_id, "result": "timed_out", "latency": elapsed, "timeout": timeout_s, "consecutive_failures": self.planner_state["consecutive_failures"], "cooldown_remaining": self._planner_cooldown_remaining(sim_state)})
+        self._emit_event(sim_state, "planner_request_completed_async", {"request_id": request_id, "trace_id": self.planner_state.get("trace_id"), "result": "timed_out", "latency": elapsed, "timeout": timeout_s, "consecutive_failures": self.planner_state["consecutive_failures"], "cooldown_remaining": self._planner_cooldown_remaining(sim_state)})
     def _poll_planner_request(self, sim_state, environment):
         with self._planner_future_lock:
             fut = self._planner_future
@@ -1095,17 +1181,19 @@ class Agent:
             result = fut.result()
         except Exception as exc:
             self._register_planner_failure(sim_state, request_id, reason=str(exc), timed_out=False)
-            self._emit_event(sim_state, "planner_request_completed_async", {"request_id": request_id, "result": "failed", "error": str(exc), "consecutive_failures": self.planner_state["consecutive_failures"], "cooldown_remaining": self._planner_cooldown_remaining(sim_state)})
+            self._emit_event(sim_state, "planner_request_completed_async", {"request_id": request_id, "trace_id": self.planner_state.get("trace_id"), "result": "failed", "error": str(exc), "consecutive_failures": self.planner_state["consecutive_failures"], "cooldown_remaining": self._planner_cooldown_remaining(sim_state)})
             return False
 
         if result.get("request_id") != request_id:
             self.planner_state["total_stale_discarded"] += 1
-            self._emit_event(sim_state, "planner_request_result_arrived_stale", {"request_id": result.get("request_id"), "expected_request_id": request_id})
+            self._emit_event(sim_state, "planner_request_result_arrived_stale", {"request_id": result.get("request_id"), "expected_request_id": request_id, "trace_id": result.get("trace_id")})
+            self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": result.get("request_id"), "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": "stale_discarded", "plan_disposition": "discarded_stale_request_id_mismatch", "fallback": True, "fallback_reason": "request_id_mismatch"})
             return False
         if result.get("request_id") in self._timed_out_request_ids:
             self._timed_out_request_ids.discard(result.get("request_id"))
             self.planner_state["total_stale_discarded"] += 1
-            self._emit_event(sim_state, "planner_request_result_arrived_stale", {"request_id": result.get("request_id"), "reason": "arrived_after_timeout"})
+            self._emit_event(sim_state, "planner_request_result_arrived_stale", {"request_id": result.get("request_id"), "reason": "arrived_after_timeout", "trace_id": result.get("trace_id")})
+            self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": result.get("request_id"), "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": "stale_discarded", "plan_disposition": "discarded_arrived_after_timeout", "fallback": True, "fallback_reason": "arrived_after_timeout", "trace": result.get("trace")})
             return False
 
         self.planner_call_count += 1
@@ -1122,20 +1210,21 @@ class Agent:
         response = result["response"]
         trigger_reason = result["trigger_reason"]
 
-        self._emit_event(sim_state, "brain_provider_response_received", {"configured_backend": result["configured_backend"], "effective_backend": result["effective_backend"], "provider_class": result["provider_name"], "has_plan": bool(getattr(response, "plan", None)), "has_explanation": bool(getattr(response, "explanation", None)), "request_id": request_id})
-        self._emit_event(sim_state, "planner_invocation_completed", {"trigger_reason": trigger_reason, "decision_status": status, "selected_action": decision.selected_action.value, "request_explanation": result["request_explanation"], "request_id": request_id})
+        self._emit_event(sim_state, "brain_provider_response_received", {"configured_backend": result["configured_backend"], "effective_backend": result["effective_backend"], "provider_class": result["provider_name"], "has_plan": bool(getattr(response, "plan", None)), "has_explanation": bool(getattr(response, "explanation", None)), "request_id": request_id, "trace_id": result.get("trace_id")})
+        self._emit_event(sim_state, "planner_invocation_completed", {"trigger_reason": trigger_reason, "decision_status": status, "selected_action": decision.selected_action.value, "request_explanation": result["request_explanation"], "request_id": request_id, "trace_id": result.get("trace_id")})
 
         if result["errors"]:
             sim_state.logger.log_event(sim_state.time, "planner_next_action_rejected", {"agent": self.name, "errors": list(result["errors"]), "fallback_action": "wait"})
-            self._emit_event(sim_state, "brain_provider_response_invalid", {"errors": list(result["errors"]), "schema_parsing_succeeded": False, "request_id": request_id})
+            self._emit_event(sim_state, "brain_provider_response_invalid", {"errors": list(result["errors"]), "schema_parsing_succeeded": False, "request_id": request_id, "trace_id": result.get("trace_id")})
 
         if self.planner_state["request_tick"] is not None and self.planner_state["request_tick"] < max(0, self.sim_step_count - 2) and self.current_plan is not None and trigger_reason not in {"no_active_plan", "plan_invalidated", "plan_completed"}:
             self.planner_state["total_stale_discarded"] += 1
             self.planner_state["status"] = "completed"
-            self._emit_event(sim_state, "planner_response_discarded_due_to_state_change", {"request_id": request_id, "request_tick": self.planner_state["request_tick"], "current_tick": self.sim_step_count, "current_plan_id": getattr(self.current_plan, "plan_id", None)})
+            self._emit_event(sim_state, "planner_response_discarded_due_to_state_change", {"request_id": request_id, "trace_id": result.get("trace_id"), "request_tick": self.planner_state["request_tick"], "current_tick": self.sim_step_count, "current_plan_id": getattr(self.current_plan, "plan_id", None)})
+            self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": request_id, "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": status, "plan_disposition": "discarded_due_to_state_change", "fallback": bool(result.get("errors")), "fallback_reason": "state_changed_before_adoption", "trace": result.get("trace")})
             return False
 
-        self._adopt_new_plan(decision, trigger_reason, sim_state, response=response)
+        self._adopt_new_plan(decision, trigger_reason, sim_state, response=response, trace_id=result.get("trace_id"))
         self._refresh_goal_plan_state(decision, sim_state, trigger_reason, response=response)
         self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment)
         self.planner_state["status"] = "completed"
@@ -1145,7 +1234,43 @@ class Agent:
         if self.planner_state["degraded_mode"]:
             self.planner_state["degraded_mode"] = False
             self._emit_event(sim_state, "backend_degraded_mode_ended", {"agent_id": self.agent_id, "request_id": request_id})
-        self._emit_event(sim_state, "planner_request_completed_async", {"request_id": request_id, "result": status, "latency": result.get("latency_s"), "consecutive_failures": self.planner_state["consecutive_failures"]})
+        self._emit_event(sim_state, "planner_request_completed_async", {"request_id": request_id, "trace_id": result.get("trace_id"), "result": status, "latency": result.get("latency_s"), "consecutive_failures": self.planner_state["consecutive_failures"]})
+        translated_actions = list(self.current_action or [])
+        self._append_planner_trace(sim_state, {
+            "trace_id": result.get("trace_id"),
+            "request_id": request_id,
+            "agent_id": self.agent_id,
+            "display_name": self.display_name,
+            "tick": self.sim_step_count,
+            "sim_time": float(sim_state.time),
+            "trigger_reason": trigger_reason,
+            "configured_backend": result.get("configured_backend"),
+            "effective_backend": result.get("effective_backend"),
+            "provider_class": result.get("provider_name"),
+            "model": self.planner_state.get("model"),
+            "timeout_s": float(self.planner_cadence.planner_timeout_seconds),
+            "latency_s": result.get("latency_s"),
+            "fallback": bool(result.get("errors")) or bool((result.get("trace", {}).get("provider_trace") or {}).get("fallback")),
+            "fallback_reason": (result.get("trace", {}).get("provider_trace") or {}).get("fallback_reason") or ("validation_repaired" if status == "repaired" else None),
+            "agent_brain_request_payload": self.planner_state.get("request_payload"),
+            "planner_result": status,
+            "schema_validation_succeeded": not bool(result.get("trace", {}).get("schema_validation_errors")),
+            "schema_validation_errors": result.get("trace", {}).get("schema_validation_errors"),
+            "plan_grounding_succeeded": result.get("trace", {}).get("grounding_status") not in {"rejected_unknown_method", None},
+            "plan_grounding_status": result.get("trace", {}).get("grounding_status"),
+            "plan_grounding_notes": result.get("trace", {}).get("grounding_notes"),
+            "plan_disposition": "adopted",
+            "normalized_agent_brain_response": result.get("trace", {}).get("normalized_agent_brain_response"),
+            "provider_trace": result.get("trace", {}).get("provider_trace"),
+            "provider_attempts": (result.get("trace", {}).get("provider_trace") or {}).get("attempts") if isinstance(result.get("trace", {}).get("provider_trace"), dict) else None,
+            "provider_request_payload": (result.get("trace", {}).get("provider_trace") or {}).get("provider_request_payload") if isinstance(result.get("trace", {}).get("provider_trace"), dict) else None,
+            "raw_http_response_text": (((result.get("trace", {}).get("provider_trace") or {}).get("attempts") or [{}])[-1].get("raw_http_response_text") if isinstance(result.get("trace", {}).get("provider_trace"), dict) else None),
+            "parsed_response_json": (((result.get("trace", {}).get("provider_trace") or {}).get("attempts") or [{}])[-1].get("parsed_response_json") if isinstance(result.get("trace", {}).get("provider_trace"), dict) else None),
+            "extracted_response_payload": (((result.get("trace", {}).get("provider_trace") or {}).get("attempts") or [{}])[-1].get("extracted_response_payload") if isinstance(result.get("trace", {}).get("provider_trace"), dict) else None),
+            "next_action_summary": {"action_type": decision.selected_action.value, "target_id": decision.target_id, "target_zone": decision.target_zone, "reason": decision.reason_summary},
+            "action_translation_outcome": "succeeded" if translated_actions else "none",
+            "translated_actions": translated_actions,
+        })
         sim_state.logger.log_event(
             sim_state.time,
             "brain_decision_outcome",
@@ -1396,7 +1521,7 @@ class Agent:
                 "active_goal_count": len(self.goal_stack),
             },
         )
-    def _adopt_new_plan(self, decision, trigger_reason, sim_state, response=None):
+    def _adopt_new_plan(self, decision, trigger_reason, sim_state, response=None, trace_id=None):
         if self.current_plan is not None and self.current_plan.invalidation_reason is None:
             self.current_plan.invalidation_reason = f"replaced_by_{trigger_reason}"
 
@@ -1430,7 +1555,7 @@ class Agent:
             validation_notes=method_notes,
             associated_goal_ids=associated_goal_ids,
         )
-        self._emit_event(sim_state, "plan_adopted", {"plan_id": self.current_plan.plan_id, "plan_method_id": self.current_plan.plan_method_id, "trust_tier": method_status, "canonical_goal_matches": len([g for g in (self.current_plan.associated_goal_ids or []) if g]), "ad_hoc_goal_count": len([g for g in (self.current_plan.ordered_goals or []) if not g.get("goal_id")]), "next_action_type": decision.selected_action.value})
+        self._emit_event(sim_state, "plan_adopted", {"plan_id": self.current_plan.plan_id, "plan_method_id": self.current_plan.plan_method_id, "trust_tier": method_status, "canonical_goal_matches": len([g for g in (self.current_plan.associated_goal_ids or []) if g]), "ad_hoc_goal_count": len([g for g in (self.current_plan.ordered_goals or []) if not g.get("goal_id")]), "next_action_type": decision.selected_action.value, "trace_id": trace_id})
         sim_state.logger.log_event(
             sim_state.time,
             "plan_method_grounding_result",
@@ -1449,14 +1574,14 @@ class Agent:
             return False
         if self.current_plan.remaining_executions <= 0:
             self.current_plan.invalidation_reason = "plan_completed"
-            sim_state.logger.log_event(sim_state.time, "plan_invalidated", {"agent": self.name, "plan_id": self.current_plan.plan_id, "reason": self.current_plan.invalidation_reason})
+            sim_state.logger.log_event(sim_state.time, "plan_invalidated", {"agent": self.name, "plan_id": self.current_plan.plan_id, "reason": self.current_plan.invalidation_reason, "trace_id": self.planner_state.get("trace_id")})
             return False
 
         active_goal_ids = {g.get("goal_id") for g in self.goal_stack if g.get("status") in {"active", "queued", "candidate"}}
         plan_goal_ids = set(self.current_plan.associated_goal_ids or [])
         if plan_goal_ids and not (plan_goal_ids & active_goal_ids):
             self.current_plan.invalidation_reason = "plan_goal_mismatch"
-            sim_state.logger.log_event(sim_state.time, "plan_invalidated", {"agent": self.name, "plan_id": self.current_plan.plan_id, "reason": self.current_plan.invalidation_reason})
+            sim_state.logger.log_event(sim_state.time, "plan_invalidated", {"agent": self.name, "plan_id": self.current_plan.plan_id, "reason": self.current_plan.invalidation_reason, "trace_id": self.planner_state.get("trace_id")})
             return False
 
         self.current_action = self._translate_brain_decision_to_legacy_action(self.current_plan.decision, environment, sim_state=sim_state)
@@ -1971,10 +2096,11 @@ class Agent:
                         runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend, "effective_backend": sim_state.effective_brain_backend, "provider": sim_state.brain_provider}
                         self._emit_event(sim_state, "planner_request_skipped_inflight", {"reason": planner_reason, "request_id": self.planner_state.get("request_id"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
                     else:
-                        self._emit_event(sim_state, "planner_invocation_started", {"trigger_reason": planner_reason, "tick": self.sim_step_count, "current_plan_id": getattr(self.current_plan, "plan_id", None)})
+                        pending_trace_id = self._make_planner_trace_id(f"{self.agent_id}-{self.sim_step_count}")
+                        self._emit_event(sim_state, "planner_invocation_started", {"trigger_reason": planner_reason, "tick": self.sim_step_count, "current_plan_id": getattr(self.current_plan, "plan_id", None), "trace_id": pending_trace_id})
                         runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend, "effective_backend": sim_state.effective_brain_backend, "provider": sim_state.brain_provider}
-                        self._emit_event(sim_state, "planner_invocation_requested", {"tick": self.sim_step_count, "trigger_reason": planner_reason, "configured_backend": runtime.get("configured_backend", sim_state.configured_brain_backend), "effective_backend": runtime.get("effective_backend", sim_state.effective_brain_backend), "request_explanation": self._should_request_explanation(), "current_plan_id": getattr(self.current_plan, "plan_id", None), "current_active_goal_ids": [g.get("goal_id") for g in self.goal_stack[:6]]})
-                        self._emit_event(sim_state, "brain_provider_request_started", {"configured_backend": runtime.get("configured_backend", sim_state.configured_brain_backend), "effective_backend": runtime.get("effective_backend", sim_state.effective_brain_backend), "provider_class": runtime["provider"].__class__.__name__})
+                        self._emit_event(sim_state, "planner_invocation_requested", {"tick": self.sim_step_count, "trigger_reason": planner_reason, "configured_backend": runtime.get("configured_backend", sim_state.configured_brain_backend), "effective_backend": runtime.get("effective_backend", sim_state.effective_brain_backend), "request_explanation": self._should_request_explanation(), "current_plan_id": getattr(self.current_plan, "plan_id", None), "current_active_goal_ids": [g.get("goal_id") for g in self.goal_stack[:6]], "trace_id": pending_trace_id})
+                        self._emit_event(sim_state, "brain_provider_request_started", {"configured_backend": runtime.get("configured_backend", sim_state.configured_brain_backend), "effective_backend": runtime.get("effective_backend", sim_state.effective_brain_backend), "provider_class": runtime["provider"].__class__.__name__, "trace_id": pending_trace_id})
                         self._submit_planner_request_async(sim_state, planner_reason)
                 elif self._continue_cached_plan(sim_state, environment):
                     self.planner_state["stale_plan_reuse_count"] += 1

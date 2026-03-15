@@ -61,6 +61,91 @@ class OutputSessionManager:
         with placeholder.open("w", encoding="utf-8") as f:
             json.dump({"status": "placeholder"}, f)
 
+class PlannerTraceWriter:
+    def __init__(self, output_session, enabled=True, mode="full", max_chars=12000):
+        self.output_session = output_session
+        self.enabled = bool(enabled)
+        mode = str(mode or "summary").lower()
+        self.mode = mode if mode in {"summary", "full"} else "summary"
+        self.max_chars = max(200, int(max_chars or 12000))
+        self.trace_path = self.output_session.build_log_path("planner_trace.jsonl")
+
+    def _truncate_text(self, value):
+        if value is None:
+            return None
+        text = str(value)
+        if len(text) <= self.max_chars:
+            return text
+        return text[: self.max_chars] + f"...<truncated {len(text)-self.max_chars} chars>"
+
+    def _trim_value(self, value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return self._truncate_text(value)
+        encoded = json.dumps(value, default=str)
+        if len(encoded) <= self.max_chars:
+            return value
+        return self._truncate_text(encoded)
+
+    def _sanitize_attempt(self, attempt):
+        item = dict(attempt or {})
+        if self.mode == "summary":
+            item.pop("raw_http_response_text", None)
+            item.pop("parsed_response_json", None)
+            item.pop("extracted_response_payload", None)
+        else:
+            if "raw_http_response_text" in item:
+                item["raw_http_response_text"] = self._truncate_text(item.get("raw_http_response_text"))
+            if "parsed_response_json" in item:
+                item["parsed_response_json"] = self._trim_value(item.get("parsed_response_json"))
+            if "extracted_response_payload" in item:
+                item["extracted_response_payload"] = self._trim_value(item.get("extracted_response_payload"))
+        if "exception" in item:
+            item["exception"] = self._trim_value(item.get("exception"))
+        return item
+
+    def _sanitize(self, payload):
+        cleaned = dict(payload or {})
+        if self.mode == "summary":
+            for key in [
+                "raw_http_response_text",
+                "provider_request_payload",
+                "parsed_response_json",
+                "extracted_response_payload",
+                "normalized_agent_brain_response",
+                "agent_brain_request_payload",
+                "provider_trace",
+            ]:
+                cleaned.pop(key, None)
+        else:
+            for key in [
+                "raw_http_response_text",
+                "provider_request_payload",
+                "parsed_response_json",
+                "extracted_response_payload",
+                "normalized_agent_brain_response",
+                "agent_brain_request_payload",
+                "provider_trace",
+            ]:
+                if key in cleaned:
+                    cleaned[key] = self._trim_value(cleaned.get(key))
+        if "exception" in cleaned:
+            cleaned["exception"] = self._trim_value(cleaned.get("exception"))
+        attempts = cleaned.get("provider_attempts")
+        if isinstance(attempts, list):
+            cleaned["provider_attempts"] = [self._sanitize_attempt(a) for a in attempts]
+        return cleaned
+
+    def append(self, payload):
+        if not self.enabled:
+            return
+        row = self._sanitize(payload)
+        self.trace_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.trace_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, default=str) + "\n")
+
+
 class SimulationLogger:
     def __init__(self, filename=None, interval=5.0, experiment_name="experiment", project_root=None):
         self.output_session = OutputSessionManager(experiment_name=experiment_name, project_root=project_root)
@@ -78,6 +163,7 @@ class SimulationLogger:
         self.max_recent_events = 300
         self.event_listeners = []
         self.last_dump_time = 0.0
+        self.planner_trace_writer = PlannerTraceWriter(self.output_session, enabled=False)
 
     def _append_recent_event(self, event):
         self.recent_events.append(event)
@@ -169,6 +255,17 @@ class SimulationLogger:
 
         self.buffer = []
         print(f"✅ Agent logs saved to {save_path}")
+
+    def configure_planner_trace(self, enabled=True, mode="full", max_chars=12000):
+        self.planner_trace_writer = PlannerTraceWriter(
+            self.output_session,
+            enabled=enabled,
+            mode=mode,
+            max_chars=max_chars,
+        )
+
+    def append_planner_trace(self, payload):
+        self.planner_trace_writer.append(payload)
 
     def initialize_session_outputs(self, speed=None, flash_mode=None, active_agents=None, extra_metadata=None):
         self.output_session.write_manifest(
