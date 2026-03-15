@@ -20,6 +20,9 @@ from modules.action_schema import (
     validate_brain_decision,
 )
 from modules.brain_contract import AgentBrainRequest, AgentBrainResponse, validate_agent_brain_response
+from modules.goal_manager import GoalManager
+from modules.goal_state import GOAL_SOURCES, GOAL_STATUSES
+from modules.plan_state import PlanRecord
 
 DIK_LOG = []
 
@@ -40,57 +43,6 @@ MESSAGE_TYPES = {
     "TKRQ": "Team Knowledge Request",
     "TCR": "Team Correction or Repair"
 }
-
-GOAL_STATUSES = {"inactive", "candidate", "active", "queued", "blocked", "satisfied", "invalidated", "abandoned"}
-GOAL_SOURCES = {
-    "task_defined",
-    "planner_proposed",
-    "derived_from_rule",
-    "teammate_or_artifact_influenced",
-    "teammate_artifact_influenced",  # backwards-compatible alias
-    "legacy_seed",
-}
-
-
-@dataclass
-class PlanRecord:
-    plan_id: str
-    decision: BrainDecision
-    created_at: float
-    last_reviewed_at: float
-    trigger_reason: str
-    remaining_executions: int = 2
-    invalidation_reason: str | None = None
-    ordered_goals: list[dict] | None = None
-    ordered_actions: list[dict] | None = None
-    explanation: str | None = None
-    plan_method_id: str | None = None
-    plan_method_status: str = "unspecified"
-    adoption_reason: str | None = None
-    validation_notes: list[str] | None = None
-    associated_goal_ids: list[str] | None = None
-
-
-@dataclass
-class GoalRecord:
-    goal_key: str
-    goal_id: str | None
-    label: str
-    source: str
-    status: str
-    priority: float
-    target: object = None
-    parent_goal_key: str | None = None
-    evidence: list[str] | None = None
-    activation_conditions: list[str] | None = None
-    completion_conditions: list[str] | None = None
-    invalidation_reasons: list[str] | None = None
-    blocking_reasons: list[str] | None = None
-    goal_level: str | None = None
-    goal_type: str | None = None
-    trust_tier: str = "normal"
-    last_transition_reason: str | None = None
-
 
 @dataclass
 class PlannerCadenceConfig:
@@ -160,6 +112,7 @@ class Agent:
         self.goal = None  # Synchronized with highest-priority active goal
         self.goal_status_history = []
         self.goal_transition_counter = 0
+        self.goal_manager = GoalManager(self)
         self.target = None
         self.has_shared = False
         self.detour_target = None
@@ -215,6 +168,7 @@ class Agent:
         self.last_planner_step = -1
         self.last_planner_time = -1.0
         self.planner_call_count = 0
+        self.loop_counters = {"action_signature": None, "action_repeats": 0, "plan_signature": None, "plan_repeats": 0, "target_failures": {}}
 
 
         # Experiment-facing trait defaults
@@ -232,6 +186,13 @@ class Agent:
         self.executed_derivations = set()
         self.derivation_events = []
         self.task_model = None
+
+
+    def _emit_event(self, sim_state, event_type, payload):
+        if sim_state is None:
+            return
+        enriched = {"agent_id": self.agent_id, "agent": self.name, **dict(payload or {})}
+        sim_state.logger.log_event(sim_state.time, event_type, enriched)
 
     def _normalize_packet_name(self, packet_name):
         """Map UI packet labels and aliases to canonical environment packet keys."""
@@ -352,18 +313,21 @@ class Agent:
         candidates.sort(key=lambda c: c[0], reverse=True)
         return candidates
 
-    def _resolve_inspect_target(self, decision, environment):
+    def _resolve_inspect_target(self, decision, environment, sim_state=None):
         self._ensure_source_state(environment)
         explicit_target = decision.target_id
+        self._emit_event(sim_state, "target_resolution_started", {"target_type": "information_source", "requested_target_id": explicit_target})
         if explicit_target:
             point = environment.get_interaction_target_position(explicit_target, from_position=self.position)
             if point is not None:
                 self._set_status(f"Inspect target selected: {explicit_target}")
+                self._emit_event(sim_state, "target_resolved", {"target_type": "information_source", "target_id": explicit_target, "candidate_count": 1})
                 return explicit_target, point
 
         candidates = self._candidate_information_sources(environment)
         if not candidates:
             self._set_status("Inspect target resolution failed: no accessible information sources")
+            self._emit_event(sim_state, "target_resolution_failed", {"target_type": "information_source", "failure_category": "no_information_source_available"})
             return None, None
 
         # Conservative retargeting away from repeatedly stalled targets when alternatives exist.
@@ -377,6 +341,7 @@ class Agent:
             self._set_status(
                 f"Inspect target {explicit_target} unreachable; retargeted to {chosen[1]} (status={chosen[3]}, stalled={chosen[4]})"
             )
+        self._emit_event(sim_state, "target_resolved", {"target_type": "information_source", "target_id": chosen[1], "candidate_count": len(candidates)})
         return chosen[1], chosen[2]
 
     def mark_source_revisitable(self, source_id, reason="identified_gap"):
@@ -557,170 +522,43 @@ class Agent:
         return point
 
     def _next_goal_key(self):
-        self.goal_transition_counter += 1
-        return f"{self.agent_id}:goal:{self.goal_transition_counter}"
+        return self.goal_manager.next_goal_key()
 
     def _coerce_goal_status(self, status):
-        normalized = str(status or "candidate").strip().lower()
-        return normalized if normalized in GOAL_STATUSES else "candidate"
+        from modules.goal_state import coerce_goal_status
+
+        return coerce_goal_status(status)
 
     def _coerce_goal_source(self, source):
-        normalized = str(source or "planner_proposed").strip().lower()
-        return normalized if normalized in GOAL_SOURCES else "planner_proposed"
+        from modules.goal_state import coerce_goal_source
+
+        return coerce_goal_source(source)
 
     def _goal_priority(self, status, priority):
-        base = float(priority if priority is not None else 0.5)
-        status_bias = {
-            "active": 0.35,
-            "queued": 0.2,
-            "candidate": 0.1,
-            "blocked": -0.2,
-            "inactive": -0.3,
-            "satisfied": -0.6,
-            "invalidated": -0.7,
-            "abandoned": -0.8,
-        }.get(status, 0.0)
-        return max(0.0, min(1.0, base + status_bias))
+        from modules.goal_state import goal_priority
+
+        return goal_priority(status, priority)
 
     def _log_goal_transition(self, sim_state, goal, reason, extra=None):
-        payload = {
-            "agent": self.name,
-            "goal_key": goal.goal_key,
-            "goal_id": goal.goal_id,
-            "label": goal.label,
-            "status": goal.status,
-            "priority": round(goal.priority, 3),
-            "source": goal.source,
-            "goal_level": goal.goal_level,
-            "goal_type": goal.goal_type,
-            "trust_tier": goal.trust_tier,
-            "parent_goal_key": goal.parent_goal_key,
-            "reason": reason,
-        }
-        if extra:
-            payload.update(extra)
-        self.goal_status_history.append(payload)
-        if sim_state is not None:
-            sim_state.logger.log_event(sim_state.time, "goal_state_transition", payload)
+        self.goal_manager.log_goal_transition(sim_state, goal, reason, extra=extra)
 
-    def _upsert_goal_record(self, *, label, goal_id=None, source="planner_proposed", status="candidate", priority=0.5, target=None, parent_goal_key=None, evidence=None, activation_conditions=None, completion_conditions=None, invalidation_reason=None, blocking_reason=None, sim_state=None, reason="goal_upsert", goal_level=None, goal_type=None, trust_tier="normal"):
-        if goal_id and goal_id in self.goal_registry:
-            key = goal_id
-            goal = self.goal_registry[key]
-            changed = False
-            next_status = self._coerce_goal_status(status)
-            if goal.status != next_status:
-                goal.status = next_status
-                changed = True
-            next_priority = self._goal_priority(next_status, priority)
-            if abs(goal.priority - next_priority) > 1e-6:
-                goal.priority = next_priority
-                changed = True
-            if target is not None:
-                goal.target = target
-                changed = True
-            if evidence:
-                goal.evidence = sorted(set((goal.evidence or []) + list(evidence)))
-                changed = True
-            if activation_conditions:
-                goal.activation_conditions = sorted(set((goal.activation_conditions or []) + list(activation_conditions)))
-                changed = True
-            if completion_conditions:
-                goal.completion_conditions = sorted(set((goal.completion_conditions or []) + list(completion_conditions)))
-                changed = True
-            if blocking_reason:
-                goal.blocking_reasons = sorted(set((goal.blocking_reasons or []) + [blocking_reason]))
-                changed = True
-            if invalidation_reason:
-                goal.invalidation_reasons = sorted(set((goal.invalidation_reasons or []) + [invalidation_reason]))
-                changed = True
-            if parent_goal_key and goal.parent_goal_key != parent_goal_key:
-                goal.parent_goal_key = parent_goal_key
-                changed = True
-            if goal_level and goal.goal_level != goal_level:
-                goal.goal_level = goal_level
-                changed = True
-            if goal_type and goal.goal_type != goal_type:
-                goal.goal_type = goal_type
-                changed = True
-            if trust_tier and goal.trust_tier != trust_tier:
-                goal.trust_tier = trust_tier
-                changed = True
-            if changed:
-                goal.last_transition_reason = reason
-                self._log_goal_transition(sim_state, goal, reason)
-            return goal
-
-        key = goal_id or self._next_goal_key()
-        goal = GoalRecord(
-            goal_key=key,
-            goal_id=goal_id,
-            label=label,
-            source=self._coerce_goal_source(source),
-            status=self._coerce_goal_status(status),
-            priority=self._goal_priority(status, priority),
-            target=target,
-            parent_goal_key=parent_goal_key,
-            evidence=list(evidence or []),
-            activation_conditions=list(activation_conditions or []),
-            completion_conditions=list(completion_conditions or []),
-            invalidation_reasons=[invalidation_reason] if invalidation_reason else [],
-            blocking_reasons=[blocking_reason] if blocking_reason else [],
-            goal_level=goal_level,
-            goal_type=goal_type,
-            trust_tier=trust_tier,
-            last_transition_reason=reason,
-        )
-        self.goal_registry[key] = goal
-        self.goal_order.append(key)
-        self._log_goal_transition(sim_state, goal, reason, extra={"event": "created", "trust_tier": trust_tier})
-        return goal
+    def _upsert_goal_record(self, **kwargs):
+        return self.goal_manager.upsert_goal_record(**kwargs)
 
     def _refresh_goal_stack_view(self):
-        live = [
-            g for g in self.goal_registry.values()
-            if g.status in {"active", "queued", "candidate", "blocked"}
-        ]
-        live.sort(key=lambda g: (g.priority, -self.goal_order.index(g.goal_key)), reverse=True)
-        self.goal_stack = [{"goal": g.label, "target": g.target, "goal_id": g.goal_id or g.goal_key, "status": g.status, "source": g.source, "parent_goal_key": g.parent_goal_key, "goal_level": g.goal_level, "goal_type": g.goal_type, "trust_tier": g.trust_tier} for g in live]
-        self.goal = self.goal_stack[0]["goal"] if self.goal_stack else None
+        self.goal_manager.refresh_goal_stack_view()
 
     def current_goal(self):
-        self._refresh_goal_stack_view()
-        return self.goal_stack[0] if self.goal_stack else None
+        return self.goal_manager.current_goal()
 
     def update_current_goal(self):
-        self._refresh_goal_stack_view()
+        self.goal_manager.refresh_goal_stack_view()
 
     def push_goal(self, goal, target=None):
-        rec = self._upsert_goal_record(
-            label=str(goal),
-            goal_id=str(goal) if isinstance(goal, str) and goal.startswith("G_") else None,
-            source="legacy_seed",
-            status="active",
-            target=target,
-            reason="legacy_push_goal",
-        )
-        self.activity_log.append(f"Pushed goal: {rec.label}")
-        self._refresh_goal_stack_view()
+        self.goal_manager.push_goal(goal, target=target)
 
     def pop_goal(self):
-        self._refresh_goal_stack_view()
-        if not self.goal_stack:
-            return
-        top = self.goal_stack[0]
-        key = top.get("goal_id")
-        goal = self.goal_registry.get(key)
-        if goal is None:
-            for candidate in self.goal_registry.values():
-                if candidate.label == top.get("goal") and candidate.status in {"active", "queued", "candidate", "blocked"}:
-                    goal = candidate
-                    break
-        if goal is None:
-            return
-        goal.status = "satisfied"
-        self.activity_log.append(f"Completed goal: {goal.label}")
-        self._refresh_goal_stack_view()
+        self.goal_manager.pop_goal()
 
     def _seed_task_defined_goals(self, sim_state=None):
         if not self.task_model:
@@ -1043,7 +881,9 @@ class Agent:
         configured_backend = getattr(sim_state, "configured_brain_backend", sim_state.brain_backend_config.backend)
         effective_backend = getattr(sim_state, "effective_brain_backend", configured_backend)
         request_explanation = self._should_request_explanation()
+        self._emit_event(sim_state, "planner_invocation_requested", {"tick": self.sim_step_count, "trigger_reason": trigger_reason, "configured_backend": configured_backend, "effective_backend": effective_backend, "request_explanation": request_explanation, "current_plan_id": getattr(self.current_plan, "plan_id", None), "current_active_goal_ids": [g.get("goal_id") for g in self.goal_stack[:6]]})
         request_packet = self._build_brain_request(sim_state, context, request_explanation, trigger_reason)
+        self._emit_event(sim_state, "brain_request_built", {"tick": self.sim_step_count, "trigger_reason": trigger_reason, "legal_action_count": len(context.action_affordances), "current_goal_count": len(context.individual_cognitive_state.get("goal_stack", [])), "inbox_count": len(context.team_state.get("recent_communications", [])), "observation_count": len(context.history_bands.get("near_preceding_events", [])), "request_explanation": request_explanation, "used_canonical_goals": any((g.get("goal_type") == "canonical") for g in context.individual_cognitive_state.get("goal_stack", [])), "included_plan_method_hints": bool(context.static_task_context.get("enabled_plan_methods"))})
         sim_state.logger.log_event(sim_state.time, "planner_call_triggered", {
             "agent": self.name,
             "reason": trigger_reason,
@@ -1071,6 +911,7 @@ class Agent:
         )
 
         response = None
+        self._emit_event(sim_state, "brain_provider_request_started", {"configured_backend": configured_backend, "effective_backend": effective_backend, "provider_class": provider_name})
         provider_decide = getattr(sim_state.brain_provider, "decide", None)
         if callable(provider_decide) and sim_state.brain_provider.__class__.__name__ == "RuleBrain":
             legacy_decision = provider_decide(context)
@@ -1138,6 +979,7 @@ class Agent:
                 }
             )
 
+        self._emit_event(sim_state, "brain_provider_response_received", {"configured_backend": configured_backend, "effective_backend": effective_backend, "provider_class": provider_name, "has_plan": bool(getattr(response, "plan", None)), "has_explanation": bool(getattr(response, "explanation", None))})
         response = self._validate_and_ground_response_plan(response, context, request_packet)
 
         self.planner_call_count += 1
@@ -1154,6 +996,7 @@ class Agent:
                 "planner_next_action_rejected",
                 {"agent": self.name, "errors": list(errors), "fallback_action": "wait"},
             )
+            self._emit_event(sim_state, "brain_provider_response_invalid", {"errors": list(errors), "schema_parsing_succeeded": False})
             response = AgentBrainResponse.from_dict(
                 {
                     "response_id": f"fallback-{request_packet.request_id}",
@@ -1182,6 +1025,7 @@ class Agent:
             status = "rejected"
             decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="Fallback due to decision validation failure.", confidence=1.0)
 
+        self._emit_event(sim_state, "planner_invocation_completed", {"trigger_reason": trigger_reason, "decision_status": status, "selected_action": decision.selected_action.value, "request_explanation": request_explanation})
         sim_state.logger.log_event(
             sim_state.time,
             "brain_decision_outcome",
@@ -1442,8 +1286,17 @@ class Agent:
         method_notes = list(getattr(plan_obj, "_method_notes", [])) if plan_obj else []
         associated_goal_ids = [g.goal_id for g in getattr(plan_obj, "ordered_goals", []) if getattr(g, "goal_id", None)] if plan_obj else []
 
+        next_plan_id = getattr(plan_obj, "plan_id", self._next_plan_id())
+        if self.loop_counters.get("plan_signature") == next_plan_id:
+            self.loop_counters["plan_repeats"] += 1
+        else:
+            self.loop_counters["plan_signature"] = next_plan_id
+            self.loop_counters["plan_repeats"] = 1
+        if self.loop_counters["plan_repeats"] >= 3:
+            self._emit_event(sim_state, "repeated_plan_loop_detected", {"plan_id": next_plan_id, "repetition_count": self.loop_counters["plan_repeats"], "window_size": 3})
+
         self.current_plan = PlanRecord(
-            plan_id=getattr(plan_obj, "plan_id", self._next_plan_id()),
+            plan_id=next_plan_id,
             decision=decision,
             created_at=sim_state.time,
             last_reviewed_at=sim_state.time,
@@ -1458,6 +1311,7 @@ class Agent:
             validation_notes=method_notes,
             associated_goal_ids=associated_goal_ids,
         )
+        self._emit_event(sim_state, "plan_adopted", {"plan_id": self.current_plan.plan_id, "plan_method_id": self.current_plan.plan_method_id, "trust_tier": method_status, "canonical_goal_matches": len([g for g in (self.current_plan.associated_goal_ids or []) if g]), "ad_hoc_goal_count": len([g for g in (self.current_plan.ordered_goals or []) if not g.get("goal_id")]), "next_action_type": decision.selected_action.value})
         sim_state.logger.log_event(
             sim_state.time,
             "plan_method_grounding_result",
@@ -1486,7 +1340,7 @@ class Agent:
             sim_state.logger.log_event(sim_state.time, "plan_invalidated", {"agent": self.name, "plan_id": self.current_plan.plan_id, "reason": self.current_plan.invalidation_reason})
             return False
 
-        self.current_action = self._translate_brain_decision_to_legacy_action(self.current_plan.decision, environment)
+        self.current_action = self._translate_brain_decision_to_legacy_action(self.current_plan.decision, environment, sim_state=sim_state)
         self.current_plan.remaining_executions -= 1
         self.current_plan.last_reviewed_at = sim_state.time
         sim_state.logger.log_event(
@@ -1498,11 +1352,21 @@ class Agent:
                 "remaining_executions": self.current_plan.remaining_executions,
             },
         )
+        action_sig = f"{self.current_plan.plan_id}:{self.current_plan.decision.selected_action.value}:{self.current_plan.decision.target_id}"
+        if self.loop_counters.get("action_signature") == action_sig:
+            self.loop_counters["action_repeats"] += 1
+        else:
+            self.loop_counters["action_signature"] = action_sig
+            self.loop_counters["action_repeats"] = 1
+        if self.loop_counters["action_repeats"] >= 3:
+            self._emit_event(sim_state, "repeated_action_loop_detected", {"repetition_count": self.loop_counters["action_repeats"], "window_size": 3, "plan_id": self.current_plan.plan_id, "selected_action": self.current_plan.decision.selected_action.value})
         return True
-    def _translate_brain_decision_to_legacy_action(self, decision, environment):
+    def _translate_brain_decision_to_legacy_action(self, decision, environment, sim_state=None):
+        self._emit_event(sim_state, "planner_next_action_selected", {"planner_action_type": decision.selected_action.value, "plan_id": getattr(self.current_plan, "plan_id", None)})
         if self.task_model is not None:
             enabled = set(self.task_model.enabled_actions_for_role(self.role))
             if decision.selected_action.value not in enabled:
+                self._emit_event(sim_state, "action_translation_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "illegal_action"})
                 return [{"type": "idle", "duration": 1.0, "priority": 1, "decision_action": ExecutableActionType.WAIT.value}]
 
         mapping = {
@@ -1531,8 +1395,9 @@ class Agent:
                 action["task_parameters"] = dict(params.metadata)
 
         if decision.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
-            source_id, interaction_target = self._resolve_inspect_target(decision, environment)
+            source_id, interaction_target = self._resolve_inspect_target(decision, environment, sim_state=sim_state)
             if source_id is None or interaction_target is None:
+                self._emit_event(sim_state, "action_translation_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "unresolved_target"})
                 return [{"type": "idle", "duration": 1.0, "priority": 1}]
             action["target"] = interaction_target
             action["source_target_id"] = source_id
@@ -1571,6 +1436,7 @@ class Agent:
         if decision.selected_action == ExecutableActionType.REQUEST_ASSISTANCE:
             action["assist_action"] = decision.selected_action.value
 
+        self._emit_event(sim_state, "action_translation_succeeded", {"planner_action_type": decision.selected_action.value, "translated_action_type": action.get("type"), "target_id": decision.target_id, "target_zone": decision.target_zone})
         return [action]
 
     def perceive_environment(self, sim_state):
@@ -1750,7 +1616,7 @@ class Agent:
                     self.activity_log.append(f"Absorbed info: {info.id} (from {info.source})")
                     self.last_dik_change_time = getattr(self, "current_time", 0.0)
 
-    def move_toward(self, target, dt, environment):
+    def move_toward(self, target, dt, environment, sim_state=None):
         def is_blocking_object(obj):
             obj_type = obj.get("type")
             # Anything that is not a bridge/line is impassable unless marked passable
@@ -1861,7 +1727,9 @@ class Agent:
         tx, ty = active_target
         dx, dy = tx - x, ty - y
         dist = math.hypot(dx, dy)
+        self._emit_event(sim_state, "movement_started", {"origin": self.position, "destination": active_target, "distance": round(dist, 3)})
         if dist < 0.01:
+            self._emit_event(sim_state, "movement_arrived", {"destination": active_target, "distance": round(dist, 3)})
             return
 
         angle = math.atan2(dy, dx)
@@ -1872,6 +1740,7 @@ class Agent:
 
         if can_occupy((new_x, new_y)):
             self.position = (new_x, new_y)
+            self._emit_event(sim_state, "movement_progress", {"destination": active_target, "remaining_distance": round(max(0.0, dist-step), 3)})
         else:
             if self.detour_target is None:
                 detour = compute_detour_waypoint(self.position, target)
@@ -1880,6 +1749,7 @@ class Agent:
                     self.activity_log.append(f"Detouring around obstacle via {detour}")
                 else:
                     self.activity_log.append(f"Blocked while moving toward {target}")
+                    self._emit_event(sim_state, "movement_blocked", {"destination": target, "blocker_category": "path_blocked"})
                     if self.current_inspect_target_id:
                         self.inspect_stall_counts[self.current_inspect_target_id] = self.inspect_stall_counts.get(self.current_inspect_target_id, 0) + 1
                         self._set_status(
@@ -1887,6 +1757,7 @@ class Agent:
                         )
             else:
                 self.activity_log.append(f"Blocked while moving toward {active_target}")
+                self._emit_event(sim_state, "movement_blocked", {"destination": active_target, "blocker_category": "path_blocked"})
                 if self.current_inspect_target_id:
                     self.inspect_stall_counts[self.current_inspect_target_id] = self.inspect_stall_counts.get(self.current_inspect_target_id, 0) + 1
 
@@ -1969,6 +1840,7 @@ class Agent:
                 trigger_reason = self._plan_trigger_reason(sim_state, environment)
                 planner_allowed, planner_reason = self._planner_decision_allowed(sim_state, trigger_reason)
                 if planner_allowed:
+                    self._emit_event(sim_state, "planner_invocation_started", {"trigger_reason": planner_reason, "tick": self.sim_step_count, "current_plan_id": getattr(self.current_plan, "plan_id", None)})
                     decision, _status, response = self._build_rule_based_brain_decision(sim_state, planner_reason)
                     self._adopt_new_plan(decision, planner_reason, sim_state, response=response)
                     self._refresh_goal_plan_state(decision, sim_state, planner_reason, response=response)
@@ -1985,7 +1857,7 @@ class Agent:
             self._update_goal_states_from_runtime(sim_state, environment)
 
         if self.target:
-            self.move_toward(self.target, dt, environment)
+            self.move_toward(self.target, dt, environment, sim_state=sim_state)
 
 
         # Communication attempt (talk while walking or standing still)
