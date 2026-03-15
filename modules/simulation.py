@@ -70,6 +70,7 @@ class SimulationState:
         self.brain_backend_config = BrainBackendConfig(backend=brain_backend, **backend_options)
         self.configured_brain_backend = self.brain_backend_config.backend
         self.brain_provider = create_brain_provider(self.brain_backend_config)
+        self.agent_brain_runtime = {}
         worker_count = int(self.planner_defaults.get("planner_async_workers", max(2, len(self.task_model.agent_defaults) if self.task_model.agent_defaults else 3)))
         self.planner_executor = ThreadPoolExecutor(max_workers=max(1, worker_count), thread_name_prefix="planner")
         self.effective_brain_backend = self.configured_brain_backend
@@ -187,6 +188,13 @@ class SimulationState:
             position = self.environment.get_spawn_point(role_id)
             merged_planner_config = dict(self.planner_defaults)
             merged_planner_config.update(dict(config.get("planner_config", {})))
+            merged_brain_config = dict(config.get("brain_config", {}))
+            merged_brain_config.setdefault("backend", self.configured_brain_backend)
+            merged_brain_config.setdefault("local_model", self.brain_backend_config.local_model)
+            merged_brain_config.setdefault("fallback_backend", self.brain_backend_config.fallback_backend)
+            merged_brain_config.setdefault("timeout_s", self.brain_backend_config.timeout_s)
+            merged_brain_config.setdefault("local_base_url", self.brain_backend_config.local_base_url)
+            merged_brain_config.setdefault("local_endpoint", self.brain_backend_config.local_endpoint)
             agent = Agent(
                 name=config.get("name", config.get("display_name", role_id)),
                 role=role_id,
@@ -196,7 +204,7 @@ class SimulationState:
                 display_name=config.get("display_name", config.get("name", role_id)),
                 agent_label=config.get("label") or config.get("alias"),
                 template_id=config.get("template_id"),
-                brain_config=config.get("brain_config"),
+                brain_config=merged_brain_config,
                 communication_params=config.get("communication_params"),
                 initial_goal_seeds=config.get("initial_goal_seeds"),
             )
@@ -237,6 +245,7 @@ class SimulationState:
                 if isinstance(seed, str) and seed.strip() and seed not in agent.goal_registry:
                     agent.push_goal(seed.strip(), target=None)
             agent.update_current_goal()
+            self._register_agent_brain_runtime(agent)
             self.agents.append(agent)
 
         self.environment.agents = self.agents
@@ -245,7 +254,7 @@ class SimulationState:
         self.logger.initialize_session_outputs(
             speed=speed,
             flash_mode=self.flash_mode,
-            active_agents=[{"name": agent.name, "role": agent.role} for agent in self.agents],
+            active_agents=[self._agent_manifest_row(agent) for agent in self.agents],
             extra_metadata=self._backend_settings_for_manifest(),
         )
         self.logger.log_event(
@@ -258,6 +267,74 @@ class SimulationState:
                 "agents": [agent.name for agent in self.agents],
             },
         )
+
+
+    def _agent_manifest_row(self, agent):
+        runtime = self.get_agent_brain_runtime(agent)
+        return {
+            "name": agent.name,
+            "display_name": agent.display_name,
+            "label": agent.agent_label,
+            "role": agent.role,
+            "configured_backend": runtime["configured_backend"],
+            "fallback_backend": runtime["config"].fallback_backend,
+            "local_model": runtime["config"].local_model if runtime["configured_backend"] != "rule_brain" else None,
+            "planner_interval_steps": agent.planner_cadence.planner_interval_steps,
+            "planner_timeout_seconds": agent.planner_cadence.planner_timeout_seconds,
+        }
+
+    def _register_agent_brain_runtime(self, agent):
+        cfg = BrainBackendConfig(
+            backend=str(agent.brain_config.get("backend", self.configured_brain_backend) or self.configured_brain_backend),
+            local_base_url=str(agent.brain_config.get("local_base_url", self.brain_backend_config.local_base_url) or self.brain_backend_config.local_base_url),
+            local_endpoint=str(agent.brain_config.get("local_endpoint", self.brain_backend_config.local_endpoint) or self.brain_backend_config.local_endpoint),
+            local_model=str(agent.brain_config.get("local_model", self.brain_backend_config.local_model) or self.brain_backend_config.local_model),
+            timeout_s=float(agent.brain_config.get("timeout_s", self.brain_backend_config.timeout_s)),
+            max_retries=int(agent.brain_config.get("max_retries", self.brain_backend_config.max_retries)),
+            fallback_backend=str(agent.brain_config.get("fallback_backend", self.brain_backend_config.fallback_backend) or self.brain_backend_config.fallback_backend),
+            debug=bool(agent.brain_config.get("debug", self.brain_backend_config.debug)),
+        )
+        provider = create_brain_provider(cfg)
+        self.agent_brain_runtime[agent.agent_id] = {
+            "config": cfg,
+            "provider": provider,
+            "configured_backend": cfg.backend,
+            "effective_backend": cfg.backend,
+            "fallback_count": 0,
+            "last_outcome_signature": None,
+        }
+
+    def get_agent_brain_runtime(self, agent):
+        return self.agent_brain_runtime.get(agent.agent_id) or {
+            "config": self.brain_backend_config,
+            "provider": self.brain_provider,
+            "configured_backend": self.configured_brain_backend,
+            "effective_backend": self.effective_brain_backend,
+            "fallback_count": self.backend_fallback_count,
+            "last_outcome_signature": None,
+        }
+
+    def refresh_agent_backend_effective_state(self, agent, reason="runtime_update"):
+        runtime = self.get_agent_brain_runtime(agent)
+        provider = runtime["provider"]
+        configured = runtime["configured_backend"]
+        effective = configured
+        if hasattr(provider, "last_outcome") and isinstance(provider.last_outcome, dict):
+            outcome = provider.last_outcome
+            if outcome.get("fallback"):
+                signature = (outcome.get("reason"), outcome.get("latency_ms"))
+                if signature != runtime.get("last_outcome_signature"):
+                    runtime["fallback_count"] += 1
+                    runtime["last_outcome_signature"] = signature
+                effective = runtime["config"].fallback_backend or "rule_brain"
+            elif outcome.get("fallback") is False:
+                runtime["last_outcome_signature"] = None
+        runtime["effective_backend"] = effective
+
+        any_fallback = any(rt.get("effective_backend") != rt.get("configured_backend") for rt in self.agent_brain_runtime.values())
+        self.effective_brain_backend = self.brain_backend_config.fallback_backend if any_fallback else self.configured_brain_backend
+        self.backend_fallback_count = sum(int(rt.get("fallback_count", 0)) for rt in self.agent_brain_runtime.values())
+        self.fallback_occurred = self.backend_fallback_count > 0
 
 
     def _backend_settings_for_manifest(self):
@@ -390,7 +467,7 @@ class SimulationState:
             agent.current_time = self.time
             agent.update(dt, self.environment, sim_state=self)
             agent.compare_and_repair_construction(self.environment.construction, sim_state=self)
-            self._refresh_backend_effective_state(reason="planner_call")
+            self.refresh_agent_backend_effective_state(agent, reason="planner_call")
             self.logger.log_agent_state(self.time, agent)
 
         self.metrics.on_step(dt)

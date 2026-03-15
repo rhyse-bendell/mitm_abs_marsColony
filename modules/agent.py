@@ -914,13 +914,16 @@ class Agent:
 
     def _execute_planner_request_sync(self, sim_state, trigger_reason, request_packet, request_explanation, request_started_at, request_sim_time):
         context = sim_state.brain_context_builder.build(sim_state, self)
-        provider_name = sim_state.brain_provider.__class__.__name__
-        configured_backend = getattr(sim_state, "configured_brain_backend", sim_state.brain_backend_config.backend)
-        effective_backend = getattr(sim_state, "effective_brain_backend", configured_backend)
+        runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"provider": sim_state.brain_provider, "config": sim_state.brain_backend_config, "configured_backend": getattr(sim_state, "configured_brain_backend", sim_state.brain_backend_config.backend), "effective_backend": getattr(sim_state, "effective_brain_backend", sim_state.brain_backend_config.backend)}
+        provider = runtime["provider"]
+        provider_cfg = runtime["config"]
+        provider_name = provider.__class__.__name__
+        configured_backend = runtime.get("configured_backend", getattr(sim_state, "configured_brain_backend", sim_state.brain_backend_config.backend))
+        effective_backend = runtime.get("effective_backend", configured_backend)
 
         response = None
-        provider_decide = getattr(sim_state.brain_provider, "decide", None)
-        if callable(provider_decide) and sim_state.brain_provider.__class__.__name__ == "RuleBrain":
+        provider_decide = getattr(provider, "decide", None)
+        if callable(provider_decide) and provider.__class__.__name__ == "RuleBrain":
             legacy_decision = provider_decide(context)
             response = AgentBrainResponse.from_dict(
                 {
@@ -938,10 +941,10 @@ class Agent:
                     "explanation": legacy_decision.reason_summary if request_explanation else None,
                 }
             )
-        elif hasattr(sim_state.brain_provider, "generate_plan"):
-            response = sim_state.brain_provider.generate_plan(request_packet)
+        elif hasattr(provider, "generate_plan"):
+            response = provider.generate_plan(request_packet)
         if response is None:
-            legacy_decision = sim_state.brain_provider.decide(context)
+            legacy_decision = provider.decide(context)
             response = AgentBrainResponse.from_dict(
                 {
                     "response_id": f"legacy-{request_packet.request_id}",
@@ -1013,8 +1016,10 @@ class Agent:
 
     def _submit_planner_request_async(self, sim_state, trigger_reason):
         context = sim_state.brain_context_builder.build(sim_state, self)
-        configured_backend = getattr(sim_state, "configured_brain_backend", sim_state.brain_backend_config.backend)
-        effective_backend = getattr(sim_state, "effective_brain_backend", configured_backend)
+        runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"provider": sim_state.brain_provider, "config": sim_state.brain_backend_config, "configured_backend": getattr(sim_state, "configured_brain_backend", sim_state.brain_backend_config.backend), "effective_backend": getattr(sim_state, "effective_brain_backend", sim_state.brain_backend_config.backend)}
+        provider_cfg = runtime["config"]
+        configured_backend = runtime.get("configured_backend", getattr(sim_state, "configured_brain_backend", sim_state.brain_backend_config.backend))
+        effective_backend = runtime.get("effective_backend", configured_backend)
         request_explanation = self._should_request_explanation()
         request_packet = self._build_brain_request(sim_state, context, request_explanation, trigger_reason)
         self._planner_request_seq += 1
@@ -1027,7 +1032,7 @@ class Agent:
         self.planner_state["error"] = None
         self.planner_state["last_result"] = None
         self.planner_state["total_started"] += 1
-        self._emit_event(sim_state, "planner_request_started_async", {"request_id": request_packet.request_id, "trigger_reason": trigger_reason, "backend": configured_backend, "effective_backend": effective_backend, "timeout": self.planner_cadence.planner_timeout_seconds, "model": sim_state.brain_backend_config.local_model, "queue_depth": 1})
+        self._emit_event(sim_state, "planner_request_started_async", {"request_id": request_packet.request_id, "trigger_reason": trigger_reason, "backend": configured_backend, "effective_backend": effective_backend, "timeout": self.planner_cadence.planner_timeout_seconds, "model": provider_cfg.local_model, "queue_depth": 1})
         self._emit_event(sim_state, "planner_request_queue_depth", {"request_id": request_packet.request_id, "queue_depth": 1, "backend": configured_backend})
 
         with self._planner_future_lock:
@@ -1059,7 +1064,8 @@ class Agent:
             if not self.planner_state["degraded_mode"]:
                 self.planner_state["degraded_mode"] = True
                 self.planner_state["degraded_mode_episodes"] += 1
-                self._emit_event(sim_state, "backend_degraded_mode_started", {"request_id": request_id, "consecutive_failures": self.planner_state["consecutive_failures"], "threshold": threshold, "backend": sim_state.configured_brain_backend, "model": sim_state.brain_backend_config.local_model})
+                runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"config": sim_state.brain_backend_config, "configured_backend": sim_state.configured_brain_backend}
+                self._emit_event(sim_state, "backend_degraded_mode_started", {"request_id": request_id, "consecutive_failures": self.planner_state["consecutive_failures"], "threshold": threshold, "backend": runtime.get("configured_backend", sim_state.configured_brain_backend), "model": runtime["config"].local_model})
             cooldown = self.planner_cadence.degraded_cooldown_seconds
             self.planner_state["cooldown_until"] = max(float(self.planner_state.get("cooldown_until", 0.0)), float(sim_state.time) + float(cooldown))
 
@@ -1958,14 +1964,17 @@ class Agent:
                     cooldown_remaining = self._planner_cooldown_remaining(sim_state)
                     if cooldown_remaining > 0.0:
                         self.planner_state["total_skipped_cooldown"] += 1
-                        self._emit_event(sim_state, "planner_request_skipped_cooldown", {"reason": planner_reason, "cooldown_remaining": cooldown_remaining, "consecutive_failures": self.planner_state["consecutive_failures"], "backend": sim_state.configured_brain_backend, "model": sim_state.brain_backend_config.local_model})
+                        runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"config": sim_state.brain_backend_config, "configured_backend": sim_state.configured_brain_backend}
+                        self._emit_event(sim_state, "planner_request_skipped_cooldown", {"reason": planner_reason, "cooldown_remaining": cooldown_remaining, "consecutive_failures": self.planner_state["consecutive_failures"], "backend": runtime.get("configured_backend", sim_state.configured_brain_backend), "model": runtime["config"].local_model})
                     elif self.planner_state.get("status") == "in_flight":
                         self.planner_state["total_skipped_inflight"] += 1
-                        self._emit_event(sim_state, "planner_request_skipped_inflight", {"reason": planner_reason, "request_id": self.planner_state.get("request_id"), "backend": sim_state.configured_brain_backend})
+                        runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend, "effective_backend": sim_state.effective_brain_backend, "provider": sim_state.brain_provider}
+                        self._emit_event(sim_state, "planner_request_skipped_inflight", {"reason": planner_reason, "request_id": self.planner_state.get("request_id"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
                     else:
                         self._emit_event(sim_state, "planner_invocation_started", {"trigger_reason": planner_reason, "tick": self.sim_step_count, "current_plan_id": getattr(self.current_plan, "plan_id", None)})
-                        self._emit_event(sim_state, "planner_invocation_requested", {"tick": self.sim_step_count, "trigger_reason": planner_reason, "configured_backend": sim_state.configured_brain_backend, "effective_backend": sim_state.effective_brain_backend, "request_explanation": self._should_request_explanation(), "current_plan_id": getattr(self.current_plan, "plan_id", None), "current_active_goal_ids": [g.get("goal_id") for g in self.goal_stack[:6]]})
-                        self._emit_event(sim_state, "brain_provider_request_started", {"configured_backend": sim_state.configured_brain_backend, "effective_backend": sim_state.effective_brain_backend, "provider_class": sim_state.brain_provider.__class__.__name__})
+                        runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend, "effective_backend": sim_state.effective_brain_backend, "provider": sim_state.brain_provider}
+                        self._emit_event(sim_state, "planner_invocation_requested", {"tick": self.sim_step_count, "trigger_reason": planner_reason, "configured_backend": runtime.get("configured_backend", sim_state.configured_brain_backend), "effective_backend": runtime.get("effective_backend", sim_state.effective_brain_backend), "request_explanation": self._should_request_explanation(), "current_plan_id": getattr(self.current_plan, "plan_id", None), "current_active_goal_ids": [g.get("goal_id") for g in self.goal_stack[:6]]})
+                        self._emit_event(sim_state, "brain_provider_request_started", {"configured_backend": runtime.get("configured_backend", sim_state.configured_brain_backend), "effective_backend": runtime.get("effective_backend", sim_state.effective_brain_backend), "provider_class": runtime["provider"].__class__.__name__})
                         self._submit_planner_request_async(sim_state, planner_reason)
                 elif self._continue_cached_plan(sim_state, environment):
                     self.planner_state["stale_plan_reuse_count"] += 1
@@ -1974,7 +1983,8 @@ class Agent:
                     decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="no active cached plan while planner cadence skips", confidence=1.0)
                     self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment)
                     self.planner_state["ui_safe_fallback_count"] += 1
-                    self._emit_event(sim_state, "ui_safe_fallback_used", {"reason": planner_reason, "request_state": self.planner_state.get("status"), "backend": sim_state.configured_brain_backend})
+                    runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend}
+                    self._emit_event(sim_state, "ui_safe_fallback_used", {"reason": planner_reason, "request_state": self.planner_state.get("status"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
                     sim_state.logger.log_event(sim_state.time, "planner_skipped_without_plan", {"agent": self.name, "reason": planner_reason})
                 self._advance_active_actions(dt)
 

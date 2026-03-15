@@ -50,6 +50,15 @@ class MetricsCollector:
                     "rule_accuracy": getattr(agent, "rule_accuracy", 0.5),
                 },
                 "packet_access": list(getattr(agent, "allowed_packet", [])),
+                "display_name": getattr(agent, "display_name", agent.name),
+                "agent_label": getattr(agent, "agent_label", None),
+                "brain_backend": getattr(agent, "brain_config", {}).get("backend"),
+                "brain_local_model": getattr(agent, "brain_config", {}).get("local_model"),
+                "brain_fallback_backend": getattr(agent, "brain_config", {}).get("fallback_backend"),
+                "planner_interval_steps": getattr(agent.planner_cadence, "planner_interval_steps", None),
+                "planner_timeout_seconds": getattr(agent.planner_cadence, "planner_timeout_seconds", None),
+                "planner_fallback_events": 0,
+                "planner_degraded_episodes": 0,
                 "time_moving": 0.0,
                 "time_stalled": 0.0,
                 "time_inspecting_info": 0.0,
@@ -179,6 +188,16 @@ class MetricsCollector:
             self.phase_stats[-1]["phase_transitions"] += 1
             for stats in self.agent_stats.values():
                 stats["phase_transitions_seen"] += 1
+
+        if event_type == "brain_provider_fallback":
+            agent = payload.get("agent")
+            if agent in self.agent_stats:
+                self.agent_stats[agent]["planner_fallback_events"] += 1
+
+        if event_type == "backend_degraded_mode_started":
+            agent = payload.get("agent")
+            if agent in self.agent_stats:
+                self.agent_stats[agent]["planner_degraded_episodes"] += 1
 
         if event_type == "brain_decision_outcome":
             selected = payload.get("selected_action", "")
