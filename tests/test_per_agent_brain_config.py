@@ -158,6 +158,16 @@ class TestPerAgentBrainConfig(unittest.TestCase):
             finally:
                 sim.stop()
 
+    def test_simulation_instantiates_only_selected_agent_count(self):
+        configs = self._agent_configs()[:2]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, agent_configs=configs)
+            try:
+                self.assertEqual(len(sim.agents), 2)
+                self.assertEqual([a.role for a in sim.agents], ["Architect", "Engineer"])
+            finally:
+                sim.stop()
+
     def test_headless_simulation_runs_with_per_agent_overrides(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = SimulationState(phases=[], project_root=tmpdir, agent_configs=self._agent_configs(), flash_mode=True)
@@ -186,14 +196,107 @@ class TestInterfacePerAgentDefaults(unittest.TestCase):
 
         try:
             app.root.withdraw()
-            roles = sorted(app.active_roles.keys())
-            self.assertEqual(roles, ["Architect", "Botanist", "Engineer"])
+            roles = list(app.agent_card_order)
+            self.assertEqual(roles[:3], ["Architect", "Engineer", "Botanist"])
+            self.assertEqual(roles[3:], ["Agent 4", "Agent 5", "Agent 6"])
             self.assertIn("Architect", app.agent_identity)
             self.assertIn("Engineer", app.agent_brain_settings)
             self.assertIn("Botanist", app.agent_planner_settings)
         finally:
             app.stop_experiment()
             app.root.destroy()
+
+    def test_experiment_ui_defaults_and_agent_count(self):
+        try:
+            import tkinter as tk
+            from interface import MarsColonyInterface
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"GUI dependencies unavailable: {exc}")
+            return
+
+        try:
+            app = MarsColonyInterface()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk unavailable in test environment: {exc}")
+            return
+
+        try:
+            app.root.withdraw()
+            self.assertEqual(app.brain_backend_var.get(), "ollama")
+            self.assertEqual(app.local_model_var.get(), "qwen3.5:9b")
+            self.assertEqual(app.local_base_url_var.get(), "http://127.0.0.1:11434")
+            self.assertEqual(app.local_timeout_var.get(), 15.0)
+            self.assertEqual(app.fallback_backend_var.get(), "rule_brain")
+            self.assertEqual(app.num_agents_var.get(), 3)
+            self.assertEqual(app.agent_planner_settings["Architect"]["planner_interval_steps"].get(), 4)
+            self.assertEqual(app.agent_planner_settings["Engineer"]["planner_timeout_seconds"].get(), 15.0)
+            self.assertEqual(app.agent_planner_settings["Botanist"]["degraded_cooldown_seconds"].get(), 12.0)
+        finally:
+            app.stop_experiment()
+            app.root.destroy()
+
+    def test_build_agent_configs_respects_selected_agent_count_and_preserves_state(self):
+        try:
+            import tkinter as tk
+            from interface import MarsColonyInterface
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"GUI dependencies unavailable: {exc}")
+            return
+
+        try:
+            app = MarsColonyInterface()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk unavailable in test environment: {exc}")
+            return
+
+        try:
+            app.root.withdraw()
+            app.agent_identity["Architect"]["display_name"].set("Alpha")
+            app.agent_identity["Agent 4"]["display_name"].set("Delta")
+            app.num_agents_var.set(4)
+            app._update_visible_agent_cards()
+            cfg4 = app.build_agent_configs()
+            self.assertEqual(len(cfg4), 4)
+            self.assertEqual(cfg4[0]["display_name"], "Alpha")
+            self.assertEqual(cfg4[3]["display_name"], "Delta")
+
+            app.num_agents_var.set(2)
+            app._update_visible_agent_cards()
+            cfg2 = app.build_agent_configs()
+            self.assertEqual(len(cfg2), 2)
+            self.assertEqual(cfg2[0]["display_name"], "Alpha")
+
+            app.num_agents_var.set(4)
+            app._update_visible_agent_cards()
+            cfg4b = app.build_agent_configs()
+            self.assertEqual(cfg4b[3]["display_name"], "Delta")
+        finally:
+            app.stop_experiment()
+            app.root.destroy()
+
+    def test_agent_card_labels_are_dynamic_not_hardcoded_role_titles(self):
+        try:
+            import tkinter as tk
+            from interface import MarsColonyInterface
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"GUI dependencies unavailable: {exc}")
+            return
+
+        try:
+            app = MarsColonyInterface()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk unavailable in test environment: {exc}")
+            return
+
+        try:
+            app.root.withdraw()
+            self.assertEqual(app.agent_cards["Engineer"].cget("text"), "Agent 2 Configuration")
+            app.agent_identity["Engineer"]["display_name"].set("Field Specialist")
+            self.assertEqual(app.agent_identity["Engineer"]["display_name"].get(), "Field Specialist")
+        finally:
+            app.stop_experiment()
+            app.root.destroy()
+
 
 
 if __name__ == "__main__":

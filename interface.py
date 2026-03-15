@@ -18,6 +18,33 @@ class MarsColonyInterface:
     STATE_STOPPED = "stopped"
     EXPERIMENT_MAX_CONTENT_WIDTH = 940
     EXPERIMENT_PANEL_BORDER = "#586271"
+    BACKEND_DEFAULTS = {
+        "brain_backend": "ollama",
+        "local_model": "qwen3.5:9b",
+        "local_base_url": "http://127.0.0.1:11434",
+        "timeout_s": 15.0,
+        "fallback_backend": "rule_brain",
+    }
+    PLANNER_DEFAULTS = {
+        "planner_interval_steps": 4,
+        "planner_timeout_seconds": 15.0,
+        "planner_max_retries": 0,
+        "backend_timeout_s": 15.0,
+        "backend_max_retries": 0,
+        "degraded_consecutive_failures_threshold": 3,
+        "degraded_cooldown_seconds": 12.0,
+        "degraded_step_interval_multiplier": 2.0,
+    }
+    MAX_AGENT_PANELS = 6
+    DEFAULT_AGENT_COUNT = 3
+    DEFAULT_AGENT_IDENTITIES = [
+        {"role": "Architect", "display_name": "Architect", "label": "Architect", "template_id": "mars_architect"},
+        {"role": "Engineer", "display_name": "Engineer", "label": "Engineer", "template_id": "mars_engineer"},
+        {"role": "Botanist", "display_name": "Botanist", "label": "Botanist", "template_id": "mars_botanist"},
+        {"role": "Agent 4", "display_name": "Agent 4", "label": "Agent 4", "template_id": None},
+        {"role": "Agent 5", "display_name": "Agent 5", "label": "Agent 5", "template_id": None},
+        {"role": "Agent 6", "display_name": "Agent 6", "label": "Agent 6", "template_id": None},
+    ]
 
     def __init__(self):
         self.root = tk.Tk()
@@ -231,7 +258,8 @@ class MarsColonyInterface:
             }
         }
 
-        for role in self.active_roles:
+        selected_count = max(1, min(self.MAX_AGENT_PANELS, int(self.num_agents_var.get())))
+        for role in self.agent_card_order[:selected_count]:
             if self.active_roles[role].get():
                 team_pot = self.agent_profiles[role]["team"].get()
                 task_pot = self.agent_profiles[role]["task"].get()
@@ -303,14 +331,36 @@ class MarsColonyInterface:
         return agent_configs
 
     def _collect_brain_backend_config(self):
-        backend = (self.brain_backend_var.get() or "rule_brain").strip() or "rule_brain"
+        backend = (self.brain_backend_var.get() or self.BACKEND_DEFAULTS["brain_backend"]).strip() or self.BACKEND_DEFAULTS["brain_backend"]
         options = {
-            "local_model": self.local_model_var.get().strip() or "qwen3.5:9b",
-            "local_base_url": self.local_base_url_var.get().strip() or "http://127.0.0.1:11434",
+            "local_model": self.local_model_var.get().strip() or self.BACKEND_DEFAULTS["local_model"],
+            "local_base_url": self.local_base_url_var.get().strip() or self.BACKEND_DEFAULTS["local_base_url"],
             "timeout_s": max(0.1, float(self.local_timeout_var.get())),
-            "fallback_backend": (self.fallback_backend_var.get() or "rule_brain").strip() or "rule_brain",
+            "fallback_backend": (self.fallback_backend_var.get() or self.BACKEND_DEFAULTS["fallback_backend"]).strip() or self.BACKEND_DEFAULTS["fallback_backend"],
         }
         return backend, options
+
+
+    def _add_help_text(self, parent, row, text):
+        ttk.Label(parent, text=text, foreground="#5f6b7a", wraplength=620, justify="left").grid(
+            row=row,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            padx=(0, 8),
+            pady=(0, 3),
+        )
+
+    def _update_visible_agent_cards(self):
+        if not hasattr(self, "agent_cards"):
+            return
+        selected_count = max(1, min(self.MAX_AGENT_PANELS, int(self.num_agents_var.get())))
+        for idx, role in enumerate(self.agent_card_order):
+            card = self.agent_cards[role]
+            if idx < selected_count:
+                card.grid()
+            else:
+                card.grid_remove()
 
     def _is_local_backend_selected(self):
         selected = (self.brain_backend_var.get() or "").strip().lower()
@@ -651,66 +701,60 @@ class MarsColonyInterface:
             orient="horizontal",
             length=260,
         ).grid(row=0, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 1, "Controls how quickly simulated time advances.")
 
-        ttk.Label(settings_frame, text="Flash Mode").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Checkbutton(settings_frame, text="Enable (no animation)", variable=self.flash_mode).grid(
-            row=1,
-            column=1,
-            sticky="w",
-            pady=3,
-        )
+        ttk.Label(settings_frame, text="Flash Mode").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Checkbutton(settings_frame, text="Enable (no animation)", variable=self.flash_mode).grid(row=2, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 3, "Runs the simulation without rendering each animation step.")
 
-        ttk.Label(settings_frame, text="Experiment Name").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Label(settings_frame, text="Number of Agents").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
+        self.num_agents_var = IntVar(value=self.DEFAULT_AGENT_COUNT)
+        num_agents_combo = ttk.Combobox(settings_frame, textvariable=self.num_agents_var, values=[1, 2, 3, 4, 5, 6], state="readonly", width=10)
+        num_agents_combo.grid(row=4, column=1, sticky="w", pady=3)
+        num_agents_combo.bind("<<ComboboxSelected>>", lambda _e: self._update_visible_agent_cards())
+        self._add_help_text(settings_frame, 5, "Select how many agent panels are active for this run (1-6).")
+
+        ttk.Label(settings_frame, text="Experiment Name").grid(row=6, column=0, sticky="w", padx=(0, 8), pady=3)
         self.experiment_name_var = StringVar()
-        ttk.Entry(settings_frame, textvariable=self.experiment_name_var, width=34).grid(
-            row=2,
-            column=1,
-            sticky="w",
-            pady=3,
-        )
+        ttk.Entry(settings_frame, textvariable=self.experiment_name_var, width=34).grid(row=6, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 7, "Optional label used in output folders and logs.")
 
-        ttk.Label(settings_frame, text="Number of Simulation Runs").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=(6, 3))
+        ttk.Label(settings_frame, text="Number of Simulation Runs").grid(row=8, column=0, sticky="w", padx=(0, 8), pady=(6, 3))
         self.num_runs = IntVar(value=1)
-        ttk.Entry(settings_frame, textvariable=self.num_runs, width=10).grid(row=3, column=1, sticky="w", pady=(6, 3))
+        ttk.Entry(settings_frame, textvariable=self.num_runs, width=10).grid(row=8, column=1, sticky="w", pady=(6, 3))
+        self._add_help_text(settings_frame, 9, "How many repeated runs to execute with the same setup.")
 
-        ttk.Label(settings_frame, text="Brain Backend").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=(6, 3))
-        self.brain_backend_var = StringVar(value="rule_brain")
-        backend_combo = ttk.Combobox(
-            settings_frame,
-            textvariable=self.brain_backend_var,
-            values=["rule_brain", "local_http", "ollama"],
-            state="readonly",
-            width=22,
-        )
-        backend_combo.grid(row=4, column=1, sticky="w", pady=(6, 3))
+        ttk.Label(settings_frame, text="Brain Backend").grid(row=10, column=0, sticky="w", padx=(0, 8), pady=(6, 3))
+        self.brain_backend_var = StringVar(value=self.BACKEND_DEFAULTS["brain_backend"])
+        backend_combo = ttk.Combobox(settings_frame, textvariable=self.brain_backend_var, values=["rule_brain", "local_http", "ollama"], state="readonly", width=22)
+        backend_combo.grid(row=10, column=1, sticky="w", pady=(6, 3))
         backend_combo.bind("<<ComboboxSelected>>", lambda _e: self._update_backend_field_states())
+        self._add_help_text(settings_frame, 11, "Select which decision system agents use by default.")
 
-        self.local_model_var = StringVar(value="qwen3.5:9b")
-        self.local_base_url_var = StringVar(value="http://127.0.0.1:11434")
-        self.local_timeout_var = DoubleVar(value=15.0)
-        self.fallback_backend_var = StringVar(value="rule_brain")
+        self.local_model_var = StringVar(value=self.BACKEND_DEFAULTS["local_model"])
+        self.local_base_url_var = StringVar(value=self.BACKEND_DEFAULTS["local_base_url"])
+        self.local_timeout_var = DoubleVar(value=self.BACKEND_DEFAULTS["timeout_s"])
+        self.fallback_backend_var = StringVar(value=self.BACKEND_DEFAULTS["fallback_backend"])
 
-        ttk.Label(settings_frame, text="Local Model").grid(row=5, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Label(settings_frame, text="Local Model").grid(row=12, column=0, sticky="w", padx=(0, 8), pady=3)
         local_model_entry = ttk.Entry(settings_frame, textvariable=self.local_model_var, width=34)
-        local_model_entry.grid(row=5, column=1, sticky="w", pady=3)
+        local_model_entry.grid(row=12, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 13, "Local model name to use for Ollama-backed agents.")
 
-        ttk.Label(settings_frame, text="Local Base URL").grid(row=6, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Label(settings_frame, text="Local Base URL").grid(row=14, column=0, sticky="w", padx=(0, 8), pady=3)
         local_base_url_entry = ttk.Entry(settings_frame, textvariable=self.local_base_url_var, width=34)
-        local_base_url_entry.grid(row=6, column=1, sticky="w", pady=3)
+        local_base_url_entry.grid(row=14, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 15, "Base URL for the local backend endpoint.")
 
-        ttk.Label(settings_frame, text="Local Timeout (s)").grid(row=7, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Label(settings_frame, text="Local Timeout (s)").grid(row=16, column=0, sticky="w", padx=(0, 8), pady=3)
         local_timeout_entry = ttk.Entry(settings_frame, textvariable=self.local_timeout_var, width=10)
-        local_timeout_entry.grid(row=7, column=1, sticky="w", pady=3)
+        local_timeout_entry.grid(row=16, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 17, "Maximum request time for the selected default backend.")
 
-        ttk.Label(settings_frame, text="Fallback Backend").grid(row=8, column=0, sticky="w", padx=(0, 8), pady=3)
-        fallback_combo = ttk.Combobox(
-            settings_frame,
-            textvariable=self.fallback_backend_var,
-            values=["rule_brain"],
-            state="readonly",
-            width=22,
-        )
-        fallback_combo.grid(row=8, column=1, sticky="w", pady=3)
+        ttk.Label(settings_frame, text="Fallback Backend").grid(row=18, column=0, sticky="w", padx=(0, 8), pady=3)
+        fallback_combo = ttk.Combobox(settings_frame, textvariable=self.fallback_backend_var, values=["rule_brain"], state="readonly", width=22)
+        fallback_combo.grid(row=18, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 19, "Used if the selected backend fails or times out.")
 
         self._local_backend_widgets = [local_model_entry, local_base_url_entry, local_timeout_entry, fallback_combo]
         self._update_backend_field_states()
@@ -733,9 +777,15 @@ class MarsColonyInterface:
 
     def _create_agent_card(self, parent, agent_row, row, trait_labels, update_traits_from_profile):
         role = agent_row["role"]
+        self.agent_identity[role] = {
+            "display_name": StringVar(value=agent_row.get("display_name") or role),
+            "alias": StringVar(value=agent_row.get("label") or role),
+            "template_id": agent_row.get("template_id"),
+        }
+
         card = tk.LabelFrame(
             parent,
-            text=f"{role} Configuration",
+            text=f"Agent {row + 1} Configuration",
             padx=10,
             pady=8,
             relief="groove",
@@ -753,13 +803,7 @@ class MarsColonyInterface:
         header.columnconfigure(1, weight=1)
 
         ttk.Checkbutton(header, text="Enable", variable=self.active_roles[role]).grid(row=0, column=0, sticky="w")
-        ttk.Label(header, text=role).grid(row=0, column=1, sticky="w", padx=(10, 0))
-
-        self.agent_identity[role] = {
-            "display_name": StringVar(value=agent_row.get("display_name") or role),
-            "alias": StringVar(value=agent_row.get("label") or role),
-            "template_id": agent_row.get("template_id"),
-        }
+        ttk.Label(header, textvariable=self.agent_identity[role]["display_name"]).grid(row=0, column=1, sticky="w", padx=(10, 0))
 
         ttk.Label(header, text="Display Name").grid(row=1, column=0, sticky="w", pady=(4, 0))
         ttk.Entry(header, textvariable=self.agent_identity[role]["display_name"], width=20).grid(row=1, column=1, sticky="w", padx=(10, 0), pady=(4, 0))
@@ -773,22 +817,8 @@ class MarsColonyInterface:
         task_potential = StringVar(value="High")
         self.agent_profiles[role] = {"team": team_potential, "task": task_potential}
 
-        ttk.OptionMenu(
-            card,
-            team_potential,
-            "High",
-            "High",
-            "Low",
-            command=lambda _, r=role: update_traits_from_profile(r),
-        ).grid(row=2, column=0, sticky="w", pady=(2, 6))
-        ttk.OptionMenu(
-            card,
-            task_potential,
-            "High",
-            "High",
-            "Low",
-            command=lambda _, r=role: update_traits_from_profile(r),
-        ).grid(row=2, column=1, sticky="w", pady=(2, 6))
+        ttk.OptionMenu(card, team_potential, "High", "High", "Low", command=lambda _, r=role: update_traits_from_profile(r)).grid(row=2, column=0, sticky="w", pady=(2, 6))
+        ttk.OptionMenu(card, task_potential, "High", "High", "Low", command=lambda _, r=role: update_traits_from_profile(r)).grid(row=2, column=1, sticky="w", pady=(2, 6))
 
         traits_frame = ttk.LabelFrame(card, text="Traits", padding=(8, 6))
         traits_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 6))
@@ -802,23 +832,11 @@ class MarsColonyInterface:
 
         for idx, trait in enumerate(left_traits):
             self.agent_traits[role][trait] = DoubleVar(value=0.5)
-            self._create_trait_slider(
-                traits_frame,
-                row=idx,
-                col=0,
-                label=trait_labels[trait],
-                variable=self.agent_traits[role][trait],
-            )
+            self._create_trait_slider(traits_frame, row=idx, col=0, label=trait_labels[trait], variable=self.agent_traits[role][trait])
 
         for idx, trait in enumerate(right_traits):
             self.agent_traits[role][trait] = DoubleVar(value=0.5)
-            self._create_trait_slider(
-                traits_frame,
-                row=idx,
-                col=1,
-                label=trait_labels[trait],
-                variable=self.agent_traits[role][trait],
-            )
+            self._create_trait_slider(traits_frame, row=idx, col=1, label=trait_labels[trait], variable=self.agent_traits[role][trait])
 
         packet_frame = ttk.LabelFrame(card, text="Packet Access", padding=(8, 6))
         packet_frame.grid(row=4, column=0, columnspan=2, sticky="ew")
@@ -829,12 +847,7 @@ class MarsColonyInterface:
         for idx, pkt in enumerate(packet_names):
             pkt_enabled = BooleanVar(value=(idx == 0))
             self.packet_access[role][pkt] = pkt_enabled
-            ttk.Checkbutton(packet_frame, text=pkt, variable=pkt_enabled).grid(
-                row=idx,
-                column=0,
-                sticky="w",
-                pady=1,
-            )
+            ttk.Checkbutton(packet_frame, text=pkt, variable=pkt_enabled).grid(row=idx, column=0, sticky="w", pady=1)
 
         settings_frame = ttk.LabelFrame(card, text="Per-Agent Brain/Planner", padding=(8, 6))
         settings_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0))
@@ -846,40 +859,39 @@ class MarsColonyInterface:
             "backend": StringVar(value=default_brain.get("backend", "")),
             "local_model": StringVar(value=default_brain.get("local_model", "")),
             "fallback_backend": StringVar(value=default_brain.get("fallback_backend", "")),
-            "timeout_s": DoubleVar(value=float(default_brain.get("timeout_s", 15.0))),
-            "max_retries": IntVar(value=int(default_brain.get("max_retries", 0))),
+            "timeout_s": DoubleVar(value=float(default_brain.get("timeout_s", self.PLANNER_DEFAULTS["backend_timeout_s"]))),
+            "max_retries": IntVar(value=int(default_brain.get("max_retries", self.PLANNER_DEFAULTS["backend_max_retries"]))),
         }
         self.agent_planner_settings[role] = {
-            "planner_interval_steps": IntVar(value=int(default_planner.get("planner_interval_steps", 4))),
-            "planner_timeout_seconds": DoubleVar(value=float(default_planner.get("planner_timeout_seconds", 15.0))),
-            "planner_max_retries": IntVar(value=int(default_planner.get("planner_max_retries", 0))),
-            "degraded_consecutive_failures_threshold": IntVar(value=int(default_planner.get("degraded_consecutive_failures_threshold", 3))),
-            "degraded_cooldown_seconds": DoubleVar(value=float(default_planner.get("degraded_cooldown_seconds", 12.0))),
-            "degraded_step_interval_multiplier": DoubleVar(value=float(default_planner.get("degraded_step_interval_multiplier", 2.0))),
+            "planner_interval_steps": IntVar(value=int(default_planner.get("planner_interval_steps", self.PLANNER_DEFAULTS["planner_interval_steps"]))),
+            "planner_timeout_seconds": DoubleVar(value=float(default_planner.get("planner_timeout_seconds", self.PLANNER_DEFAULTS["planner_timeout_seconds"]))),
+            "planner_max_retries": IntVar(value=int(default_planner.get("planner_max_retries", self.PLANNER_DEFAULTS["planner_max_retries"]))),
+            "degraded_consecutive_failures_threshold": IntVar(value=int(default_planner.get("degraded_consecutive_failures_threshold", self.PLANNER_DEFAULTS["degraded_consecutive_failures_threshold"]))),
+            "degraded_cooldown_seconds": DoubleVar(value=float(default_planner.get("degraded_cooldown_seconds", self.PLANNER_DEFAULTS["degraded_cooldown_seconds"]))),
+            "degraded_step_interval_multiplier": DoubleVar(value=float(default_planner.get("degraded_step_interval_multiplier", self.PLANNER_DEFAULTS["degraded_step_interval_multiplier"]))),
         }
 
-        ttk.Label(settings_frame, text="Backend Override").grid(row=0, column=0, sticky="w")
-        ttk.Combobox(settings_frame, textvariable=self.agent_brain_settings[role]["backend"], values=["", "rule_brain", "local_http", "ollama"], state="readonly", width=18).grid(row=0, column=1, sticky="w")
-        ttk.Label(settings_frame, text="Model Override").grid(row=1, column=0, sticky="w", pady=(2, 0))
-        ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["local_model"], width=20).grid(row=1, column=1, sticky="w", pady=(2, 0))
-        ttk.Label(settings_frame, text="Fallback Override").grid(row=2, column=0, sticky="w", pady=(2, 0))
-        ttk.Combobox(settings_frame, textvariable=self.agent_brain_settings[role]["fallback_backend"], values=["", "rule_brain"], state="readonly", width=18).grid(row=2, column=1, sticky="w", pady=(2, 0))
-        ttk.Label(settings_frame, text="Planner Cadence (steps)").grid(row=3, column=0, sticky="w", pady=(2, 0))
-        ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_interval_steps"], width=8).grid(row=3, column=1, sticky="w", pady=(2, 0))
-        ttk.Label(settings_frame, text="Planner Timeout (s)").grid(row=4, column=0, sticky="w", pady=(2, 0))
-        ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_timeout_seconds"], width=8).grid(row=4, column=1, sticky="w", pady=(2, 0))
-        ttk.Label(settings_frame, text="Backend Timeout (s)").grid(row=5, column=0, sticky="w", pady=(2, 0))
-        ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["timeout_s"], width=8).grid(row=5, column=1, sticky="w", pady=(2, 0))
-        ttk.Label(settings_frame, text="Backend Max Retries").grid(row=6, column=0, sticky="w", pady=(2, 0))
-        ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["max_retries"], width=8).grid(row=6, column=1, sticky="w", pady=(2, 0))
-        ttk.Label(settings_frame, text="Planner Max Retries").grid(row=7, column=0, sticky="w", pady=(2, 0))
-        ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_max_retries"], width=8).grid(row=7, column=1, sticky="w", pady=(2, 0))
-        ttk.Label(settings_frame, text="Degraded Threshold").grid(row=8, column=0, sticky="w", pady=(2, 0))
-        ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_consecutive_failures_threshold"], width=8).grid(row=8, column=1, sticky="w", pady=(2, 0))
-        ttk.Label(settings_frame, text="Degraded Cooldown (s)").grid(row=9, column=0, sticky="w", pady=(2, 0))
-        ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_cooldown_seconds"], width=8).grid(row=9, column=1, sticky="w", pady=(2, 0))
-        ttk.Label(settings_frame, text="Degraded Step Multiplier").grid(row=10, column=0, sticky="w", pady=(2, 0))
-        ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_step_interval_multiplier"], width=8).grid(row=10, column=1, sticky="w", pady=(2, 0))
+        fields = [
+            ("Backend Override", ttk.Combobox(settings_frame, textvariable=self.agent_brain_settings[role]["backend"], values=["", "rule_brain", "local_http", "ollama"], state="readonly", width=18), "Optional per-agent backend override. Leave blank to use global default."),
+            ("Model Override", ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["local_model"], width=20), "Optional model override for this agent."),
+            ("Fallback Override", ttk.Combobox(settings_frame, textvariable=self.agent_brain_settings[role]["fallback_backend"], values=["", "rule_brain"], state="readonly", width=18), "Fallback used by this agent if its selected backend fails."),
+            ("Planner Cadence (steps)", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_interval_steps"], width=8), "Higher values reduce how often this agent's brain is queried."),
+            ("Planner Timeout (s)", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_timeout_seconds"], width=8), "Maximum time allowed for this agent's planning step before it is treated as failed."),
+            ("Backend Timeout (s)", ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["timeout_s"], width=8), "Maximum backend request time for this agent."),
+            ("Backend Max Retries", ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["max_retries"], width=8), "How many backend retries are attempted before fallback/degraded behavior."),
+            ("Planner Max Retries", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_max_retries"], width=8), "How many times planning retries before the step is treated as failed."),
+            ("Degraded Threshold", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_consecutive_failures_threshold"], width=8), "Number of consecutive backend failures before degraded mode begins."),
+            ("Degraded Cooldown (s)", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_cooldown_seconds"], width=8), "How long this agent waits before retrying the backend after repeated failures."),
+            ("Degraded Step Multiplier", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_step_interval_multiplier"], width=8), "In degraded mode, increases the interval between planning attempts."),
+        ]
+
+        for idx, (label, widget, help_text) in enumerate(fields):
+            row_base = idx * 2
+            ttk.Label(settings_frame, text=label).grid(row=row_base, column=0, sticky="w", pady=(2, 0))
+            widget.grid(row=row_base, column=1, sticky="w", pady=(2, 0))
+            self._add_help_text(settings_frame, row_base + 1, help_text)
+
+        return card
 
     def create_experiment_tab(self):
         container = ttk.Frame(self.notebook)
@@ -933,6 +945,8 @@ class MarsColonyInterface:
         self.agent_identity = {}
         self.agent_brain_settings = {}
         self.agent_planner_settings = {}
+        self.agent_cards = {}
+        self.agent_card_order = []
 
         task_model = load_task_model(task_id="mars_colony")
         default_rows = []
@@ -947,12 +961,18 @@ class MarsColonyInterface:
                     "planner_config": dict(d.planner_config or {}),
                 }
             )
-        if not default_rows:
-            default_rows = [
-                {"role": "Architect", "display_name": "Architect", "label": "Architect", "template_id": None, "brain_config": {}, "planner_config": {}},
-                {"role": "Engineer", "display_name": "Engineer", "label": "Engineer", "template_id": None, "brain_config": {}, "planner_config": {}},
-                {"role": "Botanist", "display_name": "Botanist", "label": "Botanist", "template_id": None, "brain_config": {}, "planner_config": {}},
-            ]
+        by_role = {row["role"]: row for row in default_rows}
+        default_rows = []
+        for fallback in self.DEFAULT_AGENT_IDENTITIES:
+            role = fallback["role"]
+            row = dict(by_role.get(role, {}))
+            row.setdefault("role", role)
+            row.setdefault("display_name", fallback["display_name"])
+            row.setdefault("label", fallback["label"])
+            row.setdefault("template_id", fallback["template_id"])
+            row.setdefault("brain_config", {})
+            row.setdefault("planner_config", {})
+            default_rows.append(row)
 
         # Trait labels
         trait_labels = {
@@ -987,7 +1007,11 @@ class MarsColonyInterface:
         cards_container.columnconfigure(0, weight=1)
 
         for row, agent_row in enumerate(default_rows):
-            self._create_agent_card(cards_container, agent_row, row, trait_labels, update_traits_from_profile)
+            role = agent_row["role"]
+            self.agent_card_order.append(role)
+            self.agent_cards[role] = self._create_agent_card(cards_container, agent_row, row, trait_labels, update_traits_from_profile)
+
+        self._update_visible_agent_cards()
 
         ttk.Label(
             self.tab_experiment,
