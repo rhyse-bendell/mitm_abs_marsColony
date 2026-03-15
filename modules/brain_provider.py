@@ -9,6 +9,7 @@ from typing import Any, Dict
 from urllib import error, request
 
 from modules.action_schema import BrainDecision, CommunicationIntent, ExecutableActionType
+from modules.brain_contract import AgentBrainRequest, AgentBrainResponse, PlannedActionStep
 
 
 LOGGER = logging.getLogger(__name__)
@@ -31,9 +32,9 @@ def create_brain_provider(config: BrainBackendConfig | None = None) -> BrainProv
     selected = config.backend.lower()
     if selected == "local_stub":
         return LocalLLMBrainStub()
-    if selected in {"local_http", "openai_compatible_local"}:
-        fallback = RuleBrain() if config.fallback_backend.lower() == "rule_brain" else RuleBrain()
-        return LocalHTTPBrain(config=config, fallback=fallback)
+    if selected in {"local_http", "openai_compatible_local", "ollama_local", "ollama"}:
+        fallback = RuleBrain()
+        return OllamaLocalBrainProvider(config=config, fallback=fallback)
     if selected == "cloud_stub":
         return CloudBrainStub()
     return RuleBrain()
@@ -41,36 +42,60 @@ def create_brain_provider(config: BrainBackendConfig | None = None) -> BrainProv
 
 class BrainProvider(ABC):
     @abstractmethod
-    def decide(self, context_packet):
+    def generate_plan(self, request_packet: AgentBrainRequest) -> AgentBrainResponse:
         raise NotImplementedError
 
+    def decide(self, context_packet):
+        decision = self.decision_from_context(context_packet)
+        return decision
 
-def _decision_from_payload(payload: Dict[str, Any]) -> BrainDecision:
-    selected_action = payload.get("selected_action")
-    if not selected_action:
-        raise ValueError("missing selected_action in local model response")
+    def decision_from_context(self, context_packet) -> BrainDecision:
+        request_packet = _request_from_context_packet(context_packet)
+        response = self.generate_plan(request_packet)
+        next_steps = [step.expected_purpose for step in response.plan.ordered_actions[:3] if step.expected_purpose]
+        return response.plan.next_action.to_brain_decision(
+            confidence=response.plan.confidence,
+            plan_method_id=response.plan.plan_method_id,
+            next_steps=next_steps,
+        )
 
-    communication_intent = payload.get("communication_intent")
-    return BrainDecision(
-        selected_action=ExecutableActionType(selected_action),
-        target_id=payload.get("target_id"),
-        target_zone=payload.get("target_zone"),
-        goal_update=payload.get("goal_update"),
-        plan_steps=list(payload.get("plan_steps", [])),
-        communication_intent=CommunicationIntent(communication_intent) if communication_intent else None,
-        reason_summary=str(payload.get("reason_summary", "")),
-        confidence=float(payload.get("confidence", 0.0)),
-        assumptions=list(payload.get("assumptions", [])),
-        requests_for_context=list(payload.get("requests_for_context", [])),
-        plan_method_id=payload.get("plan_method_id"),
-        next_steps=list(payload.get("next_steps", payload.get("plan_steps", []))),
+
+def _request_from_context_packet(context_packet) -> AgentBrainRequest:
+    world = context_packet.world_snapshot
+    cognitive = context_packet.individual_cognitive_state
+    phase = world.get("phase_profile", {}).get("name", world.get("phase_state", {}).get("name", "default"))
+    return AgentBrainRequest(
+        request_id=f"ctx-{int(time.time()*1000)}",
+        tick=0,
+        sim_time=float(world.get("sim_time", 0.0)),
+        agent_id=str(context_packet.static_task_context.get("role", "agent")),
+        display_name=str(context_packet.static_task_context.get("role", "agent")),
+        agent_label=context_packet.static_task_context.get("role"),
+        task_id="mars_colony",
+        phase=str(phase),
+        local_context_summary=f"build_status={cognitive.get('build_readiness', {}).get('status')}",
+        local_observations=[str(x) for x in context_packet.history_bands.get("near_preceding_events", [])[:4]],
+        working_memory_summary={
+            "knowledge": list(cognitive.get("knowledge_summary", [])[:8]),
+            "known_gaps": list(cognitive.get("known_gaps", [])[:6]),
+        },
+        inbox_summary=[],
+        current_goal_stack=list(cognitive.get("goal_stack", [])),
+        current_plan_summary=dict(cognitive.get("active_plan", {})),
+        allowed_actions=list(context_packet.action_affordances),
+        planning_horizon_config={"max_steps": 3},
+        request_explanation=False,
+        task_context=dict(context_packet.static_task_context),
+        rule_context=list(cognitive.get("knowledge_summary", [])[:8]),
+        derivation_context=[],
+        artifact_context=list(context_packet.team_state.get("externalized_artifacts", []))[:4],
     )
 
 
 class RuleBrain(BrainProvider):
     """Deterministic baseline brain used as default backend."""
 
-    def decide(self, context_packet):
+    def _decision_logic(self, context_packet) -> BrainDecision:
         affordances = context_packet.action_affordances
         affordance_types = [item["action_type"] for item in affordances]
 
@@ -222,8 +247,47 @@ class RuleBrain(BrainProvider):
             assumptions=["holding position is legal"],
         )
 
+    def decide(self, context_packet):
+        return self._decision_logic(context_packet)
 
-class LocalHTTPBrain(BrainProvider):
+    def generate_plan(self, request_packet: AgentBrainRequest) -> AgentBrainResponse:
+        legal = request_packet.allowed_actions
+        step = PlannedActionStep(step_index=0, action_type=ExecutableActionType.WAIT, expected_purpose="hold position")
+        if legal:
+            first = legal[0]
+            step = PlannedActionStep(
+                step_index=0,
+                action_type=ExecutableActionType(first.get("action_type", ExecutableActionType.WAIT.value)),
+                target_id=first.get("target_id"),
+                target_zone=first.get("target_zone"),
+                expected_purpose="deterministic first legal action",
+            )
+        payload = {
+            "response_id": f"rule-{request_packet.request_id}",
+            "agent_id": request_packet.agent_id,
+            "plan": {
+                "plan_id": f"plan-{request_packet.request_id}",
+                "plan_horizon": int(request_packet.planning_horizon_config.get("max_steps", 3)),
+                "ordered_goals": [
+                    {
+                        "goal_id": "stability",
+                        "description": "maintain forward progress with legal actions",
+                        "priority": 0.7,
+                        "status": "active",
+                        "source": "planner",
+                    }
+                ],
+                "ordered_actions": [step.__dict__],
+                "next_action": step.__dict__,
+                "confidence": 0.7,
+            },
+            "explanation": "rule fallback selected legal first action" if request_packet.request_explanation else None,
+            "confidence": 0.7,
+        }
+        return AgentBrainResponse.from_dict(payload)
+
+
+class OllamaLocalBrainProvider(BrainProvider):
     """Optional local model backend with safe fallback to RuleBrain."""
 
     def __init__(self, config: BrainBackendConfig, fallback: BrainProvider):
@@ -235,18 +299,18 @@ class LocalHTTPBrain(BrainProvider):
         if self.config.debug:
             LOGGER.info("%s %s", message, payload)
 
-    def _build_request_payload(self, context_packet) -> Dict[str, Any]:
-        context_json = json.dumps(context_packet.__dict__, default=str)
+    def _build_request_payload(self, request_packet: AgentBrainRequest) -> Dict[str, Any]:
+        contract = request_packet.to_dict()
         return {
             "model": self.config.local_model,
             "messages": [
                 {
                     "role": "system",
-                    "content": "Return only JSON object matching BrainDecision fields."
+                    "content": "Return only JSON object matching AgentBrainResponse with plan/next_action."
                 },
                 {
                     "role": "user",
-                    "content": context_json,
+                    "content": json.dumps(contract, default=str),
                 },
             ],
             "temperature": 0,
@@ -270,21 +334,14 @@ class LocalHTTPBrain(BrainProvider):
                 cleaned = cleaned[4:].strip()
         return json.loads(cleaned)
 
-    def decide(self, context_packet):
+    def generate_plan(self, request_packet: AgentBrainRequest) -> AgentBrainResponse:
         started_at = time.perf_counter()
-        context_meta = {
-            "sim_time": context_packet.world_snapshot.get("sim_time"),
-            "affordance_count": len(context_packet.action_affordances),
-            "build_plausibility": context_packet.individual_cognitive_state.get("build_readiness", {}).get("status"),
-        }
-        self._log_debug("brain_local_query", {"provider": "local_http", "context_meta": context_meta})
-
         endpoint = f"{self.config.local_base_url.rstrip('/')}{self.config.local_endpoint}"
         fallback_reason = None
         attempts = max(1, int(self.config.max_retries) + 1)
         for attempt in range(1, attempts + 1):
             try:
-                payload = self._build_request_payload(context_packet)
+                payload = self._build_request_payload(request_packet)
                 req = request.Request(
                     endpoint,
                     data=json.dumps(payload).encode("utf-8"),
@@ -294,62 +351,62 @@ class LocalHTTPBrain(BrainProvider):
                 with request.urlopen(req, timeout=self.config.timeout_s) as response:
                     raw = response.read().decode("utf-8")
                 parsed = json.loads(raw)
-                decision_payload = self._parse_response(parsed)
-                decision = _decision_from_payload(decision_payload)
+                response_payload = self._parse_response(parsed)
+                if not isinstance(response_payload, dict) or "plan" not in response_payload:
+                    raise ValueError("provider payload missing plan")
+                plan_payload = response_payload.get("plan") or {}
+                if "next_action" not in plan_payload or "ordered_actions" not in plan_payload:
+                    raise ValueError("provider payload missing required plan fields")
+                response_obj = AgentBrainResponse.from_dict(response_payload)
                 latency_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
-                self._log_debug(
-                    "brain_local_outcome",
-                    {
-                        "provider": "local_http",
-                        "fallback": False,
-                        "selected_action": decision.selected_action.value,
-                        "confidence": decision.confidence,
-                        "latency_ms": latency_ms,
-                        "attempt": attempt,
-                    },
-                )
                 self.last_outcome = {"fallback": False, "reason": None, "latency_ms": latency_ms}
-                return decision
+                return response_obj
             except (TimeoutError, error.URLError, error.HTTPError, ValueError, KeyError, json.JSONDecodeError) as exc:
                 fallback_reason = f"attempt={attempt}/{attempts} error={exc}"
                 if attempt >= attempts:
                     break
 
         latency_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
-        LOGGER.warning(
-            "LocalHTTPBrain fallback to RuleBrain: %s",
-            fallback_reason,
-        )
-        self._log_debug(
-            "brain_local_outcome",
-            {
-                "provider": "local_http",
-                "fallback": True,
-                "fallback_reason": fallback_reason,
-                "latency_ms": latency_ms,
-            },
-        )
+        LOGGER.warning("OllamaLocalBrainProvider fallback to RuleBrain: %s", fallback_reason)
         self.last_outcome = {"fallback": True, "reason": fallback_reason, "latency_ms": latency_ms}
-        return self.fallback.decide(context_packet)
+        return self.fallback.generate_plan(request_packet)
 
 
 class LocalLLMBrainStub(BrainProvider):
-    def decide(self, context_packet):
-        return BrainDecision(
-            selected_action=ExecutableActionType.REASSESS_PLAN,
-            reason_summary="LocalLLMBrain stub: no model call configured yet.",
-            confidence=0.25,
-            assumptions=["backend is stubbed"],
-            requests_for_context=["role-specific constraints"],
-        )
+    def generate_plan(self, request_packet: AgentBrainRequest) -> AgentBrainResponse:
+        payload = {
+            "response_id": f"stub-{request_packet.request_id}",
+            "agent_id": request_packet.agent_id,
+            "plan": {
+                "plan_id": f"stub-plan-{request_packet.request_id}",
+                "plan_horizon": 2,
+                "ordered_goals": [{"goal_id": "g_stub", "description": "request context", "priority": 0.25, "status": "active"}],
+                "ordered_actions": [{"step_index": 0, "action_type": "reassess_plan", "expected_purpose": "stub backend"}],
+                "next_action": {"step_index": 0, "action_type": "reassess_plan", "expected_purpose": "stub backend"},
+                "confidence": 0.25,
+                "notes": ["backend is stubbed"],
+            },
+            "explanation": "stub response" if request_packet.request_explanation else None,
+        }
+        return AgentBrainResponse.from_dict(payload)
 
 
 class CloudBrainStub(BrainProvider):
-    def decide(self, context_packet):
-        return BrainDecision(
-            selected_action=ExecutableActionType.OBSERVE_ENVIRONMENT,
-            reason_summary="CloudBrain stub: no external API call configured yet.",
-            confidence=0.2,
-            assumptions=["backend is stubbed", "simulator truth remains authoritative"],
-            requests_for_context=["recent validation failures"],
-        )
+    def generate_plan(self, request_packet: AgentBrainRequest) -> AgentBrainResponse:
+        payload = {
+            "response_id": f"cloud-stub-{request_packet.request_id}",
+            "agent_id": request_packet.agent_id,
+            "plan": {
+                "plan_id": f"cloud-plan-{request_packet.request_id}",
+                "plan_horizon": 1,
+                "ordered_goals": [{"goal_id": "observe", "description": "observe world", "priority": 0.2, "status": "active"}],
+                "ordered_actions": [{"step_index": 0, "action_type": "observe_environment", "expected_purpose": "no API configured"}],
+                "next_action": {"step_index": 0, "action_type": "observe_environment", "expected_purpose": "no API configured"},
+                "confidence": 0.2,
+            },
+        }
+        return AgentBrainResponse.from_dict(payload)
+
+# Backward compatible alias
+LocalHTTPBrain = OllamaLocalBrainProvider
+

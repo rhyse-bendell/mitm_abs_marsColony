@@ -2,6 +2,7 @@
 
 import math
 import random
+import uuid
 from dataclasses import dataclass
 
 try:
@@ -18,6 +19,7 @@ from modules.action_schema import (
     LEGACY_COMMUNICATION_TYPE_MAP,
     validate_brain_decision,
 )
+from modules.brain_contract import AgentBrainRequest, AgentBrainResponse, validate_agent_brain_response
 
 DIK_LOG = []
 
@@ -49,6 +51,9 @@ class PlanRecord:
     trigger_reason: str
     remaining_executions: int = 2
     invalidation_reason: str | None = None
+    ordered_goals: list[dict] | None = None
+    ordered_actions: list[dict] | None = None
+    explanation: str | None = None
 
 
 @dataclass
@@ -60,6 +65,9 @@ class PlannerCadenceConfig:
     planner_timeout_seconds: float = 1.5
     planner_fallback_backend: str = "rule_brain"
     planner_max_retries: int = 0
+    explanation_mode: str = "never"
+    explanation_every_n_calls: int = 5
+    explanation_probability: float = 0.1
 
     @classmethod
     def from_dict(cls, payload):
@@ -79,13 +87,23 @@ class PlannerCadenceConfig:
             planner_timeout_seconds=max(0.1, float(payload.get("planner_timeout_seconds", 1.5))),
             planner_fallback_backend=str(payload.get("planner_fallback_backend", "rule_brain")),
             planner_max_retries=max(0, int(payload.get("planner_max_retries", 0))),
+            explanation_mode=str(payload.get("explanation_mode", "never")).lower(),
+            explanation_every_n_calls=max(1, int(payload.get("explanation_every_n_calls", 5))),
+            explanation_probability=max(0.0, min(1.0, float(payload.get("explanation_probability", 0.1)))),
         )
 
 
 class Agent:
-    def __init__(self, name, role, position=(0.0, 0.0), orientation=0.0, speed=1.0, planner_config=None):
+    def __init__(self, name, role, position=(0.0, 0.0), orientation=0.0, speed=1.0, planner_config=None, agent_id=None, display_name=None, agent_label=None, template_id=None, brain_config=None, communication_params=None, initial_goal_seeds=None):
         self.name = name
         self.role = role
+        self.agent_id = agent_id or name
+        self.display_name = display_name or name
+        self.agent_label = agent_label
+        self.template_id = template_id
+        self.brain_config = dict(brain_config or {})
+        self.communication_params = dict(communication_params or {})
+        self.initial_goal_seeds = list(initial_goal_seeds or [])
         self.position = position
         self.orientation = orientation
         self.speed = speed
@@ -523,9 +541,55 @@ class Agent:
         self.current_action = self._plan_actions_for_current_goal()
         self._advance_active_actions(dt=1.0)
 
+    def _should_request_explanation(self):
+        mode = (self.planner_cadence.explanation_mode or "never").lower()
+        next_call = self.planner_call_count + 1
+        if mode == "always":
+            return True
+        if mode == "every_n_calls":
+            return next_call % max(1, self.planner_cadence.explanation_every_n_calls) == 0
+        if mode == "probability":
+            return random.random() < self.planner_cadence.explanation_probability
+        return False
+
+    def _build_brain_request(self, sim_state, context, request_explanation, trigger_reason):
+        phase = context.world_snapshot.get("phase_profile", {}).get("name", context.world_snapshot.get("phase_state", {}).get("name", "default"))
+        observations = [str(e) for e in context.history_bands.get("near_preceding_events", [])[-4:]]
+        return AgentBrainRequest(
+            request_id=f"{self.agent_id}-{uuid.uuid4().hex[:8]}",
+            tick=self.sim_step_count,
+            sim_time=float(sim_state.time),
+            agent_id=self.agent_id,
+            display_name=self.display_name,
+            agent_label=self.agent_label,
+            task_id=getattr(sim_state.task_model, "task_id", "unknown"),
+            phase=str(phase),
+            local_context_summary=f"trigger={trigger_reason};build={context.individual_cognitive_state.get('build_readiness',{}).get('status')}",
+            local_observations=observations,
+            working_memory_summary={
+                "data": list(context.individual_cognitive_state.get("data_summary", [])[:8]),
+                "information": list(context.individual_cognitive_state.get("information_summary", [])[:8]),
+                "knowledge": list(context.individual_cognitive_state.get("knowledge_summary", [])[:8]),
+                "known_gaps": list(context.individual_cognitive_state.get("known_gaps", [])[:8]),
+            },
+            inbox_summary=list(context.team_state.get("recent_communications", [])[-4:]),
+            current_goal_stack=list(context.individual_cognitive_state.get("goal_stack", [])),
+            current_plan_summary=dict(context.individual_cognitive_state.get("active_plan", {})),
+            allowed_actions=list(context.action_affordances),
+            planning_horizon_config={"max_steps": self.brain_config.get("plan_horizon", 3)},
+            request_explanation=request_explanation,
+            explanation_style=self.brain_config.get("explanation_style"),
+            task_context=dict(context.static_task_context),
+            rule_context=list(context.individual_cognitive_state.get("knowledge_summary", [])[:8]),
+            derivation_context=[str(e) for e in self.derivation_events[-5:]],
+            artifact_context=list(context.team_state.get("externalized_artifacts", []))[:4],
+        )
+
     def _build_rule_based_brain_decision(self, sim_state, trigger_reason):
         context = sim_state.brain_context_builder.build(sim_state, self)
         provider_name = sim_state.brain_provider.__class__.__name__
+        request_explanation = self._should_request_explanation()
+        request_packet = self._build_brain_request(sim_state, context, request_explanation, trigger_reason)
         sim_state.logger.log_event(sim_state.time, "planner_call_triggered", {"agent": self.name, "reason": trigger_reason, "backend": provider_name})
         sim_state.logger.log_event(
             sim_state.time,
@@ -535,6 +599,7 @@ class Agent:
                 "trigger_reason": trigger_reason,
                 "plan_id": getattr(self.current_plan, "plan_id", None),
                 "provider": provider_name,
+                "request_explanation": request_explanation,
                 "context_meta": {
                     "affordance_count": len(context.action_affordances),
                     "known_gaps": len(context.individual_cognitive_state.get("known_gaps", [])),
@@ -542,52 +607,111 @@ class Agent:
                 },
             },
         )
-        decision = sim_state.brain_provider.decide(context)
+
+        response = None
+        provider_decide = getattr(sim_state.brain_provider, "decide", None)
+        if callable(provider_decide) and sim_state.brain_provider.__class__.__name__ == "RuleBrain":
+            legacy_decision = provider_decide(context)
+            response = AgentBrainResponse.from_dict(
+                {
+                    "response_id": f"legacy-{request_packet.request_id}",
+                    "agent_id": self.agent_id,
+                    "plan": {
+                        "plan_id": f"legacy-plan-{request_packet.request_id}",
+                        "plan_horizon": 1,
+                        "ordered_goals": ([{"goal_id": legacy_decision.goal_update, "description": legacy_decision.goal_update, "priority": 0.8, "status": "active"}] if legacy_decision.goal_update else []),
+                        "ordered_actions": [
+                            {
+                                "step_index": 0,
+                                "action_type": legacy_decision.selected_action.value,
+                                "target_id": legacy_decision.target_id,
+                                "target_zone": legacy_decision.target_zone,
+                                "expected_purpose": legacy_decision.reason_summary,
+                            }
+                        ],
+                        "next_action": {
+                            "step_index": 0,
+                            "action_type": legacy_decision.selected_action.value,
+                            "target_id": legacy_decision.target_id,
+                            "target_zone": legacy_decision.target_zone,
+                            "expected_purpose": legacy_decision.reason_summary,
+                        },
+                        "plan_method_id": legacy_decision.plan_method_id,
+                        "confidence": legacy_decision.confidence,
+                    },
+                    "explanation": legacy_decision.reason_summary if request_explanation else None,
+                }
+            )
+        elif hasattr(sim_state.brain_provider, "generate_plan"):
+            response = sim_state.brain_provider.generate_plan(request_packet)
+        if response is None:
+            legacy_decision = sim_state.brain_provider.decide(context)
+            response = AgentBrainResponse.from_dict(
+                {
+                    "response_id": f"legacy-{request_packet.request_id}",
+                    "agent_id": self.agent_id,
+                    "plan": {
+                        "plan_id": f"legacy-plan-{request_packet.request_id}",
+                        "plan_horizon": 1,
+                        "ordered_goals": [],
+                        "ordered_actions": [
+                            {
+                                "step_index": 0,
+                                "action_type": legacy_decision.selected_action.value,
+                                "target_id": legacy_decision.target_id,
+                                "target_zone": legacy_decision.target_zone,
+                                "expected_purpose": legacy_decision.reason_summary,
+                            }
+                        ],
+                        "next_action": {
+                            "step_index": 0,
+                            "action_type": legacy_decision.selected_action.value,
+                            "target_id": legacy_decision.target_id,
+                            "target_zone": legacy_decision.target_zone,
+                            "expected_purpose": legacy_decision.reason_summary,
+                        },
+                        "plan_method_id": legacy_decision.plan_method_id,
+                        "confidence": legacy_decision.confidence,
+                    },
+                }
+            )
+
         self.planner_call_count += 1
         self.last_planner_step = self.sim_step_count
         self.last_planner_time = sim_state.time
-        decision = self._apply_trait_bias_to_decision(decision, context, sim_state, trigger_reason)
-        provider_outcome = getattr(sim_state.brain_provider, "last_outcome", None)
-        if provider_outcome and provider_outcome.get("fallback"):
-            sim_state.logger.log_event(
-                sim_state.time,
-                "brain_provider_fallback",
-                {
-                    "agent": self.name,
-                    "provider": provider_name,
-                    "fallback_provider": "RuleBrain",
-                    "reason": provider_outcome.get("reason"),
-                    "latency_ms": provider_outcome.get("latency_ms"),
-                },
-            )
-        legal_actions = [ExecutableActionType(a["action_type"]) for a in context.action_affordances]
 
+        legal_action_ids = [a["action_type"] for a in context.action_affordances]
+        errors = validate_agent_brain_response(response, legal_action_ids)
         repaired = False
-        if not (0.0 <= decision.confidence <= 1.0):
-            decision.confidence = max(0.0, min(1.0, decision.confidence))
-            repaired = True
-
-        errors = validate_brain_decision(decision, legal_actions)
-        if errors and decision.selected_action != ExecutableActionType.WAIT and ExecutableActionType.WAIT in legal_actions:
-            repaired = True
-            decision = BrainDecision(
-                selected_action=ExecutableActionType.WAIT,
-                reason_summary="Repaired to WAIT due to validation failure.",
-                confidence=1.0,
-                assumptions=["simulator legality gate"],
-            )
-            errors = validate_brain_decision(decision, legal_actions)
-
-        status = "accepted"
         if errors:
-            status = "rejected"
-            decision = BrainDecision(
-                selected_action=ExecutableActionType.WAIT,
-                reason_summary="Fallback due to unrecoverable decision validation failure.",
-                confidence=1.0,
+            repaired = True
+            response = AgentBrainResponse.from_dict(
+                {
+                    "response_id": f"fallback-{request_packet.request_id}",
+                    "agent_id": self.agent_id,
+                    "plan": {
+                        "plan_id": f"fallback-plan-{request_packet.request_id}",
+                        "plan_horizon": 1,
+                        "ordered_goals": [{"goal_id": "safety", "description": "hold legal action", "priority": 1.0, "status": "active"}],
+                        "ordered_actions": [{"step_index": 0, "action_type": "wait", "expected_purpose": "fallback legal wait"}],
+                        "next_action": {"step_index": 0, "action_type": "wait", "expected_purpose": "fallback legal wait"},
+                        "confidence": 1.0,
+                    },
+                    "explanation": None,
+                }
             )
-        elif repaired:
-            status = "repaired"
+
+        decision = response.plan.next_action.to_brain_decision(
+            confidence=max(0.0, min(1.0, float(response.plan.confidence))),
+            plan_method_id=response.plan.plan_method_id,
+            next_steps=[step.expected_purpose for step in response.plan.ordered_actions[:3] if step.expected_purpose],
+        )
+        decision = self._apply_trait_bias_to_decision(decision, context, sim_state, trigger_reason)
+        legacy_errors = validate_brain_decision(decision, [ExecutableActionType(a) for a in legal_action_ids])
+        status = "repaired" if repaired else "accepted"
+        if legacy_errors:
+            status = "rejected"
+            decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="Fallback due to decision validation failure.", confidence=1.0)
 
         sim_state.logger.log_event(
             sim_state.time,
@@ -599,14 +723,14 @@ class Agent:
                 "decision_status": status,
                 "selected_action": decision.selected_action.value,
                 "confidence": decision.confidence,
-                "errors": errors,
-                "validation_repaired": repaired,
-                "validation_fallback_to_wait": decision.selected_action == ExecutableActionType.WAIT and bool(errors),
+                "errors": errors + legacy_errors,
+                "request_explanation": request_explanation,
+                "explanation_present": bool(response.explanation),
                 "planner_call_count": self.planner_call_count,
-                "latency_ms": (provider_outcome or {}).get("latency_ms"),
             },
         )
-        return decision, status
+
+        return decision, status, response
 
     def _apply_trait_bias_to_decision(self, decision, context, sim_state, trigger_reason):
         comm = self._trait_value("communication_propensity")
@@ -756,8 +880,15 @@ class Agent:
             return True, "+".join(due_bits)
         return False, "cadence_not_due"
 
-    def _refresh_goal_plan_state(self, decision, sim_state, trigger_reason):
-        if decision.goal_update:
+    def _refresh_goal_plan_state(self, decision, sim_state, trigger_reason, response=None):
+        if response and getattr(response, "plan", None) and response.plan.ordered_goals:
+            for g in response.plan.ordered_goals[:3]:
+                if not self.goal_stack or self.goal_stack[-1].get("goal") != g.description:
+                    self.goal_stack.append({"goal": g.description, "target": decision.target_id, "goal_id": g.goal_id})
+            if len(self.goal_stack) > 5:
+                self.goal_stack = self.goal_stack[-5:]
+            self.update_current_goal()
+        elif decision.goal_update:
             if not self.goal_stack or self.goal_stack[-1].get("goal") != decision.goal_update:
                 self.goal_stack.append({"goal": decision.goal_update, "target": decision.target_id})
                 if len(self.goal_stack) > 5:
@@ -780,16 +911,19 @@ class Agent:
             },
         )
 
-    def _adopt_new_plan(self, decision, trigger_reason, sim_time):
+    def _adopt_new_plan(self, decision, trigger_reason, sim_time, response=None):
         if self.current_plan is not None and self.current_plan.invalidation_reason is None:
             self.current_plan.invalidation_reason = f"replaced_by_{trigger_reason}"
         self.current_plan = PlanRecord(
-            plan_id=self._next_plan_id(),
+            plan_id=getattr(getattr(response, "plan", None), "plan_id", self._next_plan_id()),
             decision=decision,
             created_at=sim_time,
             last_reviewed_at=sim_time,
             trigger_reason=trigger_reason,
-            remaining_executions=2,
+            remaining_executions=max(12, int(getattr(getattr(response, "plan", None), "plan_horizon", 2)) + 3),
+            ordered_goals=[g.__dict__ for g in getattr(getattr(response, "plan", None), "ordered_goals", [])],
+            ordered_actions=[a.__dict__ for a in getattr(getattr(response, "plan", None), "ordered_actions", [])],
+            explanation=getattr(response, "explanation", None),
         )
 
     def _continue_cached_plan(self, sim_state, environment):
@@ -1280,9 +1414,9 @@ class Agent:
                 trigger_reason = self._plan_trigger_reason(sim_state, environment)
                 planner_allowed, planner_reason = self._planner_decision_allowed(sim_state, trigger_reason)
                 if planner_allowed:
-                    decision, _status = self._build_rule_based_brain_decision(sim_state, planner_reason)
-                    self._adopt_new_plan(decision, planner_reason, sim_state.time)
-                    self._refresh_goal_plan_state(decision, sim_state, planner_reason)
+                    decision, _status, response = self._build_rule_based_brain_decision(sim_state, planner_reason)
+                    self._adopt_new_plan(decision, planner_reason, sim_state.time, response=response)
+                    self._refresh_goal_plan_state(decision, sim_state, planner_reason, response=response)
                     self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment)
                 elif self._continue_cached_plan(sim_state, environment):
                     sim_state.logger.log_event(sim_state.time, "planner_skipped_due_to_cadence", {"agent": self.name, "reason": planner_reason})

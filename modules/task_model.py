@@ -249,6 +249,14 @@ class AgentDefault:
     source_access_override: List[str]
     planner_config: Dict[str, object]
     enabled: bool
+    agent_id: str = ""
+    display_name: str = ""
+    agent_label: str = ""
+    template_id: str = ""
+    initial_goal_seeds: List[str] = None
+    communication_params: Dict[str, object] = None
+    brain_config: Dict[str, object] = None
+    task_overrides: Dict[str, object] = None
 
 
 @dataclass(frozen=True)
@@ -677,6 +685,14 @@ class TaskModelLoader:
                 source_access_override=_split_pipe(row.get("source_access_override", "")),
                 planner_config=json.loads(row.get("planner_config_json", "{}") or "{}"),
                 enabled=_parse_bool(row.get("enabled", "true")),
+                agent_id=row.get("agent_id", row.get("agent_name", row["role_id"])),
+                display_name=row.get("display_name", row.get("agent_name", row["role_id"])),
+                agent_label=row.get("agent_label", row.get("role_id", "")),
+                template_id=row.get("template_id", ""),
+                initial_goal_seeds=_split_pipe(row.get("initial_goal_seeds", "")),
+                communication_params=json.loads(row.get("communication_params_json", "{}") or "{}"),
+                brain_config=json.loads(row.get("brain_config_json", "{}") or "{}"),
+                task_overrides=json.loads(row.get("task_overrides_json", "{}") or "{}"),
             )
             defaults.append(default)
         return [d for d in defaults if d.enabled]

@@ -1,0 +1,25 @@
+{
+  "agents": [
+    {
+      "agent_id": "planner_alpha",
+      "display_name": "Systems Planner",
+      "label": "Navigation Lead",
+      "template_id": "mars_architect",
+      "initial_goal_seeds": ["coordinate_bridge_checks"]
+    },
+    {
+      "agent_id": "logistics_beta",
+      "display_name": "Supply Coordinator",
+      "label": "Ops Specialist",
+      "template_id": "mars_engineer",
+      "initial_goal_seeds": ["maintain_resource_flow"]
+    },
+    {
+      "agent_id": "sustain_gamma",
+      "display_name": "Habitat Steward",
+      "label": "Life Support",
+      "template_id": "mars_botanist",
+      "initial_goal_seeds": ["protect_food_and_water_path"]
+    }
+  ]
+}

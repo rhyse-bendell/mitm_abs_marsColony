@@ -121,7 +121,11 @@ class SimulationState:
                     agent_configs.append(
                         {
                             "name": d.agent_name,
+                            "display_name": d.display_name or d.agent_name,
+                            "agent_id": d.agent_id or d.agent_name,
+                            "label": d.agent_label or d.role_id,
                             "role": d.role_id,
+                            "template_id": d.template_id or None,
                             "constructs": {
                                 "teamwork_potential": d.teamwork_potential,
                                 "taskwork_potential": d.taskwork_potential,
@@ -129,6 +133,11 @@ class SimulationState:
                             "mechanism_overrides": dict(d.mechanism_overrides),
                             "traits": dict(d.mechanism_overrides),
                             "packet_access": list(d.source_access_override),
+                            "accessible_packet_ids": list(d.source_access_override),
+                            "initial_goal_seeds": list(d.initial_goal_seeds or []),
+                            "communication_params": dict(d.communication_params or {}),
+                            "brain_config": dict(d.brain_config or {}),
+                            "task_overrides": dict(d.task_overrides or {}),
                             "planner_config": dict(d.planner_config),
                         }
                     )
@@ -141,14 +150,23 @@ class SimulationState:
 
 
         for config in agent_configs:
-            position = self.environment.get_spawn_point(config["role"])
+            config = self._resolve_agent_config_with_template(config)
+            role_id = config.get("role", config.get("label", "Agent"))
+            position = self.environment.get_spawn_point(role_id)
             merged_planner_config = dict(self.planner_defaults)
             merged_planner_config.update(dict(config.get("planner_config", {})))
             agent = Agent(
-                name=config["name"],
-                role=config["role"],
+                name=config.get("name", config.get("display_name", role_id)),
+                role=role_id,
                 position=position,
                 planner_config=merged_planner_config,
+                agent_id=config.get("agent_id"),
+                display_name=config.get("display_name", config.get("name", role_id)),
+                agent_label=config.get("label") or config.get("alias"),
+                template_id=config.get("template_id"),
+                brain_config=config.get("brain_config"),
+                communication_params=config.get("communication_params"),
+                initial_goal_seeds=config.get("initial_goal_seeds"),
             )
             incoming_traits = dict(config.get("traits", {}))
             construct_values = dict(config.get("constructs", {}))
@@ -172,15 +190,19 @@ class SimulationState:
                 "agent_mechanism_profile",
                 {"agent": agent.name, "mechanisms": resolved_mechanisms},
             )
-            role_sources = self.task_model.source_ids_for_role(config["role"])
+            role_sources = self.task_model.source_ids_for_role(role_id)
             mapped_packets = [
                 self.environment.source_packet_name_map.get(source_id, source_id)
                 for source_id in role_sources
                 if self.environment.source_packet_name_map.get(source_id, source_id) in self.environment.knowledge_packets
             ]
-            fallback = config.get("packet_access")
+            fallback = config.get("accessible_packet_ids") or config.get("packet_access")
             agent.allowed_packet = mapped_packets or fallback
             agent.task_model = self.task_model
+            for seed in config.get("initial_goal_seeds", [])[:3]:
+                if isinstance(seed, str) and seed.strip():
+                    agent.goal_stack.append({"goal": seed.strip(), "target": None})
+            agent.update_current_goal()
             self.agents.append(agent)
 
         self.environment.agents = self.agents
@@ -201,6 +223,26 @@ class SimulationState:
                 "agents": [agent.name for agent in self.agents],
             },
         )
+
+
+    def _agent_templates(self):
+        return dict(self.task_model.manifest.get("agent_templates", {}))
+
+    def _resolve_agent_config_with_template(self, config):
+        cfg = dict(config)
+        template_id = cfg.get("template_id")
+        templates = self._agent_templates()
+        if template_id and template_id in templates:
+            merged = dict(templates.get(template_id, {}))
+            for k, v in cfg.items():
+                if isinstance(v, dict) and isinstance(merged.get(k), dict):
+                    base = dict(merged.get(k, {}))
+                    base.update(v)
+                    merged[k] = base
+                else:
+                    merged[k] = v
+            return merged
+        return cfg
 
     def update(self, base_dt):
         dt = base_dt * self.speed_multiplier

@@ -16,6 +16,45 @@
     ],
     "planner_timeout_seconds": 1.5,
     "planner_fallback_backend": "rule_brain",
-    "planner_max_retries": 0
+    "planner_max_retries": 0,
+    "explanation_mode": "never",
+    "explanation_every_n_calls": 5,
+    "explanation_probability": 0.1
+  },
+  "agent_templates": {
+    "mars_architect": {
+      "role": "Architect",
+      "label": "Architect",
+      "accessible_packet_ids": [
+        "Team_Info",
+        "Architect_Info"
+      ],
+      "brain_config": {
+        "plan_horizon": 3,
+        "explanation_style": "concise"
+      }
+    },
+    "mars_engineer": {
+      "role": "Engineer",
+      "label": "Engineer",
+      "accessible_packet_ids": [
+        "Team_Info",
+        "Engineer_Info"
+      ],
+      "brain_config": {
+        "plan_horizon": 3
+      }
+    },
+    "mars_botanist": {
+      "role": "Botanist",
+      "label": "Botanist",
+      "accessible_packet_ids": [
+        "Team_Info",
+        "Botanist_Info"
+      ],
+      "brain_config": {
+        "plan_horizon": 3
+      }
+    }
   }
 }
