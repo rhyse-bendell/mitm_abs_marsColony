@@ -41,6 +41,9 @@ MESSAGE_TYPES = {
     "TCR": "Team Correction or Repair"
 }
 
+GOAL_STATUSES = {"inactive", "candidate", "active", "queued", "blocked", "satisfied", "invalidated", "abandoned"}
+GOAL_SOURCES = {"task_defined", "planner_proposed", "derived_from_rule", "teammate_artifact_influenced", "legacy_seed"}
+
 
 @dataclass
 class PlanRecord:
@@ -54,6 +57,28 @@ class PlanRecord:
     ordered_goals: list[dict] | None = None
     ordered_actions: list[dict] | None = None
     explanation: str | None = None
+    plan_method_id: str | None = None
+    plan_method_status: str = "unspecified"
+    adoption_reason: str | None = None
+    validation_notes: list[str] | None = None
+    associated_goal_ids: list[str] | None = None
+
+
+@dataclass
+class GoalRecord:
+    goal_key: str
+    goal_id: str | None
+    label: str
+    source: str
+    status: str
+    priority: float
+    target: object = None
+    parent_goal_key: str | None = None
+    evidence: list[str] | None = None
+    activation_conditions: list[str] | None = None
+    completion_conditions: list[str] | None = None
+    invalidation_reasons: list[str] | None = None
+    blocking_reasons: list[str] | None = None
 
 
 @dataclass
@@ -118,8 +143,12 @@ class Agent:
         # Taskwork-related state
         self.inventory = []
         self.activity_log = []
-        self.goal_stack = []  # A list of goals (most important is first)
-        self.goal = None  # Synchronized with top of stack
+        self.goal_stack = []  # Legacy compatibility mirror of active/queued goals
+        self.goal_registry = {}
+        self.goal_order = []
+        self.goal = None  # Synchronized with highest-priority active goal
+        self.goal_status_history = []
+        self.goal_transition_counter = 0
         self.target = None
         self.has_shared = False
         self.detour_target = None
@@ -516,23 +545,170 @@ class Agent:
             return {"project_id": target_name, "target": point}
         return point
 
+    def _next_goal_key(self):
+        self.goal_transition_counter += 1
+        return f"{self.agent_id}:goal:{self.goal_transition_counter}"
+
+    def _coerce_goal_status(self, status):
+        normalized = str(status or "candidate").strip().lower()
+        return normalized if normalized in GOAL_STATUSES else "candidate"
+
+    def _coerce_goal_source(self, source):
+        normalized = str(source or "planner_proposed").strip().lower()
+        return normalized if normalized in GOAL_SOURCES else "planner_proposed"
+
+    def _goal_priority(self, status, priority):
+        base = float(priority if priority is not None else 0.5)
+        status_bias = {
+            "active": 0.35,
+            "queued": 0.2,
+            "candidate": 0.1,
+            "blocked": -0.2,
+            "inactive": -0.3,
+            "satisfied": -0.6,
+            "invalidated": -0.7,
+            "abandoned": -0.8,
+        }.get(status, 0.0)
+        return max(0.0, min(1.0, base + status_bias))
+
+    def _log_goal_transition(self, sim_state, goal, reason, extra=None):
+        payload = {
+            "agent": self.name,
+            "goal_key": goal.goal_key,
+            "goal_id": goal.goal_id,
+            "label": goal.label,
+            "status": goal.status,
+            "priority": round(goal.priority, 3),
+            "source": goal.source,
+            "reason": reason,
+        }
+        if extra:
+            payload.update(extra)
+        self.goal_status_history.append(payload)
+        if sim_state is not None:
+            sim_state.logger.log_event(sim_state.time, "goal_state_transition", payload)
+
+    def _upsert_goal_record(self, *, label, goal_id=None, source="planner_proposed", status="candidate", priority=0.5, target=None, parent_goal_key=None, evidence=None, activation_conditions=None, completion_conditions=None, invalidation_reason=None, blocking_reason=None, sim_state=None, reason="goal_upsert"):
+        if goal_id and goal_id in self.goal_registry:
+            key = goal_id
+            goal = self.goal_registry[key]
+            changed = False
+            next_status = self._coerce_goal_status(status)
+            if goal.status != next_status:
+                goal.status = next_status
+                changed = True
+            next_priority = self._goal_priority(next_status, priority)
+            if abs(goal.priority - next_priority) > 1e-6:
+                goal.priority = next_priority
+                changed = True
+            if target is not None:
+                goal.target = target
+                changed = True
+            if evidence:
+                goal.evidence = sorted(set((goal.evidence or []) + list(evidence)))
+                changed = True
+            if blocking_reason:
+                goal.blocking_reasons = sorted(set((goal.blocking_reasons or []) + [blocking_reason]))
+                changed = True
+            if invalidation_reason:
+                goal.invalidation_reasons = sorted(set((goal.invalidation_reasons or []) + [invalidation_reason]))
+                changed = True
+            if changed:
+                self._log_goal_transition(sim_state, goal, reason)
+            return goal
+
+        key = goal_id or self._next_goal_key()
+        goal = GoalRecord(
+            goal_key=key,
+            goal_id=goal_id,
+            label=label,
+            source=self._coerce_goal_source(source),
+            status=self._coerce_goal_status(status),
+            priority=self._goal_priority(status, priority),
+            target=target,
+            parent_goal_key=parent_goal_key,
+            evidence=list(evidence or []),
+            activation_conditions=list(activation_conditions or []),
+            completion_conditions=list(completion_conditions or []),
+            invalidation_reasons=[invalidation_reason] if invalidation_reason else [],
+            blocking_reasons=[blocking_reason] if blocking_reason else [],
+        )
+        self.goal_registry[key] = goal
+        self.goal_order.append(key)
+        self._log_goal_transition(sim_state, goal, reason, extra={"event": "created"})
+        return goal
+
+    def _refresh_goal_stack_view(self):
+        live = [
+            g for g in self.goal_registry.values()
+            if g.status in {"active", "queued", "candidate", "blocked"}
+        ]
+        live.sort(key=lambda g: (g.priority, -self.goal_order.index(g.goal_key)), reverse=True)
+        self.goal_stack = [{"goal": g.label, "target": g.target, "goal_id": g.goal_id or g.goal_key, "status": g.status, "source": g.source} for g in live]
+        self.goal = self.goal_stack[0]["goal"] if self.goal_stack else None
+
     def current_goal(self):
-        return self.goal_stack[-1] if self.goal_stack else None
+        self._refresh_goal_stack_view()
+        return self.goal_stack[0] if self.goal_stack else None
 
     def update_current_goal(self):
-        self.goal = self.goal_stack[-1]["goal"] if self.goal_stack else None
+        self._refresh_goal_stack_view()
 
     def push_goal(self, goal, target=None):
-        self.goal_stack.append({"goal": goal, "target": target})
-        self.goal = goal  # Keep synchronized
-        self.activity_log.append(f"Pushed goal: {goal}")
+        rec = self._upsert_goal_record(
+            label=str(goal),
+            goal_id=str(goal) if isinstance(goal, str) and goal.startswith("G_") else None,
+            source="legacy_seed",
+            status="active",
+            target=target,
+            reason="legacy_push_goal",
+        )
+        self.activity_log.append(f"Pushed goal: {rec.label}")
+        self._refresh_goal_stack_view()
 
     def pop_goal(self):
-        if self.goal_stack:
-            completed = self.goal_stack.pop()
-            self.activity_log.append(f"Completed goal: {completed['goal']}")
-            self.goal = self.goal_stack[-1]["goal"] if self.goal_stack else None  # Sync again
+        self._refresh_goal_stack_view()
+        if not self.goal_stack:
+            return
+        top = self.goal_stack[0]
+        key = top.get("goal_id")
+        goal = self.goal_registry.get(key)
+        if goal is None:
+            for candidate in self.goal_registry.values():
+                if candidate.label == top.get("goal") and candidate.status in {"active", "queued", "candidate", "blocked"}:
+                    goal = candidate
+                    break
+        if goal is None:
+            return
+        goal.status = "satisfied"
+        self.activity_log.append(f"Completed goal: {goal.label}")
+        self._refresh_goal_stack_view()
 
+    def _seed_task_defined_goals(self, sim_state=None):
+        if not self.task_model:
+            return
+        for g in self.task_model.goals.values():
+            if not g.enabled:
+                continue
+            status = "candidate"
+            source = "task_defined"
+            if g.goal_id in set(self.initial_goal_seeds or []):
+                status = "active"
+            elif g.goal_level == "mission":
+                status = "queued"
+            self._upsert_goal_record(
+                label=g.label,
+                goal_id=g.goal_id,
+                source=source,
+                status=status,
+                priority=0.9 if g.goal_level == "mission" else 0.6,
+                evidence=[f"goal_level={g.goal_level}", f"phase_scope={g.phase_scope}"],
+                completion_conditions=[g.success_conditions] if g.success_conditions else [],
+                activation_conditions=["phase_alignment", "prerequisite_rules"],
+                sim_state=sim_state,
+                reason="task_goal_seeded",
+            )
+        self._refresh_goal_stack_view()
     def decide(self, sim_state):
         """Deprecated compatibility wrapper for legacy callers."""
         self.perceive_environment(sim_state)
@@ -551,6 +727,168 @@ class Agent:
         if mode == "probability":
             return random.random() < self.planner_cadence.explanation_probability
         return False
+
+    def _phase_matches(self, phase_scope, current_phase_name):
+        scope = str(phase_scope or "all").strip().lower()
+        if scope in {"", "all"}:
+            return True
+        phase = str(current_phase_name or "").strip().lower()
+        if scope == "planning":
+            return "phase 1" in phase or "plan" in phase
+        if scope == "phase1":
+            return "phase 1" in phase
+        if scope == "phase2":
+            return "phase 2" in phase
+        return scope in phase
+
+    def _goal_definition_for(self, goal_id):
+        if not self.task_model:
+            return None
+        return self.task_model.goals.get(goal_id)
+
+    def _activate_support_goal(self, label, reason, sim_state=None, priority=0.7, source="derived_from_rule"):
+        goal = self._upsert_goal_record(
+            label=label,
+            source=source,
+            status="active",
+            priority=priority,
+            evidence=[reason],
+            sim_state=sim_state,
+            reason="support_goal_activated",
+        )
+        self.activity_log.append(f"Support goal active: {goal.label} ({reason})")
+
+    def _update_goal_states_from_runtime(self, sim_state, environment):
+        if not self.task_model:
+            self._refresh_goal_stack_view()
+            return
+        phase_name = (environment.get_current_phase() or {}).get("name", "")
+        data_ids, info_ids, knowledge_ids = self._held_dik_ids()
+
+        for key in list(self.goal_order):
+            goal = self.goal_registry.get(key)
+            if goal is None:
+                continue
+            definition = self._goal_definition_for(goal.goal_id)
+            if definition is None:
+                continue
+
+            if not self._phase_matches(definition.phase_scope, phase_name) and goal.status in {"active", "candidate", "queued"}:
+                goal.status = "inactive"
+                self._log_goal_transition(sim_state, goal, "phase_out_of_scope")
+                continue
+            if self._phase_matches(definition.phase_scope, phase_name) and goal.status == "inactive":
+                goal.status = "candidate"
+                self._log_goal_transition(sim_state, goal, "phase_in_scope")
+
+            prereq_rules = set(definition.prerequisite_rules)
+            if prereq_rules and not prereq_rules.intersection(knowledge_ids):
+                if goal.status in {"active", "candidate", "queued"}:
+                    goal.status = "blocked"
+                    goal.blocking_reasons = sorted(set((goal.blocking_reasons or []) + ["missing_prerequisite_rules"]))
+                    self._log_goal_transition(sim_state, goal, "goal_blocked_prerequisites")
+            elif goal.status == "blocked":
+                reasons = set(goal.blocking_reasons or [])
+                reasons.discard("missing_prerequisite_rules")
+                goal.blocking_reasons = sorted(reasons)
+                goal.status = "candidate"
+                self._log_goal_transition(sim_state, goal, "goal_unblocked_prerequisites")
+
+            success = (definition.success_conditions or "").lower()
+            if "artifact" in success and any(str(p).startswith("whiteboard:") for p in self.memory_seen_packets):
+                if goal.status not in {"satisfied", "invalidated", "abandoned"}:
+                    goal.status = "satisfied"
+                    self._log_goal_transition(sim_state, goal, "goal_satisfied_artifact_evidence")
+            if "dik" in success and (len(info_ids) + len(knowledge_ids)) >= 3 and goal.status in {"active", "candidate", "queued"}:
+                goal.status = "satisfied"
+                self._log_goal_transition(sim_state, goal, "goal_satisfied_dik_evidence")
+
+        if any("mismatch with construction" in e.lower() for e in self.activity_log[-6:]):
+            self._activate_support_goal("repair_detected_mismatch", "construction_mismatch_detected", sim_state=sim_state, priority=0.85, source="derived_from_rule")
+
+        if getattr(self, "derivation_events", []):
+            last = self.derivation_events[-1]
+            self._activate_support_goal("integrate_new_derivation", f"derivation:{last.get('derivation_id')}", sim_state=sim_state, priority=0.65, source="derived_from_rule")
+
+        if sim_state is not None and sim_state.team_knowledge_manager.recent_updates:
+            self._activate_support_goal("consult_artifact", "teammate/shared-artifact influenced", sim_state=sim_state, priority=0.6, source="teammate_artifact_influenced")
+
+        self._refresh_goal_stack_view()
+
+    def _validate_plan_method_grounding(self, response, context):
+        notes = []
+        status = "accepted"
+        method_id = response.plan.plan_method_id
+        if not method_id:
+            return status, notes
+        method = self.task_model.plan_methods.get(method_id) if self.task_model else None
+        if method is None or not method.enabled:
+            return "rejected_unknown_method", [f"unknown_plan_method:{method_id}"]
+
+        phase = context.world_snapshot.get("phase_profile", {}).get("name") or context.world_snapshot.get("phase_state", {}).get("name")
+        if not self._phase_matches(method.phase_scope, phase):
+            notes.append("phase_scope_mismatch")
+            status = "low_trust"
+
+        data_ids, info_ids, knowledge_ids = self._held_dik_ids()
+        missing_rules = [r for r in method.required_rules if r and r not in knowledge_ids]
+        missing_knowledge = [k for k in method.required_knowledge if k and k not in knowledge_ids]
+        missing_information = [i for i in method.required_information if i and i not in info_ids]
+        missing_data = [d for d in method.required_data if d and d not in data_ids]
+        if missing_rules or missing_knowledge or missing_information or missing_data:
+            status = "low_trust"
+            if missing_rules:
+                notes.append(f"missing_rules:{'|'.join(missing_rules[:4])}")
+            if missing_knowledge:
+                notes.append(f"missing_knowledge:{'|'.join(missing_knowledge[:4])}")
+            if missing_information:
+                notes.append(f"missing_information:{'|'.join(missing_information[:4])}")
+            if missing_data:
+                notes.append(f"missing_data:{'|'.join(missing_data[:4])}")
+
+        legal_actions = {a.get("action_type") for a in context.action_affordances}
+        illegal_steps = [s.action_type.value for s in response.plan.ordered_actions if s.action_type.value not in legal_actions]
+        if illegal_steps:
+            status = "low_trust"
+            notes.append(f"illegal_plan_steps:{'|'.join(illegal_steps[:4])}")
+        return status, notes
+
+    def _validate_and_ground_response_plan(self, response, context, request_packet):
+        if not self.task_model:
+            return response
+        method_status, notes = self._validate_plan_method_grounding(response, context)
+        if method_status == "rejected_unknown_method":
+            fallback_method = None
+            for m in self.task_model.plan_methods.values():
+                if not m.enabled:
+                    continue
+                if response.plan.ordered_goals and m.goal_id == response.plan.ordered_goals[0].goal_id:
+                    fallback_method = m.method_id
+                    break
+            replacement = response.plan.ordered_actions[0] if response.plan.ordered_actions else None
+            action = replacement.action_type.value if replacement else "wait"
+            response = AgentBrainResponse.from_dict(
+                {
+                    "response_id": f"planmethod-fallback-{request_packet.request_id}",
+                    "agent_id": self.agent_id,
+                    "plan": {
+                        "plan_id": response.plan.plan_id,
+                        "plan_horizon": max(1, response.plan.plan_horizon),
+                        "ordered_goals": [g.__dict__ for g in response.plan.ordered_goals],
+                        "ordered_actions": [{"step_index": 0, "action_type": action, "expected_purpose": "fallback after unknown method"}],
+                        "next_action": {"step_index": 0, "action_type": action, "expected_purpose": "fallback after unknown method"},
+                        "plan_method_id": fallback_method,
+                        "confidence": min(0.5, float(response.plan.confidence)),
+                        "notes": list(response.plan.notes) + ["unknown_method_fallback"],
+                    },
+                    "explanation": response.explanation,
+                }
+            )
+            method_status = "mapped_fallback"
+            notes = notes + ["plan_method_mapped_to_fallback"]
+        setattr(response.plan, "_method_status", method_status)
+        setattr(response.plan, "_method_notes", notes)
+        return response
 
     def _build_brain_request(self, sim_state, context, request_explanation, trigger_reason):
         phase = context.world_snapshot.get("phase_profile", {}).get("name", context.world_snapshot.get("phase_state", {}).get("name", "default"))
@@ -675,6 +1013,8 @@ class Agent:
                     },
                 }
             )
+
+        response = self._validate_and_ground_response_plan(response, context, request_packet)
 
         self.planner_call_count += 1
         self.last_planner_step = self.sim_step_count
@@ -882,18 +1222,45 @@ class Agent:
 
     def _refresh_goal_plan_state(self, decision, sim_state, trigger_reason, response=None):
         if response and getattr(response, "plan", None) and response.plan.ordered_goals:
-            for g in response.plan.ordered_goals[:3]:
-                if not self.goal_stack or self.goal_stack[-1].get("goal") != g.description:
-                    self.goal_stack.append({"goal": g.description, "target": decision.target_id, "goal_id": g.goal_id})
-            if len(self.goal_stack) > 5:
-                self.goal_stack = self.goal_stack[-5:]
-            self.update_current_goal()
+            for idx, g in enumerate(response.plan.ordered_goals[:5]):
+                known_task_goal = bool(self.task_model and g.goal_id and g.goal_id in self.task_model.goals)
+                source = "task_defined" if known_task_goal else "planner_proposed"
+                goal_id = g.goal_id if known_task_goal else None
+                parent = g.parent_goal_id if known_task_goal else None
+                self._upsert_goal_record(
+                    label=g.description or g.goal_id,
+                    goal_id=goal_id,
+                    source=source,
+                    status="active" if idx == 0 else (g.status or "queued"),
+                    priority=g.priority,
+                    parent_goal_key=parent,
+                    evidence=[f"planner_trigger={trigger_reason}", f"planner_source={g.source or source}"],
+                    sim_state=sim_state,
+                    reason="planner_goal_refresh",
+                )
+                if not known_task_goal:
+                    self._upsert_goal_record(
+                        label=f"adhoc_subgoal:{g.description or g.goal_id}",
+                        source="planner_proposed",
+                        status="candidate",
+                        priority=max(0.3, g.priority * 0.7),
+                        parent_goal_key=goal_id,
+                        evidence=["wrapped_ad_hoc_goal"],
+                        sim_state=sim_state,
+                        reason="planner_adhoc_goal_wrapped",
+                    )
         elif decision.goal_update:
-            if not self.goal_stack or self.goal_stack[-1].get("goal") != decision.goal_update:
-                self.goal_stack.append({"goal": decision.goal_update, "target": decision.target_id})
-                if len(self.goal_stack) > 5:
-                    self.goal_stack = self.goal_stack[-5:]
-            self.update_current_goal()
+            self._upsert_goal_record(
+                label=decision.goal_update,
+                source="planner_proposed",
+                status="active",
+                target=decision.target_id,
+                evidence=[f"decision_action={decision.selected_action.value}"],
+                sim_state=sim_state,
+                reason="planner_decision_goal_update",
+            )
+
+        self._update_goal_states_from_runtime(sim_state, sim_state.environment)
 
         next_steps = decision.next_steps or decision.plan_steps
         if next_steps:
@@ -908,22 +1275,34 @@ class Agent:
                 "goal_update": decision.goal_update,
                 "plan_method_id": decision.plan_method_id,
                 "next_steps": list(next_steps[:5]),
+                "active_goal_count": len(self.goal_stack),
             },
         )
 
     def _adopt_new_plan(self, decision, trigger_reason, sim_time, response=None):
         if self.current_plan is not None and self.current_plan.invalidation_reason is None:
             self.current_plan.invalidation_reason = f"replaced_by_{trigger_reason}"
+
+        plan_obj = getattr(response, "plan", None)
+        method_status = getattr(plan_obj, "_method_status", "unspecified") if plan_obj else "unspecified"
+        method_notes = list(getattr(plan_obj, "_method_notes", [])) if plan_obj else []
+        associated_goal_ids = [g.goal_id for g in getattr(plan_obj, "ordered_goals", []) if getattr(g, "goal_id", None)] if plan_obj else []
+
         self.current_plan = PlanRecord(
-            plan_id=getattr(getattr(response, "plan", None), "plan_id", self._next_plan_id()),
+            plan_id=getattr(plan_obj, "plan_id", self._next_plan_id()),
             decision=decision,
             created_at=sim_time,
             last_reviewed_at=sim_time,
             trigger_reason=trigger_reason,
-            remaining_executions=max(12, int(getattr(getattr(response, "plan", None), "plan_horizon", 2)) + 3),
-            ordered_goals=[g.__dict__ for g in getattr(getattr(response, "plan", None), "ordered_goals", [])],
-            ordered_actions=[a.__dict__ for a in getattr(getattr(response, "plan", None), "ordered_actions", [])],
+            remaining_executions=max(12, int(getattr(plan_obj, "plan_horizon", 2)) + 3),
+            ordered_goals=[g.__dict__ for g in getattr(plan_obj, "ordered_goals", [])],
+            ordered_actions=[a.__dict__ for a in getattr(plan_obj, "ordered_actions", [])],
             explanation=getattr(response, "explanation", None),
+            plan_method_id=getattr(plan_obj, "plan_method_id", None),
+            plan_method_status=method_status,
+            adoption_reason=f"trigger={trigger_reason};status={method_status}",
+            validation_notes=method_notes,
+            associated_goal_ids=associated_goal_ids,
         )
 
     def _continue_cached_plan(self, sim_state, environment):
@@ -931,6 +1310,12 @@ class Agent:
             return False
         if self.current_plan.remaining_executions <= 0:
             self.current_plan.invalidation_reason = "plan_completed"
+            return False
+
+        active_goal_ids = {g.get("goal_id") for g in self.goal_stack if g.get("status") in {"active", "queued", "candidate"}}
+        plan_goal_ids = set(self.current_plan.associated_goal_ids or [])
+        if plan_goal_ids and not (plan_goal_ids & active_goal_ids):
+            self.current_plan.invalidation_reason = "plan_goal_mismatch"
             return False
 
         self.current_action = self._translate_brain_decision_to_legacy_action(self.current_plan.decision, environment)
@@ -1057,6 +1442,7 @@ class Agent:
         if environment is None:
             return
 
+        self._update_goal_states_from_runtime(sim_state=None, environment=environment)
         goal_entry = self.current_goal()
         if not goal_entry:
             self.push_goal("seek_info", self._choose_info_target(environment))
@@ -1110,15 +1496,16 @@ class Agent:
         if not self.goal_stack:
             return [{"type": "idle", "duration": 1.0, "priority": 0}]
 
-        goal = self.goal_stack[-1]["goal"]
+        top_goal = self.current_goal()
+        goal = top_goal["goal"]
 
         if goal == "seek_info":
-            target = self.goal_stack[-1].get("target") or self.target or (7.0, 6.4)
+            target = top_goal.get("target") or self.target or (7.0, 6.4)
             return [{"type": "move_to", "target": target, "duration": 1.0, "priority": 1}]
         if goal == "share":
             return [{"type": "communicate", "duration": 0.5, "priority": 1}]
         if goal == "build":
-            goal_target = self.goal_stack[-1].get("target")
+            goal_target = top_goal.get("target")
             project_id = goal_target.get("project_id") if isinstance(goal_target, dict) else None
             target_point = goal_target.get("target") if isinstance(goal_target, dict) else goal_target
             return [{"type": "construct", "duration": 2.0, "priority": 1, "project_id": project_id, "target": target_point}]
@@ -1427,6 +1814,7 @@ class Agent:
                 self._advance_active_actions(dt)
 
             self._apply_externalization_and_construction_effects(environment, sim_state, dt)
+            self._update_goal_states_from_runtime(sim_state, environment)
 
         if self.target:
             self.move_toward(self.target, dt, environment)
