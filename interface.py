@@ -8,6 +8,7 @@ from modules.simulation import SimulationState
 from tkinter import StringVar, BooleanVar, DoubleVar, IntVar
 from modules.construction import ConstructionManager
 from modules.phase_definitions import MISSION_PHASES
+from modules.task_model import load_task_model
 
 
 class MarsColonyInterface:
@@ -248,16 +249,43 @@ class MarsColonyInterface:
                     if is_enabled.get()
                 ]
 
+                identity = self.agent_identity[role]
+                brain_settings = self.agent_brain_settings[role]
+                planner_settings = self.agent_planner_settings[role]
+                display_name = identity["display_name"].get().strip() or role
+                alias = identity["alias"].get().strip()
+                backend = brain_settings["backend"].get().strip()
+                model = brain_settings["local_model"].get().strip()
+                fallback_backend = brain_settings["fallback_backend"].get().strip()
+                planner_cadence = max(1, int(planner_settings["planner_interval_steps"].get()))
+                planner_timeout = max(0.1, float(planner_settings["planner_timeout_seconds"].get()))
+
+                brain_config = {
+                    "backend": backend,
+                    "local_model": model,
+                    "fallback_backend": fallback_backend,
+                }
+                planner_config = {
+                    "planner_interval_steps": planner_cadence,
+                    "planner_timeout_seconds": planner_timeout,
+                }
+
                 agent_configs.append({
                     "name": role,
+                    "display_name": display_name,
+                    "alias": alias,
+                    "label": alias or role,
                     "role": role,
+                    "template_id": identity["template_id"],
                     "constructs": {
                         "teamwork_potential": profile_constructs[team_pot],
                         "taskwork_potential": profile_constructs[task_pot],
                     },
                     "mechanism_overrides": dict(traits),
                     "traits": traits,
-                    "packet_access": selected_packets
+                    "packet_access": selected_packets,
+                    "brain_config": {k: v for k, v in brain_config.items() if v},
+                    "planner_config": planner_config,
                 })
 
         return agent_configs
@@ -691,7 +719,8 @@ class MarsColonyInterface:
             length=180,
         ).grid(row=1, column=0, sticky="w")
 
-    def _create_agent_card(self, parent, role, row, trait_labels, update_traits_from_profile):
+    def _create_agent_card(self, parent, agent_row, row, trait_labels, update_traits_from_profile):
+        role = agent_row["role"]
         card = tk.LabelFrame(
             parent,
             text=f"{role} Configuration",
@@ -713,6 +742,17 @@ class MarsColonyInterface:
 
         ttk.Checkbutton(header, text="Enable", variable=self.active_roles[role]).grid(row=0, column=0, sticky="w")
         ttk.Label(header, text=role).grid(row=0, column=1, sticky="w", padx=(10, 0))
+
+        self.agent_identity[role] = {
+            "display_name": StringVar(value=agent_row.get("display_name") or role),
+            "alias": StringVar(value=agent_row.get("label") or role),
+            "template_id": agent_row.get("template_id"),
+        }
+
+        ttk.Label(header, text="Display Name").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(header, textvariable=self.agent_identity[role]["display_name"], width=20).grid(row=1, column=1, sticky="w", padx=(10, 0), pady=(4, 0))
+        ttk.Label(header, text="Alias").grid(row=2, column=0, sticky="w", pady=(2, 0))
+        ttk.Entry(header, textvariable=self.agent_identity[role]["alias"], width=20).grid(row=2, column=1, sticky="w", padx=(10, 0), pady=(2, 0))
 
         ttk.Label(card, text="Teamwork Potential").grid(row=1, column=0, sticky="w")
         ttk.Label(card, text="Taskwork Potential").grid(row=1, column=1, sticky="w")
@@ -784,6 +824,33 @@ class MarsColonyInterface:
                 pady=1,
             )
 
+        settings_frame = ttk.LabelFrame(card, text="Per-Agent Brain/Planner", padding=(8, 6))
+        settings_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        settings_frame.columnconfigure(1, weight=1)
+
+        default_brain = dict(agent_row.get("brain_config", {}))
+        default_planner = dict(agent_row.get("planner_config", {}))
+        self.agent_brain_settings[role] = {
+            "backend": StringVar(value=default_brain.get("backend", "")),
+            "local_model": StringVar(value=default_brain.get("local_model", "")),
+            "fallback_backend": StringVar(value=default_brain.get("fallback_backend", "")),
+        }
+        self.agent_planner_settings[role] = {
+            "planner_interval_steps": IntVar(value=int(default_planner.get("planner_interval_steps", 4))),
+            "planner_timeout_seconds": DoubleVar(value=float(default_planner.get("planner_timeout_seconds", 15.0))),
+        }
+
+        ttk.Label(settings_frame, text="Backend Override").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(settings_frame, textvariable=self.agent_brain_settings[role]["backend"], values=["", "rule_brain", "local_http", "ollama"], state="readonly", width=18).grid(row=0, column=1, sticky="w")
+        ttk.Label(settings_frame, text="Model Override").grid(row=1, column=0, sticky="w", pady=(2, 0))
+        ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["local_model"], width=20).grid(row=1, column=1, sticky="w", pady=(2, 0))
+        ttk.Label(settings_frame, text="Fallback Override").grid(row=2, column=0, sticky="w", pady=(2, 0))
+        ttk.Combobox(settings_frame, textvariable=self.agent_brain_settings[role]["fallback_backend"], values=["", "rule_brain"], state="readonly", width=18).grid(row=2, column=1, sticky="w", pady=(2, 0))
+        ttk.Label(settings_frame, text="Planner Cadence (steps)").grid(row=3, column=0, sticky="w", pady=(2, 0))
+        ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_interval_steps"], width=8).grid(row=3, column=1, sticky="w", pady=(2, 0))
+        ttk.Label(settings_frame, text="Planner Timeout (s)").grid(row=4, column=0, sticky="w", pady=(2, 0))
+        ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_timeout_seconds"], width=8).grid(row=4, column=1, sticky="w", pady=(2, 0))
+
     def create_experiment_tab(self):
         container = ttk.Frame(self.notebook)
         canvas = tk.Canvas(container)
@@ -833,7 +900,29 @@ class MarsColonyInterface:
         self.agent_profiles = {}
         self.agent_traits = {}
         self.packet_access = {}
-        roles = ["Architect", "Engineer", "Botanist"]
+        self.agent_identity = {}
+        self.agent_brain_settings = {}
+        self.agent_planner_settings = {}
+
+        task_model = load_task_model(task_id="mars_colony")
+        default_rows = []
+        for d in task_model.agent_defaults:
+            default_rows.append(
+                {
+                    "role": d.role_id,
+                    "display_name": d.display_name or d.agent_name,
+                    "label": d.agent_label or d.role_id,
+                    "template_id": d.template_id,
+                    "brain_config": dict(d.brain_config or {}),
+                    "planner_config": dict(d.planner_config or {}),
+                }
+            )
+        if not default_rows:
+            default_rows = [
+                {"role": "Architect", "display_name": "Architect", "label": "Architect", "template_id": None, "brain_config": {}, "planner_config": {}},
+                {"role": "Engineer", "display_name": "Engineer", "label": "Engineer", "template_id": None, "brain_config": {}, "planner_config": {}},
+                {"role": "Botanist", "display_name": "Botanist", "label": "Botanist", "template_id": None, "brain_config": {}, "planner_config": {}},
+            ]
 
         # Trait labels
         trait_labels = {
@@ -867,8 +956,8 @@ class MarsColonyInterface:
         cards_container.grid(row=1, column=0, sticky="ew", padx=10)
         cards_container.columnconfigure(0, weight=1)
 
-        for row, role in enumerate(roles):
-            self._create_agent_card(cards_container, role, row, trait_labels, update_traits_from_profile)
+        for row, agent_row in enumerate(default_rows):
+            self._create_agent_card(cards_container, agent_row, row, trait_labels, update_traits_from_profile)
 
         ttk.Label(
             self.tab_experiment,
