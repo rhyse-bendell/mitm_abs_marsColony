@@ -60,6 +60,14 @@ class SimulationState:
         self.planner_defaults = dict(self.task_model.manifest.get("planner_defaults", {}))
         if planner_config:
             self.planner_defaults.update(dict(planner_config))
+        planner_trace_enabled = bool(self.planner_defaults.get("enable_planner_trace", True))
+        planner_trace_mode = str(self.planner_defaults.get("planner_trace_mode", "full") or "full").lower()
+        planner_trace_max_chars = int(self.planner_defaults.get("planner_trace_max_chars", 12000) or 12000)
+        self.logger.configure_planner_trace(
+            enabled=planner_trace_enabled,
+            mode=planner_trace_mode,
+            max_chars=planner_trace_max_chars,
+        )
         backend_options = dict(brain_backend_options or {})
         if "timeout_s" not in backend_options and "planner_timeout_seconds" in self.planner_defaults:
             backend_options["timeout_s"] = self.planner_defaults.get("planner_timeout_seconds")
@@ -357,6 +365,10 @@ class SimulationState:
             "local_backend_alias": "ollama_openai_compatible" if self.configured_brain_backend in {"local_http", "openai_compatible_local", "ollama_local", "ollama"} else None,
             "fallback_occurred": self.backend_fallback_count > 0,
             "fallback_count": self.backend_fallback_count,
+            "planner_trace_enabled": bool(self.planner_defaults.get("enable_planner_trace", True)),
+            "planner_trace_mode": str(self.planner_defaults.get("planner_trace_mode", "full") or "full"),
+            "planner_trace_max_chars": int(self.planner_defaults.get("planner_trace_max_chars", 12000) or 12000),
+            "planner_trace_artifact": "logs/planner_trace.jsonl" if bool(self.planner_defaults.get("enable_planner_trace", True)) else None,
         }
 
     def _refresh_backend_effective_state(self, reason="runtime_update"):

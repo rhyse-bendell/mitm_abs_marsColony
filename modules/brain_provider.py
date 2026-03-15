@@ -25,6 +25,9 @@ class BrainBackendConfig:
     max_retries: int = 0
     fallback_backend: str = "rule_brain"
     debug: bool = False
+    planner_trace_enabled: bool = True
+    planner_trace_mode: str = "full"
+    planner_trace_max_chars: int = 12000
 
 
 def create_brain_provider(config: BrainBackendConfig | None = None) -> BrainProvider:
@@ -294,6 +297,7 @@ class OllamaLocalBrainProvider(BrainProvider):
         self.config = config
         self.fallback = fallback
         self.last_outcome = {"fallback": False, "reason": None, "latency_ms": None}
+        self.last_trace: Dict[str, Any] = {}
 
     def backend_settings(self) -> Dict[str, Any]:
         return {
@@ -350,10 +354,22 @@ class OllamaLocalBrainProvider(BrainProvider):
         endpoint = f"{self.config.local_base_url.rstrip('/')}{self.config.local_endpoint}"
         fallback_reason = None
         fallback_hint = None
+        trace: Dict[str, Any] = {
+            "request_id": request_packet.request_id,
+            "provider_class": self.__class__.__name__,
+            "backend": self.config.backend,
+            "model": self.config.local_model,
+            "endpoint": endpoint,
+            "timeout_s": self.config.timeout_s,
+            "provider_request_payload": None,
+            "attempts": [],
+        }
         attempts = max(1, int(self.config.max_retries) + 1)
         for attempt in range(1, attempts + 1):
             try:
                 payload = self._build_request_payload(request_packet)
+                trace["provider_request_payload"] = payload
+                attempt_trace: Dict[str, Any] = {"attempt": attempt}
                 req = request.Request(
                     endpoint,
                     data=json.dumps(payload).encode("utf-8"),
@@ -362,18 +378,41 @@ class OllamaLocalBrainProvider(BrainProvider):
                 )
                 with request.urlopen(req, timeout=self.config.timeout_s) as response:
                     raw = response.read().decode("utf-8")
+                attempt_trace["raw_http_response_text"] = raw
                 parsed = json.loads(raw)
+                attempt_trace["parsed_response_json"] = parsed
                 response_payload = self._parse_response(parsed)
+                attempt_trace["extracted_response_payload"] = response_payload
                 if not isinstance(response_payload, dict) or "plan" not in response_payload:
                     raise ValueError("provider payload missing plan")
                 plan_payload = response_payload.get("plan") or {}
                 if "next_action" not in plan_payload or "ordered_actions" not in plan_payload:
                     raise ValueError("provider payload missing required plan fields")
                 response_obj = AgentBrainResponse.from_dict(response_payload)
+                trace["attempts"].append(attempt_trace)
                 latency_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
                 self.last_outcome = {"fallback": False, "reason": None, "latency_ms": latency_ms}
+                trace.update(
+                    {
+                        "fallback": False,
+                        "fallback_reason": None,
+                        "fallback_hint": None,
+                        "latency_ms": latency_ms,
+                        "response_payload_valid": True,
+                        "exception": None,
+                    }
+                )
+                self.last_trace = trace
                 return response_obj
             except (TimeoutError, error.URLError, error.HTTPError, ValueError, KeyError, json.JSONDecodeError) as exc:
+                attempt_trace = {"attempt": attempt, "exception": {"type": type(exc).__name__, "message": str(exc), "repr": repr(exc)}}
+                if "raw" in locals() and isinstance(raw, str):
+                    attempt_trace["raw_http_response_text"] = raw
+                if "parsed" in locals() and isinstance(parsed, dict):
+                    attempt_trace["parsed_response_json"] = parsed
+                if "response_payload" in locals() and isinstance(response_payload, dict):
+                    attempt_trace["extracted_response_payload"] = response_payload
+                trace["attempts"].append(attempt_trace)
                 if isinstance(exc, error.HTTPError) and getattr(exc, "code", None) == 404:
                     fallback_hint = "HTTP 404 from local backend may indicate missing/incorrect model name"
                 fallback_reason = f"attempt={attempt}/{attempts} error={exc}"
@@ -392,6 +431,17 @@ class OllamaLocalBrainProvider(BrainProvider):
             "configured_endpoint": self.config.local_endpoint,
             "timeout_s": self.config.timeout_s,
         }
+        trace.update(
+            {
+                "fallback": True,
+                "fallback_reason": fallback_reason,
+                "fallback_hint": fallback_hint,
+                "latency_ms": latency_ms,
+                "response_payload_valid": False,
+                "exception": trace.get("attempts", [{}])[-1].get("exception") if trace.get("attempts") else None,
+            }
+        )
+        self.last_trace = trace
         LOGGER.warning("OllamaLocalBrainProvider fallback to RuleBrain: %s", self.last_outcome)
         return self.fallback.generate_plan(request_packet)
 

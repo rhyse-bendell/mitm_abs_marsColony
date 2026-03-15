@@ -19,7 +19,10 @@
     "planner_max_retries": 0,
     "explanation_mode": "never",
     "explanation_every_n_calls": 5,
-    "explanation_probability": 0.1
+    "explanation_probability": 0.1,
+    "enable_planner_trace": true,
+    "planner_trace_mode": "full",
+    "planner_trace_max_chars": 12000
   },
   "agent_templates": {
     "mars_architect": {
