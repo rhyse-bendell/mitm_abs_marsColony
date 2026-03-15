@@ -1,0 +1,27 @@
+{
+  "agents": [
+    {
+      "agent_id": "architect_1",
+      "display_name": "Architect",
+      "label": "Architect",
+      "template_id": "mars_architect",
+      "initial_goal_seeds": ["align_team_plan", "verify_phase_objectives"],
+      "planner_config": {"planner_interval_steps": 4},
+      "brain_config": {"plan_horizon": 3}
+    },
+    {
+      "agent_id": "engineer_1",
+      "display_name": "Engineer",
+      "label": "Engineer",
+      "template_id": "mars_engineer",
+      "initial_goal_seeds": ["prepare_build_logistics"]
+    },
+    {
+      "agent_id": "botanist_1",
+      "display_name": "Botanist",
+      "label": "Botanist",
+      "template_id": "mars_botanist",
+      "initial_goal_seeds": ["sustain_greenhouse_support"]
+    }
+  ]
+}
