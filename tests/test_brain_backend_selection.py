@@ -4,11 +4,17 @@ import unittest
 from unittest.mock import patch
 
 from modules.aggregate_measures import aggregate_run_summaries
-from modules.brain_provider import OllamaLocalBrainProvider
+from modules.brain_provider import BrainBackendConfig, OllamaLocalBrainProvider, create_brain_provider
 from modules.simulation import SimulationState
 
 
 class TestBrainBackendSelection(unittest.TestCase):
+
+    def test_local_backend_defaults_use_real_model_and_timeout(self):
+        cfg = BrainBackendConfig()
+        self.assertEqual(cfg.local_model, "qwen3.5:9b")
+        self.assertEqual(cfg.timeout_s, 15.0)
+
     def test_explicit_rule_brain_selection_supported(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = SimulationState(phases=[], project_root=tmpdir, brain_backend="rule_brain")
@@ -34,6 +40,9 @@ class TestBrainBackendSelection(unittest.TestCase):
             self.assertEqual(sim.brain_backend_config.local_model, "llama3.2")
             self.assertEqual(sim.brain_backend_config.local_base_url, "http://127.0.0.1:11434")
             self.assertEqual(sim.brain_backend_config.fallback_backend, "rule_brain")
+            self.assertEqual(sim.brain_backend_config.timeout_s, 0.2)
+            self.assertIsInstance(sim.brain_provider, OllamaLocalBrainProvider)
+            self.assertEqual(sim.brain_provider.config.local_model, "llama3.2")
             sim.stop()
 
     def test_fallback_updates_effective_backend_tracking(self):
@@ -87,6 +96,23 @@ class TestBrainBackendSelection(unittest.TestCase):
                 self.assertIn("fallback_occurred", payload)
                 self.assertIn("fallback_count", payload)
 
+
+    def test_manifest_records_local_backend_model_and_timeout(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                brain_backend="ollama",
+                brain_backend_options={"local_model": "qwen3.5:9b", "timeout_s": 15.0},
+            )
+            sim.update(0.1)
+            sim.stop()
+            session_dir = next((sim.logger.output_session.outputs_root).iterdir())
+            manifest = json.loads((session_dir / "session_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["configured_brain_backend"], "ollama")
+            self.assertEqual(manifest["local_model_name"], "qwen3.5:9b")
+            self.assertEqual(manifest["timeout_s"], 15.0)
+
     def test_aggregate_outputs_include_backend_columns(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = SimulationState(phases=[], project_root=tmpdir, experiment_name="agg_backend")
@@ -108,6 +134,42 @@ class TestBrainBackendSelection(unittest.TestCase):
             sim.stop()
 
 
+    def test_ollama_alias_routes_to_local_provider(self):
+        provider = create_brain_provider(BrainBackendConfig(backend="ollama"))
+        self.assertIsInstance(provider, OllamaLocalBrainProvider)
+
+    def test_fallback_event_includes_model_and_hint_for_404(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                brain_backend="ollama",
+                brain_backend_options={
+                    "local_model": "missing-model",
+                    "local_base_url": "http://127.0.0.1:11434",
+                    "timeout_s": 0.1,
+                    "max_retries": 0,
+                },
+            )
+            provider = sim.brain_provider
+            provider.last_outcome = {
+                "fallback": True,
+                "reason": "attempt=1/1 error=HTTP Error 404: Not Found",
+                "latency_ms": 2.0,
+                "hint": "HTTP 404 from local backend may indicate missing/incorrect model name",
+            }
+            sim._refresh_backend_effective_state(reason="unit_test")
+            events = sim.logger.get_recent_events(10)
+            fallback_events = [e for e in events if e.get("event_type") == "brain_provider_fallback"]
+            self.assertTrue(fallback_events)
+            payload = json.loads(fallback_events[-1].get("payload", "{}"))
+            self.assertEqual(payload.get("local_model_name"), "missing-model")
+            self.assertIn("404", payload.get("reason", ""))
+            self.assertIn("missing/incorrect model", payload.get("fallback_hint", ""))
+            sim.stop()
+
+
+
 class TestExperimentTabBackendControl(unittest.TestCase):
     def test_experiment_tab_backend_selection_applies_to_run_config(self):
         try:
@@ -125,6 +187,8 @@ class TestExperimentTabBackendControl(unittest.TestCase):
 
         try:
             app.root.withdraw()
+            self.assertEqual(app.local_model_var.get(), "qwen3.5:9b")
+            self.assertAlmostEqual(float(app.local_timeout_var.get()), 15.0)
             app.brain_backend_var.set("rule_brain")
             app.apply_experiment_settings()
             self.assertIsNotNone(app.sim)

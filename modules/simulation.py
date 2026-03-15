@@ -95,8 +95,11 @@ class SimulationState:
                 "effective_brain_backend": self.effective_brain_backend,
                 "provider_class": self.brain_provider.__class__.__name__,
                 "fallback_backend": self.brain_backend_config.fallback_backend,
+                "local_backend_alias": "ollama_openai_compatible" if self.configured_brain_backend in {"local_http", "openai_compatible_local", "ollama_local", "ollama"} else None,
                 "local_model_name": self.brain_backend_config.local_model if self.configured_brain_backend != "rule_brain" else None,
                 "local_base_url": self.brain_backend_config.local_base_url if self.configured_brain_backend != "rule_brain" else None,
+                "local_endpoint": self.brain_backend_config.local_endpoint if self.configured_brain_backend != "rule_brain" else None,
+                "timeout_s": self.brain_backend_config.timeout_s if self.configured_brain_backend != "rule_brain" else None,
             },
         )
         self.logger.log_event(
@@ -111,8 +114,11 @@ class SimulationState:
                 "configured_brain_backend": self.configured_brain_backend,
                 "effective_brain_backend": self.effective_brain_backend,
                 "fallback_backend": self.brain_backend_config.fallback_backend,
+                "local_backend_alias": "ollama_openai_compatible" if self.configured_brain_backend in {"local_http", "openai_compatible_local", "ollama_local", "ollama"} else None,
                 "local_model_name": self.brain_backend_config.local_model if self.configured_brain_backend != "rule_brain" else None,
                 "local_base_url": self.brain_backend_config.local_base_url if self.configured_brain_backend != "rule_brain" else None,
+                "local_endpoint": self.brain_backend_config.local_endpoint if self.configured_brain_backend != "rule_brain" else None,
+                "timeout_s": self.brain_backend_config.timeout_s if self.configured_brain_backend != "rule_brain" else None,
             },
         )
         self.save_interval = 10.0
@@ -260,6 +266,9 @@ class SimulationState:
             "local_model_name": cfg.local_model if self.configured_brain_backend != "rule_brain" else None,
             "local_base_url": cfg.local_base_url if self.configured_brain_backend != "rule_brain" else None,
             "local_endpoint": cfg.local_endpoint if self.configured_brain_backend != "rule_brain" else None,
+            "timeout_s": cfg.timeout_s if self.configured_brain_backend != "rule_brain" else None,
+            "provider_class": self.brain_provider.__class__.__name__,
+            "local_backend_alias": "ollama_openai_compatible" if self.configured_brain_backend in {"local_http", "openai_compatible_local", "ollama_local", "ollama"} else None,
             "fallback_occurred": self.backend_fallback_count > 0,
             "fallback_count": self.backend_fallback_count,
         }
@@ -293,6 +302,11 @@ class SimulationState:
                     "provider": provider.__class__.__name__,
                     "fallback_provider": "RuleBrain",
                     "reason": fallback_reason,
+                    "fallback_hint": getattr(provider, "last_outcome", {}).get("hint"),
+                    "local_model_name": self.brain_backend_config.local_model if configured != "rule_brain" else None,
+                    "local_base_url": self.brain_backend_config.local_base_url if configured != "rule_brain" else None,
+                    "local_endpoint": self.brain_backend_config.local_endpoint if configured != "rule_brain" else None,
+                    "timeout_s": self.brain_backend_config.timeout_s if configured != "rule_brain" else None,
                     "fallback_count": self.backend_fallback_count,
                 },
             )

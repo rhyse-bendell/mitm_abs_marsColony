@@ -14,7 +14,7 @@
       "contradiction_detected",
       "build_readiness_changed"
     ],
-    "planner_timeout_seconds": 1.5,
+    "planner_timeout_seconds": 15.0,
     "planner_fallback_backend": "rule_brain",
     "planner_max_retries": 0,
     "explanation_mode": "never",

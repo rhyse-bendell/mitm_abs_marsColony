@@ -20,8 +20,8 @@ class BrainBackendConfig:
     backend: str = "rule_brain"
     local_base_url: str = "http://127.0.0.1:11434"
     local_endpoint: str = "/v1/chat/completions"
-    local_model: str = "local-model"
-    timeout_s: float = 1.5
+    local_model: str = "qwen3.5:9b"
+    timeout_s: float = 15.0
     max_retries: int = 0
     fallback_backend: str = "rule_brain"
     debug: bool = False
@@ -295,6 +295,17 @@ class OllamaLocalBrainProvider(BrainProvider):
         self.fallback = fallback
         self.last_outcome = {"fallback": False, "reason": None, "latency_ms": None}
 
+    def backend_settings(self) -> Dict[str, Any]:
+        return {
+            "configured_backend": self.config.backend,
+            "provider_class": self.__class__.__name__,
+            "local_model_name": self.config.local_model,
+            "local_base_url": self.config.local_base_url,
+            "local_endpoint": self.config.local_endpoint,
+            "timeout_s": self.config.timeout_s,
+            "fallback_backend": self.config.fallback_backend,
+        }
+
     def _log_debug(self, message: str, payload: Dict[str, Any]) -> None:
         if self.config.debug:
             LOGGER.info("%s %s", message, payload)
@@ -338,6 +349,7 @@ class OllamaLocalBrainProvider(BrainProvider):
         started_at = time.perf_counter()
         endpoint = f"{self.config.local_base_url.rstrip('/')}{self.config.local_endpoint}"
         fallback_reason = None
+        fallback_hint = None
         attempts = max(1, int(self.config.max_retries) + 1)
         for attempt in range(1, attempts + 1):
             try:
@@ -362,13 +374,25 @@ class OllamaLocalBrainProvider(BrainProvider):
                 self.last_outcome = {"fallback": False, "reason": None, "latency_ms": latency_ms}
                 return response_obj
             except (TimeoutError, error.URLError, error.HTTPError, ValueError, KeyError, json.JSONDecodeError) as exc:
+                if isinstance(exc, error.HTTPError) and getattr(exc, "code", None) == 404:
+                    fallback_hint = "HTTP 404 from local backend may indicate missing/incorrect model name"
                 fallback_reason = f"attempt={attempt}/{attempts} error={exc}"
                 if attempt >= attempts:
                     break
 
         latency_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
-        LOGGER.warning("OllamaLocalBrainProvider fallback to RuleBrain: %s", fallback_reason)
-        self.last_outcome = {"fallback": True, "reason": fallback_reason, "latency_ms": latency_ms}
+        self.last_outcome = {
+            "fallback": True,
+            "reason": fallback_reason,
+            "latency_ms": latency_ms,
+            "hint": fallback_hint,
+            "configured_backend": self.config.backend,
+            "configured_model": self.config.local_model,
+            "configured_base_url": self.config.local_base_url,
+            "configured_endpoint": self.config.local_endpoint,
+            "timeout_s": self.config.timeout_s,
+        }
+        LOGGER.warning("OllamaLocalBrainProvider fallback to RuleBrain: %s", self.last_outcome)
         return self.fallback.generate_plan(request_packet)
 
 
@@ -409,4 +433,3 @@ class CloudBrainStub(BrainProvider):
 
 # Backward compatible alias
 LocalHTTPBrain = OllamaLocalBrainProvider
-
