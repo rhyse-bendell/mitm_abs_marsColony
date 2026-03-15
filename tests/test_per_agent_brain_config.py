@@ -22,8 +22,17 @@ class TestPerAgentBrainConfig(unittest.TestCase):
                     "backend": "rule_brain",
                     "local_model": "qwen3.5:9b",
                     "fallback_backend": "rule_brain",
+                    "timeout_s": 0.8,
+                    "max_retries": 1,
                 },
-                "planner_config": {"planner_interval_steps": 2, "planner_timeout_seconds": 1.2},
+                "planner_config": {
+                    "planner_interval_steps": 2,
+                    "planner_timeout_seconds": 1.2,
+                    "planner_max_retries": 1,
+                    "degraded_consecutive_failures_threshold": 2,
+                    "degraded_cooldown_seconds": 5.0,
+                    "degraded_step_interval_multiplier": 2.5,
+                },
             },
             {
                 "name": "Engineer",
@@ -37,8 +46,17 @@ class TestPerAgentBrainConfig(unittest.TestCase):
                     "backend": "ollama",
                     "local_model": "llama3.2",
                     "fallback_backend": "rule_brain",
+                    "timeout_s": 1.1,
+                    "max_retries": 2,
                 },
-                "planner_config": {"planner_interval_steps": 5, "planner_timeout_seconds": 2.5},
+                "planner_config": {
+                    "planner_interval_steps": 5,
+                    "planner_timeout_seconds": 2.5,
+                    "planner_max_retries": 2,
+                    "degraded_consecutive_failures_threshold": 4,
+                    "degraded_cooldown_seconds": 8.0,
+                    "degraded_step_interval_multiplier": 3.0,
+                },
             },
             {
                 "name": "Botanist",
@@ -52,8 +70,17 @@ class TestPerAgentBrainConfig(unittest.TestCase):
                     "backend": "local_http",
                     "local_model": "mistral",
                     "fallback_backend": "rule_brain",
+                    "timeout_s": 2.2,
+                    "max_retries": 0,
                 },
-                "planner_config": {"planner_interval_steps": 3, "planner_timeout_seconds": 3.0},
+                "planner_config": {
+                    "planner_interval_steps": 3,
+                    "planner_timeout_seconds": 3.0,
+                    "planner_max_retries": 0,
+                    "degraded_consecutive_failures_threshold": 3,
+                    "degraded_cooldown_seconds": 6.0,
+                    "degraded_step_interval_multiplier": 2.0,
+                },
             },
         ]
 
@@ -70,6 +97,10 @@ class TestPerAgentBrainConfig(unittest.TestCase):
                 self.assertEqual(runtime["configured_backend"], "ollama")
                 self.assertEqual(runtime["config"].local_model, "llama3.2")
                 self.assertEqual(runtime["config"].fallback_backend, "rule_brain")
+                self.assertEqual(runtime["config"].timeout_s, 1.1)
+                self.assertEqual(runtime["config"].max_retries, 2)
+                self.assertEqual(by_role["Architect"].planner_cadence.planner_max_retries, 1)
+                self.assertEqual(by_role["Architect"].planner_cadence.degraded_consecutive_failures_threshold, 2)
             finally:
                 sim.stop()
 
@@ -92,12 +123,22 @@ class TestPerAgentBrainConfig(unittest.TestCase):
             manifest = json.loads((session_dir / "session_manifest.json").read_text(encoding="utf-8"))
             self.assertTrue(any(a.get("display_name") == "Lead Architect" for a in manifest.get("active_agents", [])))
             self.assertTrue(any(a.get("configured_backend") == "ollama" for a in manifest.get("active_agents", [])))
+            self.assertTrue(any(a.get("planner_max_retries") == 2 for a in manifest.get("active_agents", [])))
+            self.assertTrue(any(a.get("degraded_cooldown_seconds") == 8.0 for a in manifest.get("active_agents", [])))
 
             logs_path = next(p for p in (session_dir / "logs").glob("*.csv") if p.name != "events.csv")
             rows = list(csv.DictReader(logs_path.open("r", encoding="utf-8")))
             self.assertTrue(any(r.get("display_name") == "Lead Architect" for r in rows))
             self.assertIn("brain_backend", rows[0])
             self.assertIn("planner_timeout_seconds", rows[0])
+
+            events_path = session_dir / "logs" / "events.csv"
+            events = list(csv.DictReader(events_path.open("r", encoding="utf-8")))
+            decision_events = [e for e in events if e.get("event_type") == "brain_decision_query"]
+            if decision_events:
+                payload = json.loads(decision_events[0]["payload"])
+                self.assertIn("configured_brain_backend", payload)
+                self.assertIn("effective_brain_backend", payload)
 
     def test_heterogeneous_per_agent_backend_model_and_cadence_supported(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -108,9 +149,12 @@ class TestPerAgentBrainConfig(unittest.TestCase):
                 self.assertEqual(runtime_map["Engineer"]["configured_backend"], "ollama")
                 self.assertEqual(runtime_map["Botanist"]["configured_backend"], "local_http")
                 self.assertEqual(runtime_map["Botanist"]["config"].local_model, "mistral")
+                self.assertEqual(runtime_map["Engineer"]["config"].timeout_s, 1.1)
 
                 cadence = {a.role: a.planner_cadence.planner_interval_steps for a in sim.agents}
                 self.assertEqual(cadence, {"Architect": 2, "Engineer": 5, "Botanist": 3})
+                degraded_thresholds = {a.role: a.planner_cadence.degraded_consecutive_failures_threshold for a in sim.agents}
+                self.assertEqual(degraded_thresholds, {"Architect": 2, "Engineer": 4, "Botanist": 3})
             finally:
                 sim.stop()
 
