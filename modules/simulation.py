@@ -277,10 +277,16 @@ class SimulationState:
             "label": agent.agent_label,
             "role": agent.role,
             "configured_backend": runtime["configured_backend"],
+            "effective_backend": runtime.get("effective_backend"),
+            "fallback_count": runtime.get("fallback_count", 0),
             "fallback_backend": runtime["config"].fallback_backend,
             "local_model": runtime["config"].local_model if runtime["configured_backend"] != "rule_brain" else None,
             "planner_interval_steps": agent.planner_cadence.planner_interval_steps,
             "planner_timeout_seconds": agent.planner_cadence.planner_timeout_seconds,
+            "planner_max_retries": agent.planner_cadence.planner_max_retries,
+            "degraded_consecutive_failures_threshold": agent.planner_cadence.degraded_consecutive_failures_threshold,
+            "degraded_cooldown_seconds": agent.planner_cadence.degraded_cooldown_seconds,
+            "degraded_step_interval_multiplier": agent.planner_cadence.degraded_step_interval_multiplier,
         }
 
     def _register_agent_brain_runtime(self, agent):

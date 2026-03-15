@@ -259,15 +259,27 @@ class MarsColonyInterface:
                 fallback_backend = brain_settings["fallback_backend"].get().strip()
                 planner_cadence = max(1, int(planner_settings["planner_interval_steps"].get()))
                 planner_timeout = max(0.1, float(planner_settings["planner_timeout_seconds"].get()))
+                planner_max_retries = max(0, int(planner_settings["planner_max_retries"].get()))
+                degraded_threshold = max(1, int(planner_settings["degraded_consecutive_failures_threshold"].get()))
+                degraded_cooldown = max(0.0, float(planner_settings["degraded_cooldown_seconds"].get()))
+                degraded_interval_multiplier = max(1.0, float(planner_settings["degraded_step_interval_multiplier"].get()))
+                per_agent_timeout = max(0.1, float(brain_settings["timeout_s"].get()))
+                per_agent_max_retries = max(0, int(brain_settings["max_retries"].get()))
 
                 brain_config = {
                     "backend": backend,
                     "local_model": model,
                     "fallback_backend": fallback_backend,
+                    "timeout_s": per_agent_timeout,
+                    "max_retries": per_agent_max_retries,
                 }
                 planner_config = {
                     "planner_interval_steps": planner_cadence,
                     "planner_timeout_seconds": planner_timeout,
+                    "planner_max_retries": planner_max_retries,
+                    "degraded_consecutive_failures_threshold": degraded_threshold,
+                    "degraded_cooldown_seconds": degraded_cooldown,
+                    "degraded_step_interval_multiplier": degraded_interval_multiplier,
                 }
 
                 agent_configs.append({
@@ -834,10 +846,16 @@ class MarsColonyInterface:
             "backend": StringVar(value=default_brain.get("backend", "")),
             "local_model": StringVar(value=default_brain.get("local_model", "")),
             "fallback_backend": StringVar(value=default_brain.get("fallback_backend", "")),
+            "timeout_s": DoubleVar(value=float(default_brain.get("timeout_s", 15.0))),
+            "max_retries": IntVar(value=int(default_brain.get("max_retries", 0))),
         }
         self.agent_planner_settings[role] = {
             "planner_interval_steps": IntVar(value=int(default_planner.get("planner_interval_steps", 4))),
             "planner_timeout_seconds": DoubleVar(value=float(default_planner.get("planner_timeout_seconds", 15.0))),
+            "planner_max_retries": IntVar(value=int(default_planner.get("planner_max_retries", 0))),
+            "degraded_consecutive_failures_threshold": IntVar(value=int(default_planner.get("degraded_consecutive_failures_threshold", 3))),
+            "degraded_cooldown_seconds": DoubleVar(value=float(default_planner.get("degraded_cooldown_seconds", 12.0))),
+            "degraded_step_interval_multiplier": DoubleVar(value=float(default_planner.get("degraded_step_interval_multiplier", 2.0))),
         }
 
         ttk.Label(settings_frame, text="Backend Override").grid(row=0, column=0, sticky="w")
@@ -850,6 +868,18 @@ class MarsColonyInterface:
         ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_interval_steps"], width=8).grid(row=3, column=1, sticky="w", pady=(2, 0))
         ttk.Label(settings_frame, text="Planner Timeout (s)").grid(row=4, column=0, sticky="w", pady=(2, 0))
         ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_timeout_seconds"], width=8).grid(row=4, column=1, sticky="w", pady=(2, 0))
+        ttk.Label(settings_frame, text="Backend Timeout (s)").grid(row=5, column=0, sticky="w", pady=(2, 0))
+        ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["timeout_s"], width=8).grid(row=5, column=1, sticky="w", pady=(2, 0))
+        ttk.Label(settings_frame, text="Backend Max Retries").grid(row=6, column=0, sticky="w", pady=(2, 0))
+        ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["max_retries"], width=8).grid(row=6, column=1, sticky="w", pady=(2, 0))
+        ttk.Label(settings_frame, text="Planner Max Retries").grid(row=7, column=0, sticky="w", pady=(2, 0))
+        ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_max_retries"], width=8).grid(row=7, column=1, sticky="w", pady=(2, 0))
+        ttk.Label(settings_frame, text="Degraded Threshold").grid(row=8, column=0, sticky="w", pady=(2, 0))
+        ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_consecutive_failures_threshold"], width=8).grid(row=8, column=1, sticky="w", pady=(2, 0))
+        ttk.Label(settings_frame, text="Degraded Cooldown (s)").grid(row=9, column=0, sticky="w", pady=(2, 0))
+        ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_cooldown_seconds"], width=8).grid(row=9, column=1, sticky="w", pady=(2, 0))
+        ttk.Label(settings_frame, text="Degraded Step Multiplier").grid(row=10, column=0, sticky="w", pady=(2, 0))
+        ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_step_interval_multiplier"], width=8).grid(row=10, column=1, sticky="w", pady=(2, 0))
 
     def create_experiment_tab(self):
         container = ttk.Frame(self.notebook)
