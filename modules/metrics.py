@@ -569,6 +569,16 @@ class MetricsCollector:
                 sum(float(s.get("consecutive_failure_sum", 0) or 0.0) for s in planner_states) / streak_samples,
                 3,
             )
+        startup_states = [getattr(agent, "startup_state", {}) for agent in self.simulation.agents]
+        moved_map = {}
+        leave_time_map = {}
+        first_productive_map = {}
+        for agent in self.simulation.agents:
+            st = getattr(agent, "startup_state", {})
+            moved_map[agent.name] = bool(st.get("left_spawn"))
+            leave_time_map[agent.name] = st.get("left_spawn_time")
+            first_productive_map[agent.name] = st.get("first_productive_action_started_time")
+
         planner_responsiveness = {
             "requests_started": int(sum(int(s.get("total_started", 0) or 0) for s in planner_states)),
             "requests_completed": int(sum(int(s.get("total_completed", 0) or 0) for s in planner_states)),
@@ -593,6 +603,9 @@ class MetricsCollector:
             "fallback_only_ticks": int(sum(int(s.get("fallback_only_ticks", 0) or 0) for s in planner_states)),
             "productive_fallback_action_count": int(sum(int(s.get("productive_fallback_action_count", 0) or 0) for s in planner_states)),
             "idle_fallback_action_count": int(sum(int(s.get("idle_fallback_action_count", 0) or 0) for s in planner_states)),
+            "startup_target_resolution_failures": int(sum(int(s.get("startup_target_resolution_failures", 0) or 0) for s in planner_states)),
+            "startup_movement_blockers": int(sum(int(s.get("startup_movement_blockers", 0) or 0) for s in planner_states)),
+            "startup_plan_invalidations": int(sum(int(s.get("startup_plan_invalidations", 0) or 0) for s in planner_states)),
         }
 
         run_summary = {
@@ -631,6 +644,12 @@ class MetricsCollector:
                 "repair_or_correction_episodes": self.events_by_type["construction_repair_episode"],
                 "team_knowledge": team_knowledge_summary,
                 "planner_responsiveness": planner_responsiveness,
+                "startup_progression": {
+                    "agents_left_spawn_count": int(sum(1 for moved in moved_map.values() if moved)),
+                    "left_spawn_by_agent": moved_map,
+                    "time_to_leave_spawn_by_agent": leave_time_map,
+                    "first_productive_action_time_by_agent": first_productive_map,
+                },
             },
             "externalization_metrics": {
                 "externalized_artifacts_created_by_type": dict(self.externalization_by_type),

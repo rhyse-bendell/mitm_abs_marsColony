@@ -218,6 +218,30 @@ class TestMovementAndInfoAccessRepairs(unittest.TestCase):
             recent_log = " ".join(agent.activity_log[-8:])
             self.assertNotIn("Blocked while moving", recent_log, msg=f"{agent.role} became immediately stuck")
 
+
+    def test_startup_first_productive_action_reaches_translation(self):
+        sim = SimulationState(phases=[])
+        for _ in range(6):
+            sim.update(1.0)
+        events = sim.logger.get_recent_events(400)
+        productive_started = [
+            e for e in events
+            if e["event_type"] == "first_productive_action_started"
+        ]
+        self.assertTrue(productive_started, msg="No first productive action startup event emitted")
+        sim.stop()
+
+    def test_run_summary_contains_startup_progression_measures(self):
+        sim = SimulationState(phases=[])
+        for _ in range(6):
+            sim.update(1.0)
+        summary = sim.metrics.finalize()
+        startup = summary["process"]["startup_progression"]
+        self.assertIn("agents_left_spawn_count", startup)
+        self.assertIn("time_to_leave_spawn_by_agent", startup)
+        self.assertIn("first_productive_action_time_by_agent", startup)
+        sim.stop()
+
     def test_agent_can_reach_and_ingest_allowed_packet(self):
         env = Environment(phases=[])
         station = env.objects["Architect_Info"]
