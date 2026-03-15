@@ -379,6 +379,13 @@ class MetricsCollector:
             "active_roles": [a.role for a in self.simulation.agents],
             "phase_timing": phase_config,
             "brain_backend": self.simulation.brain_backend_config.backend,
+            "configured_brain_backend": getattr(self.simulation, "configured_brain_backend", self.simulation.brain_backend_config.backend),
+            "effective_brain_backend": getattr(self.simulation, "effective_brain_backend", self.simulation.brain_backend_config.backend),
+            "fallback_backend": self.simulation.brain_backend_config.fallback_backend,
+            "local_model_name": self.simulation.brain_backend_config.local_model,
+            "local_base_url": self.simulation.brain_backend_config.local_base_url,
+            "fallback_occurred": bool(getattr(self.simulation, "fallback_occurred", False)),
+            "fallback_count": int(getattr(self.simulation, "backend_fallback_count", 0)),
             "agent_traits": {
                 a.name: {
                     "role": a.role,
@@ -556,6 +563,13 @@ class MetricsCollector:
             "externalization_metrics": run_summary["externalization_metrics"],
             "communication_counts_by_type": run_summary["process"]["communication_counts_by_type"],
             "events": dict(self.events_by_type),
+            "backend": {
+                "configured_brain_backend": run_summary["run_metadata"].get("configured_brain_backend"),
+                "effective_brain_backend": run_summary["run_metadata"].get("effective_brain_backend"),
+                "fallback_backend": run_summary["run_metadata"].get("fallback_backend"),
+                "fallback_occurred": run_summary["run_metadata"].get("fallback_occurred"),
+                "fallback_count": run_summary["run_metadata"].get("fallback_count"),
+            },
         }
 
         self._write_outputs(run_summary, phase_summary, agent_rows, team_summary)
