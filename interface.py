@@ -144,6 +144,9 @@ class MarsColonyInterface:
         log_scroll.pack(side="right", fill="y")
         self.system_log_text.configure(yscrollcommand=log_scroll.set)
 
+        self.backend_status_var = StringVar(value="Backend (configured/effective): rule_brain / rule_brain")
+        ttk.Label(right_frame, textvariable=self.backend_status_var).grid(row=2, column=0, sticky="w", pady=(6, 0))
+
         right_frame.rowconfigure(0, weight=3)
         right_frame.rowconfigure(1, weight=2)
         right_frame.columnconfigure(0, weight=1)
@@ -259,12 +262,47 @@ class MarsColonyInterface:
 
         return agent_configs
 
+    def _collect_brain_backend_config(self):
+        backend = (self.brain_backend_var.get() or "rule_brain").strip() or "rule_brain"
+        options = {
+            "local_model": self.local_model_var.get().strip() or "local-model",
+            "local_base_url": self.local_base_url_var.get().strip() or "http://127.0.0.1:11434",
+            "timeout_s": max(0.1, float(self.local_timeout_var.get())),
+            "fallback_backend": (self.fallback_backend_var.get() or "rule_brain").strip() or "rule_brain",
+        }
+        return backend, options
+
+    def _is_local_backend_selected(self):
+        selected = (self.brain_backend_var.get() or "").strip().lower()
+        return selected in {"local_http", "openai_compatible_local", "ollama_local", "ollama"}
+
+    def _update_backend_field_states(self):
+        state = "normal" if self._is_local_backend_selected() else "disabled"
+        for widget in getattr(self, "_local_backend_widgets", []):
+            widget.configure(state=state)
+
+    def _update_backend_status_display(self):
+        if not hasattr(self, "backend_status_var"):
+            return
+        if not self.sim:
+            configured = self.brain_backend_var.get() if hasattr(self, "brain_backend_var") else "rule_brain"
+            self.backend_status_var.set(f"Backend (configured/effective): {configured} / {configured}")
+            return
+        configured = getattr(self.sim, "configured_brain_backend", "unknown")
+        effective = getattr(self.sim, "effective_brain_backend", configured)
+        fallback_count = getattr(self.sim, "backend_fallback_count", 0)
+        suffix = f" (fallbacks={fallback_count})" if fallback_count else ""
+        self.backend_status_var.set(f"Backend (configured/effective): {configured} / {effective}{suffix}")
+
     def apply_experiment_settings(self):
         print("=== Experiment Settings ===")
         print("Speed Multiplier:", self.speed_multiplier.get())
         print("Flash Mode:", self.flash_mode.get())
 
         print("Number of Runs:", self.num_runs.get())
+        selected_backend, backend_options = self._collect_brain_backend_config()
+        print("Brain Backend:", selected_backend)
+        print("Brain Backend Options:", backend_options)
 
         agent_configs = self.build_agent_configs()
         for agent in agent_configs:
@@ -281,7 +319,9 @@ class MarsColonyInterface:
             speed=self.speed_multiplier.get(),
             experiment_name=self.experiment_name_var.get(),
             phases=MISSION_PHASES,
-            flash_mode=self.flash_mode.get()
+            flash_mode=self.flash_mode.get(),
+            brain_backend=selected_backend,
+            brain_backend_options=backend_options,
         )
 
         self.run_state = self.STATE_IDLE
@@ -291,6 +331,7 @@ class MarsColonyInterface:
         self.update_environment_plot()
         self._sync_construction_summaries()
         self._update_system_log()
+        self._update_backend_status_display()
 
     def _cancel_run_loop(self):
         if self._run_loop_job is not None:
@@ -312,6 +353,7 @@ class MarsColonyInterface:
         self.update_event_monitor()
         self.update_dashboard()
         self._sync_construction_summaries()
+        self._update_backend_status_display()
         self._schedule_next_tick()
 
     def _update_control_states(self):
@@ -487,13 +529,19 @@ class MarsColonyInterface:
             return f"t={sim_time:05.2f} Session created: {payload.get('session_folder', 'unknown')}"
         if event_type == "outputs_saved":
             return f"t={sim_time:05.2f} Outputs saved ({payload.get('rows', 0)} state rows, {payload.get('event_rows', 0)} events)."
+        if event_type == "brain_backend_selected":
+            return f"t={sim_time:05.2f} backend configured={payload.get('configured_brain_backend')} effective={payload.get('effective_brain_backend')} provider={payload.get('provider_class')}."
+        if event_type == "brain_backend_runtime_status":
+            return f"t={sim_time:05.2f} backend runtime configured={payload.get('configured_brain_backend')} effective={payload.get('effective_brain_backend')} fallback={payload.get('fallback_backend')}."
         if event_type == "brain_decision_query":
             meta = payload.get("context_meta", {})
-            return f"t={sim_time:05.2f} {payload.get('agent')} query via {payload.get('provider')} ({payload.get('trigger_reason')}); affordances={meta.get('affordance_count', 0)}."
+            return f"t={sim_time:05.2f} {payload.get('agent')} query via {payload.get('provider')} cfg={payload.get('configured_brain_backend')} eff={payload.get('effective_brain_backend')} ({payload.get('trigger_reason')}); affordances={meta.get('affordance_count', 0)}."
         if event_type == "brain_decision_outcome":
-            return f"t={sim_time:05.2f} {payload.get('agent')} decision {payload.get('decision_status')} -> {payload.get('selected_action')} ({payload.get('provider')})."
+            return f"t={sim_time:05.2f} {payload.get('agent')} decision {payload.get('decision_status')} -> {payload.get('selected_action')} ({payload.get('provider')}, cfg={payload.get('configured_brain_backend')}, eff={payload.get('effective_brain_backend')})."
         if event_type == "brain_provider_fallback":
-            return f"t={sim_time:05.2f} WARNING fallback {payload.get('provider')} -> {payload.get('fallback_provider')}: {payload.get('reason')}"
+            return f"t={sim_time:05.2f} WARNING fallback cfg={payload.get('configured_brain_backend')} eff={payload.get('effective_brain_backend')} {payload.get('provider')} -> {payload.get('fallback_provider')}: {payload.get('reason')}"
+        if event_type == "effective_brain_backend_updated":
+            return f"t={sim_time:05.2f} backend effective updated to {payload.get('effective_brain_backend')} (configured={payload.get('configured_brain_backend')}, reason={payload.get('reason')})."
         if event_type == "brain_plan_continued":
             return f"t={sim_time:05.2f} {payload.get('agent')} continuing {payload.get('plan_id')} (remaining={payload.get('remaining_executions')})."
         return f"t={sim_time:05.2f} {event_type}: {payload}"
@@ -584,6 +632,48 @@ class MarsColonyInterface:
         ttk.Label(settings_frame, text="Number of Simulation Runs").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=(6, 3))
         self.num_runs = IntVar(value=1)
         ttk.Entry(settings_frame, textvariable=self.num_runs, width=10).grid(row=3, column=1, sticky="w", pady=(6, 3))
+
+        ttk.Label(settings_frame, text="Brain Backend").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=(6, 3))
+        self.brain_backend_var = StringVar(value="rule_brain")
+        backend_combo = ttk.Combobox(
+            settings_frame,
+            textvariable=self.brain_backend_var,
+            values=["rule_brain", "local_http", "ollama"],
+            state="readonly",
+            width=22,
+        )
+        backend_combo.grid(row=4, column=1, sticky="w", pady=(6, 3))
+        backend_combo.bind("<<ComboboxSelected>>", lambda _e: self._update_backend_field_states())
+
+        self.local_model_var = StringVar(value="local-model")
+        self.local_base_url_var = StringVar(value="http://127.0.0.1:11434")
+        self.local_timeout_var = DoubleVar(value=1.5)
+        self.fallback_backend_var = StringVar(value="rule_brain")
+
+        ttk.Label(settings_frame, text="Local Model").grid(row=5, column=0, sticky="w", padx=(0, 8), pady=3)
+        local_model_entry = ttk.Entry(settings_frame, textvariable=self.local_model_var, width=34)
+        local_model_entry.grid(row=5, column=1, sticky="w", pady=3)
+
+        ttk.Label(settings_frame, text="Local Base URL").grid(row=6, column=0, sticky="w", padx=(0, 8), pady=3)
+        local_base_url_entry = ttk.Entry(settings_frame, textvariable=self.local_base_url_var, width=34)
+        local_base_url_entry.grid(row=6, column=1, sticky="w", pady=3)
+
+        ttk.Label(settings_frame, text="Local Timeout (s)").grid(row=7, column=0, sticky="w", padx=(0, 8), pady=3)
+        local_timeout_entry = ttk.Entry(settings_frame, textvariable=self.local_timeout_var, width=10)
+        local_timeout_entry.grid(row=7, column=1, sticky="w", pady=3)
+
+        ttk.Label(settings_frame, text="Fallback Backend").grid(row=8, column=0, sticky="w", padx=(0, 8), pady=3)
+        fallback_combo = ttk.Combobox(
+            settings_frame,
+            textvariable=self.fallback_backend_var,
+            values=["rule_brain"],
+            state="readonly",
+            width=22,
+        )
+        fallback_combo.grid(row=8, column=1, sticky="w", pady=3)
+
+        self._local_backend_widgets = [local_model_entry, local_base_url_entry, local_timeout_entry, fallback_combo]
+        self._update_backend_field_states()
 
     def _create_trait_slider(self, parent, row, col, label, variable):
         item = ttk.Frame(parent)

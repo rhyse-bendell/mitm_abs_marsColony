@@ -67,7 +67,12 @@ class SimulationState:
         if "fallback_backend" not in backend_options and "planner_fallback_backend" in self.planner_defaults:
             backend_options["fallback_backend"] = self.planner_defaults.get("planner_fallback_backend")
         self.brain_backend_config = BrainBackendConfig(backend=brain_backend, **backend_options)
+        self.configured_brain_backend = self.brain_backend_config.backend
         self.brain_provider = create_brain_provider(self.brain_backend_config)
+        self.effective_brain_backend = self.configured_brain_backend
+        self.fallback_occurred = False
+        self.backend_fallback_count = 0
+        self._last_backend_outcome_signature = None
         self.logger.log_event(
             self.time,
             "task_model_loaded",
@@ -85,12 +90,30 @@ class SimulationState:
         self.logger.log_event(
             self.time,
             "brain_backend_selected",
-            {"backend": self.brain_backend_config.backend, "provider_class": self.brain_provider.__class__.__name__},
+            {
+                "configured_brain_backend": self.configured_brain_backend,
+                "effective_brain_backend": self.effective_brain_backend,
+                "provider_class": self.brain_provider.__class__.__name__,
+                "fallback_backend": self.brain_backend_config.fallback_backend,
+                "local_model_name": self.brain_backend_config.local_model if self.configured_brain_backend != "rule_brain" else None,
+                "local_base_url": self.brain_backend_config.local_base_url if self.configured_brain_backend != "rule_brain" else None,
+            },
         )
         self.logger.log_event(
             self.time,
             "planner_cadence_configured",
             {"planner_defaults": self.planner_defaults},
+        )
+        self.logger.log_event(
+            self.time,
+            "brain_backend_runtime_status",
+            {
+                "configured_brain_backend": self.configured_brain_backend,
+                "effective_brain_backend": self.effective_brain_backend,
+                "fallback_backend": self.brain_backend_config.fallback_backend,
+                "local_model_name": self.brain_backend_config.local_model if self.configured_brain_backend != "rule_brain" else None,
+                "local_base_url": self.brain_backend_config.local_base_url if self.configured_brain_backend != "rule_brain" else None,
+            },
         )
         self.save_interval = 10.0
         self._last_save_time = 0.0
@@ -214,6 +237,7 @@ class SimulationState:
             speed=speed,
             flash_mode=self.flash_mode,
             active_agents=[{"name": agent.name, "role": agent.role} for agent in self.agents],
+            extra_metadata=self._backend_settings_for_manifest(),
         )
         self.logger.log_event(
             self.time,
@@ -225,6 +249,66 @@ class SimulationState:
                 "agents": [agent.name for agent in self.agents],
             },
         )
+
+
+    def _backend_settings_for_manifest(self):
+        cfg = self.brain_backend_config
+        return {
+            "configured_brain_backend": self.configured_brain_backend,
+            "effective_brain_backend": self.effective_brain_backend,
+            "fallback_backend": cfg.fallback_backend,
+            "local_model_name": cfg.local_model if self.configured_brain_backend != "rule_brain" else None,
+            "local_base_url": cfg.local_base_url if self.configured_brain_backend != "rule_brain" else None,
+            "local_endpoint": cfg.local_endpoint if self.configured_brain_backend != "rule_brain" else None,
+            "fallback_occurred": self.backend_fallback_count > 0,
+            "fallback_count": self.backend_fallback_count,
+        }
+
+    def _refresh_backend_effective_state(self, reason="runtime_update"):
+        configured = self.configured_brain_backend
+        provider = self.brain_provider
+        effective = configured
+        fallback_happened = False
+        fallback_reason = None
+        if hasattr(provider, "last_outcome") and isinstance(provider.last_outcome, dict):
+            outcome = provider.last_outcome
+            if outcome.get("fallback"):
+                signature = (outcome.get("reason"), outcome.get("latency_ms"))
+                if signature != self._last_backend_outcome_signature:
+                    fallback_happened = True
+                    self._last_backend_outcome_signature = signature
+                fallback_reason = outcome.get("reason")
+                effective = self.brain_backend_config.fallback_backend or "rule_brain"
+            elif outcome.get("fallback") is False:
+                self._last_backend_outcome_signature = None
+        if fallback_happened:
+            self.backend_fallback_count += 1
+            self.fallback_occurred = True
+            self.logger.log_event(
+                self.time,
+                "brain_provider_fallback",
+                {
+                    "configured_brain_backend": configured,
+                    "effective_brain_backend": effective,
+                    "provider": provider.__class__.__name__,
+                    "fallback_provider": "RuleBrain",
+                    "reason": fallback_reason,
+                    "fallback_count": self.backend_fallback_count,
+                },
+            )
+        previous_effective = self.effective_brain_backend
+        self.effective_brain_backend = effective
+        if previous_effective != self.effective_brain_backend:
+            self.logger.log_event(
+                self.time,
+                "effective_brain_backend_updated",
+                {
+                    "configured_brain_backend": configured,
+                    "effective_brain_backend": self.effective_brain_backend,
+                    "reason": reason,
+                },
+            )
+
 
 
     def _agent_templates(self):
@@ -277,6 +361,7 @@ class SimulationState:
             agent.current_time = self.time
             agent.update(dt, self.environment, sim_state=self)
             agent.compare_and_repair_construction(self.environment.construction, sim_state=self)
+            self._refresh_backend_effective_state(reason="planner_call")
             self.logger.log_agent_state(self.time, agent)
 
         self.metrics.on_step(dt)
@@ -289,6 +374,7 @@ class SimulationState:
 
     def stop(self):
         self.metrics.finalize()
+        self.logger.update_session_manifest(extra_metadata=self._backend_settings_for_manifest())
         self.logger.save_csv()
 
 

@@ -926,9 +926,17 @@ class Agent:
     def _build_rule_based_brain_decision(self, sim_state, trigger_reason):
         context = sim_state.brain_context_builder.build(sim_state, self)
         provider_name = sim_state.brain_provider.__class__.__name__
+        configured_backend = getattr(sim_state, "configured_brain_backend", sim_state.brain_backend_config.backend)
+        effective_backend = getattr(sim_state, "effective_brain_backend", configured_backend)
         request_explanation = self._should_request_explanation()
         request_packet = self._build_brain_request(sim_state, context, request_explanation, trigger_reason)
-        sim_state.logger.log_event(sim_state.time, "planner_call_triggered", {"agent": self.name, "reason": trigger_reason, "backend": provider_name})
+        sim_state.logger.log_event(sim_state.time, "planner_call_triggered", {
+            "agent": self.name,
+            "reason": trigger_reason,
+            "backend": provider_name,
+            "configured_brain_backend": configured_backend,
+            "effective_brain_backend": effective_backend,
+        })
         sim_state.logger.log_event(
             sim_state.time,
             "brain_decision_query",
@@ -937,6 +945,8 @@ class Agent:
                 "trigger_reason": trigger_reason,
                 "plan_id": getattr(self.current_plan, "plan_id", None),
                 "provider": provider_name,
+                "configured_brain_backend": configured_backend,
+                "effective_brain_backend": effective_backend,
                 "request_explanation": request_explanation,
                 "context_meta": {
                     "affordance_count": len(context.action_affordances),
@@ -1060,6 +1070,8 @@ class Agent:
                 "agent": self.name,
                 "trigger_reason": trigger_reason,
                 "provider": provider_name,
+                "configured_brain_backend": configured_backend,
+                "effective_brain_backend": effective_backend,
                 "decision_status": status,
                 "selected_action": decision.selected_action.value,
                 "confidence": decision.confidence,

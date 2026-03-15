@@ -38,7 +38,7 @@ class OutputSessionManager:
     def build_measure_path(self, filename):
         return self.measures_dir / filename
 
-    def write_manifest(self, speed=None, flash_mode=None, active_agents=None):
+    def write_manifest(self, speed=None, flash_mode=None, active_agents=None, extra_metadata=None):
         manifest = {
             "experiment_name": self.experiment_name,
             "sanitized_prefix": self.sanitized_prefix,
@@ -48,6 +48,8 @@ class OutputSessionManager:
             "flash_mode": flash_mode,
             "active_agents": active_agents or []
         }
+        if extra_metadata:
+            manifest.update(dict(extra_metadata))
         manifest_path = self.session_folder / "session_manifest.json"
         with manifest_path.open("w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
@@ -159,10 +161,23 @@ class SimulationLogger:
         self.buffer = []
         print(f"✅ Agent logs saved to {save_path}")
 
-    def initialize_session_outputs(self, speed=None, flash_mode=None, active_agents=None):
+    def initialize_session_outputs(self, speed=None, flash_mode=None, active_agents=None, extra_metadata=None):
         self.output_session.write_manifest(
             speed=speed,
             flash_mode=flash_mode,
             active_agents=active_agents,
+            extra_metadata=extra_metadata,
         )
         self.output_session.ensure_measures_placeholder()
+
+    def update_session_manifest(self, extra_metadata=None):
+        if not extra_metadata:
+            return
+        manifest_path = self.output_session.session_folder / "session_manifest.json"
+        payload = {}
+        if manifest_path.exists():
+            with manifest_path.open("r", encoding="utf-8") as f:
+                payload = json.load(f)
+        payload.update(dict(extra_metadata))
+        with manifest_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
