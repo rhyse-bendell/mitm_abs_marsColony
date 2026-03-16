@@ -525,6 +525,13 @@ class MetricsCollector:
             "local_base_url": self.simulation.brain_backend_config.local_base_url,
             "fallback_occurred": bool(getattr(self.simulation, "fallback_occurred", False)),
             "fallback_count": int(getattr(self.simulation, "backend_fallback_count", 0)),
+            "startup_llm_sanity_enabled": bool(getattr(self.simulation, "startup_llm_sanity_summary", {}).get("startup_llm_sanity_enabled", False)),
+            "startup_llm_sanity_agent_count": int(getattr(self.simulation, "startup_llm_sanity_summary", {}).get("startup_llm_sanity_agent_count", 0)),
+            "startup_llm_sanity_success_count": int(getattr(self.simulation, "startup_llm_sanity_summary", {}).get("startup_llm_sanity_success_count", 0)),
+            "startup_llm_sanity_failure_count": int(getattr(self.simulation, "startup_llm_sanity_summary", {}).get("startup_llm_sanity_failure_count", 0)),
+            "startup_llm_sanity_timeout_count": int(getattr(self.simulation, "startup_llm_sanity_summary", {}).get("startup_llm_sanity_timeout_count", 0)),
+            "startup_llm_sanity_parse_failure_count": int(getattr(self.simulation, "startup_llm_sanity_summary", {}).get("startup_llm_sanity_parse_failure_count", 0)),
+            "startup_llm_sanity_artifact": getattr(self.simulation, "startup_llm_sanity_summary", {}).get("startup_llm_sanity_artifact"),
             "agent_traits": {
                 a.name: {
                     "role": a.role,

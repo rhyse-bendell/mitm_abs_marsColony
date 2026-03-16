@@ -7,6 +7,7 @@ from modules.brain_context import BrainContextBuilder
 from modules.brain_provider import BrainBackendConfig, create_brain_provider
 from modules.environment import Environment
 from modules.logging_tools import SimulationLogger
+from modules.llm_sanity import StartupLLMSanityConfig, run_startup_llm_sanity_check
 from modules.metrics import MetricsCollector
 from modules.runtime_witness_audit import RuntimeWitnessAudit
 from modules.team_knowledge import TeamKnowledgeManager
@@ -61,6 +62,23 @@ class SimulationState:
         self.planner_defaults = dict(self.task_model.manifest.get("planner_defaults", {}))
         if planner_config:
             self.planner_defaults.update(dict(planner_config))
+        self.startup_llm_sanity_config = StartupLLMSanityConfig(
+            enabled=bool(self.planner_defaults.get("enable_startup_llm_sanity", False)),
+            timeout_s=float(self.planner_defaults.get("startup_llm_sanity_timeout_seconds", 8.0) or 8.0),
+            max_sources=max(1, int(self.planner_defaults.get("startup_llm_sanity_max_sources", 2) or 2)),
+            max_items_per_type=max(1, int(self.planner_defaults.get("startup_llm_sanity_max_items_per_type", 3) or 3)),
+            raw_response_max_chars=max(500, int(self.planner_defaults.get("startup_llm_sanity_raw_response_max_chars", 4000) or 4000)),
+            artifact_name=str(self.planner_defaults.get("startup_llm_sanity_artifact_name", "startup_llm_sanity.json") or "startup_llm_sanity.json"),
+        )
+        self.startup_llm_sanity_summary = {
+            "startup_llm_sanity_enabled": bool(self.startup_llm_sanity_config.enabled),
+            "startup_llm_sanity_agent_count": 0,
+            "startup_llm_sanity_success_count": 0,
+            "startup_llm_sanity_failure_count": 0,
+            "startup_llm_sanity_timeout_count": 0,
+            "startup_llm_sanity_parse_failure_count": 0,
+            "startup_llm_sanity_artifact": None,
+        }
         planner_trace_enabled = bool(self.planner_defaults.get("enable_planner_trace", True))
         planner_trace_mode = str(self.planner_defaults.get("planner_trace_mode", "full") or "full").lower()
         planner_trace_max_chars = int(self.planner_defaults.get("planner_trace_max_chars", 12000) or 12000)
@@ -273,6 +291,7 @@ class SimulationState:
             active_agents=[self._agent_manifest_row(agent) for agent in self.agents],
             extra_metadata=self._backend_settings_for_manifest(),
         )
+        self.run_startup_llm_sanity_check()
         self.logger.log_event(
             self.time,
             "session_initialized",
@@ -284,6 +303,32 @@ class SimulationState:
             },
         )
 
+
+    def run_startup_llm_sanity_check(self):
+        if not self.startup_llm_sanity_config.enabled:
+            self.logger.log_event(self.time, "startup_llm_sanity_disabled", {"enabled": False})
+            return dict(self.startup_llm_sanity_summary)
+        try:
+            summary = run_startup_llm_sanity_check(self, config=self.startup_llm_sanity_config)
+            self.startup_llm_sanity_summary.update(summary)
+            self.logger.update_session_manifest(extra_metadata=self._backend_settings_for_manifest())
+            return dict(self.startup_llm_sanity_summary)
+        except Exception as exc:  # noqa: BLE001
+            self.startup_llm_sanity_summary.update(
+                {
+                    "startup_llm_sanity_enabled": True,
+                    "startup_llm_sanity_failure_count": len(self.agents),
+                    "startup_llm_sanity_agent_count": len(self.agents),
+                    "startup_llm_sanity_error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            self.logger.log_event(
+                self.time,
+                "startup_llm_sanity_failed",
+                {"error": f"{type(exc).__name__}: {exc}", "agent_count": len(self.agents)},
+            )
+            self.logger.update_session_manifest(extra_metadata=self._backend_settings_for_manifest())
+            return dict(self.startup_llm_sanity_summary)
 
     def _agent_manifest_row(self, agent):
         runtime = self.get_agent_brain_runtime(agent)
@@ -380,6 +425,7 @@ class SimulationState:
             "planner_trace_max_chars": int(self.planner_defaults.get("planner_trace_max_chars", 12000) or 12000),
             "planner_trace_artifact": "logs/planner_trace.jsonl" if bool(self.planner_defaults.get("enable_planner_trace", True)) else None,
             "backend_warmup": self.provider_warmup_status,
+            **dict(self.startup_llm_sanity_summary),
         }
 
     def _refresh_backend_effective_state(self, reason="runtime_update"):
