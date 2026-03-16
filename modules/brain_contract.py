@@ -133,6 +133,7 @@ class AgentBrainRequest:
     rule_context: List[str] = field(default_factory=list)
     derivation_context: List[str] = field(default_factory=list)
     artifact_context: List[Dict[str, Any]] = field(default_factory=list)
+    bootstrap_summary: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -158,6 +159,7 @@ class AgentBrainRequest:
             "rule_context": self.rule_context,
             "derivation_context": self.derivation_context,
             "artifact_context": self.artifact_context,
+            "bootstrap_summary": self.bootstrap_summary,
         }
 
 
@@ -216,6 +218,7 @@ BRAIN_REQUEST_JSON_SCHEMA: Dict[str, Any] = {
         "planning_horizon_config": {"type": "object"},
         "request_explanation": {"type": "boolean"},
         "explanation_style": {"type": ["string", "null"]},
+        "bootstrap_summary": {"type": ["object", "null"]},
     },
 }
 

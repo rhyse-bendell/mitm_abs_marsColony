@@ -1368,6 +1368,18 @@ class Agent:
     def _build_brain_request(self, sim_state, context, request_explanation, trigger_reason):
         phase = context.world_snapshot.get("phase_profile", {}).get("name", context.world_snapshot.get("phase_state", {}).get("name", "default"))
         observations = [str(e) for e in context.history_bands.get("near_preceding_events", [])[-4:]]
+        runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {}
+        bootstrap_summary = None
+        if bool(getattr(sim_state, "bootstrap_reuse_enabled", False)):
+            runtime_bootstrap = runtime.get("bootstrap") if isinstance(runtime, dict) else None
+            if isinstance(runtime_bootstrap, dict) and runtime_bootstrap.get("status") == "success":
+                bootstrap_summary = {
+                    "summary_text": runtime_bootstrap.get("summary_text"),
+                    "summary_structured": runtime_bootstrap.get("summary_structured"),
+                }
+                runtime_bootstrap["included_count"] = int(runtime_bootstrap.get("included_count", 0)) + 1
+                if hasattr(sim_state, "startup_llm_sanity_summary") and isinstance(sim_state.startup_llm_sanity_summary, dict):
+                    sim_state.startup_llm_sanity_summary["bootstrap_reuse_included_count"] = int(sim_state.startup_llm_sanity_summary.get("bootstrap_reuse_included_count", 0)) + 1
         return AgentBrainRequest(
             request_id=f"{self.agent_id}-{uuid.uuid4().hex[:8]}",
             tick=self.sim_step_count,
@@ -1396,6 +1408,7 @@ class Agent:
             rule_context=list(context.individual_cognitive_state.get("knowledge_summary", [])[:8]),
             derivation_context=[str(e) for e in self.derivation_events[-5:]],
             artifact_context=list(context.team_state.get("externalized_artifacts", []))[:4],
+            bootstrap_summary=bootstrap_summary,
         )
 
     def _is_productive_action(self, action_type):

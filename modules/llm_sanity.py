@@ -176,10 +176,35 @@ def _post_chat_completion(*, endpoint: str, model: str, prompt_text: str, timeou
     return raw, latency_ms
 
 
+def _build_bootstrap_summary(parsed_payload: Dict[str, Any], *, max_chars: int) -> Tuple[str, Dict[str, Any]]:
+    summary_structured = {
+        "role_or_focus": str(parsed_payload.get("role_or_focus", "")).strip(),
+        "understood_mission": str(parsed_payload.get("understood_mission", "")).strip(),
+        "first_information_priority": str(parsed_payload.get("first_information_priority", "")).strip(),
+        "first_coordination_need": str(parsed_payload.get("first_coordination_need", "")).strip(),
+        "confidence": parsed_payload.get("confidence"),
+        "relevant_data_ids": list(parsed_payload.get("relevant_data_ids", []))[:3],
+        "relevant_information_ids": list(parsed_payload.get("relevant_information_ids", []))[:3],
+        "relevant_knowledge_or_rule_ids": list(parsed_payload.get("relevant_knowledge_or_rule_ids", []))[:3],
+    }
+    summary_text = (
+        f"focus={summary_structured['role_or_focus']}; "
+        f"mission={summary_structured['understood_mission']}; "
+        f"priority={summary_structured['first_information_priority']}; "
+        f"coordination={summary_structured['first_coordination_need']}; "
+        f"confidence={summary_structured['confidence']}"
+    ).strip()
+    if len(summary_text) > max_chars:
+        summary_text = summary_text[:max_chars].rstrip()
+    return summary_text, summary_structured
+
+
 def run_startup_llm_sanity_check(simulation, *, config: StartupLLMSanityConfig) -> Dict[str, Any]:
     timestamp = int(time.time() * 1000)
     results: List[Dict[str, Any]] = []
-    simulation.logger.log_event(simulation.time, "startup_llm_sanity_started", {"agent_count": len(simulation.agents), "enabled": True})
+    bootstrap_reuse_enabled = bool(getattr(simulation, "bootstrap_reuse_enabled", True))
+    bootstrap_summary_max_chars = int(getattr(simulation, "bootstrap_summary_max_chars", 280))
+    simulation.logger.log_event(simulation.time, "startup_llm_sanity_started", {"agent_count": len(simulation.agents), "enabled": True, "bootstrap_reuse_enabled": bootstrap_reuse_enabled})
 
     for agent in simulation.agents:
         runtime = simulation.get_agent_brain_runtime(agent)
@@ -192,6 +217,7 @@ def run_startup_llm_sanity_check(simulation, *, config: StartupLLMSanityConfig) 
             max_items_per_type=config.max_items_per_type,
         )
         endpoint = f"{runtime_config.local_base_url.rstrip('/')}{runtime_config.local_endpoint}"
+        runtime_bootstrap = runtime.get("bootstrap") if isinstance(runtime, dict) else None
         row: Dict[str, Any] = {
             "agent_id": getattr(agent, "agent_id", agent.name),
             "agent_name": agent.name,
@@ -225,6 +251,8 @@ def run_startup_llm_sanity_check(simulation, *, config: StartupLLMSanityConfig) 
 
         if backend not in LOCAL_BACKEND_ALIASES:
             row["error"] = f"backend_not_local:{backend}"
+            if isinstance(runtime_bootstrap, dict):
+                runtime_bootstrap.update({"status": "failed", "latency_ms": None, "validated_response": None, "summary_text": None, "summary_structured": None})
             results.append(row)
             continue
 
@@ -254,13 +282,42 @@ def run_startup_llm_sanity_check(simulation, *, config: StartupLLMSanityConfig) 
             valid, errors = validate_sanity_response_schema(parsed_payload, expected_agent_name=agent.name)
             row["validation_success"] = valid
             row["validation_errors"] = errors
+            if isinstance(runtime_bootstrap, dict):
+                if valid:
+                    summary_text, summary_structured = _build_bootstrap_summary(parsed_payload, max_chars=bootstrap_summary_max_chars)
+                    runtime_bootstrap.update(
+                        {
+                            "status": "success",
+                            "latency_ms": latency_ms,
+                            "validated_response": parsed_payload,
+                            "summary_text": summary_text,
+                            "summary_structured": summary_structured,
+                        }
+                    )
+                    row["bootstrap_summary_text"] = summary_text
+                else:
+                    runtime_bootstrap.update(
+                        {
+                            "status": "failed",
+                            "latency_ms": latency_ms,
+                            "validated_response": None,
+                            "summary_text": None,
+                            "summary_structured": None,
+                        }
+                    )
         except TimeoutError as exc:
             row["timeout"] = True
             row["error"] = f"TimeoutError: {exc}"
+            if isinstance(runtime_bootstrap, dict):
+                runtime_bootstrap.update({"status": "timeout", "latency_ms": None, "validated_response": None, "summary_text": None, "summary_structured": None})
         except (error.URLError, error.HTTPError, json.JSONDecodeError, ValueError, KeyError) as exc:
             row["error"] = f"{type(exc).__name__}: {exc}"
+            if isinstance(runtime_bootstrap, dict):
+                runtime_bootstrap.update({"status": "failed", "latency_ms": None, "validated_response": None, "summary_text": None, "summary_structured": None})
         except Exception as exc:  # noqa: BLE001
             row["error"] = f"{type(exc).__name__}: {exc}"
+            if isinstance(runtime_bootstrap, dict):
+                runtime_bootstrap.update({"status": "failed", "latency_ms": None, "validated_response": None, "summary_text": None, "summary_structured": None})
 
         provider = runtime.get("provider")
         if hasattr(provider, "last_outcome") and isinstance(provider.last_outcome, dict):
@@ -276,11 +333,20 @@ def run_startup_llm_sanity_check(simulation, *, config: StartupLLMSanityConfig) 
         "startup_llm_sanity_failure_count": sum(1 for r in results if not r.get("validation_success")),
         "startup_llm_sanity_timeout_count": sum(1 for r in results if r.get("timeout")),
         "startup_llm_sanity_parse_failure_count": sum(1 for r in results if r.get("response_received") and not r.get("parsed_success")),
+        "bootstrap_reuse_enabled": bootstrap_reuse_enabled,
+        "bootstrap_reuse_agent_count": len(simulation.agents) if bootstrap_reuse_enabled else 0,
+        "bootstrap_reuse_included_count": 0,
     }
 
     artifact_payload = {
         "summary": summary,
         "schema_fields": SANITY_RESPONSE_FIELDS,
+        "session_semantics": {
+            "simulator_agents_persistent": True,
+            "bootstrap_is_explicit_and_session_scoped": True,
+            "model_calls_are_stateless_unless_bootstrap_summary_is_explicitly_included": True,
+            "hidden_model_side_session_memory_relied_on": False,
+        },
         "results": results,
     }
 
