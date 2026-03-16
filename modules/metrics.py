@@ -173,6 +173,26 @@ class MetricsCollector:
             self.breakdown_counts["readiness_failures_by_category"][payload.get("failure_category", "unknown")] += 1
         if event_type in {"movement_blocked", "movement_failed"}:
             self.breakdown_counts["movement_failures_by_category"][payload.get("blocker_category", payload.get("failure_category", "unknown"))] += 1
+        if event_type == "path_planning_succeeded":
+            self.breakdown_counts["movement_path_metrics"]["path_planning_success_count"] += 1
+        if event_type == "path_planning_failed":
+            self.breakdown_counts["movement_path_metrics"]["path_planning_failure_count"] += 1
+        if event_type == "path_cached_reused":
+            self.breakdown_counts["movement_path_metrics"]["path_cache_hit_count"] += 1
+        if event_type == "movement_started":
+            self.breakdown_counts["movement_path_metrics"]["movement_started_count"] += 1
+        if event_type == "movement_arrived":
+            self.breakdown_counts["movement_path_metrics"]["movement_arrived_count"] += 1
+        if event_type == "movement_blocked":
+            self.breakdown_counts["movement_path_metrics"]["movement_blocked_count"] += 1
+        if event_type == "movement_failed":
+            self.breakdown_counts["movement_path_metrics"]["movement_failed_count"] += 1
+            if payload.get("failure_category") == "repeated_move_retry":
+                self.breakdown_counts["movement_path_metrics"]["repeated_move_retry_count"] += 1
+        if event_type == "movement_blocked" and payload.get("blocker_category") == "zero_distance_retarget":
+            self.breakdown_counts["movement_path_metrics"]["zero_distance_retarget_count"] += 1
+        if event_type == "movement_blocked" and payload.get("blocker_category") == "agent_collision_block":
+            self.breakdown_counts["movement_path_metrics"]["agent_collision_block_count"] += 1
         if event_type in {"stall_started", "stall_continued", "stall_recovered", "repeated_stall_detected"}:
             self.breakdown_counts["stall_events_by_category"][payload.get("stall_reason", "unknown")] += 1
         if event_type in {"repeated_action_loop_detected", "repeated_plan_loop_detected", "repeated_target_failure_detected", "repeated_backend_fallback_detected"}:
@@ -682,6 +702,12 @@ class MetricsCollector:
                     "left_spawn_by_agent": moved_map,
                     "time_to_leave_spawn_by_agent": leave_time_map,
                     "first_productive_action_time_by_agent": first_productive_map,
+                    "time_to_leave_spawn": min([v for v in leave_time_map.values() if isinstance(v, (int, float))], default=None),
+                    "time_to_reach_first_target": min([
+                        e.get("time", 0.0)
+                        for e in self.simulation.logger.get_recent_events(5000)
+                        if e.get("event_type") == "movement_arrived"
+                    ], default=None),
                 },
             },
             "externalization_metrics": {

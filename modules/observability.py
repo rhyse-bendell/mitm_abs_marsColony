@@ -17,10 +17,16 @@ TARGET_FAILURE_CATEGORIES = {
 }
 
 MOVEMENT_BLOCKER_CATEGORIES = {
-    "path_blocked",
-    "unreachable_target",
-    "zone_blocked",
-    "no_path",
+    "no_path_found",
+    "target_unreachable",
+    "blocked_zone",
+    "spawn_conflict",
+    "agent_collision_block",
+    "zero_distance_retarget",
+    "path_invalidated",
+    "target_drifted",
+    "repeated_move_retry",
+    "arrival_without_progress",
     "target_missing",
     "action_precondition_failed",
     "agent_waiting_on_teammate",
