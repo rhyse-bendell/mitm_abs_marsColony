@@ -420,19 +420,22 @@ class Agent:
         self.source_inspection_state[source_id] = "revisitable_due_to_gap"
         self._set_status(f"Source marked revisitable due to gap: {source_id} ({reason})")
 
-    def _inspect_source(self, environment, source_id):
+    def _inspect_source(self, environment, source_id, sim_state=None):
         packet = environment.knowledge_packets.get(source_id)
         if packet is None:
             self._set_status(f"Inspect failed: unknown source {source_id}")
+            self._emit_event(sim_state, "source_inspection_blocked", {"source_id": source_id, "failure_category": "inspect_not_completed"})
             return False
 
         self.source_inspection_state[source_id] = "in_progress"
         target_pos = environment.get_interaction_target_position(source_id, from_position=self.position)
         if target_pos is None:
             self._set_status(f"Inspect failed: no navigable target for {source_id}")
+            self._emit_event(sim_state, "source_inspection_blocked", {"source_id": source_id, "failure_category": "target_resolution_failed"})
             return False
         if not environment.can_access_info(self.position, source_id, role=self.role):
             self._set_status(f"Inspect pending: not yet in source zone for {source_id}")
+            self._emit_event(sim_state, "source_inspection_blocked", {"source_id": source_id, "failure_category": "inspect_not_completed"})
             return False
 
         self._set_status(f"Arrived at source zone: {source_id}")
@@ -454,6 +457,19 @@ class Agent:
             self.source_inspection_state[source_id] = "inspected"
         else:
             self.source_inspection_state[source_id] = "in_progress"
+
+        packet_data_ids = {d.id for d in packet.get("data", [])}
+        held_data_ids = {d.id for d in self.mental_model["data"]}
+        new_data_ids = sorted(packet_data_ids & held_data_ids)
+        self._emit_event(
+            sim_state,
+            "source_access_succeeded",
+            {
+                "source_id": source_id,
+                "new_information_ids": sorted(new_ids),
+                "new_data_ids": new_data_ids,
+            },
+        )
         return bool(new_ids)
 
 
@@ -536,6 +552,8 @@ class Agent:
                 self.last_dik_change_time = now
                 if sim_state is not None:
                     sim_state.logger.log_event(now, "dik_derivation_executed", event)
+                    if output_id in self.mental_model["knowledge"].rules:
+                        self._emit_event(sim_state, "rule_adopted", {"rule_id": output_id, "adoption_mode": "derived", "derivation_id": derivation.derivation_id})
 
     def _build_readiness_score(self):
         info_count = len(self.mental_model["information"])
@@ -1768,6 +1786,7 @@ class Agent:
         if not self.startup_state.get("first_productive_action_started"):
             self._emit_event(sim_state, "first_action_translation_started", {"planner_action_type": decision.selected_action.value})
         self._emit_event(sim_state, "planner_next_action_selected", {"planner_action_type": decision.selected_action.value, "plan_id": getattr(self.current_plan, "plan_id", None)})
+        self._emit_event(sim_state, "executable_action_attempted", {"planner_action_type": decision.selected_action.value, "plan_id": getattr(self.current_plan, "plan_id", None)})
         if self.task_model is not None:
             enabled = set(self.task_model.enabled_actions_for_role(self.role))
             if decision.selected_action.value not in enabled:
@@ -1840,6 +1859,18 @@ class Agent:
             ExecutableActionType.VALIDATE_CONSTRUCTION,
         }:
             action["duration"] = self._scaled_duration(action["duration"]) * self._duration_scale(decision.selected_action.value)
+
+        if decision.selected_action in {
+            ExecutableActionType.START_CONSTRUCTION,
+            ExecutableActionType.CONTINUE_CONSTRUCTION,
+            ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
+            ExecutableActionType.VALIDATE_CONSTRUCTION,
+        }:
+            blockers = self._build_readiness_blockers(environment)
+            if blockers:
+                self._emit_event(sim_state, "execution_readiness_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "readiness_not_unlocked", "blockers": blockers})
+            else:
+                self._emit_event(sim_state, "execution_readiness_passed", {"planner_action_type": decision.selected_action.value, "goal_id": "G_MISSION_BUILD_COMPLETE"})
 
         if decision.selected_action in {ExecutableActionType.EXTERNALIZE_PLAN, ExecutableActionType.CONSULT_TEAM_ARTIFACT}:
             action["artifact_action"] = decision.selected_action.value
@@ -1963,7 +1994,7 @@ class Agent:
         self.update_internal_state()
         self._evaluate_goal_state(environment)
         self.current_action = self._plan_actions_for_current_goal()
-        self._advance_active_actions(dt)
+        self._advance_active_actions(dt, sim_state=None)
 
     def select_action(self):
         """Deprecated: retained for compatibility; delegates to action planner."""
@@ -2196,7 +2227,7 @@ class Agent:
         self.temperature = max(96.0, min(self.temperature, 101.0))
         self.co2_output = 0.04 + 0.01 * abs(self.heart_rate - 70)
 
-    def update_knowledge(self, environment, full_packet_sweep=True):
+    def update_knowledge(self, environment, full_packet_sweep=True, sim_state=None):
         self._ensure_source_state(environment)
         if full_packet_sweep:
             for packet_name, packet_content in environment.knowledge_packets.items():
@@ -2216,7 +2247,7 @@ class Agent:
                 # Deliberately suppress per-tick access-failure spam from legacy sweep.
 
         elif self.current_inspect_target_id:
-            self._inspect_source(environment, self.current_inspect_target_id)
+            self._inspect_source(environment, self.current_inspect_target_id, sim_state=sim_state)
 
         if "mismatch with construction" in " ".join(self.activity_log[-6:]).lower() and self.current_inspect_target_id:
             self.mark_source_revisitable(self.current_inspect_target_id, reason="construction_mismatch")
@@ -2246,7 +2277,7 @@ class Agent:
 
     def update(self, dt, environment, sim_state=None):
         self.update_physiology(exertion=0.5)
-        self.update_knowledge(environment, full_packet_sweep=(sim_state is None))
+        self.update_knowledge(environment, full_packet_sweep=(sim_state is None), sim_state=sim_state)
         self._apply_task_derivations(sim_state=sim_state)
         if sim_state is None:
             # Legacy compatibility path for unit-level agent calls outside full simulation state.
@@ -2257,7 +2288,7 @@ class Agent:
             self._check_inflight_timeout(sim_state)
             self._poll_planner_request(sim_state, environment)
             if self.active_actions:
-                self._advance_active_actions(dt)
+                self._advance_active_actions(dt, sim_state=sim_state)
             else:
                 trigger_reason = self._plan_trigger_reason(sim_state, environment)
                 planner_allowed, planner_reason = self._planner_decision_allowed(sim_state, trigger_reason)
@@ -2292,7 +2323,7 @@ class Agent:
                     runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend}
                     self._emit_event(sim_state, "ui_safe_fallback_used", {"reason": planner_reason, "request_state": self.planner_state.get("status"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
                     sim_state.logger.log_event(sim_state.time, "planner_skipped_without_plan", {"agent": self.name, "reason": planner_reason})
-                self._advance_active_actions(dt)
+                self._advance_active_actions(dt, sim_state=sim_state)
 
             self._apply_externalization_and_construction_effects(environment, sim_state, dt)
             self._update_goal_states_from_runtime(sim_state, environment)
@@ -2399,9 +2430,9 @@ class Agent:
 
     def update_active_actions(self, dt):
         """Deprecated wrapper: use `_advance_active_actions(...)` in live path."""
-        self._advance_active_actions(dt)
+        self._advance_active_actions(dt, sim_state=None)
 
-    def _advance_active_actions(self, dt):
+    def _advance_active_actions(self, dt, sim_state=None):
         completed = []
 
         for action in self.active_actions:
@@ -2411,6 +2442,7 @@ class Agent:
 
         for action in completed:
             self.perform_action([action])
+            self._emit_event(sim_state, "executable_action_completed", {"action_type": action.get("type"), "decision_action": action.get("decision_action"), "project_id": action.get("project_id")})
             self.active_actions.remove(action)
 
         if not self.active_actions and self.current_action:
@@ -2501,6 +2533,8 @@ class Agent:
                     "mode": "shared",
                     "from": self.name
                 })
+                if sim_state is not None:
+                    sim_state.logger.log_event(sim_state.time, "rule_adopted", {"agent": other_agent.name, "agent_id": getattr(other_agent, "agent_id", other_agent.name), "rule_id": rule, "adoption_mode": "communication", "from_agent": self.name})
 
         # Update Theory of Mind estimates
         other_agent.theory_of_mind[self.name] = {
