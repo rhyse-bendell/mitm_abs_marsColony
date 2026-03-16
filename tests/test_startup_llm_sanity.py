@@ -87,6 +87,9 @@ class TestStartupLLMSanity(unittest.TestCase):
             self.assertTrue(manifest["startup_llm_sanity_enabled"])
             self.assertGreaterEqual(manifest["startup_llm_sanity_agent_count"], 1)
             self.assertIn("startup_llm_sanity_success_count", manifest)
+            self.assertIn("bootstrap_reuse_enabled", manifest)
+            self.assertIn("bootstrap_reuse_agent_count", manifest)
+            self.assertIn("bootstrap_reuse_included_count", manifest)
 
             artifact_rel = manifest["startup_llm_sanity_artifact"]
             artifact = sim.logger.output_session.session_folder / artifact_rel
@@ -138,6 +141,106 @@ class TestStartupLLMSanity(unittest.TestCase):
             self.assertEqual(sim.startup_llm_sanity_summary["startup_llm_sanity_failure_count"], 0)
             self.assertEqual(sim.startup_llm_sanity_summary["startup_llm_sanity_success_count"], len(sim.agents))
             sim.stop()
+
+
+    def test_successful_startup_stores_explicit_per_agent_bootstrap_runtime_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("modules.llm_sanity.request.urlopen") as mocked:
+                def _side_effect(req, timeout):
+                    req_payload = json.loads(req.data.decode("utf-8"))
+                    prompt_payload = json.loads(req_payload["messages"][1]["content"])
+                    target_name = prompt_payload["agent_identity"]["agent_name"]
+                    response_payload = {
+                        "agent_name": target_name,
+                        "role_or_focus": "role sanity",
+                        "understood_mission": "Support mission startup checks.",
+                        "relevant_data_ids": ["D001"],
+                        "relevant_information_ids": ["I001"],
+                        "relevant_knowledge_or_rule_ids": ["K001"],
+                        "first_information_priority": "Verify first bounded source.",
+                        "first_coordination_need": "Notify team lead.",
+                        "confidence": 0.8,
+                    }
+                    body = json.dumps({"choices": [{"message": {"content": json.dumps(response_payload)}}]})
+                    return _FakeHTTPResponse(body)
+
+                mocked.side_effect = _side_effect
+                sim = SimulationState(
+                    phases=[],
+                    project_root=tmpdir,
+                    brain_backend="ollama",
+                    planner_config={"enable_startup_llm_sanity": True, "enable_bootstrap_summary_reuse": True},
+                )
+            try:
+                for agent in sim.agents:
+                    runtime = sim.get_agent_brain_runtime(agent)
+                    bootstrap = runtime.get("bootstrap", {})
+                    self.assertEqual(bootstrap.get("status"), "success")
+                    self.assertIsInstance(bootstrap.get("latency_ms"), float)
+                    self.assertIsInstance(bootstrap.get("validated_response"), dict)
+                    self.assertTrue(bootstrap.get("summary_text"))
+                    self.assertIsInstance(bootstrap.get("summary_structured"), dict)
+            finally:
+                sim.stop()
+
+    def test_bootstrap_summary_reuse_included_in_planner_request_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("modules.llm_sanity.request.urlopen") as startup_mock:
+                def _startup_side_effect(req, timeout):
+                    req_payload = json.loads(req.data.decode("utf-8"))
+                    prompt_payload = json.loads(req_payload["messages"][1]["content"])
+                    target_name = prompt_payload["agent_identity"]["agent_name"]
+                    response_payload = {
+                        "agent_name": target_name,
+                        "role_or_focus": "role sanity",
+                        "understood_mission": "Support mission startup checks.",
+                        "relevant_data_ids": ["D001"],
+                        "relevant_information_ids": ["I001"],
+                        "relevant_knowledge_or_rule_ids": ["K001"],
+                        "first_information_priority": "Verify first bounded source.",
+                        "first_coordination_need": "Notify team lead.",
+                        "confidence": 0.8,
+                    }
+                    return _FakeHTTPResponse(json.dumps({"choices": [{"message": {"content": json.dumps(response_payload)}}]}))
+
+                startup_mock.side_effect = _startup_side_effect
+                sim = SimulationState(
+                    phases=[],
+                    project_root=tmpdir,
+                    brain_backend="ollama",
+                    planner_config={
+                        "enable_startup_llm_sanity": True,
+                        "enable_bootstrap_summary_reuse": True,
+                        "bootstrap_summary_max_chars": 120,
+                    },
+                )
+            try:
+                agent = sim.agents[0]
+                with patch("modules.agent.uuid.uuid4") as uuid_mock:
+                    uuid_mock.return_value.hex = "0123456789abcdef"
+                    context = sim.brain_context_builder.build(sim, agent)
+                    req = agent._build_brain_request(sim, context, request_explanation=False, trigger_reason="test")
+                self.assertIsNotNone(req.bootstrap_summary)
+                self.assertLessEqual(len(req.bootstrap_summary.get("summary_text", "")), 120)
+                self.assertEqual(sim.startup_llm_sanity_summary["bootstrap_reuse_included_count"], 1)
+            finally:
+                sim.stop()
+
+    def test_bootstrap_reuse_disabled_or_failed_preserves_planner_request_behavior(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                planner_config={"enable_startup_llm_sanity": False, "enable_bootstrap_summary_reuse": False},
+            )
+            try:
+                agent = sim.agents[0]
+                context = sim.brain_context_builder.build(sim, agent)
+                req = agent._build_brain_request(sim, context, request_explanation=False, trigger_reason="test")
+                self.assertIsNone(req.bootstrap_summary)
+                self.assertEqual(sim.startup_llm_sanity_summary["bootstrap_reuse_included_count"], 0)
+            finally:
+                sim.stop()
 
 
 if __name__ == "__main__":

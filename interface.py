@@ -34,6 +34,13 @@ class MarsColonyInterface:
         "degraded_consecutive_failures_threshold": 3,
         "degraded_cooldown_seconds": 12.0,
         "degraded_step_interval_multiplier": 2.0,
+        "enable_startup_llm_sanity": True,
+        "startup_llm_sanity_timeout_seconds": 8.0,
+        "startup_llm_sanity_max_sources": 2,
+        "startup_llm_sanity_max_items_per_type": 3,
+        "startup_llm_sanity_raw_response_max_chars": 4000,
+        "enable_bootstrap_summary_reuse": True,
+        "bootstrap_summary_max_chars": 280,
     }
     RETRY_HELP_TEXT = {
         "backend_max_retries": "0 means make one attempt and then rely on fallback/degraded behavior instead of retrying immediately.",
@@ -345,6 +352,17 @@ class MarsColonyInterface:
         return backend, options
 
 
+    def _collect_global_planner_config(self):
+        return {
+            "enable_startup_llm_sanity": bool(self.enable_startup_llm_sanity_var.get()),
+            "startup_llm_sanity_timeout_seconds": max(0.1, float(self.startup_llm_sanity_timeout_var.get())),
+            "startup_llm_sanity_max_sources": max(1, int(self.startup_llm_sanity_max_sources_var.get())),
+            "startup_llm_sanity_max_items_per_type": max(1, int(self.startup_llm_sanity_max_items_var.get())),
+            "startup_llm_sanity_raw_response_max_chars": max(500, int(self.startup_llm_sanity_raw_max_chars_var.get())),
+            "enable_bootstrap_summary_reuse": bool(self.bootstrap_reuse_enabled_var.get()),
+            "bootstrap_summary_max_chars": max(80, int(self.bootstrap_summary_max_chars_var.get())),
+        }
+
     def _add_help_text(self, parent, row, text):
         ttk.Label(parent, text=text, foreground="#5f6b7a", wraplength=620, justify="left").grid(
             row=row,
@@ -431,8 +449,10 @@ class MarsColonyInterface:
 
         print("Number of Runs:", self.num_runs.get())
         selected_backend, backend_options = self._collect_brain_backend_config()
+        planner_config = self._collect_global_planner_config()
         print("Brain Backend:", selected_backend)
         print("Brain Backend Options:", backend_options)
+        print("Planner Config:", planner_config)
 
         agent_configs = self.build_agent_configs()
         for agent in agent_configs:
@@ -452,6 +472,7 @@ class MarsColonyInterface:
             flash_mode=self.flash_mode.get(),
             brain_backend=selected_backend,
             brain_backend_options=backend_options,
+            planner_config=planner_config,
         )
 
         self.run_state = self.STATE_IDLE
@@ -798,6 +819,42 @@ class MarsColonyInterface:
         fallback_combo = ttk.Combobox(settings_frame, textvariable=self.fallback_backend_var, values=["rule_brain"], state="readonly", width=22)
         fallback_combo.grid(row=18, column=1, sticky="w", pady=3)
         self._add_help_text(settings_frame, 19, "Used if the selected backend fails or times out.")
+
+        self.enable_startup_llm_sanity_var = BooleanVar(value=bool(self.PLANNER_DEFAULTS["enable_startup_llm_sanity"]))
+        self.startup_llm_sanity_timeout_var = DoubleVar(value=float(self.PLANNER_DEFAULTS["startup_llm_sanity_timeout_seconds"]))
+        self.startup_llm_sanity_max_sources_var = IntVar(value=int(self.PLANNER_DEFAULTS["startup_llm_sanity_max_sources"]))
+        self.startup_llm_sanity_max_items_var = IntVar(value=int(self.PLANNER_DEFAULTS["startup_llm_sanity_max_items_per_type"]))
+        self.startup_llm_sanity_raw_max_chars_var = IntVar(value=int(self.PLANNER_DEFAULTS["startup_llm_sanity_raw_response_max_chars"]))
+        self.bootstrap_reuse_enabled_var = BooleanVar(value=bool(self.PLANNER_DEFAULTS["enable_bootstrap_summary_reuse"]))
+        self.bootstrap_summary_max_chars_var = IntVar(value=int(self.PLANNER_DEFAULTS["bootstrap_summary_max_chars"]))
+
+        ttk.Label(settings_frame, text="Startup LLM Sanity / Bootstrap").grid(row=20, column=0, sticky="w", padx=(0, 8), pady=(8, 3))
+        ttk.Checkbutton(settings_frame, text="Enable Startup LLM Sanity / Bootstrap", variable=self.enable_startup_llm_sanity_var).grid(row=20, column=1, sticky="w", pady=(8, 3))
+        self._add_help_text(settings_frame, 21, "Runs once per agent at startup with bounded role/task/DIK context. It validates local model responsiveness and seeds explicit simulator-side bootstrap context for reuse.")
+
+        ttk.Label(settings_frame, text="Startup Sanity Timeout (s)").grid(row=22, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.startup_llm_sanity_timeout_var, width=10).grid(row=22, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 23, "Per-agent timeout for startup sanity/bootstrap requests.")
+
+        ttk.Label(settings_frame, text="Max Sources in Startup Prompt").grid(row=24, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.startup_llm_sanity_max_sources_var, width=10).grid(row=24, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 25, "Bound the number of role-relevant sources included in startup context.")
+
+        ttk.Label(settings_frame, text="Max Items Per Type in Startup Prompt").grid(row=26, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.startup_llm_sanity_max_items_var, width=10).grid(row=26, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 27, "Bound data/information/knowledge/rule examples included per type.")
+
+        ttk.Label(settings_frame, text="Raw Response Max Chars").grid(row=28, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.startup_llm_sanity_raw_max_chars_var, width=10).grid(row=28, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 29, "Truncate captured raw startup responses to keep artifacts bounded.")
+
+        ttk.Label(settings_frame, text="Reuse Bootstrap Summary in Planner Requests").grid(row=30, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Checkbutton(settings_frame, text="Include compact bootstrap summary on future planner requests", variable=self.bootstrap_reuse_enabled_var).grid(row=30, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 31, "Agents remain persistent simulator entities for the session, but model calls stay explicit stateless requests. Reuse adds a compact inspectable summary field; no hidden model-side memory is assumed.")
+
+        ttk.Label(settings_frame, text="Bootstrap Summary Max Chars").grid(row=32, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.bootstrap_summary_max_chars_var, width=10).grid(row=32, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 33, "Upper bound for compact bootstrap summaries attached to planner requests.")
 
         self._local_backend_widgets = [local_model_entry, local_base_url_entry, local_timeout_entry, fallback_combo]
         self._update_backend_field_states()

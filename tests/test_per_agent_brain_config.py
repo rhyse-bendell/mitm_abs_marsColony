@@ -263,6 +263,13 @@ class TestInterfacePerAgentDefaults(unittest.TestCase):
             self.assertEqual(app.agent_brain_settings["Architect"]["max_retries"].get(), 0)
             self.assertEqual(app.agent_planner_settings["Botanist"]["degraded_consecutive_failures_threshold"].get(), 3)
             self.assertEqual(app.agent_planner_settings["Botanist"]["degraded_cooldown_seconds"].get(), 12.0)
+            self.assertTrue(app.enable_startup_llm_sanity_var.get())
+            self.assertEqual(app.startup_llm_sanity_timeout_var.get(), 8.0)
+            self.assertEqual(app.startup_llm_sanity_max_sources_var.get(), 2)
+            self.assertEqual(app.startup_llm_sanity_max_items_var.get(), 3)
+            self.assertEqual(app.startup_llm_sanity_raw_max_chars_var.get(), 4000)
+            self.assertTrue(app.bootstrap_reuse_enabled_var.get())
+            self.assertEqual(app.bootstrap_summary_max_chars_var.get(), 280)
         finally:
             app.stop_experiment()
             app.root.destroy()
@@ -372,6 +379,52 @@ class TestInterfacePerAgentDefaults(unittest.TestCase):
             self.assertEqual(app.agent_cards["Engineer"].cget("text"), "Agent 2 Configuration")
             app.agent_identity["Engineer"]["display_name"].set("Field Specialist")
             self.assertEqual(app.agent_identity["Engineer"]["display_name"].get(), "Field Specialist")
+        finally:
+            app.stop_experiment()
+            app.root.destroy()
+
+
+    def test_startup_bootstrap_settings_propagate_into_simulation_planner_config(self):
+        try:
+            import tkinter as tk
+            from interface import MarsColonyInterface
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"GUI dependencies unavailable: {exc}")
+            return
+
+        try:
+            app = MarsColonyInterface()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk unavailable in test environment: {exc}")
+            return
+
+        try:
+            app.root.withdraw()
+            app.enable_startup_llm_sanity_var.set(True)
+            app.startup_llm_sanity_timeout_var.set(1.7)
+            app.startup_llm_sanity_max_sources_var.set(1)
+            app.startup_llm_sanity_max_items_var.set(2)
+            app.startup_llm_sanity_raw_max_chars_var.set(1234)
+            app.bootstrap_reuse_enabled_var.set(True)
+            app.bootstrap_summary_max_chars_var.set(140)
+
+            planner_cfg = app._collect_global_planner_config()
+            self.assertTrue(planner_cfg["enable_startup_llm_sanity"])
+            self.assertEqual(planner_cfg["startup_llm_sanity_timeout_seconds"], 1.7)
+            self.assertEqual(planner_cfg["startup_llm_sanity_max_sources"], 1)
+            self.assertEqual(planner_cfg["startup_llm_sanity_max_items_per_type"], 2)
+            self.assertEqual(planner_cfg["startup_llm_sanity_raw_response_max_chars"], 1234)
+            self.assertTrue(planner_cfg["enable_bootstrap_summary_reuse"])
+            self.assertEqual(planner_cfg["bootstrap_summary_max_chars"], 140)
+
+            app.apply_experiment_settings()
+            self.assertTrue(app.sim.startup_llm_sanity_config.enabled)
+            self.assertEqual(app.sim.startup_llm_sanity_config.timeout_s, 1.7)
+            self.assertEqual(app.sim.startup_llm_sanity_config.max_sources, 1)
+            self.assertEqual(app.sim.startup_llm_sanity_config.max_items_per_type, 2)
+            self.assertEqual(app.sim.startup_llm_sanity_config.raw_response_max_chars, 1234)
+            self.assertTrue(app.sim.bootstrap_reuse_enabled)
+            self.assertEqual(app.sim.bootstrap_summary_max_chars, 140)
         finally:
             app.stop_experiment()
             app.root.destroy()

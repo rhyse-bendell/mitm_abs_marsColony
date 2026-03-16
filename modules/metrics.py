@@ -532,6 +532,9 @@ class MetricsCollector:
             "startup_llm_sanity_timeout_count": int(getattr(self.simulation, "startup_llm_sanity_summary", {}).get("startup_llm_sanity_timeout_count", 0)),
             "startup_llm_sanity_parse_failure_count": int(getattr(self.simulation, "startup_llm_sanity_summary", {}).get("startup_llm_sanity_parse_failure_count", 0)),
             "startup_llm_sanity_artifact": getattr(self.simulation, "startup_llm_sanity_summary", {}).get("startup_llm_sanity_artifact"),
+            "bootstrap_reuse_enabled": bool(getattr(self.simulation, "startup_llm_sanity_summary", {}).get("bootstrap_reuse_enabled", False)),
+            "bootstrap_reuse_agent_count": int(getattr(self.simulation, "startup_llm_sanity_summary", {}).get("bootstrap_reuse_agent_count", 0)),
+            "bootstrap_reuse_included_count": int(getattr(self.simulation, "startup_llm_sanity_summary", {}).get("bootstrap_reuse_included_count", 0)),
             "agent_traits": {
                 a.name: {
                     "role": a.role,

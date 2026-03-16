@@ -63,13 +63,15 @@ class SimulationState:
         if planner_config:
             self.planner_defaults.update(dict(planner_config))
         self.startup_llm_sanity_config = StartupLLMSanityConfig(
-            enabled=bool(self.planner_defaults.get("enable_startup_llm_sanity", False)),
+            enabled=bool(self.planner_defaults.get("enable_startup_llm_sanity", True)),
             timeout_s=float(self.planner_defaults.get("startup_llm_sanity_timeout_seconds", 8.0) or 8.0),
             max_sources=max(1, int(self.planner_defaults.get("startup_llm_sanity_max_sources", 2) or 2)),
             max_items_per_type=max(1, int(self.planner_defaults.get("startup_llm_sanity_max_items_per_type", 3) or 3)),
             raw_response_max_chars=max(500, int(self.planner_defaults.get("startup_llm_sanity_raw_response_max_chars", 4000) or 4000)),
             artifact_name=str(self.planner_defaults.get("startup_llm_sanity_artifact_name", "startup_llm_sanity.json") or "startup_llm_sanity.json"),
         )
+        self.bootstrap_reuse_enabled = bool(self.planner_defaults.get("enable_bootstrap_summary_reuse", True))
+        self.bootstrap_summary_max_chars = max(80, int(self.planner_defaults.get("bootstrap_summary_max_chars", 280) or 280))
         self.startup_llm_sanity_summary = {
             "startup_llm_sanity_enabled": bool(self.startup_llm_sanity_config.enabled),
             "startup_llm_sanity_agent_count": 0,
@@ -78,6 +80,9 @@ class SimulationState:
             "startup_llm_sanity_timeout_count": 0,
             "startup_llm_sanity_parse_failure_count": 0,
             "startup_llm_sanity_artifact": None,
+            "bootstrap_reuse_enabled": bool(self.bootstrap_reuse_enabled),
+            "bootstrap_reuse_agent_count": 0,
+            "bootstrap_reuse_included_count": 0,
         }
         planner_trace_enabled = bool(self.planner_defaults.get("enable_planner_trace", True))
         planner_trace_mode = str(self.planner_defaults.get("planner_trace_mode", "full") or "full").lower()
@@ -306,6 +311,14 @@ class SimulationState:
 
     def run_startup_llm_sanity_check(self):
         if not self.startup_llm_sanity_config.enabled:
+            self.startup_llm_sanity_summary.update(
+                {
+                    "startup_llm_sanity_enabled": False,
+                    "bootstrap_reuse_enabled": bool(self.bootstrap_reuse_enabled),
+                    "bootstrap_reuse_agent_count": len(self.agents) if self.bootstrap_reuse_enabled else 0,
+                    "bootstrap_reuse_included_count": 0,
+                }
+            )
             self.logger.log_event(self.time, "startup_llm_sanity_disabled", {"enabled": False})
             return dict(self.startup_llm_sanity_summary)
         try:
@@ -369,6 +382,14 @@ class SimulationState:
             "effective_backend": cfg.backend,
             "fallback_count": 0,
             "last_outcome_signature": None,
+            "bootstrap": {
+                "status": "not_run",
+                "latency_ms": None,
+                "validated_response": None,
+                "summary_text": None,
+                "summary_structured": None,
+                "included_count": 0,
+            },
         }
 
     def get_agent_brain_runtime(self, agent):
@@ -379,6 +400,14 @@ class SimulationState:
             "effective_backend": self.effective_brain_backend,
             "fallback_count": self.backend_fallback_count,
             "last_outcome_signature": None,
+            "bootstrap": {
+                "status": "not_run",
+                "latency_ms": None,
+                "validated_response": None,
+                "summary_text": None,
+                "summary_structured": None,
+                "included_count": 0,
+            },
         }
 
     def refresh_agent_backend_effective_state(self, agent, reason="runtime_update"):
@@ -425,6 +454,7 @@ class SimulationState:
             "planner_trace_max_chars": int(self.planner_defaults.get("planner_trace_max_chars", 12000) or 12000),
             "planner_trace_artifact": "logs/planner_trace.jsonl" if bool(self.planner_defaults.get("enable_planner_trace", True)) else None,
             "backend_warmup": self.provider_warmup_status,
+            "bootstrap_summary_max_chars": self.bootstrap_summary_max_chars,
             **dict(self.startup_llm_sanity_summary),
         }
 
