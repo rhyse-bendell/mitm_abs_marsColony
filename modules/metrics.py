@@ -649,6 +649,23 @@ class MetricsCollector:
                 "team_knowledge": team_knowledge_summary,
                 "planner_responsiveness": planner_responsiveness,
                 "runtime_witness_coverage": witness_summary,
+                "inspect_readiness_diagnostics": {
+                    "inspect_started_count": int(self.events_by_type.get("inspect_started", 0)),
+                    "inspect_completed_count": int(self.events_by_type.get("inspect_completed", 0)),
+                    "inspect_reset_count": int(self.events_by_type.get("inspect_reset", 0)),
+                    "inspect_duplicate_restart_count": int(self.events_by_type.get("inspect_restarted_duplicate", 0)),
+                    "inspect_completion_failures_by_reason": {
+                        reason: int(count)
+                        for reason, count in self.reason_distributions.get("inspect_completion_failed", {}).items()
+                    },
+                    "dik_acquired_from_inspect_count": int(self.events_by_type.get("dik_acquired_from_inspect", 0)),
+                    "readiness_recomputed_after_inspect_count": int(self.events_by_type.get("readiness_recomputed_after_inspect", 0)),
+                    "readiness_unlock_failures_after_successful_inspect": int(
+                        self.reason_distributions.get("inspect_completion_blocked", {}).get(
+                            "readiness_not_unlocked_after_inspect_success", 0
+                        )
+                    ),
+                },
                 "startup_progression": {
                     "agents_left_spawn_count": int(sum(1 for moved in moved_map.values() if moved)),
                     "left_spawn_by_agent": moved_map,

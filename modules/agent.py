@@ -136,6 +136,14 @@ class Agent:
         self.source_inspection_state = {}
         self.inspect_stall_counts = {}
         self.current_inspect_target_id = None
+        self.inspect_session = {
+            "source_id": None,
+            "target": None,
+            "state": "idle",
+            "started_at": None,
+            "last_updated_at": None,
+            "restarts": 0,
+        }
         self.status_last_action = ""
 
         # Team dynamics
@@ -424,26 +432,50 @@ class Agent:
         packet = environment.knowledge_packets.get(source_id)
         if packet is None:
             self._set_status(f"Inspect failed: unknown source {source_id}")
-            self._emit_event(sim_state, "source_inspection_blocked", {"source_id": source_id, "failure_category": "inspect_not_completed"})
+            self._emit_event(sim_state, "inspect_completion_failed", {"source_id": source_id, "failure_category": "unknown_source"})
             return False
 
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        if self.inspect_session.get("source_id") != source_id:
+            self.inspect_session = {
+                "source_id": source_id,
+                "target": None,
+                "state": "target_selected",
+                "started_at": now_ts,
+                "last_updated_at": now_ts,
+                "restarts": 0,
+            }
         self.source_inspection_state[source_id] = "in_progress"
         target_pos = environment.get_interaction_target_position(source_id, from_position=self.position)
+        self.inspect_session["target"] = target_pos
         if target_pos is None:
             self._set_status(f"Inspect failed: no navigable target for {source_id}")
-            self._emit_event(sim_state, "source_inspection_blocked", {"source_id": source_id, "failure_category": "target_resolution_failed"})
+            self._emit_event(sim_state, "inspect_completion_blocked", {"source_id": source_id, "failure_category": "target_resolution_failed"})
             return False
         if not environment.can_access_info(self.position, source_id, role=self.role):
             self._set_status(f"Inspect pending: not yet in source zone for {source_id}")
-            self._emit_event(sim_state, "source_inspection_blocked", {"source_id": source_id, "failure_category": "inspect_not_completed"})
+            self.inspect_session["last_updated_at"] = now_ts
+            self.inspect_session["state"] = "target_reached" if self.inspect_session.get("state") == "target_reached" else "target_selected"
+            self._emit_event(sim_state, "inspect_progressed", {"source_id": source_id, "stage": self.inspect_session.get("state"), "target": target_pos, "goal": self.goal})
             return False
 
+        self.inspect_session["state"] = "target_reached"
+        self.inspect_session["last_updated_at"] = now_ts
+        self._emit_event(sim_state, "inspect_progressed", {"source_id": source_id, "stage": "target_reached", "target": target_pos, "goal": self.goal})
+        self.inspect_session["state"] = "inspection_started"
+        self.inspect_session["last_updated_at"] = now_ts
+        self._emit_event(sim_state, "inspect_progressed", {"source_id": source_id, "stage": "inspection_started", "target": target_pos, "goal": self.goal})
         self._set_status(f"Arrived at source zone: {source_id}")
+        readiness_before = set(self._build_readiness_blockers(environment))
+        before_data_ids = {d.id for d in self.mental_model["data"]}
         before_ids = {info.id for info in self.mental_model["information"]}
+        before_rules = set(self.mental_model["knowledge"].rules)
         self.absorb_packet(packet, accuracy=0.95)
         after_ids = {info.id for info in self.mental_model["information"]}
         packet_info_ids = {info.id for info in packet.get("information", [])}
         new_ids = after_ids - before_ids
+        after_data_ids = {d.id for d in self.mental_model["data"]}
+        new_data_from_source = after_data_ids - before_data_ids
         self.memory_seen_packets.add(source_id)
 
         if new_ids:
@@ -455,12 +487,58 @@ class Agent:
 
         if packet_info_ids.issubset(after_ids):
             self.source_inspection_state[source_id] = "inspected"
+            self.inspect_session["state"] = "inspection_completed"
+            self.inspect_session["last_updated_at"] = now_ts
+            self._emit_event(sim_state, "inspect_completed", {"source_id": source_id, "target": target_pos, "goal": self.goal})
         else:
             self.source_inspection_state[source_id] = "in_progress"
+            self._emit_event(sim_state, "inspect_completion_failed", {"source_id": source_id, "failure_category": "partial_packet_uptake"})
 
         packet_data_ids = {d.id for d in packet.get("data", [])}
         held_data_ids = {d.id for d in self.mental_model["data"]}
         new_data_ids = sorted(packet_data_ids & held_data_ids)
+        self._apply_task_derivations(sim_state=sim_state)
+        after_rules = set(self.mental_model["knowledge"].rules)
+        new_rule_ids = sorted(after_rules - before_rules)
+        dik_changed = bool(new_ids or new_data_from_source or new_rule_ids)
+        if dik_changed:
+            self.inspect_session["state"] = "dik_acquired"
+            self.inspect_session["last_updated_at"] = now_ts
+            self._emit_event(
+                sim_state,
+                "dik_acquired_from_inspect",
+                {
+                    "source_id": source_id,
+                    "new_information_ids": sorted(new_ids),
+                    "new_data_ids": sorted(new_data_from_source),
+                    "new_rule_ids": new_rule_ids,
+                    "dik_changed": True,
+                },
+            )
+        readiness_after = set(self._build_readiness_blockers(environment))
+        readiness_changed = readiness_before != readiness_after
+        if sim_state is not None:
+            self._emit_event(
+                sim_state,
+                "readiness_recomputed_after_inspect",
+                {
+                    "source_id": source_id,
+                    "readiness_changed": readiness_changed,
+                    "readiness_unlocked": not readiness_after,
+                    "before_blockers": sorted(readiness_before),
+                    "after_blockers": sorted(readiness_after),
+                },
+            )
+            if dik_changed and readiness_after:
+                self._emit_event(
+                    sim_state,
+                    "inspect_completion_blocked",
+                    {
+                        "source_id": source_id,
+                        "failure_category": "readiness_not_unlocked_after_inspect_success",
+                        "remaining_blockers": sorted(readiness_after),
+                    },
+                )
         self._emit_event(
             sim_state,
             "source_access_succeeded",
@@ -470,6 +548,8 @@ class Agent:
                 "new_data_ids": new_data_ids,
             },
         )
+        self.inspect_session["state"] = "post_inspect_derivation_attempted"
+        self.inspect_session["last_updated_at"] = now_ts
         return bool(new_ids)
 
 
@@ -1829,7 +1909,42 @@ class Agent:
                 return [{"type": "idle", "duration": 1.0, "priority": 1}]
             action["target"] = interaction_target
             action["source_target_id"] = source_id
+            current_source = self.inspect_session.get("source_id")
+            current_state = self.inspect_session.get("state")
+            if current_source == source_id and current_state in {"target_selected", "target_reached", "inspection_started", "inspection_completed", "dik_acquired", "post_inspect_derivation_attempted"}:
+                self._emit_event(
+                    sim_state,
+                    "inspect_restarted_duplicate",
+                    {
+                        "source_id": source_id,
+                        "duplicate_reason": "inspect_already_active",
+                        "inspect_state": current_state,
+                        "goal": self.goal,
+                    },
+                )
+            elif current_source and current_source != source_id and current_state not in {"idle"}:
+                self._emit_event(
+                    sim_state,
+                    "inspect_reset",
+                    {
+                        "source_id": current_source,
+                        "new_source_id": source_id,
+                        "reason": "retargeted_source",
+                        "prior_state": current_state,
+                    },
+                )
             self.current_inspect_target_id = source_id
+            now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+            if current_source != source_id:
+                self.inspect_session = {
+                    "source_id": source_id,
+                    "target": interaction_target,
+                    "state": "target_selected",
+                    "started_at": now_ts,
+                    "last_updated_at": now_ts,
+                    "restarts": 0,
+                }
+                self._emit_event(sim_state, "inspect_started", {"source_id": source_id, "target": interaction_target, "goal": self.goal})
             if self.source_inspection_state.get(source_id) == "inspected":
                 self._set_status(f"Source skipped due to completion: {source_id}")
             self._emit_startup_once(sim_state, "first_productive_action_started", "first_productive_action_started", {"planner_action_type": decision.selected_action.value, "translated_action_type": action.get("type")})
