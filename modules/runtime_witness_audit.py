@@ -85,6 +85,26 @@ class RuntimeWitnessAudit:
         self._event_guard = False
         self._build_critical_targets()
 
+    @staticmethod
+    def _event_agent(payload: Dict[str, object]) -> Optional[str]:
+        agent = payload.get("agent")
+        return str(agent) if agent is not None else None
+
+    def _target_relevant_to_agent(self, target_id: str, payload: Dict[str, object]) -> bool:
+        agent = self._event_agent(payload)
+        if not agent:
+            return True
+        target = self.targets.get(target_id) or {}
+        involved = set(target.get("agents_involved") or set())
+        if not involved:
+            return True
+        return agent in involved
+
+    def _block_targets(self, payload: Dict[str, object], failure_category: str, step_hint: Optional[str] = None):
+        for tid in self.targets:
+            if self._target_relevant_to_agent(tid, payload):
+                self._block_target(tid, failure_category, payload, step_hint=step_hint)
+
     def _build_critical_targets(self):
         critical_goals = {
             g.goal_id
@@ -305,14 +325,12 @@ class RuntimeWitnessAudit:
         elif event_type == "inspect_completion_failed":
             reason = str(payload.get("failure_category") or "inspect_not_completed")
             category = "inspect_completed_dik_not_acquired" if reason == "partial_packet_uptake" else "inspect_not_completed"
-            for tid in self.targets:
-                self._block_target(tid, category, payload, step_hint="source_access")
+            self._block_targets(payload, category, step_hint="source_access")
 
         elif event_type == "shared_source_access_blocked":
             reason = str(payload.get("reason") or "blocked")
             category = "shared_source_access_blocked_by_legality" if reason in {"too_far_or_role_mismatch"} else "shared_source_access_blocked_by_mapping"
-            for tid in self.targets:
-                self._block_target(tid, category, payload, step_hint="source_access")
+            self._block_targets(payload, category, step_hint="source_access")
 
         elif event_type == "shared_source_dik_acquired_team":
             for element_id in payload.get("added_ids", []):
@@ -343,8 +361,7 @@ class RuntimeWitnessAudit:
             }
             category = outcome_map.get(outcome)
             if category:
-                for tid in self.targets:
-                    self._block_target(tid, category, payload, step_hint="readiness_unlock")
+                self._block_targets(payload, category, step_hint="readiness_unlock")
 
         elif event_type == "dik_derivation_executed":
             did = payload.get("derivation_id")
@@ -392,14 +409,11 @@ class RuntimeWitnessAudit:
                 self._complete_step(tid, idx, payload)
 
         elif event_type == "source_inspection_blocked":
-            for tid in self.targets:
-                self._block_target(tid, "inspect_not_completed", payload, step_hint="source_access")
+            self._block_targets(payload, "inspect_not_completed", step_hint="source_access")
         elif event_type == "action_translation_failed":
-            for tid in self.targets:
-                self._block_target(tid, "action_translation_failed", payload)
+            self._block_targets(payload, "action_translation_failed")
         elif event_type == "target_resolution_failed":
-            for tid in self.targets:
-                self._block_target(tid, "target_resolution_failed", payload)
+            self._block_targets(payload, "target_resolution_failed")
         elif event_type == "movement_blocked":
             blocker = str(payload.get("blocker_category") or "movement_blocked")
             mapping = {
@@ -410,14 +424,11 @@ class RuntimeWitnessAudit:
                 "arrival_without_progress": "arrival_without_progress",
             }
             failure = mapping.get(blocker, "movement_blocked")
-            for tid in self.targets:
-                self._block_target(tid, failure, payload)
+            self._block_targets(payload, failure)
         elif event_type == "plan_invalidated":
-            for tid in self.targets:
-                self._block_target(tid, "plan_invalidated", payload, step_hint="plan_method_grounded")
+            self._block_targets(payload, "plan_invalidated", step_hint="plan_method_grounded")
         elif event_type == "execution_readiness_failed":
-            for tid in self.targets:
-                self._block_target(tid, "readiness_not_unlocked", payload, step_hint="readiness_unlock")
+            self._block_targets(payload, "readiness_not_unlocked", step_hint="readiness_unlock")
 
     @staticmethod
     def _default_failure_for_step(step_type: str) -> str:

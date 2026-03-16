@@ -3,6 +3,7 @@
 import math
 import random
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 
@@ -204,6 +205,7 @@ class Agent:
             "request_id": None,
             "request_tick": None,
             "requested_at": None,
+            "requested_wallclock_at": None,
             "completed_at": None,
             "error": None,
             "last_latency_s": None,
@@ -574,7 +576,7 @@ class Agent:
         if shared_source:
             self._emit_event(sim_state, "shared_source_inspect_started", {"source_id": source_id, "target": target_pos, "source_meta": source_meta})
         self._set_status(f"Arrived at source zone: {source_id}")
-        readiness_before = set(self._build_readiness_blockers(environment))
+        readiness_before = set(self._build_readiness_blockers(environment, sim_state=sim_state))
         before_data_ids = {d.id for d in self.mental_model["data"]}
         before_ids = {info.id for info in self.mental_model["information"]}
         before_rules = set(self.mental_model["knowledge"].rules)
@@ -701,7 +703,7 @@ class Agent:
                     "dik_changed": True,
                 },
             )
-        readiness_after = set(self._build_readiness_blockers(environment))
+        readiness_after = set(self._build_readiness_blockers(environment, sim_state=sim_state))
         readiness_changed = readiness_before != readiness_after
         blocker_category = self._categorize_readiness_blockers(readiness_after)
         post_inspect_outcome = self._categorize_post_inspect_outcome(
@@ -879,6 +881,15 @@ class Agent:
         knowledge_ids = set(self.mental_model["knowledge"].rules)
         return data_ids, info_ids, knowledge_ids
 
+    def _team_validated_ids(self, sim_state=None):
+        if sim_state is None or not hasattr(sim_state, "team_knowledge_manager"):
+            return set(), set(), set()
+        keys = set(sim_state.team_knowledge_manager.validated_knowledge.keys())
+        data_ids = {k.split(":", 1)[1] for k in keys if isinstance(k, str) and k.startswith("data:") and ":" in k}
+        info_ids = {k.split(":", 1)[1] for k in keys if isinstance(k, str) and k.startswith("information:") and ":" in k}
+        rule_ids = {k.split(":", 1)[1] for k in keys if isinstance(k, str) and k.startswith("rule:") and ":" in k}
+        return data_ids, info_ids, rule_ids
+
     def _create_dik_object_from_element(self, element, source_id):
         tags = [element.role_scope, element.phase_scope, element.element_type]
         if element.element_type == "data":
@@ -893,7 +904,8 @@ class Agent:
 
         now = getattr(self, "current_time", 0.0)
         data_ids, info_ids, knowledge_ids = self._held_dik_ids()
-        held_ids = data_ids | info_ids | knowledge_ids
+        team_data_ids, team_info_ids, team_rule_ids = self._team_validated_ids(sim_state=sim_state)
+        held_ids = data_ids | info_ids | knowledge_ids | team_data_ids | team_info_ids | team_rule_ids
 
         for derivation in self.task_model.derivations.values():
             if not derivation.enabled or derivation.derivation_id in self.executed_derivations:
@@ -961,11 +973,20 @@ class Agent:
         artifact_count = len([p for p in self.memory_seen_packets if isinstance(p, str) and p.startswith("whiteboard:")])
         return info_count + (2 * knowledge_count) + inspected_sources + min(artifact_count, 1)
 
-    def _build_readiness_blockers(self, environment):
+    def _effective_knowledge_for_readiness(self, sim_state=None):
+        info_ids = {i.id for i in self.mental_model["information"]}
+        rule_ids = set(self.mental_model["knowledge"].rules)
+        _, team_info_ids, team_rule_ids = self._team_validated_ids(sim_state=sim_state)
+        info_ids.update(team_info_ids)
+        rule_ids.update(team_rule_ids)
+        return info_ids, rule_ids
+
+    def _build_readiness_blockers(self, environment, sim_state=None):
         blockers = []
-        if len(self.mental_model["information"]) < 2:
+        info_ids, rule_ids = self._effective_knowledge_for_readiness(sim_state=sim_state)
+        if len(info_ids) < 2:
             blockers.append("insufficient_information_inspection")
-        if len(self.mental_model["knowledge"].rules) < 1:
+        if len(rule_ids) < 1:
             blockers.append("insufficient_rule_knowledge")
 
         if getattr(self, "task_model", None):
@@ -973,7 +994,7 @@ class Agent:
                 r.rule_id for r in self.task_model.rules.values()
                 if r.enabled and r.role_scope in {"team", self.role.lower()}
             ]
-            if role_rules and not set(role_rules).intersection(set(self.mental_model["knowledge"].rules)):
+            if role_rules and not set(role_rules).intersection(rule_ids):
                 blockers.append("missing_task_prerequisite_rules")
         if not any(state == "inspected" for state in self.source_inspection_state.values()):
             blockers.append("no_inspected_information_source")
@@ -981,8 +1002,8 @@ class Agent:
             blockers.append("no_navigable_build_target")
         return blockers
 
-    def _is_build_eligible(self, environment):
-        return self._build_readiness_score() >= self._readiness_threshold() and not self._build_readiness_blockers(environment)
+    def _is_build_eligible(self, environment, sim_state=None):
+        return self._build_readiness_score() >= self._readiness_threshold() and not self._build_readiness_blockers(environment, sim_state=sim_state)
 
     def _select_build_target(self, environment, require_readiness=False, include_project=False):
         candidates = []
@@ -1391,7 +1412,7 @@ class Agent:
             ExecutableActionType.VALIDATE_CONSTRUCTION.value,
         }
 
-    def _execute_planner_request_sync(self, sim_state, trigger_reason, request_packet, request_explanation, request_started_at, request_sim_time, trace_id):
+    def _execute_planner_request_sync(self, sim_state, trigger_reason, request_packet, request_explanation, request_started_at, request_sim_time, request_wallclock_time, trace_id):
         context = sim_state.brain_context_builder.build(sim_state, self)
         runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"provider": sim_state.brain_provider, "config": sim_state.brain_backend_config, "configured_backend": getattr(sim_state, "configured_brain_backend", sim_state.brain_backend_config.backend), "effective_backend": getattr(sim_state, "effective_brain_backend", sim_state.brain_backend_config.backend)}
         provider = runtime["provider"]
@@ -1494,7 +1515,7 @@ class Agent:
             status = "rejected"
             decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="Fallback due to decision validation failure.", confidence=1.0)
 
-        latency_s = max(0.0, sim_state.time - request_sim_time)
+        latency_s = max(0.0, time.perf_counter() - float(request_wallclock_time))
         provider_outcome = getattr(provider, "last_outcome", {}) if isinstance(getattr(provider, "last_outcome", {}), dict) else {}
         provider_trace = provider_trace if isinstance(provider_trace, dict) else {}
         llm_response_received = bool(provider_trace.get("llm_response_received", False))
@@ -1518,6 +1539,7 @@ class Agent:
             "trigger_reason": trigger_reason,
             "request_started_at": request_started_at,
             "request_sim_time": request_sim_time,
+            "request_wallclock_time": request_wallclock_time,
             "latency_s": latency_s,
             "failed": False,
             "timed_out": False,
@@ -1569,11 +1591,13 @@ class Agent:
         self._planner_request_seq += 1
         request_started_at = self.sim_step_count
         request_sim_time = float(sim_state.time)
+        request_wallclock_time = time.perf_counter()
         self.planner_state["status"] = "in_flight"
         self.planner_state["request_id"] = request_packet.request_id
         self.planner_state["trace_id"] = trace_id
         self.planner_state["request_tick"] = self.sim_step_count
         self.planner_state["requested_at"] = request_sim_time
+        self.planner_state["requested_wallclock_at"] = request_wallclock_time
         self.planner_state["error"] = None
         self.planner_state["trigger_reason"] = trigger_reason
         self.planner_state["request_payload"] = request_packet.to_dict()
@@ -1594,6 +1618,7 @@ class Agent:
                 request_explanation,
                 request_started_at,
                 request_sim_time,
+                request_wallclock_time,
                 trace_id,
             )
 
@@ -1664,11 +1689,11 @@ class Agent:
     def _check_inflight_timeout(self, sim_state):
         if self.planner_state.get("status") != "in_flight":
             return
-        requested_at = self.planner_state.get("requested_at")
+        requested_at = self.planner_state.get("requested_wallclock_at")
         if requested_at is None:
             return
         timeout_s = float(self.planner_cadence.planner_timeout_seconds)
-        elapsed = float(sim_state.time) - float(requested_at)
+        elapsed = max(0.0, time.perf_counter() - float(requested_at))
         if elapsed < timeout_s:
             return
         request_id = self.planner_state.get("request_id")
@@ -1736,7 +1761,18 @@ class Agent:
             sim_state.logger.log_event(sim_state.time, "planner_next_action_rejected", {"agent": self.name, "errors": list(result["errors"]), "fallback_action": "wait"})
             self._emit_event(sim_state, "brain_provider_response_invalid", {"errors": list(result["errors"]), "schema_parsing_succeeded": False, "request_id": request_id, "trace_id": result.get("trace_id")})
 
-        if self.planner_state["request_tick"] is not None and self.planner_state["request_tick"] < max(0, self.sim_step_count - 2) and self.current_plan is not None and trigger_reason not in {"no_active_plan", "plan_invalidated", "plan_completed"}:
+        result_request_tick = result.get("request_started_at")
+        request_tick = self.planner_state.get("request_tick")
+        if result_request_tick is None:
+            result_request_tick = request_tick
+        if (
+            request_tick is not None
+            and result_request_tick is not None
+            and request_tick == result_request_tick
+            and self.current_plan is not None
+            and trigger_reason not in {"no_active_plan", "plan_invalidated", "plan_completed"}
+            and getattr(self.current_plan, "source", None) == "planner"
+        ):
             self.planner_state["total_stale_discarded"] += 1
             self.planner_state["status"] = "completed"
             self._emit_event(sim_state, "planner_response_discarded_due_to_state_change", {"request_id": request_id, "trace_id": result.get("trace_id"), "request_tick": self.planner_state["request_tick"], "current_tick": self.sim_step_count, "current_plan_id": getattr(self.current_plan, "plan_id", None)})
@@ -1933,7 +1969,7 @@ class Agent:
         info_count = len(self.mental_model["information"])
         knowledge_count = len(self.mental_model["knowledge"].rules)
         build_readiness = self._build_readiness_score()
-        build_blockers = self._build_readiness_blockers(environment)
+        build_blockers = self._build_readiness_blockers(environment, sim_state=sim_state)
         team_updates = len(sim_state.team_knowledge_manager.recent_updates)
         recent_log = " ".join(self.activity_log[-4:]).lower()
 
@@ -2348,7 +2384,7 @@ class Agent:
             ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
             ExecutableActionType.VALIDATE_CONSTRUCTION,
         }:
-            blockers = self._build_readiness_blockers(environment)
+            blockers = self._build_readiness_blockers(environment, sim_state=sim_state)
             if blockers:
                 self._emit_event(sim_state, "execution_readiness_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "readiness_not_unlocked", "blockers": blockers})
             else:
