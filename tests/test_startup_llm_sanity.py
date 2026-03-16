@@ -98,6 +98,18 @@ class TestStartupLLMSanity(unittest.TestCase):
             self.assertIn("results", payload)
             self.assertGreaterEqual(len(payload["results"]), 1)
 
+
+    def test_high_latency_local_defaults_raise_startup_sanity_timeout(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                brain_backend="ollama",
+            )
+            self.assertGreaterEqual(sim.startup_llm_sanity_config.timeout_s, 45.0)
+            self.assertTrue(sim.planner_defaults.get("high_latency_local_llm_mode"))
+            sim.stop()
+
     def test_disabled_mode_keeps_startup_behavior_non_regressive(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = SimulationState(

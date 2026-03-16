@@ -14,6 +14,24 @@ from modules.team_knowledge import TeamKnowledgeManager
 from modules.construct_mapping import ConstructMapper
 from modules.task_model import load_task_model
 
+LOCAL_BACKEND_ALIASES = {"local_http", "openai_compatible_local", "ollama_local", "ollama"}
+
+
+def _planner_defaults_with_high_latency_mode(planner_defaults, configured_backend):
+    defaults = dict(planner_defaults or {})
+    high_latency_enabled = bool(defaults.get("high_latency_local_llm_mode", configured_backend in LOCAL_BACKEND_ALIASES))
+    defaults["high_latency_local_llm_mode"] = high_latency_enabled
+    if high_latency_enabled:
+        defaults.setdefault("planner_interval_steps", 8)
+        defaults.setdefault("planner_interval_time", 6.0)
+        defaults.setdefault("planner_timeout_seconds", 90.0)
+        defaults.setdefault("degraded_consecutive_failures_threshold", 6)
+        defaults.setdefault("degraded_cooldown_seconds", 45.0)
+        defaults.setdefault("degraded_step_interval_multiplier", 3.0)
+        defaults.setdefault("startup_llm_sanity_timeout_seconds", 45.0)
+        defaults.setdefault("high_latency_stale_result_grace_s", 60.0)
+    return defaults
+
 
 class SimulationState:
 
@@ -62,9 +80,10 @@ class SimulationState:
         self.planner_defaults = dict(self.task_model.manifest.get("planner_defaults", {}))
         if planner_config:
             self.planner_defaults.update(dict(planner_config))
+        self.planner_defaults = _planner_defaults_with_high_latency_mode(self.planner_defaults, brain_backend)
         self.startup_llm_sanity_config = StartupLLMSanityConfig(
             enabled=bool(self.planner_defaults.get("enable_startup_llm_sanity", True)),
-            timeout_s=float(self.planner_defaults.get("startup_llm_sanity_timeout_seconds", 8.0) or 8.0),
+            timeout_s=float(self.planner_defaults.get("startup_llm_sanity_timeout_seconds", 45.0) or 45.0),
             max_sources=max(1, int(self.planner_defaults.get("startup_llm_sanity_max_sources", 2) or 2)),
             max_items_per_type=max(1, int(self.planner_defaults.get("startup_llm_sanity_max_items_per_type", 3) or 3)),
             raw_response_max_chars=max(500, int(self.planner_defaults.get("startup_llm_sanity_raw_response_max_chars", 4000) or 4000)),
@@ -97,6 +116,8 @@ class SimulationState:
             backend_options["timeout_s"] = self.planner_defaults.get("planner_timeout_seconds")
         if "max_retries" not in backend_options and "planner_max_retries" in self.planner_defaults:
             backend_options["max_retries"] = self.planner_defaults.get("planner_max_retries")
+        if "warmup_timeout_s" not in backend_options and "startup_llm_sanity_timeout_seconds" in self.planner_defaults:
+            backend_options["warmup_timeout_s"] = self.planner_defaults.get("startup_llm_sanity_timeout_seconds")
         if "fallback_backend" not in backend_options and "planner_fallback_backend" in self.planner_defaults:
             backend_options["fallback_backend"] = self.planner_defaults.get("planner_fallback_backend")
         self.brain_backend_config = BrainBackendConfig(backend=brain_backend, **backend_options)
@@ -445,6 +466,12 @@ class SimulationState:
             "local_base_url": cfg.local_base_url if self.configured_brain_backend != "rule_brain" else None,
             "local_endpoint": cfg.local_endpoint if self.configured_brain_backend != "rule_brain" else None,
             "timeout_s": cfg.timeout_s if self.configured_brain_backend != "rule_brain" else None,
+            "warmup_timeout_s": cfg.warmup_timeout_s if self.configured_brain_backend != "rule_brain" else None,
+            "high_latency_local_llm_mode": bool(self.planner_defaults.get("high_latency_local_llm_mode", False)),
+            "effective_planner_timeout_seconds": float(self.planner_defaults.get("planner_timeout_seconds", 0.0) or 0.0),
+            "effective_startup_llm_sanity_timeout_seconds": float(self.planner_defaults.get("startup_llm_sanity_timeout_seconds", 0.0) or 0.0),
+            "stale_result_relaxation_enabled": bool(self.planner_defaults.get("high_latency_local_llm_mode", False)) and float(self.planner_defaults.get("high_latency_stale_result_grace_s", 0.0) or 0.0) > 0.0,
+            "high_latency_stale_result_grace_s": float(self.planner_defaults.get("high_latency_stale_result_grace_s", 0.0) or 0.0),
             "provider_class": self.brain_provider.__class__.__name__,
             "local_backend_alias": "ollama_openai_compatible" if self.configured_brain_backend in {"local_http", "openai_compatible_local", "ollama_local", "ollama"} else None,
             "fallback_occurred": self.backend_fallback_count > 0,

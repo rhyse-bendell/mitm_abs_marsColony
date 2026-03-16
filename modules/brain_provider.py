@@ -79,8 +79,8 @@ class BrainBackendConfig:
     local_base_url: str = "http://127.0.0.1:11434"
     local_endpoint: str = "/v1/chat/completions"
     local_model: str = "qwen3.5:9b"
-    timeout_s: float = 15.0
-    warmup_timeout_s: float = 10.0
+    timeout_s: float = 75.0
+    warmup_timeout_s: float = 45.0
     max_retries: int = 0
     fallback_backend: str = "rule_brain"
     debug: bool = False

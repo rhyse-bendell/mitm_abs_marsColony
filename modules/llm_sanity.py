@@ -26,7 +26,7 @@ SANITY_RESPONSE_FIELDS = [
 @dataclass(frozen=True)
 class StartupLLMSanityConfig:
     enabled: bool = False
-    timeout_s: float = 8.0
+    timeout_s: float = 45.0
     max_sources: int = 2
     max_items_per_type: int = 3
     raw_response_max_chars: int = 4000
