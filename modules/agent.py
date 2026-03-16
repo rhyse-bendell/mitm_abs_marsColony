@@ -539,7 +539,18 @@ class Agent:
     def _inspect_source(self, environment, source_id, sim_state=None):
         packet = environment.knowledge_packets.get(source_id)
         source_meta = environment.source_metadata_for_packet(source_id) if hasattr(environment, "source_metadata_for_packet") else {}
-        shared_source = bool(getattr(environment, "is_shared_information_source", lambda _: False)(source_id))
+        source_access_classification = (
+            environment.classify_source_access(source_id, position=self.position, role=self.role, target_kind="information")
+            if hasattr(environment, "classify_source_access")
+            else {
+                "classification": "shared_team_source" if bool(getattr(environment, "is_shared_information_source", lambda _: False)(source_id)) else "role_private_source",
+                "is_shared_source": bool(getattr(environment, "is_shared_information_source", lambda _: False)(source_id)),
+                "is_private_source": not bool(getattr(environment, "is_shared_information_source", lambda _: False)(source_id)),
+                "is_role_mismatch": False,
+                "is_movement_only": False,
+            }
+        )
+        shared_source = bool(source_access_classification.get("is_shared_source"))
         if packet is None:
             self._set_status(f"Inspect failed: unknown source {source_id}")
             self._emit_event(sim_state, "inspect_completion_failed", {"source_id": source_id, "failure_category": "unknown_source"})
@@ -616,7 +627,7 @@ class Agent:
         packet_data_ids = {d.id for d in packet.get("data", [])}
         held_data_ids = {d.id for d in self.mental_model["data"]}
         new_data_ids = sorted(packet_data_ids & held_data_ids)
-        self._apply_task_derivations(sim_state=sim_state)
+        self._apply_task_derivations(sim_state=sim_state, trigger_source=source_id)
         derivation_ids_triggered = sorted(set(self.executed_derivations) - derivations_before)
         after_rules = set(self.mental_model["knowledge"].rules)
         new_rule_ids = sorted(after_rules - before_rules)
@@ -786,6 +797,11 @@ class Agent:
                 "new_data_ids": new_data_ids,
                 "team_dik_added_ids": shared_team_delta["added"],
                 "team_dik_adopted_ids": shared_team_delta["adopted"],
+                "source_access_classification": source_access_classification.get("classification"),
+                "is_shared_source": bool(source_access_classification.get("is_shared_source")),
+                "is_private_source": bool(source_access_classification.get("is_private_source")),
+                "is_role_mismatch": bool(source_access_classification.get("is_role_mismatch")),
+                "is_movement_only": bool(source_access_classification.get("is_movement_only")),
             },
         )
         if shared_source:
@@ -803,6 +819,7 @@ class Agent:
                     "team_dik_added_ids": shared_team_delta["added"],
                     "team_dik_adopted_ids": shared_team_delta["adopted"],
                     "witness_step_satisfied": bool(net_dik_changed),
+                    "source_access_classification": source_access_classification.get("classification"),
                 },
             )
         self.inspect_session["state"] = "post_inspect_derivation_attempted"
@@ -902,7 +919,7 @@ class Agent:
             return Information(element.element_id, element.description, source=source_id, tags=tags)
         return None
 
-    def _apply_task_derivations(self, sim_state=None):
+    def _apply_task_derivations(self, sim_state=None, trigger_source=None):
         if not getattr(self, "task_model", None):
             return
 
@@ -911,6 +928,8 @@ class Agent:
         team_data_ids, team_info_ids, team_rule_ids = self._team_validated_ids(sim_state=sim_state)
         held_ids = data_ids | info_ids | knowledge_ids | team_data_ids | team_info_ids | team_rule_ids
 
+        ready_count = 0
+        attempted_count = 0
         for derivation in self.task_model.derivations.values():
             if not derivation.enabled or derivation.derivation_id in self.executed_derivations:
                 continue
@@ -921,16 +940,55 @@ class Agent:
             if derivation.min_required_count and len(required & held_ids) < derivation.min_required_count:
                 continue
 
+            ready_count += 1
+            if sim_state is not None:
+                self._emit_event(
+                    sim_state,
+                    "derivation_prerequisites_satisfied",
+                    {
+                        "derivation_id": derivation.derivation_id,
+                        "required_inputs": sorted(required),
+                        "trigger_source": trigger_source,
+                    },
+                )
+
             output_id = derivation.output_element_id
             element = self.task_model.dik_elements.get(output_id)
             if element is None or not element.enabled:
+                if sim_state is not None:
+                    self._emit_event(
+                        sim_state,
+                        "derivation_ready_but_not_attempted",
+                        {
+                            "derivation_id": derivation.derivation_id,
+                            "reason": "output_disabled_or_missing",
+                            "output_element_id": output_id,
+                            "trigger_source": trigger_source,
+                        },
+                    )
                 continue
 
+            attempted_count += 1
+            if sim_state is not None:
+                self._emit_event(
+                    sim_state,
+                    "derivation_attempted",
+                    {
+                        "derivation_id": derivation.derivation_id,
+                        "output_element_id": output_id,
+                        "required_inputs": sorted(required),
+                        "trigger_source": trigger_source,
+                    },
+                )
+
             produced = False
+            rule_ready_not_adopted = False
             if derivation.output_type == "knowledge" or element.element_type == "knowledge":
                 if output_id not in self.mental_model["knowledge"].rules:
                     self.mental_model["knowledge"].add_rule(output_id, sorted(required), inferred_by_agents=[self.name])
                     produced = True
+                else:
+                    rule_ready_not_adopted = True
             elif derivation.output_type == "information" or element.element_type == "information":
                 if output_id not in info_ids:
                     info_obj = self._create_dik_object_from_element(element, source_id=f"DRV:{derivation.derivation_id}")
@@ -952,6 +1010,7 @@ class Agent:
                     "output_element_id": output_id,
                     "derivation_kind": derivation.derivation_kind,
                     "required_inputs": sorted(required),
+                    "trigger_source": trigger_source,
                 }
                 self.executed_derivations.add(derivation.derivation_id)
                 self.derivation_events.append(event)
@@ -966,9 +1025,44 @@ class Agent:
                 })
                 self.last_dik_change_time = now
                 if sim_state is not None:
+                    self._emit_event(sim_state, "derivation_succeeded", event)
                     sim_state.logger.log_event(now, "dik_derivation_executed", event)
                     if output_id in self.mental_model["knowledge"].rules:
                         self._emit_event(sim_state, "rule_adopted", {"rule_id": output_id, "adoption_mode": "derived", "derivation_id": derivation.derivation_id})
+            else:
+                if sim_state is not None:
+                    self._emit_event(
+                        sim_state,
+                        "derivation_attempted_no_output",
+                        {
+                            "derivation_id": derivation.derivation_id,
+                            "output_element_id": output_id,
+                            "reason": "output_already_held_or_not_materialized",
+                            "trigger_source": trigger_source,
+                        },
+                    )
+                    if rule_ready_not_adopted:
+                        self._emit_event(
+                            sim_state,
+                            "rule_ready_but_not_adopted",
+                            {
+                                "derivation_id": derivation.derivation_id,
+                                "rule_id": output_id,
+                                "reason": "rule_already_present",
+                                "trigger_source": trigger_source,
+                            },
+                        )
+
+        if sim_state is not None and ready_count > 0 and attempted_count == 0:
+            self._emit_event(
+                sim_state,
+                "derivation_ready_but_not_attempted",
+                {
+                    "ready_count": ready_count,
+                    "reason": "ready_derivations_filtered_before_execution",
+                    "trigger_source": trigger_source,
+                },
+            )
 
     def _build_readiness_score(self):
         info_count = len(self.mental_model["information"])

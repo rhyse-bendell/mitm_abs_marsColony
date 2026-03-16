@@ -150,6 +150,26 @@ class MetricsCollector:
         if event_type in {"planner_invocation_requested", "planner_invocation_completed"}:
             trig = payload.get("trigger_reason", "unknown")
             self.breakdown_counts["planner_invocations_by_trigger"][trig] += 1
+        if event_type == "source_access_succeeded":
+            cls = str(payload.get("source_access_classification") or "unknown")
+            self.breakdown_counts["source_access_classification"][cls] += 1
+        if event_type == "shared_source_access_success":
+            cls = str(payload.get("source_access_classification") or "unknown")
+            if cls == "shared_team_source":
+                self.breakdown_counts["shared_source_access_success_strict"]["shared_team_source"] += 1
+            else:
+                self.breakdown_counts["shared_source_access_success_strict"]["rejected_non_shared"] += 1
+        if event_type in {
+            "derivation_prerequisites_satisfied",
+            "derivation_attempted",
+            "derivation_succeeded",
+            "derivation_attempted_no_output",
+            "derivation_ready_but_not_attempted",
+            "rule_ready_but_not_adopted",
+        }:
+            self.breakdown_counts["derivation_audit"][event_type] += 1
+        if event_type == "brain_decision_outcome" and payload.get("fallback_used"):
+            self.breakdown_counts["derivation_audit"]["brute_force_progression_cycles"] += 1
         if event_type in {"brain_provider_fallback", "brain_provider_timeout", "brain_provider_error"}:
             self.breakdown_counts["planner_fallback_by_reason"][payload.get("reason", "unknown")] += 1
         if event_type in {"brain_provider_response_invalid", "brain_response_rejected"}:
@@ -679,6 +699,19 @@ class MetricsCollector:
                 "team_knowledge": team_knowledge_summary,
                 "planner_responsiveness": planner_responsiveness,
                 "runtime_witness_coverage": witness_summary,
+                "brute_force_dik_derivation_audit": {
+                    "data_acquired_count": int(sum(v.get("Data", 0) for v in self.dik_counts.values())),
+                    "information_acquired_count": int(sum(v.get("Information", 0) for v in self.dik_counts.values())),
+                    "knowledge_acquired_count": int(sum(v.get("Knowledge", 0) for v in self.dik_counts.values())),
+                    "rule_acquired_or_adopted_count": int(self.events_by_type.get("rule_adopted", 0)),
+                    "derivation_prerequisites_satisfied_count": int(self.breakdown_counts.get("derivation_audit", {}).get("derivation_prerequisites_satisfied", 0)),
+                    "derivation_attempted_count": int(self.breakdown_counts.get("derivation_audit", {}).get("derivation_attempted", 0)),
+                    "derivation_succeeded_count": int(self.breakdown_counts.get("derivation_audit", {}).get("derivation_succeeded", 0)),
+                    "derivation_attempted_no_output_count": int(self.breakdown_counts.get("derivation_audit", {}).get("derivation_attempted_no_output", 0)),
+                    "derivation_ready_but_not_attempted_count": int(self.breakdown_counts.get("derivation_audit", {}).get("derivation_ready_but_not_attempted", 0)),
+                    "rule_ready_but_not_adopted_count": int(self.breakdown_counts.get("derivation_audit", {}).get("rule_ready_but_not_adopted", 0)),
+                    "brute_force_progression_cycles": int(self.breakdown_counts.get("derivation_audit", {}).get("brute_force_progression_cycles", 0)),
+                },
                 "inspect_readiness_diagnostics": {
                     "inspect_started_count": int(self.events_by_type.get("inspect_started", 0)),
                     "inspect_completed_count": int(self.events_by_type.get("inspect_completed", 0)),
@@ -709,14 +742,21 @@ class MetricsCollector:
                     "shared_source_target_count": int(self.events_by_type.get("shared_source_target_selected", 0)),
                     "shared_source_inspect_started_count": int(self.events_by_type.get("shared_source_inspect_started", 0)),
                     "shared_source_inspect_completed_count": int(self.events_by_type.get("shared_source_inspect_completed", 0)),
-                    "shared_source_access_success_count": int(self.events_by_type.get("shared_source_access_success", 0)),
+                    "shared_source_access_success_count": int(self.breakdown_counts.get("shared_source_access_success_strict", {}).get("shared_team_source", 0)),
+                    "shared_source_access_success_raw_event_count": int(self.events_by_type.get("shared_source_access_success", 0)),
                     "shared_source_access_blocked_count": int(self.events_by_type.get("shared_source_access_blocked", 0)),
                     "shared_source_dik_agent_count": int(self.events_by_type.get("shared_source_dik_acquired_agent", 0)),
                     "shared_source_dik_team_count": int(self.events_by_type.get("shared_source_dik_acquired_team", 0)),
                     "shared_source_adoption_count": int(self.events_by_type.get("shared_source_dik_adopted", 0)),
                     "shared_source_exhausted_count": int(self.events_by_type.get("shared_source_exhausted_for_agent", 0))
                     + int(self.events_by_type.get("shared_source_exhausted_for_team", 0)),
-                    "witness_steps_satisfied_by_shared_source_count": int(self.events_by_type.get("shared_source_access_success", 0)),
+                    "witness_steps_satisfied_by_shared_source_count": int(self.breakdown_counts.get("shared_source_access_success_strict", {}).get("shared_team_source", 0)),
+                    "source_access_classification_counts": {
+                        k: int(v) for k, v in self.breakdown_counts.get("source_access_classification", {}).items()
+                    },
+                    "shared_source_access_strict_accounting": {
+                        k: int(v) for k, v in self.breakdown_counts.get("shared_source_access_success_strict", {}).items()
+                    },
                     "shared_source_failure_distribution": {
                         reason: int(count)
                         for reason, count in self.reason_distributions.get("shared_source_access_blocked", {}).items()
