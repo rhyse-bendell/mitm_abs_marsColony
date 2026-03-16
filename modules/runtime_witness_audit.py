@@ -28,6 +28,10 @@ FAILURE_CATEGORIES = {
     "inspect_not_started",
     "inspect_not_completed",
     "inspect_completed_dik_not_acquired",
+    "inspect_completed_team_dik_acquired",
+    "inspect_completed_shared_adoption_not_local",
+    "shared_source_access_blocked_by_legality",
+    "shared_source_access_blocked_by_mapping",
     "dik_acquired_readiness_not_unlocked",
     "inspect_success_no_new_dik",
     "inspect_success_dik_no_derivation",
@@ -274,6 +278,16 @@ class RuntimeWitnessAudit:
                 for prefix in ("acquire_data", "acquire_information"):
                     for tid, idx in self._raw_index.get(f"{prefix}:{element_id}", []):
                         self._complete_step(tid, idx, payload)
+            for element_id in payload.get("team_dik_added_ids", []):
+                for prefix in ("acquire_data", "acquire_information"):
+                    for tid, idx in self._raw_index.get(f"{prefix}:{element_id}", []):
+                        self._complete_step(tid, idx, payload)
+
+        elif event_type == "shared_source_access_success":
+            source_id = payload.get("source_id")
+            if source_id:
+                for tid, idx in self._raw_index.get(f"source_access:{source_id}", []):
+                    self._complete_step(tid, idx, payload)
 
         elif event_type == "inspect_started":
             source_id = payload.get("source_id")
@@ -293,6 +307,18 @@ class RuntimeWitnessAudit:
             category = "inspect_completed_dik_not_acquired" if reason == "partial_packet_uptake" else "inspect_not_completed"
             for tid in self.targets:
                 self._block_target(tid, category, payload, step_hint="source_access")
+
+        elif event_type == "shared_source_access_blocked":
+            reason = str(payload.get("reason") or "blocked")
+            category = "shared_source_access_blocked_by_legality" if reason in {"too_far_or_role_mismatch"} else "shared_source_access_blocked_by_mapping"
+            for tid in self.targets:
+                self._block_target(tid, category, payload, step_hint="source_access")
+
+        elif event_type == "shared_source_dik_acquired_team":
+            for element_id in payload.get("added_ids", []):
+                for prefix in ("acquire_data", "acquire_information"):
+                    for tid, idx in self._raw_index.get(f"{prefix}:{element_id}", []):
+                        self._complete_step(tid, idx, payload)
 
         elif event_type == "inspect_completion_blocked":
             reason = str(payload.get("failure_category") or "inspect_not_completed")

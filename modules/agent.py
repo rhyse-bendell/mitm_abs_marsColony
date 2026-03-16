@@ -491,8 +491,49 @@ class Agent:
         self.source_inspection_state[source_id] = "revisitable_due_to_gap"
         self._set_status(f"Source marked revisitable due to gap: {source_id} ({reason})")
 
+    @staticmethod
+    def _team_dik_key(element_id, element_type):
+        return f"{element_type}:{element_id}"
+
+    def _write_shared_source_to_team_knowledge(self, sim_state, source_id, packet, new_info_ids, new_data_ids, new_rule_ids):
+        if sim_state is None or not hasattr(sim_state, "team_knowledge_manager"):
+            return {"added": [], "adopted": []}
+        manager = sim_state.team_knowledge_manager
+        added = []
+        adopted = []
+
+        for item in packet.get("information", []):
+            key = self._team_dik_key(item.id, "information")
+            summary = f"{source_id}:{item.id}:{getattr(item, 'content', '')}"
+            if key not in manager.validated_knowledge:
+                manager.add_validated_knowledge(key, summary, self.name, float(getattr(sim_state, "time", 0.0)))
+                added.append(item.id)
+            elif item.id in set(new_info_ids):
+                adopted.append(item.id)
+
+        for item in packet.get("data", []):
+            key = self._team_dik_key(item.id, "data")
+            summary = f"{source_id}:{item.id}:{getattr(item, 'content', '')}"
+            if key not in manager.validated_knowledge:
+                manager.add_validated_knowledge(key, summary, self.name, float(getattr(sim_state, "time", 0.0)))
+                added.append(item.id)
+            elif item.id in set(new_data_ids):
+                adopted.append(item.id)
+
+        for rule_id in new_rule_ids:
+            key = self._team_dik_key(rule_id, "rule")
+            if key not in manager.validated_knowledge:
+                manager.add_validated_knowledge(key, f"{source_id}:{rule_id}", self.name, float(getattr(sim_state, "time", 0.0)))
+                added.append(rule_id)
+            else:
+                adopted.append(rule_id)
+
+        return {"added": sorted(set(added)), "adopted": sorted(set(adopted))}
+
     def _inspect_source(self, environment, source_id, sim_state=None):
         packet = environment.knowledge_packets.get(source_id)
+        source_meta = environment.source_metadata_for_packet(source_id) if hasattr(environment, "source_metadata_for_packet") else {}
+        shared_source = bool(getattr(environment, "is_shared_information_source", lambda _: False)(source_id))
         if packet is None:
             self._set_status(f"Inspect failed: unknown source {source_id}")
             self._emit_event(sim_state, "inspect_completion_failed", {"source_id": source_id, "failure_category": "unknown_source"})
@@ -520,6 +561,8 @@ class Agent:
             self.inspect_session["last_updated_at"] = now_ts
             self.inspect_session["state"] = "target_reached" if self.inspect_session.get("state") == "target_reached" else "target_selected"
             self._emit_event(sim_state, "inspect_progressed", {"source_id": source_id, "stage": self.inspect_session.get("state"), "target": target_pos, "goal": self.goal})
+            if shared_source:
+                self._emit_event(sim_state, "shared_source_access_blocked", {"source_id": source_id, "reason": "too_far_or_role_mismatch", "source_meta": source_meta})
             return False
 
         self.inspect_session["state"] = "target_reached"
@@ -528,6 +571,8 @@ class Agent:
         self.inspect_session["state"] = "inspection_started"
         self.inspect_session["last_updated_at"] = now_ts
         self._emit_event(sim_state, "inspect_progressed", {"source_id": source_id, "stage": "inspection_started", "target": target_pos, "goal": self.goal})
+        if shared_source:
+            self._emit_event(sim_state, "shared_source_inspect_started", {"source_id": source_id, "target": target_pos, "source_meta": source_meta})
         self._set_status(f"Arrived at source zone: {source_id}")
         readiness_before = set(self._build_readiness_blockers(environment))
         before_data_ids = {d.id for d in self.mental_model["data"]}
@@ -555,8 +600,12 @@ class Agent:
             self.inspect_session["last_updated_at"] = now_ts
             self._emit_event(sim_state, "inspect_completed", {"source_id": source_id, "target": target_pos, "goal": self.goal})
         else:
-            self.source_inspection_state[source_id] = "in_progress"
-            self._emit_event(sim_state, "inspect_completion_failed", {"source_id": source_id, "failure_category": "partial_packet_uptake"})
+            if shared_source:
+                self.source_inspection_state[source_id] = "inspected"
+                self._emit_event(sim_state, "inspect_completed", {"source_id": source_id, "target": target_pos, "goal": self.goal, "completion_mode": "partial_packet_uptake"})
+            else:
+                self.source_inspection_state[source_id] = "in_progress"
+                self._emit_event(sim_state, "inspect_completion_failed", {"source_id": source_id, "failure_category": "partial_packet_uptake"})
 
         packet_data_ids = {d.id for d in packet.get("data", [])}
         held_data_ids = {d.id for d in self.mental_model["data"]}
@@ -566,13 +615,27 @@ class Agent:
         after_rules = set(self.mental_model["knowledge"].rules)
         new_rule_ids = sorted(after_rules - before_rules)
         dik_changed = bool(new_ids or new_data_from_source or new_rule_ids)
+        shared_team_delta = {"added": [], "adopted": []}
+        if shared_source:
+            shared_team_delta = self._write_shared_source_to_team_knowledge(
+                sim_state,
+                source_id,
+                packet,
+                sorted(new_ids),
+                sorted(new_data_from_source),
+                new_rule_ids,
+            )
+        team_changed = bool(shared_team_delta["added"] or shared_team_delta["adopted"])
+        net_dik_changed = bool(dik_changed or team_changed)
         source_state = self.source_exhaustion_state.setdefault(source_id, {"inspect_count": 0, "last_dik_changed": None, "exhausted": False})
         source_state["inspect_count"] = int(source_state.get("inspect_count", 0)) + 1
-        source_state["last_dik_changed"] = bool(dik_changed)
-        source_state["exhausted"] = bool((not dik_changed) and self.source_inspection_state.get(source_id) == "inspected")
+        source_state["last_dik_changed"] = bool(net_dik_changed)
+        source_state["exhausted"] = bool((not net_dik_changed) and self.source_inspection_state.get(source_id) == "inspected")
         if sim_state is not None and source_state["exhausted"]:
             self._emit_event(sim_state, "source_already_inspected_no_new_dik", {"source_id": source_id, "inspect_count": source_state["inspect_count"]})
             self._emit_event(sim_state, "source_exhausted_for_agent", {"source_id": source_id, "inspect_count": source_state["inspect_count"]})
+            if shared_source:
+                self._emit_event(sim_state, "shared_source_exhausted_for_team", {"source_id": source_id, "inspect_count": source_state["inspect_count"]})
         if sim_state is not None:
             self._emit_event(
                 sim_state,
@@ -614,6 +677,16 @@ class Agent:
                         "dik_changed": dik_changed,
                     },
                 )
+            if shared_source:
+                self._emit_event(sim_state, "shared_source_inspect_completed", {"source_id": source_id, "local_dik_changed": bool(dik_changed), "team_dik_changed": bool(team_changed), "source_meta": source_meta})
+                if new_ids or new_data_from_source or new_rule_ids:
+                    self._emit_event(sim_state, "shared_source_dik_acquired_agent", {"source_id": source_id, "new_information_ids": sorted(new_ids), "new_data_ids": sorted(new_data_from_source), "new_rule_ids": new_rule_ids})
+                if shared_team_delta["added"]:
+                    self._emit_event(sim_state, "shared_source_dik_acquired_team", {"source_id": source_id, "added_ids": shared_team_delta["added"]})
+                if shared_team_delta["adopted"]:
+                    self._emit_event(sim_state, "shared_source_dik_adopted", {"source_id": source_id, "adopted_ids": shared_team_delta["adopted"]})
+                if not net_dik_changed:
+                    self._emit_event(sim_state, "shared_source_exhausted_for_agent", {"source_id": source_id, "inspect_count": source_state["inspect_count"]})
         if dik_changed:
             self.inspect_session["state"] = "dik_acquired"
             self.inspect_session["last_updated_at"] = now_ts
@@ -632,7 +705,7 @@ class Agent:
         readiness_changed = readiness_before != readiness_after
         blocker_category = self._categorize_readiness_blockers(readiness_after)
         post_inspect_outcome = self._categorize_post_inspect_outcome(
-            dik_changed=dik_changed,
+            dik_changed=net_dik_changed,
             derivation_triggered=bool(derivation_ids_triggered),
             rule_adopted=bool(new_rule_ids),
             readiness_after=readiness_after,
@@ -641,7 +714,7 @@ class Agent:
         self.post_inspect_handoff = {
             "pending": True,
             "source_id": source_id,
-            "dik_changed": dik_changed,
+            "dik_changed": net_dik_changed,
             "readiness_changed": readiness_changed,
             "blockers": sorted(readiness_after),
             "blocker_category": blocker_category,
@@ -660,7 +733,7 @@ class Agent:
                     "after_blockers": sorted(readiness_after),
                 },
             )
-            if dik_changed and readiness_after:
+            if net_dik_changed and readiness_after:
                 self._emit_event(
                     sim_state,
                     "inspect_completion_blocked",
@@ -675,7 +748,8 @@ class Agent:
                 "inspect_success_readiness_changed" if readiness_changed else "inspect_success_no_readiness_change",
                 {
                     "source_id": source_id,
-                    "dik_changed": dik_changed,
+                    "dik_changed": net_dik_changed,
+                    "team_dik_changed": bool(team_changed),
                     "readiness_changed": readiness_changed,
                     "readiness_unlocked": not readiness_after,
                     "remaining_blockers": sorted(readiness_after),
@@ -688,7 +762,8 @@ class Agent:
                 "inspect_post_handoff_classified",
                 {
                     "source_id": source_id,
-                    "dik_changed": dik_changed,
+                    "dik_changed": net_dik_changed,
+                    "team_dik_changed": bool(team_changed),
                     "readiness_changed": readiness_changed,
                     "post_inspect_outcome": post_inspect_outcome,
                     "post_inspect_blocker_category": blocker_category,
@@ -700,13 +775,33 @@ class Agent:
             "source_access_succeeded",
             {
                 "source_id": source_id,
+                "reason": source_id,
                 "new_information_ids": sorted(new_ids),
                 "new_data_ids": new_data_ids,
+                "team_dik_added_ids": shared_team_delta["added"],
+                "team_dik_adopted_ids": shared_team_delta["adopted"],
             },
         )
+        if shared_source:
+            self._emit_event(
+                sim_state,
+                "shared_source_access_success" if net_dik_changed else "shared_source_access_blocked",
+                {
+                    "source_id": source_id,
+                    "reason": source_id if net_dik_changed else "no_new_dik",
+                    "local_dik_changed": bool(dik_changed),
+                    "team_dik_changed": bool(team_changed),
+                    "new_information_ids": sorted(new_ids),
+                    "new_data_ids": sorted(new_data_from_source),
+                    "new_rule_ids": new_rule_ids,
+                    "team_dik_added_ids": shared_team_delta["added"],
+                    "team_dik_adopted_ids": shared_team_delta["adopted"],
+                    "witness_step_satisfied": bool(net_dik_changed),
+                },
+            )
         self.inspect_session["state"] = "post_inspect_derivation_attempted"
         self.inspect_session["last_updated_at"] = now_ts
-        return bool(new_ids)
+        return bool(net_dik_changed)
 
     @staticmethod
     def _categorize_readiness_blockers(readiness_after):

@@ -319,6 +319,59 @@ class TestRuntimeWitnessAudit(unittest.TestCase):
             self.assertLess(failures.get("source_not_accessed", 0), result["summary"].get("critical_witness_targets_total", 0))
             sim.stop()
 
+    def test_shared_source_inspect_updates_team_knowledge_and_emits_uptake_events(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            agent = sim.agents[0]
+            target = sim.environment.get_interaction_target_position("Team_Info", from_position=agent.position)
+            self.assertIsNotNone(target)
+            agent.position = target
+            with patch("modules.agent.random.random", return_value=0.0):
+                changed = agent._inspect_source(sim.environment, "Team_Info", sim_state=sim)
+            self.assertTrue(changed)
+            self.assertTrue(sim.team_knowledge_manager.validated_knowledge)
+            event_types = [e["event_type"] for e in sim.logger.get_recent_events(320)]
+            self.assertIn("shared_source_inspect_started", event_types)
+            self.assertIn("shared_source_inspect_completed", event_types)
+            self.assertIn("shared_source_access_success", event_types)
+            self.assertIn("shared_source_dik_acquired_team", event_types)
+            sim.stop()
+
+    def test_runtime_witness_source_access_satisfied_by_shared_source_access_success(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            target_id, target = next(iter(sim.runtime_witness_audit.targets.items()))
+            source_steps = [s for s in target["ordered_witness_steps"] if s.raw_step.startswith("source_access:")]
+            if not source_steps:
+                sim.stop()
+                return
+            source_id = source_steps[0].raw_step.split(":", 1)[1]
+            sim.logger.log_event(sim.time, "shared_source_access_success", {"agent": sim.agents[0].name, "source_id": source_id, "local_dik_changed": False, "team_dik_changed": True})
+            self.assertEqual(source_steps[0].status, "completed")
+            sim.stop()
+
+    def test_shared_source_mapping_block_is_explicit_in_runtime_witness(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            sim.logger.log_event(sim.time, "shared_source_access_blocked", {"agent": sim.agents[0].name, "source_id": "Team_Info", "reason": "mapping_missing"})
+            result = sim.runtime_witness_audit.finalize()
+            categories = result["summary"]["witness_step_failures_by_category"]
+            self.assertIn("shared_source_access_blocked_by_mapping", categories)
+            sim.stop()
+
+    def test_shared_source_not_marked_exhausted_when_team_state_changes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            agent = sim.agents[0]
+            target = sim.environment.get_interaction_target_position("Team_Info", from_position=agent.position)
+            self.assertIsNotNone(target)
+            agent.position = target
+            with patch("modules.agent.random.random", return_value=1.0):
+                changed = agent._inspect_source(sim.environment, "Team_Info", sim_state=sim)
+            self.assertTrue(changed)
+            self.assertFalse(agent.source_exhaustion_state["Team_Info"].get("exhausted"))
+            sim.stop()
+
     def test_summary_includes_knowledge_transition_and_suppression_metrics(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
@@ -336,6 +389,15 @@ class TestRuntimeWitnessAudit(unittest.TestCase):
             diagnostics = run_summary["process"]["inspect_readiness_diagnostics"]
             self.assertIn("shared_source_target_count", diagnostics)
             self.assertIn("shared_source_access_success_count", diagnostics)
+            self.assertIn("shared_source_inspect_started_count", diagnostics)
+            self.assertIn("shared_source_inspect_completed_count", diagnostics)
+            self.assertIn("shared_source_access_blocked_count", diagnostics)
+            self.assertIn("shared_source_dik_agent_count", diagnostics)
+            self.assertIn("shared_source_dik_team_count", diagnostics)
+            self.assertIn("shared_source_adoption_count", diagnostics)
+            self.assertIn("shared_source_exhausted_count", diagnostics)
+            self.assertIn("witness_steps_satisfied_by_shared_source_count", diagnostics)
+            self.assertIn("shared_source_failure_distribution", diagnostics)
             self.assertIn("private_source_revisit_suppressed_count", diagnostics)
             self.assertIn("source_exhausted_count", diagnostics)
             self.assertIn("movement_between_knowledge_locations_count", diagnostics)
