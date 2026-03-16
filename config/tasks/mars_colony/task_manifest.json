@@ -22,7 +22,13 @@
     "explanation_probability": 0.1,
     "enable_planner_trace": true,
     "planner_trace_mode": "full",
-    "planner_trace_max_chars": 12000
+    "planner_trace_max_chars": 12000,
+    "enable_startup_llm_sanity": false,
+    "startup_llm_sanity_timeout_seconds": 8.0,
+    "startup_llm_sanity_max_sources": 2,
+    "startup_llm_sanity_max_items_per_type": 3,
+    "startup_llm_sanity_raw_response_max_chars": 4000,
+    "startup_llm_sanity_artifact_name": "startup_llm_sanity.json"
   },
   "agent_templates": {
     "mars_architect": {
