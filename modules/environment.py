@@ -247,6 +247,45 @@ class Environment:
             return True
         return str(packet_name).strip().lower().startswith("team_")
 
+    def classify_source_access(self, packet_name: str, position=None, role=None, target_kind=None) -> dict:
+        """Classify a source interaction for strict witness/metrics accounting."""
+        packet_name = str(packet_name)
+        target = self.interaction_targets.get(packet_name, {})
+        kind = str(target_kind or target.get("kind") or "information").strip().lower()
+        meta = self.source_metadata_for_packet(packet_name)
+        is_shared = self.is_shared_information_source(packet_name)
+        expected_role = None
+        if packet_name.endswith("_Info") and packet_name != "Team_Info":
+            expected_role = packet_name.replace("_Info", "")
+
+        role_mismatch = bool(expected_role and role and str(expected_role).lower() != str(role).lower())
+        movement_only = False
+        if position is not None and kind == "information":
+            movement_only = not self.can_access_info(position, packet_name, role=role)
+
+        if kind != "information":
+            classification = "artifact_consultation" if kind == "artifact" else "movement_only_visit"
+        elif is_shared:
+            classification = "shared_team_source"
+        elif role_mismatch:
+            classification = "role_mismatch_visit"
+        elif movement_only:
+            classification = "movement_only_visit"
+        else:
+            classification = "role_private_source"
+
+        return {
+            "source_id": meta.get("source_id") or self.resolve_source_id(packet_name) or packet_name,
+            "packet_name": packet_name,
+            "classification": classification,
+            "is_shared_source": bool(classification == "shared_team_source"),
+            "is_private_source": bool(classification == "role_private_source"),
+            "is_role_mismatch": bool(classification == "role_mismatch_visit"),
+            "is_movement_only": bool(classification == "movement_only_visit"),
+            "is_artifact_consultation": bool(classification == "artifact_consultation"),
+            "access_scope": meta.get("access_scope"),
+        }
+
     def __init__(self, phases=None, task_model: TaskModel | None = None):
         self.objects = _objects_from_task_model(task_model) if task_model and task_model.environment_objects else OBJECTS
         self.zones = _zones_from_task_model(task_model) if task_model and task_model.zones else ZONES

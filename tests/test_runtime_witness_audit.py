@@ -391,6 +391,91 @@ class TestRuntimeWitnessAudit(unittest.TestCase):
             self.assertFalse(agent.source_exhaustion_state["Team_Info"].get("exhausted"))
             sim.stop()
 
+    def test_shared_source_witness_step_recovers_after_late_success(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            audit = sim.runtime_witness_audit
+            source_target = None
+            step_ref = None
+            for target in audit.targets.values():
+                for step in target["ordered_witness_steps"]:
+                    if step.raw_step == "source_access:SRC_TEAM_SHARED":
+                        source_target = target
+                        step_ref = step
+                        break
+                if step_ref is not None:
+                    break
+            if step_ref is None:
+                self.skipTest("No shared source witness step found")
+            sim.logger.log_event(sim.time, "shared_source_access_blocked", {"agent": sim.agents[0].name, "source_id": "SRC_TEAM_SHARED", "reason": "too_far_or_role_mismatch", "source_access_classification": "shared_team_source"})
+            self.assertEqual(step_ref.status, "blocked")
+            sim.logger.log_event(sim.time, "shared_source_access_success", {"agent": sim.agents[0].name, "source_id": "SRC_TEAM_SHARED", "source_access_classification": "shared_team_source"})
+            self.assertEqual(step_ref.status, "completed")
+            self.assertNotEqual(source_target.get("status"), "failed")
+            event_types = [e["event_type"] for e in sim.logger.get_recent_events(300)]
+            self.assertIn("shared_source_step_recovered", event_types)
+            self.assertIn("witness_step_recovered_after_late_success", event_types)
+            sim.stop()
+
+    def test_strict_source_classification_shared_vs_private(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            sim.logger.log_event(sim.time, "shared_source_access_success", {"agent": sim.agents[0].name, "source_id": "Architect_Info", "source_access_classification": "role_private_source"})
+            sim.logger.log_event(sim.time, "shared_source_access_success", {"agent": sim.agents[0].name, "source_id": "Team_Info", "source_access_classification": "shared_team_source"})
+            sim.stop()
+            session_dir = next((Path(tmpdir) / "Outputs").iterdir())
+            run_summary = json.loads((session_dir / "measures" / "run_summary.json").read_text(encoding="utf-8"))
+            diagnostics = run_summary["process"]["inspect_readiness_diagnostics"]
+            self.assertEqual(diagnostics["shared_source_access_success_count"], 1)
+            self.assertEqual(diagnostics["shared_source_access_success_raw_event_count"], 2)
+
+    def test_derivation_attempt_auditing_and_ready_not_attempted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            agent = sim.agents[0]
+            data_el = next((e for e in sim.task_model.dik_elements.values() if e.element_type == "data" and e.enabled), None)
+            if data_el is None:
+                self.skipTest("No enabled data element available")
+            deriv = next((d for d in sim.task_model.derivations.values() if d.enabled and d.output_element_id == data_el.element_id), None)
+            if deriv is None:
+                self.skipTest("No suitable derivation found")
+            for req in deriv.required_inputs:
+                el = sim.task_model.dik_elements.get(req)
+                if el and el.element_type == "data":
+                    agent.mental_model["data"].add(agent._create_dik_object_from_element(el, source_id="test"))
+                elif el and el.element_type == "information":
+                    agent.mental_model["information"].add(agent._create_dik_object_from_element(el, source_id="test"))
+                elif el and el.element_type == "knowledge":
+                    agent.mental_model["knowledge"].add_rule(el.element_id, [], inferred_by_agents=[agent.name])
+            agent.mental_model["data"].add(agent._create_dik_object_from_element(data_el, source_id="held"))
+            agent._apply_task_derivations(sim_state=sim, trigger_source="Team_Info")
+            event_types = [e["event_type"] for e in sim.logger.get_recent_events(400)]
+            self.assertIn("derivation_prerequisites_satisfied", event_types)
+            self.assertIn("derivation_attempted", event_types)
+            self.assertIn("derivation_attempted_no_output", event_types)
+            sim.stop()
+
+    def test_rule_ready_but_not_adopted_is_logged(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            agent = sim.agents[0]
+            rule_deriv = next((d for d in sim.task_model.derivations.values() if d.enabled and ((sim.task_model.dik_elements.get(d.output_element_id) or type("X", (), {"element_type": ""})()).element_type == "knowledge")), None)
+            if rule_deriv is None:
+                self.skipTest("No knowledge derivation found")
+            for req in rule_deriv.required_inputs:
+                el = sim.task_model.dik_elements.get(req)
+                if el and el.element_type == "data":
+                    agent.mental_model["data"].add(agent._create_dik_object_from_element(el, source_id="test"))
+                elif el and el.element_type == "information":
+                    agent.mental_model["information"].add(agent._create_dik_object_from_element(el, source_id="test"))
+                elif el and el.element_type == "knowledge":
+                    agent.mental_model["knowledge"].add_rule(el.element_id, [], inferred_by_agents=[agent.name])
+            agent.mental_model["knowledge"].add_rule(rule_deriv.output_element_id, [], inferred_by_agents=[agent.name])
+            agent._apply_task_derivations(sim_state=sim, trigger_source="Team_Info")
+            event_types = [e["event_type"] for e in sim.logger.get_recent_events(400)]
+            self.assertIn("rule_ready_but_not_adopted", event_types)
+            sim.stop()
+
     def test_summary_includes_knowledge_transition_and_suppression_metrics(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
