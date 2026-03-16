@@ -4,7 +4,17 @@ from modules.brain_provider import select_productive_fallback_action
 
 
 class TestFallbackPolicy(unittest.TestCase):
-    def test_prefers_productive_action_before_observe_wait(self):
+    def test_prefers_build_family_actions_when_available(self):
+        allowed = [
+            {"action_type": "wait"},
+            {"action_type": "inspect_information_source", "target_id": "Team_Info", "target_zone": "Zone_Team_Info"},
+            {"action_type": "continue_construction", "target_id": "Habitat_A"},
+        ]
+        step = select_productive_fallback_action(allowed)
+        self.assertEqual(step.action_type.value, "continue_construction")
+        self.assertEqual(step.target_id, "Habitat_A")
+
+    def test_prefers_inspect_when_build_actions_not_available(self):
         allowed = [
             {"action_type": "wait"},
             {"action_type": "observe_environment"},

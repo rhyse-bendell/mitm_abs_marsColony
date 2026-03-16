@@ -14,6 +14,23 @@ class TestBrainBackendSelection(unittest.TestCase):
         cfg = BrainBackendConfig()
         self.assertEqual(cfg.local_model, "qwen3.5:9b")
         self.assertEqual(cfg.timeout_s, 15.0)
+        self.assertEqual(cfg.warmup_timeout_s, 10.0)
+
+    def test_warmup_probe_uses_configured_warmup_timeout(self):
+        provider = OllamaLocalBrainProvider(
+            config=BrainBackendConfig(backend="ollama", timeout_s=15.0, warmup_timeout_s=9.0),
+            fallback=create_brain_provider(BrainBackendConfig(backend="rule_brain")),
+        )
+
+        def _raise_timeout(*_args, **_kwargs):
+            raise TimeoutError("simulated warmup timeout")
+
+        with patch("modules.brain_provider.request.urlopen", side_effect=_raise_timeout):
+            status = provider.warmup_probe()
+        self.assertFalse(status["ok"])
+        self.assertEqual(status["warmup_timeout_s"], 9.0)
+        self.assertTrue(status["warmup_timeout"])
+        self.assertEqual(status["probe_type"], "startup_warmup")
 
     def test_explicit_rule_brain_selection_supported(self):
         with tempfile.TemporaryDirectory() as tmpdir:

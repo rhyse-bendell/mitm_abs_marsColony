@@ -31,6 +31,25 @@ class TestRuntimeWitnessAudit(unittest.TestCase):
             self.assertIn("target_resolution_failed", categories)
             sim.stop()
 
+    def test_generic_failure_blocking_is_agent_scoped_when_progress_exists(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            audit = sim.runtime_witness_audit
+            if len(audit.targets) < 2:
+                self.skipTest("Need at least two witness targets")
+            target_items = list(audit.targets.items())[:2]
+            (tid_a, _), (tid_b, _) = target_items
+            payload_a = {"agent": sim.agents[0].name}
+            payload_b = {"agent": sim.agents[1].name}
+
+            audit.targets[tid_a]["agents_involved"].add(sim.agents[0].name)
+            audit.targets[tid_b]["agents_involved"].add(sim.agents[1].name)
+
+            sim.logger.log_event(sim.time, "target_resolution_failed", payload_a)
+            self.assertEqual(audit.targets[tid_a]["status"], "failed")
+            self.assertNotEqual(audit.targets[tid_b]["status"], "failed")
+            sim.stop()
+
     def test_runtime_witness_artifact_emitted(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)

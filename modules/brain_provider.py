@@ -16,19 +16,41 @@ LOGGER = logging.getLogger(__name__)
 
 
 def select_productive_fallback_action(allowed_actions: list[dict[str, Any]]) -> PlannedActionStep:
-    """Pick a deterministic safe fallback action with minimal forward progress bias."""
+    """Pick a deterministic safe fallback action with conservative progress bias."""
     if not allowed_actions:
         return PlannedActionStep(step_index=0, action_type=ExecutableActionType.WAIT, expected_purpose="fallback legal wait")
 
+    indexed_allowed = [item for item in allowed_actions if isinstance(item, dict)]
+    build_actions_present = any(
+        item.get("action_type")
+        in {
+            ExecutableActionType.START_CONSTRUCTION.value,
+            ExecutableActionType.CONTINUE_CONSTRUCTION.value,
+            ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value,
+            ExecutableActionType.VALIDATE_CONSTRUCTION.value,
+        }
+        for item in indexed_allowed
+    )
     preference_order = [
-        ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
+        ExecutableActionType.START_CONSTRUCTION.value,
+        ExecutableActionType.CONTINUE_CONSTRUCTION.value,
+        ExecutableActionType.VALIDATE_CONSTRUCTION.value,
+        ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value,
+        ExecutableActionType.TRANSPORT_RESOURCES.value,
+        ExecutableActionType.EXTERNALIZE_PLAN.value,
+        ExecutableActionType.COMMUNICATE.value,
         ExecutableActionType.CONSULT_TEAM_ARTIFACT.value,
         ExecutableActionType.REQUEST_ASSISTANCE.value,
+        ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
         ExecutableActionType.OBSERVE_ENVIRONMENT.value,
         ExecutableActionType.WAIT.value,
     ]
+    if not build_actions_present:
+        preference_order.remove(ExecutableActionType.INSPECT_INFORMATION_SOURCE.value)
+        preference_order.insert(5, ExecutableActionType.INSPECT_INFORMATION_SOURCE.value)
+
     for action_type in preference_order:
-        choices = [item for item in allowed_actions if isinstance(item, dict) and item.get("action_type") == action_type]
+        choices = [item for item in indexed_allowed if item.get("action_type") == action_type]
         if not choices:
             continue
         reachable_first = sorted(choices, key=lambda item: 0 if item.get("reachable", True) else 1)
@@ -58,6 +80,7 @@ class BrainBackendConfig:
     local_endpoint: str = "/v1/chat/completions"
     local_model: str = "qwen3.5:9b"
     timeout_s: float = 15.0
+    warmup_timeout_s: float = 10.0
     max_retries: int = 0
     fallback_backend: str = "rule_brain"
     debug: bool = False
@@ -338,6 +361,7 @@ class OllamaLocalBrainProvider(BrainProvider):
     def warmup_probe(self) -> Dict[str, Any]:
         endpoint = f"{self.config.local_base_url.rstrip('/')}{self.config.local_endpoint}"
         started = time.perf_counter()
+        warmup_timeout_s = float(getattr(self.config, "warmup_timeout_s", self.config.timeout_s) or self.config.timeout_s)
         payload = {
             "model": self.config.local_model,
             "messages": [{"role": "user", "content": "{}"}],
@@ -352,11 +376,39 @@ class OllamaLocalBrainProvider(BrainProvider):
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with request.urlopen(req, timeout=min(float(self.config.timeout_s), 2.0)) as response:
+            with request.urlopen(req, timeout=warmup_timeout_s) as response:
                 raw = response.read().decode("utf-8")
-            return {"ok": bool(raw), "latency_ms": round((time.perf_counter() - started) * 1000.0, 2), "endpoint": endpoint, "model": self.config.local_model}
+            return {
+                "ok": bool(raw),
+                "latency_ms": round((time.perf_counter() - started) * 1000.0, 2),
+                "endpoint": endpoint,
+                "model": self.config.local_model,
+                "warmup_timeout_s": warmup_timeout_s,
+                "probe_type": "startup_warmup",
+                "warmup_timeout": False,
+            }
+        except TimeoutError as exc:  # noqa: PERF203
+            return {
+                "ok": False,
+                "latency_ms": round((time.perf_counter() - started) * 1000.0, 2),
+                "endpoint": endpoint,
+                "model": self.config.local_model,
+                "warmup_timeout_s": warmup_timeout_s,
+                "probe_type": "startup_warmup",
+                "warmup_timeout": True,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
         except Exception as exc:  # noqa: BLE001 - warmup probe should not fail simulation startup
-            return {"ok": False, "latency_ms": round((time.perf_counter() - started) * 1000.0, 2), "endpoint": endpoint, "model": self.config.local_model, "error": f"{type(exc).__name__}: {exc}"}
+            return {
+                "ok": False,
+                "latency_ms": round((time.perf_counter() - started) * 1000.0, 2),
+                "endpoint": endpoint,
+                "model": self.config.local_model,
+                "warmup_timeout_s": warmup_timeout_s,
+                "probe_type": "startup_warmup",
+                "warmup_timeout": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
 
     def backend_settings(self) -> Dict[str, Any]:
         return {
