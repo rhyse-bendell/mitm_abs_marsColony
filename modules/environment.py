@@ -212,6 +212,41 @@ class Environment:
         "SRC_BOTANIST_BRIEF": "Botanist_Info",
     }
 
+    def resolve_source_id(self, packet_name: str) -> str | None:
+        """Resolve canonical source_id for a packet/interaction target name when available."""
+        inverse = {v: k for k, v in self.source_packet_name_map.items()}
+        if packet_name in inverse:
+            return inverse[packet_name]
+        if self.task_model and packet_name in self.task_model.sources:
+            return packet_name
+        return None
+
+    def source_metadata_for_packet(self, packet_name: str) -> dict:
+        """Return source/target metadata normalized for inspect/access semantics."""
+        source_id = self.resolve_source_id(packet_name)
+        source = self.task_model.sources.get(source_id) if self.task_model and source_id else None
+        target = self.interaction_targets.get(packet_name, {})
+        role_scope = target.get("role_scope", [])
+        if isinstance(role_scope, str):
+            role_scope = [role_scope]
+        return {
+            "packet_name": packet_name,
+            "source_id": source_id,
+            "source_type": getattr(source, "source_type", None),
+            "access_scope": getattr(source, "access_scope", None),
+            "role_scope": [str(r).lower() for r in role_scope],
+        }
+
+    def is_shared_information_source(self, packet_name: str) -> bool:
+        meta = self.source_metadata_for_packet(packet_name)
+        access_scope = str(meta.get("access_scope") or "").strip().lower()
+        if access_scope in {"team", "all"}:
+            return True
+        role_scope = set(meta.get("role_scope") or [])
+        if role_scope & {"team", "all"}:
+            return True
+        return str(packet_name).strip().lower().startswith("team_")
+
     def __init__(self, phases=None, task_model: TaskModel | None = None):
         self.objects = _objects_from_task_model(task_model) if task_model and task_model.environment_objects else OBJECTS
         self.zones = _zones_from_task_model(task_model) if task_model and task_model.zones else ZONES

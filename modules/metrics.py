@@ -697,7 +697,20 @@ class MetricsCollector:
                         for reason, count in self.reason_distributions.get("inspect_post_handoff_classified", {}).items()
                     },
                     "shared_source_target_count": int(self.events_by_type.get("shared_source_target_selected", 0)),
-                    "shared_source_access_success_count": int(self.reason_distributions.get("source_access_succeeded", {}).get("Team_Info", 0)),
+                    "shared_source_inspect_started_count": int(self.events_by_type.get("shared_source_inspect_started", 0)),
+                    "shared_source_inspect_completed_count": int(self.events_by_type.get("shared_source_inspect_completed", 0)),
+                    "shared_source_access_success_count": int(self.events_by_type.get("shared_source_access_success", 0)),
+                    "shared_source_access_blocked_count": int(self.events_by_type.get("shared_source_access_blocked", 0)),
+                    "shared_source_dik_agent_count": int(self.events_by_type.get("shared_source_dik_acquired_agent", 0)),
+                    "shared_source_dik_team_count": int(self.events_by_type.get("shared_source_dik_acquired_team", 0)),
+                    "shared_source_adoption_count": int(self.events_by_type.get("shared_source_dik_adopted", 0)),
+                    "shared_source_exhausted_count": int(self.events_by_type.get("shared_source_exhausted_for_agent", 0))
+                    + int(self.events_by_type.get("shared_source_exhausted_for_team", 0)),
+                    "witness_steps_satisfied_by_shared_source_count": int(self.events_by_type.get("shared_source_access_success", 0)),
+                    "shared_source_failure_distribution": {
+                        reason: int(count)
+                        for reason, count in self.reason_distributions.get("shared_source_access_blocked", {}).items()
+                    },
                     "private_source_revisit_suppressed_count": int(self.events_by_type.get("source_revisit_suppressed", 0)),
                     "source_exhausted_count": int(self.events_by_type.get("source_exhausted_for_agent", 0)),
                     "movement_between_knowledge_locations_count": int(self.events_by_type.get("movement_between_knowledge_locations", 0)),
