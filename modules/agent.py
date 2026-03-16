@@ -62,6 +62,8 @@ class PlannerCadenceConfig:
     degraded_consecutive_failures_threshold: int = 3
     degraded_cooldown_seconds: float = 12.0
     degraded_step_interval_multiplier: float = 2.0
+    high_latency_local_llm_mode: bool = False
+    high_latency_stale_result_grace_s: float = 0.0
 
     @classmethod
     def from_dict(cls, payload):
@@ -87,6 +89,8 @@ class PlannerCadenceConfig:
             degraded_consecutive_failures_threshold=max(1, int(payload.get("degraded_consecutive_failures_threshold", 3))),
             degraded_cooldown_seconds=max(0.0, float(payload.get("degraded_cooldown_seconds", 12.0))),
             degraded_step_interval_multiplier=max(1.0, float(payload.get("degraded_step_interval_multiplier", 2.0))),
+            high_latency_local_llm_mode=bool(payload.get("high_latency_local_llm_mode", False)),
+            high_latency_stale_result_grace_s=max(0.0, float(payload.get("high_latency_stale_result_grace_s", 0.0))),
         )
 
 
@@ -1619,7 +1623,7 @@ class Agent:
         self.planner_state["model"] = provider_cfg.local_model
         self.planner_state["last_result"] = None
         self.planner_state["total_started"] += 1
-        self._emit_event(sim_state, "planner_request_started_async", {"request_id": request_packet.request_id, "trace_id": trace_id, "trigger_reason": trigger_reason, "backend": configured_backend, "effective_backend": effective_backend, "timeout": self.planner_cadence.planner_timeout_seconds, "model": provider_cfg.local_model, "queue_depth": 1})
+        self._emit_event(sim_state, "planner_request_started_async", {"request_id": request_packet.request_id, "trace_id": trace_id, "trigger_reason": trigger_reason, "backend": configured_backend, "effective_backend": effective_backend, "timeout": self.planner_cadence.planner_timeout_seconds, "model": provider_cfg.local_model, "queue_depth": 1, "high_latency_local_llm_mode": bool(self.planner_cadence.high_latency_local_llm_mode)})
         self._emit_event(sim_state, "planner_request_queue_depth", {"request_id": request_packet.request_id, "trace_id": trace_id, "queue_depth": 1, "backend": configured_backend})
 
         with self._planner_future_lock:
@@ -1734,11 +1738,24 @@ class Agent:
             self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": result.get("request_id"), "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": "stale_discarded", "plan_disposition": "discarded_stale_request_id_mismatch", "fallback": True, "fallback_used": True, "fallback_source": "stale_response_guard", "result_source": "fallback_safe_policy", "fallback_reason": "request_id_mismatch", "trace_outcome_category": "stale_response_discarded"})
             return False
         if result.get("request_id") in self._timed_out_request_ids:
-            self._timed_out_request_ids.discard(result.get("request_id"))
-            self.planner_state["total_stale_discarded"] += 1
-            self._emit_event(sim_state, "planner_request_result_arrived_stale", {"request_id": result.get("request_id"), "reason": "arrived_after_timeout", "trace_id": result.get("trace_id")})
-            self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": result.get("request_id"), "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": "stale_discarded", "plan_disposition": "discarded_arrived_after_timeout", "fallback": True, "fallback_used": True, "fallback_source": "stale_response_guard", "result_source": "fallback_safe_policy", "fallback_reason": "arrived_after_timeout", "trace_outcome_category": "stale_response_discarded", "trace": result.get("trace")})
-            return False
+            request_wallclock_started = self.planner_state.get("requested_wallclock_at")
+            elapsed_since_request_s = None
+            if request_wallclock_started is not None:
+                elapsed_since_request_s = max(0.0, time.perf_counter() - float(request_wallclock_started))
+            stale_grace_s = float(self.planner_cadence.high_latency_stale_result_grace_s)
+            if (
+                self.planner_cadence.high_latency_local_llm_mode
+                and elapsed_since_request_s is not None
+                and elapsed_since_request_s <= float(self.planner_cadence.planner_timeout_seconds) + stale_grace_s
+            ):
+                self._timed_out_request_ids.discard(result.get("request_id"))
+                self._emit_event(sim_state, "planner_request_result_arrived_after_timeout_accepted", {"request_id": result.get("request_id"), "trace_id": result.get("trace_id"), "elapsed_since_request_s": elapsed_since_request_s, "timeout_s": float(self.planner_cadence.planner_timeout_seconds), "stale_grace_s": stale_grace_s})
+            else:
+                self._timed_out_request_ids.discard(result.get("request_id"))
+                self.planner_state["total_stale_discarded"] += 1
+                self._emit_event(sim_state, "planner_request_result_arrived_stale", {"request_id": result.get("request_id"), "reason": "arrived_after_timeout", "trace_id": result.get("trace_id")})
+                self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": result.get("request_id"), "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": "stale_discarded", "plan_disposition": "discarded_arrived_after_timeout", "fallback": True, "fallback_used": True, "fallback_source": "stale_response_guard", "result_source": "fallback_safe_policy", "fallback_reason": "arrived_after_timeout", "trace_outcome_category": "stale_response_discarded", "trace": result.get("trace")})
+                return False
 
         self.planner_call_count += 1
         self.last_planner_step = self.sim_step_count
@@ -1785,6 +1802,7 @@ class Agent:
             and self.current_plan is not None
             and trigger_reason not in {"no_active_plan", "plan_invalidated", "plan_completed"}
             and getattr(self.current_plan, "source", None) == "planner"
+            and (not self.planner_cadence.high_latency_local_llm_mode)
         ):
             self.planner_state["total_stale_discarded"] += 1
             self.planner_state["status"] = "completed"

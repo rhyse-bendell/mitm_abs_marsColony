@@ -20,6 +20,8 @@ class TestPlannerAsyncResilience(unittest.TestCase):
                 "planner_timeout_seconds": 0.05,
                 "degraded_consecutive_failures_threshold": 2,
                 "degraded_cooldown_seconds": 0.3,
+                "high_latency_local_llm_mode": False,
+                "high_latency_stale_result_grace_s": 0.0,
             },
         )
 
@@ -133,6 +135,69 @@ class TestPlannerAsyncResilience(unittest.TestCase):
                 llm_done = [e for e in events if e.get("event_type") == "planner_request_completed_with_llm"]
                 self.assertFalse(stale_discard)
                 self.assertTrue(llm_done)
+            sim.stop()
+
+
+    def test_high_latency_mode_prevents_premature_inflight_timeout(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                brain_backend="local_http",
+                brain_backend_options={"timeout_s": 1.0, "max_retries": 0, "fallback_backend": "rule_brain"},
+                planner_config={
+                    "planner_interval_steps": 1,
+                    "planner_interval_time": 0.0,
+                    "planner_timeout_seconds": 0.8,
+                    "high_latency_local_llm_mode": True,
+                    "high_latency_stale_result_grace_s": 1.0,
+                    "degraded_consecutive_failures_threshold": 6,
+                    "degraded_cooldown_seconds": 5.0,
+                },
+            )
+
+            def slow_generate(self, request_packet):
+                time.sleep(0.95)
+                return self.fallback.generate_plan(request_packet)
+
+            with patch("modules.brain_provider.OllamaLocalBrainProvider.generate_plan", new=slow_generate):
+                sim.update(0.1)
+                time.sleep(0.2)
+                sim.update(0.1)
+                self.assertEqual(sim.agents[0].planner_state.get("total_timed_out", 0), 0)
+            sim.stop()
+
+    def test_high_latency_mode_accepts_late_result_within_grace(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                brain_backend="local_http",
+                brain_backend_options={"timeout_s": 1.0, "max_retries": 0, "fallback_backend": "rule_brain"},
+                planner_config={
+                    "planner_interval_steps": 1,
+                    "planner_interval_time": 0.0,
+                    "planner_timeout_seconds": 0.05,
+                    "high_latency_local_llm_mode": True,
+                    "high_latency_stale_result_grace_s": 1.0,
+                },
+            )
+
+            def slow_generate(self, request_packet):
+                time.sleep(0.2)
+                return self.fallback.generate_plan(request_packet)
+
+            with patch("modules.brain_provider.OllamaLocalBrainProvider.generate_plan", new=slow_generate):
+                sim.update(0.1)
+                for _ in range(3):
+                    sim.update(0.1)
+                time.sleep(0.25)
+                sim.update(0.1)
+                events = sim.logger.get_recent_events(300)
+                accepted = [e for e in events if e.get("event_type") == "planner_request_result_arrived_after_timeout_accepted"]
+                stale = [e for e in events if e.get("event_type") == "planner_request_result_arrived_stale"]
+                self.assertTrue(accepted)
+                self.assertFalse(stale)
             sim.stop()
 
     def test_run_summary_contains_planner_responsiveness_metrics(self):
