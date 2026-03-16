@@ -253,6 +253,18 @@ class Agent:
             "first_movement_time": None,
             "left_spawn_time": None,
         }
+        self.navigation = {
+            "path_mode": str((planner_config or {}).get("path_mode", "grid_astar") or "grid_astar"),
+            "ignore_agent_collision": bool((planner_config or {}).get("ignore_agent_collision", True)),
+            "active_path": [],
+            "path_target": None,
+            "path_index": 0,
+            "retry_count": 0,
+            "last_blocker_category": None,
+            "last_position": tuple(position),
+            "last_target": None,
+            "last_arrival_position": tuple(position),
+        }
 
 
         # Experiment-facing trait defaults
@@ -2370,157 +2382,138 @@ class Agent:
                     self.last_dik_change_time = getattr(self, "current_time", 0.0)
 
     def move_toward(self, target, dt, environment, sim_state=None):
+        nav = self.navigation
+        path_mode = nav.get("path_mode", "grid_astar")
+        origin = tuple(self.position)
+
+        def _emit(stage, extra=None):
+            payload = {
+                "stage": stage,
+                "path_mode": path_mode,
+                "current_location": self.position,
+                "target_location": target,
+                "retry_count": int(nav.get("retry_count", 0)),
+                "ignore_agent_collision": bool(nav.get("ignore_agent_collision", True)),
+            }
+            if extra:
+                payload.update(extra)
+            self._emit_event(sim_state, stage, payload)
+
         def is_blocking_object(obj):
             obj_type = obj.get("type")
-            # Anything that is not a bridge/line is impassable unless marked passable
             return obj_type in {"rect", "circle", "blocked"} and not obj.get("passable", False)
 
         def can_occupy(point):
-            return not any(
+            blocked_by_env = any(
                 environment.is_near_object(point, name, threshold=0.15)
                 for name, obj in environment.objects.items()
                 if is_blocking_object(obj)
             )
-
-        def segment_is_clear(start, end, samples=24):
-            for i in range(1, samples + 1):
-                t = i / samples
-                px = start[0] + (end[0] - start[0]) * t
-                py = start[1] + (end[1] - start[1]) * t
-                if not can_occupy((px, py)):
-                    return False
-            return True
-
-        def first_intersected_blocked_zone(start, end):
-            for name, obj in environment.objects.items():
-                if obj.get("type") != "blocked":
-                    continue
-                (x1, y1), (x2, y2) = obj["corners"]
-                x_min, x_max = min(x1, x2), max(x1, x2)
-                y_min, y_max = min(y1, y2), max(y1, y2)
-                # Quick broad phase: if any sampled segment point enters zone, treat as intersecting.
-                for i in range(1, 25):
-                    t = i / 24
-                    px = start[0] + (end[0] - start[0]) * t
-                    py = start[1] + (end[1] - start[1]) * t
-                    if x_min <= px <= x_max and y_min <= py <= y_max:
-                        return obj
-            return None
-
-        def compute_detour_waypoint(start, final_target):
-            blocked_zone = first_intersected_blocked_zone(start, final_target)
-            if blocked_zone is None:
-                # Fallback for circular/rectangular blockers encountered in practice.
-                vx, vy = final_target[0] - start[0], final_target[1] - start[1]
-                v_len = math.hypot(vx, vy)
-                if v_len < 1e-6:
-                    return None
-
-                ux, uy = vx / v_len, vy / v_len
-                # Perpendicular candidates (left/right) to slip around local obstacles.
-                offset = 0.9
-                candidates = [
-                    (start[0] - uy * offset, start[1] + ux * offset),
-                    (start[0] + uy * offset, start[1] - ux * offset),
-                ]
-
-                feasible = []
-                for wp in candidates:
-                    if not can_occupy(wp):
+            if blocked_by_env:
+                return False, "blocked_zone"
+            if not nav.get("ignore_agent_collision", True):
+                for other in getattr(environment, "agents", []):
+                    if other is self:
                         continue
-                    if not segment_is_clear(start, wp):
-                        continue
-                    cost = math.hypot(wp[0] - start[0], wp[1] - start[1]) + math.hypot(
-                        final_target[0] - wp[0], final_target[1] - wp[1]
-                    )
-                    feasible.append((cost, wp))
+                    if math.hypot(point[0] - other.position[0], point[1] - other.position[1]) < 0.15:
+                        return False, "agent_collision_block"
+            return True, None
 
-                if not feasible:
-                    return None
+        # Determine path freshness.
+        needs_new_path = (
+            not nav.get("active_path")
+            or nav.get("path_target") != tuple(target)
+            or nav.get("path_index", 0) >= len(nav.get("active_path", []))
+        )
 
-                feasible.sort(key=lambda item: item[0])
-                return feasible[0][1]
-
-            (x1, y1), (x2, y2) = blocked_zone["corners"]
-            x_min, x_max = min(x1, x2), max(x1, x2)
-            y_min, y_max = min(y1, y2), max(y1, y2)
-            margin = 0.35
-
-            candidate_waypoints = [
-                (x_min - margin, y_min - margin),
-                (x_min - margin, y_max + margin),
-                (x_max + margin, y_min - margin),
-                (x_max + margin, y_max + margin),
-            ]
-
-            feasible = []
-            for wp in candidate_waypoints:
-                if not can_occupy(wp):
-                    continue
-                if not segment_is_clear(start, wp):
-                    continue
-                total_cost = math.hypot(wp[0] - start[0], wp[1] - start[1]) + math.hypot(
-                    final_target[0] - wp[0], final_target[1] - wp[1]
-                )
-                feasible.append((total_cost, wp))
-
-            if not feasible:
-                return None
-
-            feasible.sort(key=lambda item: item[0])
-            return feasible[0][1]
-
-        if self.detour_target is not None:
-            if math.hypot(self.detour_target[0] - self.position[0], self.detour_target[1] - self.position[1]) <= 0.2:
-                self.detour_target = None
-
-        active_target = self.detour_target if self.detour_target is not None else target
-
-        x, y = self.position
-        tx, ty = active_target
-        dx, dy = tx - x, ty - y
-        dist = math.hypot(dx, dy)
-        self._emit_event(sim_state, "movement_started", {"origin": self.position, "destination": active_target, "distance": round(dist, 3)})
-        if not self.startup_state.get("first_movement_started"):
-            self._emit_startup_once(sim_state, "first_movement_started", "first_movement_started", {"destination": active_target, "distance": round(dist, 3)})
-        if dist < 0.01:
-            self._emit_event(sim_state, "movement_arrived", {"destination": active_target, "distance": round(dist, 3)})
+        if math.hypot(target[0] - self.position[0], target[1] - self.position[1]) < 0.01:
+            if nav.get("last_target") is not None and tuple(target) != tuple(nav.get("last_target")):
+                nav["last_blocker_category"] = "zero_distance_retarget"
+                _emit("movement_blocked", {"destination": target, "blocker_category": "zero_distance_retarget"})
+                self._emit_event(sim_state, "movement_failed", {"failure_category": "zero_distance_retarget", "path_mode": path_mode})
+            else:
+                _emit("movement_arrived", {"distance": 0.0})
+            nav["last_target"] = tuple(target)
             return
+
+        if needs_new_path:
+            if nav.get("active_path") and nav.get("path_target") is not None and tuple(target) != tuple(nav.get("path_target")):
+                self._emit_event(sim_state, "movement_abandoned", {"path_mode": path_mode, "previous_target": nav.get("path_target"), "new_target": target, "reason": "retargeted"})
+            _emit("path_planning_started", {"origin": self.position, "destination": target})
+            plan = environment.plan_path(self.position, target, mode=path_mode)
+            if plan.get("status") != "ok" or not plan.get("waypoints"):
+                blocker = plan.get("blocker_category", "unknown")
+                nav["retry_count"] = int(nav.get("retry_count", 0)) + 1
+                if nav["retry_count"] > 1:
+                    blocker = "repeated_move_retry"
+                nav["last_blocker_category"] = blocker
+                _emit("path_planning_failed", {"blocker_category": blocker})
+                _emit("movement_blocked", {"blocker_category": blocker})
+                self._emit_event(sim_state, "movement_failed", {"failure_category": blocker, "path_mode": path_mode})
+                self.activity_log.append(f"Blocked while moving toward {target} ({blocker})")
+                return
+
+            nav["active_path"] = list(plan.get("waypoints") or [])
+            nav["path_target"] = tuple(target)
+            nav["path_index"] = 0
+            nav["retry_count"] = 0
+            _emit(
+                "path_planning_succeeded",
+                {
+                    "path_length": len(nav["active_path"]),
+                    "waypoint_count": len(nav["active_path"]),
+                    "from_cache": bool(plan.get("from_cache")),
+                },
+            )
+            if plan.get("from_cache"):
+                _emit("path_cached_reused", {"path_length": len(nav["active_path"]), "waypoint_count": len(nav["active_path"])})
+
+        waypoint = nav["active_path"][nav["path_index"]]
+        dx, dy = waypoint[0] - self.position[0], waypoint[1] - self.position[1]
+        dist = math.hypot(dx, dy)
+        while dist < 0.01:
+            nav["path_index"] += 1
+            if nav["path_index"] >= len(nav["active_path"]):
+                nav["last_arrival_position"] = tuple(self.position)
+                _emit("movement_arrived", {"destination": target, "path_mode": path_mode, "path_length": len(nav["active_path"])})
+                return
+            waypoint = nav["active_path"][nav["path_index"]]
+            dx, dy = waypoint[0] - self.position[0], waypoint[1] - self.position[1]
+            dist = math.hypot(dx, dy)
+
+        _emit("movement_started", {"origin": origin, "destination": target, "path_length": len(nav.get("active_path", [])), "waypoint_index": nav.get("path_index", 0)})
+        if not self.startup_state.get("first_movement_started"):
+            self._emit_startup_once(sim_state, "first_movement_started", "first_movement_started", {"destination": target, "distance": round(dist, 3)})
 
         angle = math.atan2(dy, dx)
         self.orientation = angle
         step = min(self.speed * dt, dist)
-        new_x = x + math.cos(angle) * step
-        new_y = y + math.sin(angle) * step
+        new_x = self.position[0] + math.cos(angle) * step
+        new_y = self.position[1] + math.sin(angle) * step
+        can_move, blocker = can_occupy((new_x, new_y))
 
-        if can_occupy((new_x, new_y)):
+        if can_move:
             self.position = (new_x, new_y)
-            self._emit_event(sim_state, "movement_progress", {"destination": active_target, "remaining_distance": round(max(0.0, dist-step), 3)})
+            nav["last_position"] = tuple(self.position)
+            nav["last_target"] = tuple(target)
+            _emit("movement_progressed", {"remaining_distance": round(max(0.0, dist - step), 3), "waypoint_index": nav.get("path_index", 0)})
+            self._emit_event(sim_state, "movement_progress", {"destination": target, "remaining_distance": round(max(0.0, dist - step), 3), "path_mode": path_mode})
         else:
-            if self.detour_target is None:
-                detour = compute_detour_waypoint(self.position, target)
-                if detour is not None:
-                    self.detour_target = detour
-                    self.activity_log.append(f"Detouring around obstacle via {detour}")
-                else:
-                    self.activity_log.append(f"Blocked while moving toward {target}")
-                    self._emit_event(sim_state, "movement_blocked", {"destination": target, "blocker_category": "path_blocked"})
-                    if not self.startup_state.get("left_spawn"):
-                        self.planner_state["startup_movement_blockers"] = int(self.planner_state.get("startup_movement_blockers", 0)) + 1
-                        self._emit_event(sim_state, "first_movement_blocked", {"destination": target, "blocker_category": "path_blocked"})
-                    if self.current_inspect_target_id:
-                        self.inspect_stall_counts[self.current_inspect_target_id] = self.inspect_stall_counts.get(self.current_inspect_target_id, 0) + 1
-                        self._set_status(
-                            f"Inspect stalled for {self.current_inspect_target_id}; stall_count={self.inspect_stall_counts[self.current_inspect_target_id]}"
-                        )
-            else:
-                self.activity_log.append(f"Blocked while moving toward {active_target}")
-                self._emit_event(sim_state, "movement_blocked", {"destination": active_target, "blocker_category": "path_blocked"})
-                if not self.startup_state.get("left_spawn"):
-                    self.planner_state["startup_movement_blockers"] = int(self.planner_state.get("startup_movement_blockers", 0)) + 1
-                    self._emit_event(sim_state, "first_movement_blocked", {"destination": active_target, "blocker_category": "path_blocked"})
-                if self.current_inspect_target_id:
-                    self.inspect_stall_counts[self.current_inspect_target_id] = self.inspect_stall_counts.get(self.current_inspect_target_id, 0) + 1
+            nav["retry_count"] = int(nav.get("retry_count", 0)) + 1
+            block_cat = blocker or "unknown"
+            if nav["retry_count"] > 1:
+                block_cat = "repeated_move_retry"
+                self._emit_event(sim_state, "movement_retried", {"destination": target, "retry_count": nav["retry_count"], "blocker_category": block_cat, "path_mode": path_mode})
+            nav["last_blocker_category"] = block_cat
+            nav["active_path"] = []
+            nav["path_index"] = 0
+            _emit("movement_blocked", {"destination": target, "blocker_category": block_cat, "waypoint": waypoint})
+            self._emit_event(sim_state, "movement_failed", {"failure_category": block_cat, "path_mode": path_mode})
+            if not self.startup_state.get("left_spawn"):
+                self.planner_state["startup_movement_blockers"] = int(self.planner_state.get("startup_movement_blockers", 0)) + 1
+                self._emit_event(sim_state, "first_movement_blocked", {"destination": target, "blocker_category": block_cat})
+            if self.current_inspect_target_id:
+                self.inspect_stall_counts[self.current_inspect_target_id] = self.inspect_stall_counts.get(self.current_inspect_target_id, 0) + 1
 
         self.heart_rate += 1
 

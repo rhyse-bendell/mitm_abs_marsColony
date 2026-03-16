@@ -48,6 +48,11 @@ FAILURE_CATEGORIES = {
     "target_resolution_failed",
     "movement_not_started",
     "movement_blocked",
+    "no_path_found",
+    "target_unreachable",
+    "blocked_zone",
+    "agent_collision_block",
+    "arrival_without_progress",
     "execution_not_attempted",
     "unknown",
 }
@@ -370,8 +375,17 @@ class RuntimeWitnessAudit:
             for tid in self.targets:
                 self._block_target(tid, "target_resolution_failed", payload)
         elif event_type == "movement_blocked":
+            blocker = str(payload.get("blocker_category") or "movement_blocked")
+            mapping = {
+                "no_path_found": "no_path_found",
+                "target_unreachable": "target_unreachable",
+                "blocked_zone": "blocked_zone",
+                "agent_collision_block": "agent_collision_block",
+                "arrival_without_progress": "arrival_without_progress",
+            }
+            failure = mapping.get(blocker, "movement_blocked")
             for tid in self.targets:
-                self._block_target(tid, "movement_blocked", payload)
+                self._block_target(tid, failure, payload)
         elif event_type == "plan_invalidated":
             for tid in self.targets:
                 self._block_target(tid, "plan_invalidated", payload, step_hint="plan_method_grounded")

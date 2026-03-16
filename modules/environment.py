@@ -1,6 +1,7 @@
 # File: modules/environment.py
 
 import math
+import heapq
 from modules.construction import ConstructionManager
 from modules.task_model import TaskModel
 
@@ -230,6 +231,156 @@ class Environment:
             self.knowledge_packets = init_dik_packets()
         self.interaction_targets = _targets_from_task_model(task_model) if task_model and task_model.interaction_targets else INTERACTION_TARGETS
         self._time = 0.0
+        self._path_cache = {}
+
+    @staticmethod
+    def _quantize_point(point, step=0.2):
+        return (round(float(point[0]) / step) * step, round(float(point[1]) / step) * step)
+
+    @staticmethod
+    def _heuristic(a, b):
+        return math.hypot(a[0] - b[0], a[1] - b[1])
+
+    @staticmethod
+    def _reconstruct_path(came_from, node):
+        out = [node]
+        while node in came_from:
+            node = came_from[node]
+            out.append(node)
+        out.reverse()
+        return out
+
+    def _neighbor_points(self, point, step=0.2):
+        x, y = point
+        deltas = [
+            (-step, 0.0),
+            (step, 0.0),
+            (0.0, -step),
+            (0.0, step),
+            (-step, -step),
+            (-step, step),
+            (step, -step),
+            (step, step),
+        ]
+        (x_min, x_max), (y_min, y_max) = self.get_viewport_bounds(margin=0.0)
+        out = []
+        for dx, dy in deltas:
+            nx = round(x + dx, 3)
+            ny = round(y + dy, 3)
+            if nx < x_min or nx > x_max or ny < y_min or ny > y_max:
+                continue
+            out.append((nx, ny))
+        return out
+
+    def plan_path(self, start, target, mode="grid_astar", grid_step=0.35):
+        start = (float(start[0]), float(start[1]))
+        target = (float(target[0]), float(target[1]))
+        if mode != "grid_astar":
+            if self._segment_is_navigable(start, target):
+                return {
+                    "status": "ok",
+                    "waypoints": [target],
+                    "from_cache": False,
+                    "path_mode": mode,
+                    "blocker_category": None,
+                }
+            return {
+                "status": "failed",
+                "waypoints": [],
+                "from_cache": False,
+                "path_mode": mode,
+                "blocker_category": "no_path_found",
+            }
+
+        q_start = self._quantize_point(start, step=grid_step)
+        q_target = self._quantize_point(target, step=grid_step)
+
+        if not self.is_point_navigable(q_target):
+            return {
+                "status": "failed",
+                "waypoints": [],
+                "from_cache": False,
+                "path_mode": mode,
+                "blocker_category": "target_unreachable",
+            }
+
+        cache_key = (q_start, q_target, float(grid_step), mode)
+        cached = self._path_cache.get(cache_key)
+        if cached:
+            return {
+                "status": "ok",
+                "waypoints": list(cached),
+                "from_cache": True,
+                "path_mode": mode,
+                "blocker_category": None,
+            }
+
+        if self._segment_is_navigable(q_start, q_target):
+            path = [q_target]
+            if self._heuristic(q_target, target) > 1e-6:
+                path.append(target)
+            self._path_cache[cache_key] = list(path)
+            return {
+                "status": "ok",
+                "waypoints": path,
+                "from_cache": False,
+                "path_mode": mode,
+                "blocker_category": None,
+            }
+
+        open_heap = []
+        heapq.heappush(open_heap, (0.0, q_start))
+        came_from = {}
+        g_score = {q_start: 0.0}
+        closed = set()
+        max_nodes = 6000
+
+        while open_heap and len(closed) < max_nodes:
+            _, current = heapq.heappop(open_heap)
+            if current in closed:
+                continue
+            closed.add(current)
+            if self._heuristic(current, q_target) <= (grid_step * 0.75):
+                path = self._reconstruct_path(came_from, current)
+                path[-1] = q_target
+                if self._heuristic(path[-1], target) > 1e-6:
+                    path.append(target)
+                if path and self._heuristic(path[0], start) <= (grid_step * 0.75):
+                    path = path[1:]
+                if path:
+                    self._path_cache[cache_key] = list(path)
+                    return {
+                        "status": "ok",
+                        "waypoints": path,
+                        "from_cache": False,
+                        "path_mode": mode,
+                        "blocker_category": None,
+                    }
+                break
+
+            for neighbor in self._neighbor_points(current, step=grid_step):
+                if neighbor in closed:
+                    continue
+                if not self.is_point_navigable(neighbor):
+                    continue
+                if not self._segment_is_navigable(current, neighbor, samples=3):
+                    continue
+                step_cost = self._heuristic(current, neighbor)
+                tentative_g = g_score[current] + step_cost
+                if tentative_g >= g_score.get(neighbor, float("inf")):
+                    continue
+                came_from[neighbor] = current
+                g_score[neighbor] = tentative_g
+                f_score = tentative_g + self._heuristic(neighbor, q_target)
+                heapq.heappush(open_heap, (f_score, neighbor))
+
+        return {
+            "status": "failed",
+            "waypoints": [],
+            "from_cache": False,
+            "path_mode": mode,
+            "blocker_category": "no_path_found",
+        }
 
     def _zone_corners(self, zone_name):
         zone = self.zones.get(zone_name, {})
