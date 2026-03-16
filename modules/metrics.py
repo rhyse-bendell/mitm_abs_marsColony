@@ -665,6 +665,17 @@ class MetricsCollector:
                             "readiness_not_unlocked_after_inspect_success", 0
                         )
                     ),
+                    "inspect_success_no_new_dik_count": int(self.events_by_type.get("inspect_success_no_new_dik", 0)),
+                    "inspect_success_derivation_triggered_count": int(self.events_by_type.get("inspect_success_derivation_triggered", 0)),
+                    "inspect_success_rule_adopted_count": int(self.events_by_type.get("inspect_success_rule_adopted", 0)),
+                    "inspect_success_readiness_changed_count": int(self.events_by_type.get("inspect_success_readiness_changed", 0)),
+                    "inspect_success_no_readiness_change_count": int(self.events_by_type.get("inspect_success_no_readiness_change", 0)),
+                    "post_inspect_reinspect_count": int(self.events_by_type.get("post_inspect_reinspect_selected", 0)),
+                    "post_inspect_productive_action_count": int(self.events_by_type.get("post_inspect_action_selected", 0)),
+                    "post_inspect_blocker_distribution": {
+                        reason: int(count)
+                        for reason, count in self.reason_distributions.get("inspect_post_handoff_classified", {}).items()
+                    },
                 },
                 "startup_progression": {
                     "agents_left_spawn_count": int(sum(1 for moved in moved_map.values() if moved)),
