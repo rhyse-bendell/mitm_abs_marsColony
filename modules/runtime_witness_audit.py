@@ -25,7 +25,10 @@ WITNESS_STEP_TAXONOMY = {
 
 FAILURE_CATEGORIES = {
     "source_not_accessed",
+    "inspect_not_started",
     "inspect_not_completed",
+    "inspect_completed_dik_not_acquired",
+    "dik_acquired_readiness_not_unlocked",
     "data_not_acquired",
     "derivation_not_triggered",
     "derivation_failed",
@@ -183,6 +186,17 @@ class RuntimeWitnessAudit:
             },
         )
 
+    def _mark_step_in_progress(self, target_id: str, step_index: int, payload: Dict[str, object]):
+        target = self.targets[target_id]
+        step: WitnessStepRuntime = target["ordered_witness_steps"][step_index]
+        if step.status in {"completed", "blocked", "in_progress"}:
+            return
+        step.status = "in_progress"
+        target["status"] = "in_progress"
+        if target.get("started_time") is None:
+            target["started_time"] = float(self.simulation.time)
+        target["agents_involved"].add(payload.get("agent"))
+
         if all(s.status == "completed" for s in target["ordered_witness_steps"]):
             target["status"] = "completed"
             target["completed_time"] = float(self.simulation.time)
@@ -248,6 +262,35 @@ class RuntimeWitnessAudit:
                 for prefix in ("acquire_data", "acquire_information"):
                     for tid, idx in self._raw_index.get(f"{prefix}:{element_id}", []):
                         self._complete_step(tid, idx, payload)
+
+        elif event_type == "inspect_started":
+            source_id = payload.get("source_id")
+            if source_id:
+                for tid, idx in self._raw_index.get(f"source_access:{source_id}", []):
+                    self._mark_step_in_progress(tid, idx, payload)
+
+        elif event_type == "inspect_progressed":
+            source_id = payload.get("source_id")
+            stage = payload.get("stage")
+            if source_id and stage in {"target_reached", "inspection_started"}:
+                for tid, idx in self._raw_index.get(f"source_access:{source_id}", []):
+                    self._mark_step_in_progress(tid, idx, payload)
+
+        elif event_type == "inspect_completion_failed":
+            reason = str(payload.get("failure_category") or "inspect_not_completed")
+            category = "inspect_completed_dik_not_acquired" if reason == "partial_packet_uptake" else "inspect_not_completed"
+            for tid in self.targets:
+                self._block_target(tid, category, payload, step_hint="source_access")
+
+        elif event_type == "inspect_completion_blocked":
+            reason = str(payload.get("failure_category") or "inspect_not_completed")
+            category = "inspect_not_completed"
+            if reason == "readiness_not_unlocked_after_inspect_success":
+                category = "dik_acquired_readiness_not_unlocked"
+            elif reason in {"target_resolution_failed", "source_reached_inspect_not_started"}:
+                category = "inspect_not_started"
+            for tid in self.targets:
+                self._block_target(tid, category, payload, step_hint="source_access")
 
         elif event_type == "dik_derivation_executed":
             did = payload.get("derivation_id")
