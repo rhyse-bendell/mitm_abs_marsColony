@@ -562,6 +562,10 @@ class MetricsCollector:
         structure_summary = self._structure_summary()
         team_knowledge_summary = self._team_knowledge_summary()
         planner_states = [getattr(agent, "planner_state", {}) for agent in self.simulation.agents]
+        witness_result = getattr(self.simulation, "runtime_witness_audit_result", None) or {}
+        witness_summary = dict(witness_result.get("summary", {}))
+        witness_artifact_path = witness_result.get("artifact_path")
+
         avg_consecutive_failure_streak = 0.0
         streak_samples = sum(int(s.get("consecutive_failure_samples", 0) or 0) for s in planner_states)
         if streak_samples:
@@ -644,6 +648,7 @@ class MetricsCollector:
                 "repair_or_correction_episodes": self.events_by_type["construction_repair_episode"],
                 "team_knowledge": team_knowledge_summary,
                 "planner_responsiveness": planner_responsiveness,
+                "runtime_witness_coverage": witness_summary,
                 "startup_progression": {
                     "agents_left_spawn_count": int(sum(1 for moved in moved_map.values() if moved)),
                     "left_spawn_by_agent": moved_map,
@@ -702,6 +707,7 @@ class MetricsCollector:
             "end_state": {
                 "sim_time": round(self.simulation.time, 3),
                 "team_artifact_count": len(self.simulation.team_knowledge_manager.artifacts),
+                "runtime_witness_audit_artifact": witness_artifact_path,
             },
         }
 
@@ -740,6 +746,7 @@ class MetricsCollector:
             "events": dict(self.events_by_type),
             "breakdown_metrics": {k: dict(v) for k, v in self.breakdown_counts.items()},
             "reason_top_n": {k: self._top_reasons(v) for k, v in self.reason_distributions.items() if v},
+            "runtime_witness_coverage": witness_summary,
             "backend": {
                 "configured_brain_backend": run_summary["run_metadata"].get("configured_brain_backend"),
                 "effective_brain_backend": run_summary["run_metadata"].get("effective_brain_backend"),

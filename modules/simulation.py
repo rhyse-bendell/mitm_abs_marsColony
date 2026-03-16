@@ -8,6 +8,7 @@ from modules.brain_provider import BrainBackendConfig, create_brain_provider
 from modules.environment import Environment
 from modules.logging_tools import SimulationLogger
 from modules.metrics import MetricsCollector
+from modules.runtime_witness_audit import RuntimeWitnessAudit
 from modules.team_knowledge import TeamKnowledgeManager
 from modules.construct_mapping import ConstructMapper
 from modules.task_model import load_task_model
@@ -262,7 +263,9 @@ class SimulationState:
             self.agents.append(agent)
 
         self.environment.agents = self.agents
+        self.runtime_witness_audit = RuntimeWitnessAudit(self)
         self.metrics = MetricsCollector(self)
+        self.logger.register_event_listener(self.runtime_witness_audit.on_event)
         self.logger.register_event_listener(self.metrics.on_event)
         self.logger.initialize_session_outputs(
             speed=speed,
@@ -505,6 +508,7 @@ class SimulationState:
             self._last_save_time = self.time
 
     def stop(self):
+        self.runtime_witness_audit_result = self.runtime_witness_audit.finalize()
         self.metrics.finalize()
         self.logger.update_session_manifest(extra_metadata=self._backend_settings_for_manifest())
         self.logger.save_csv()

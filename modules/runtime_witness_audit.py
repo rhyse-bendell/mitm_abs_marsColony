@@ -1,0 +1,435 @@
+from __future__ import annotations
+
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+import json
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+from modules.task_validation import TaskValidator
+
+
+WITNESS_STEP_TAXONOMY = {
+    "source_access",
+    "data_acquisition",
+    "information_derivation",
+    "knowledge_derivation",
+    "rule_adoption",
+    "communication_or_integration",
+    "artifact_consultation",
+    "readiness_unlock",
+    "plan_method_grounded",
+    "executable_action_attempted",
+    "executable_action_completed",
+}
+
+FAILURE_CATEGORIES = {
+    "source_not_accessed",
+    "inspect_not_completed",
+    "data_not_acquired",
+    "derivation_not_triggered",
+    "derivation_failed",
+    "rule_not_adopted",
+    "communication_not_performed",
+    "team_integration_missing",
+    "readiness_not_unlocked",
+    "plan_invalidated",
+    "action_translation_failed",
+    "target_resolution_failed",
+    "movement_not_started",
+    "movement_blocked",
+    "execution_not_attempted",
+    "unknown",
+}
+
+
+@dataclass
+class WitnessStepRuntime:
+    raw_step: str
+    step_type: str
+    status: str = "pending"
+    completed_time: Optional[float] = None
+    blocked_time: Optional[float] = None
+    completed_by: Optional[str] = None
+    blocked_by: Optional[str] = None
+    details: Optional[Dict[str, object]] = None
+
+
+class RuntimeWitnessAudit:
+    def __init__(self, simulation):
+        self.simulation = simulation
+        report = TaskValidator().validate(simulation.task_model)
+        self.constructive_witnesses = dict(report.constructive_witnesses)
+        self.targets: Dict[str, Dict[str, object]] = {}
+        self._raw_index: Dict[str, List[Tuple[str, int]]] = defaultdict(list)
+        self._step_type_index: Dict[str, List[Tuple[str, int]]] = defaultdict(list)
+        self._event_guard = False
+        self._build_critical_targets()
+
+    def _build_critical_targets(self):
+        critical_goals = {
+            g.goal_id
+            for g in self.simulation.task_model.goals.values()
+            if g.enabled and str(g.goal_level).strip().lower() in {"mission", "phase"}
+        }
+        critical_rules = {
+            rid
+            for gid in critical_goals
+            for rid in (self.simulation.task_model.goals.get(gid).prerequisite_rules if self.simulation.task_model.goals.get(gid) else [])
+        }
+        critical_methods = {
+            m.method_id
+            for m in self.simulation.task_model.plan_methods.values()
+            if m.enabled and m.goal_id in critical_goals
+        }
+
+        critical_targets = [
+            *(f"goal:{gid}" for gid in sorted(critical_goals)),
+            *(f"rule:{rid}" for rid in sorted(critical_rules)),
+            *(f"method:{mid}" for mid in sorted(critical_methods)),
+        ]
+
+        for target_id in critical_targets:
+            witness = self.constructive_witnesses.get(target_id, {})
+            if not witness.get("constructively_witnessed"):
+                continue
+            ordered_steps = []
+            for idx, raw in enumerate(witness.get("ordered_path", [])):
+                stype = self._normalize_step(raw)
+                step = WitnessStepRuntime(raw_step=raw, step_type=stype)
+                ordered_steps.append(step)
+                self._raw_index[raw].append((target_id, idx))
+                self._step_type_index[stype].append((target_id, idx))
+
+            self.targets[target_id] = {
+                "target_id": target_id,
+                "target_type": target_id.split(":", 1)[0],
+                "witness_exists_in_validator": True,
+                "witness_type": witness.get("witness_type"),
+                "validator_summary": {
+                    "closure_reachable": witness.get("closure_reachable"),
+                    "constructively_witnessed": witness.get("constructively_witnessed"),
+                    "ordered_path": list(witness.get("ordered_path", [])),
+                    "blockers": list(witness.get("blockers", [])),
+                    "phase_scope": witness.get("phase_scope"),
+                    "communication_required": witness.get("communication_required", False),
+                },
+                "ordered_witness_steps": ordered_steps,
+                "status": "never_entered",
+                "first_failure_step": None,
+                "failure_category": None,
+                "agents_involved": set(),
+                "phase_context": set(),
+                "started_time": None,
+                "completed_time": None,
+            }
+
+    @staticmethod
+    def _normalize_step(raw_step: str) -> str:
+        raw = str(raw_step or "")
+        if raw.startswith("source_access:"):
+            return "source_access"
+        if raw.startswith("acquire_data:") or raw.startswith("acquire_information:"):
+            return "data_acquisition"
+        if raw.startswith("derive:"):
+            return "information_derivation"
+        if raw.startswith("derive_rule:"):
+            return "knowledge_derivation"
+        if raw.startswith("communicate_integrate:"):
+            return "communication_or_integration"
+        if raw.startswith("ground_goal:"):
+            return "readiness_unlock"
+        if raw.startswith("ground_plan_method:"):
+            return "plan_method_grounded"
+        return "unknown"
+
+    def _emit_witness_event(self, event_type: str, payload: Dict[str, object]):
+        if self._event_guard:
+            return
+        self._event_guard = True
+        try:
+            self.simulation.logger.log_event(self.simulation.time, event_type, payload)
+        finally:
+            self._event_guard = False
+
+    def _complete_step(self, target_id: str, step_index: int, payload: Dict[str, object]):
+        target = self.targets[target_id]
+        step: WitnessStepRuntime = target["ordered_witness_steps"][step_index]
+        if step.status == "completed":
+            return
+
+        if target["status"] == "never_entered":
+            target["status"] = "in_progress"
+            target["started_time"] = self.simulation.time
+            self._emit_witness_event("witness_path_started", {"witness_id": target_id, "target_id": target_id, "step_type": step.step_type})
+
+        step.status = "completed"
+        step.completed_time = float(self.simulation.time)
+        step.completed_by = payload.get("agent")
+        step.details = dict(payload)
+        if payload.get("agent"):
+            target["agents_involved"].add(payload.get("agent"))
+        phase = (self.simulation.environment.get_current_phase() or {}).get("name")
+        if phase:
+            target["phase_context"].add(phase)
+        self._emit_witness_event(
+            "witness_step_completed",
+            {
+                "witness_id": target_id,
+                "target_id": target_id,
+                "agent": payload.get("agent"),
+                "step_type": step.step_type,
+                "raw_step": step.raw_step,
+            },
+        )
+
+        if all(s.status == "completed" for s in target["ordered_witness_steps"]):
+            target["status"] = "completed"
+            target["completed_time"] = float(self.simulation.time)
+            self._emit_witness_event("witness_path_completed", {"witness_id": target_id, "target_id": target_id, "agent": payload.get("agent")})
+
+    def _block_target(self, target_id: str, failure_category: str, payload: Dict[str, object], step_hint: Optional[str] = None):
+        target = self.targets[target_id]
+        if target.get("failure_category"):
+            return
+        next_step = None
+        for idx, step in enumerate(target["ordered_witness_steps"]):
+            if step.status != "completed":
+                next_step = (idx, step)
+                break
+        if next_step is None:
+            return
+        idx, step = next_step
+        if step_hint and step.step_type != step_hint:
+            return
+        step.status = "blocked"
+        step.blocked_time = float(self.simulation.time)
+        step.blocked_by = payload.get("agent")
+        target["status"] = "failed"
+        target["failure_category"] = failure_category if failure_category in FAILURE_CATEGORIES else "unknown"
+        target["first_failure_step"] = {
+            "index": idx,
+            "raw_step": step.raw_step,
+            "step_type": step.step_type,
+            "time": float(self.simulation.time),
+        }
+        self._emit_witness_event(
+            "witness_step_blocked",
+            {
+                "witness_id": target_id,
+                "target_id": target_id,
+                "agent": payload.get("agent"),
+                "step_type": step.step_type,
+                "failure_category": target["failure_category"],
+            },
+        )
+        self._emit_witness_event(
+            "witness_path_failed",
+            {
+                "witness_id": target_id,
+                "target_id": target_id,
+                "agent": payload.get("agent"),
+                "failure_category": target["failure_category"],
+            },
+        )
+
+    def on_event(self, event: Dict[str, object]):
+        event_type = event.get("event_type")
+        payload = dict(event.get("payload_data") or {})
+        if not event_type or str(event_type).startswith("witness_"):
+            return
+
+        if event_type == "source_access_succeeded":
+            source_id = payload.get("source_id")
+            if source_id:
+                for tid, idx in self._raw_index.get(f"source_access:{source_id}", []):
+                    self._complete_step(tid, idx, payload)
+            for element_id in payload.get("new_data_ids", []) + payload.get("new_information_ids", []):
+                for prefix in ("acquire_data", "acquire_information"):
+                    for tid, idx in self._raw_index.get(f"{prefix}:{element_id}", []):
+                        self._complete_step(tid, idx, payload)
+
+        elif event_type == "dik_derivation_executed":
+            did = payload.get("derivation_id")
+            out = payload.get("output_element_id")
+            if did:
+                for tid, idx in self._raw_index.get(f"derive:{did}", []):
+                    self._complete_step(tid, idx, payload)
+            if out:
+                for tid, idx in self._raw_index.get(f"derive_rule:{out}", []):
+                    self._complete_step(tid, idx, payload)
+
+        elif event_type == "rule_adopted":
+            rule_id = payload.get("rule_id")
+            if rule_id:
+                for tid, idx in self._raw_index.get(f"derive_rule:{rule_id}", []):
+                    self._complete_step(tid, idx, payload)
+
+        elif event_type == "communication_exchange":
+            for tid, idx in self._step_type_index.get("communication_or_integration", []):
+                self._complete_step(tid, idx, payload)
+
+        elif event_type == "artifact_consulted":
+            for tid, idx in self._step_type_index.get("artifact_consultation", []):
+                self._complete_step(tid, idx, payload)
+
+        elif event_type == "plan_method_grounding_result":
+            method_id = payload.get("plan_method_id")
+            status = str(payload.get("plan_method_status") or "")
+            if method_id and status not in {"rejected_unknown_method", "rejected_not_grounded", ""}:
+                for tid, idx in self._raw_index.get(f"ground_plan_method:{method_id}", []):
+                    self._complete_step(tid, idx, payload)
+
+        elif event_type == "execution_readiness_passed":
+            goal_id = payload.get("goal_id")
+            if goal_id:
+                for tid, idx in self._raw_index.get(f"ground_goal:{goal_id}", []):
+                    self._complete_step(tid, idx, payload)
+
+        elif event_type == "executable_action_attempted":
+            for tid, idx in self._step_type_index.get("executable_action_attempted", []):
+                self._complete_step(tid, idx, payload)
+
+        elif event_type == "executable_action_completed":
+            for tid, idx in self._step_type_index.get("executable_action_completed", []):
+                self._complete_step(tid, idx, payload)
+
+        elif event_type == "source_inspection_blocked":
+            for tid in self.targets:
+                self._block_target(tid, "inspect_not_completed", payload, step_hint="source_access")
+        elif event_type == "action_translation_failed":
+            for tid in self.targets:
+                self._block_target(tid, "action_translation_failed", payload)
+        elif event_type == "target_resolution_failed":
+            for tid in self.targets:
+                self._block_target(tid, "target_resolution_failed", payload)
+        elif event_type == "movement_blocked":
+            for tid in self.targets:
+                self._block_target(tid, "movement_blocked", payload)
+        elif event_type == "plan_invalidated":
+            for tid in self.targets:
+                self._block_target(tid, "plan_invalidated", payload, step_hint="plan_method_grounded")
+        elif event_type == "execution_readiness_failed":
+            for tid in self.targets:
+                self._block_target(tid, "readiness_not_unlocked", payload, step_hint="readiness_unlock")
+
+    @staticmethod
+    def _default_failure_for_step(step_type: str) -> str:
+        mapping = {
+            "source_access": "source_not_accessed",
+            "data_acquisition": "data_not_acquired",
+            "information_derivation": "derivation_not_triggered",
+            "knowledge_derivation": "rule_not_adopted",
+            "rule_adoption": "rule_not_adopted",
+            "communication_or_integration": "communication_not_performed",
+            "artifact_consultation": "inspect_not_completed",
+            "readiness_unlock": "readiness_not_unlocked",
+            "plan_method_grounded": "plan_invalidated",
+            "executable_action_attempted": "execution_not_attempted",
+            "executable_action_completed": "execution_not_attempted",
+        }
+        return mapping.get(step_type, "unknown")
+
+    def finalize(self) -> Dict[str, object]:
+        failure_counts = Counter()
+        completed_by_type = Counter()
+        coverage_fracs: List[float] = []
+        partial = 0
+        zero = 0
+        started = 0
+        completed = 0
+        failed = 0
+
+        audit_rows = []
+        for target_id, target in sorted(self.targets.items()):
+            steps: List[WitnessStepRuntime] = target["ordered_witness_steps"]
+            done = sum(1 for s in steps if s.status == "completed")
+            frac = (done / len(steps)) if steps else 0.0
+            coverage_fracs.append(frac)
+            if done > 0:
+                started += 1
+            else:
+                zero += 1
+            if 0 < done < len(steps):
+                partial += 1
+            if target["status"] == "completed":
+                completed += 1
+                completed_by_type[target["target_type"]] += 1
+            elif target["status"] == "failed":
+                failed += 1
+            elif done > 0:
+                target["status"] = "partial"
+            else:
+                target["status"] = "never_entered"
+
+            if not target.get("failure_category") and target["status"] != "completed":
+                next_step = next((s for s in steps if s.status != "completed"), None)
+                if next_step is not None:
+                    target["failure_category"] = self._default_failure_for_step(next_step.step_type)
+                    target["first_failure_step"] = {
+                        "raw_step": next_step.raw_step,
+                        "step_type": next_step.step_type,
+                    }
+            if target.get("failure_category"):
+                failure_counts[target["failure_category"]] += 1
+
+            audit_rows.append(
+                {
+                    "target_id": target_id,
+                    "target_type": target["target_type"],
+                    "witness_exists_in_validator": target["witness_exists_in_validator"],
+                    "witness_type": target.get("witness_type"),
+                    "validator_summary": target.get("validator_summary"),
+                    "status": target["status"],
+                    "coverage_fraction": round(frac, 4),
+                    "runtime_completed_steps": [s.raw_step for s in steps if s.status == "completed"],
+                    "runtime_uncovered_steps": [s.raw_step for s in steps if s.status != "completed"],
+                    "first_failure_step": target.get("first_failure_step"),
+                    "failure_category": target.get("failure_category"),
+                    "agents_involved": sorted(target["agents_involved"]),
+                    "phase_context": sorted(target["phase_context"]),
+                    "ordered_witness_steps": [
+                        {
+                            "raw_step": s.raw_step,
+                            "step_type": s.step_type,
+                            "status": s.status,
+                            "completed_time": s.completed_time,
+                            "blocked_time": s.blocked_time,
+                            "completed_by": s.completed_by,
+                            "blocked_by": s.blocked_by,
+                        }
+                        for s in steps
+                    ],
+                }
+            )
+
+        summary = {
+            "critical_witness_targets_total": len(self.targets),
+            "critical_witness_targets_started": started,
+            "critical_witness_targets_completed": completed,
+            "critical_witness_targets_failed": failed,
+            "witness_step_failures_by_category": dict(failure_counts),
+            "runtime_witness_partial_count": partial,
+            "runtime_witness_zero_progress_count": zero,
+            "rule_witnesses_completed": completed_by_type.get("rule", 0),
+            "goal_witnesses_completed": completed_by_type.get("goal", 0),
+            "method_witnesses_completed": completed_by_type.get("method", 0),
+            "average_witness_coverage_fraction": round(sum(coverage_fracs) / max(1, len(coverage_fracs)), 4),
+            "top_witness_failure_categories": [
+                {"category": k, "count": v} for k, v in failure_counts.most_common(5)
+            ],
+            "witness_step_taxonomy": sorted(WITNESS_STEP_TAXONOMY),
+        }
+
+        out = {
+            "task_id": self.simulation.task_model.task_id,
+            "step_taxonomy": sorted(WITNESS_STEP_TAXONOMY),
+            "failure_categories": sorted(FAILURE_CATEGORIES),
+            "critical_targets": audit_rows,
+            "summary": summary,
+        }
+        path = Path(self.simulation.logger.output_session.measures_dir) / "runtime_witness_coverage.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(out, indent=2), encoding="utf-8")
+        self._emit_witness_event("runtime_witness_audit_saved", {"path": str(path), "target_count": len(audit_rows)})
+        return {"artifact_path": str(path), "summary": summary}
