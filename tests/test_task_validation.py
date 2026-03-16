@@ -16,8 +16,11 @@ class TaskValidationTests(unittest.TestCase):
             self.assertTrue((Path(temp_dir) / "task_validation_report.json").exists())
             self.assertTrue((Path(temp_dir) / "task_validation_report.md").exists())
             self.assertTrue((Path(temp_dir) / "dik_derivation_edges.csv").exists())
+            self.assertTrue((Path(temp_dir) / "constructive_witness_report.json").exists())
+            self.assertTrue((Path(temp_dir) / "constructive_witness_report.md").exists())
             self.assertIsInstance(report.unreachable_dik, list)
             self.assertIsInstance(report.unreachable_rules, list)
+            self.assertIsInstance(report.constructive_witnesses, dict)
         finally:
             shutil.rmtree(temp_dir)
 
@@ -86,6 +89,73 @@ class TaskValidationTests(unittest.TestCase):
         report = validate_task_model(model)
         self.assertIsInstance(report.unsatisfied_goals, list)
         self.assertIsInstance(report.unsatisfied_plan_methods, list)
+
+    def test_constructive_witness_success_fixture(self):
+        model = load_task_model("mars_colony")
+        report = validate_task_model(model)
+        witness = report.constructive_witnesses["rule:R_MISSION_MAXIMIZE_SURVIVAL"]
+        self.assertTrue(witness["closure_reachable"])
+        self.assertTrue(witness["constructively_witnessed"])
+        self.assertIn("derive_rule:R_MISSION_MAXIMIZE_SURVIVAL", witness["ordered_path"])
+
+    def test_constructive_witness_failure_when_phase_mismatch(self):
+        temp_root = Path(tempfile.mkdtemp(prefix="task_validate_phase_break_"))
+        try:
+            task_dir = temp_root / "broken_phase_task"
+            task_dir.mkdir(parents=True, exist_ok=True)
+            src = Path("config/tasks/mars_colony")
+            for _, fname in REQUIRED_TASK_FILES.items():
+                shutil.copy(src / fname, task_dir / fname)
+
+            rows = []
+            with (task_dir / "dik_elements.csv").open("r", encoding="utf-8", newline="") as f:
+                rows = list(csv.DictReader(f))
+            for row in rows:
+                if row["element_id"] == "K_PHASE1_SUPPORT_TARGET":
+                    row["phase_scope"] = "phase2"
+            with (task_dir / "dik_elements.csv").open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+
+            report = run_task_validation("broken_phase_task", config_root=temp_root)
+            witness = report.constructive_witnesses["rule:R_PHASE1_TARGET"]
+            self.assertTrue(witness["closure_reachable"])
+            self.assertFalse(witness["constructively_witnessed"])
+            self.assertTrue(any("phase_mismatch" in b for b in witness["blockers"]))
+        finally:
+            shutil.rmtree(temp_root)
+
+    def test_team_only_witness_detection(self):
+        model = load_task_model("mars_colony")
+        report = validate_task_model(model)
+        team_only = [
+            key for key, witness in report.constructive_witnesses.items()
+            if key.startswith("rule:") and witness.get("witness_type") == "team-only"
+        ]
+        self.assertGreater(len(team_only), 0)
+
+    def test_phase_constrained_witness_detection(self):
+        model = load_task_model("mars_colony")
+        report = validate_task_model(model)
+        witness = report.constructive_witnesses["goal:G_PHASE1_SUPPORT_50_CIV"]
+        self.assertTrue(witness["phase_constrained"])
+        self.assertEqual(witness["phase_scope"], "phase1")
+
+    def test_mars_critical_witness_generation_sanity(self):
+        model = load_task_model("mars_colony")
+        report = validate_task_model(model)
+        critical_targets = [
+            "rule:R_MISSION_MAXIMIZE_SURVIVAL",
+            "goal:G_MISSION_SURVIVAL",
+            "goal:G_PHASE1_SUPPORT_50_CIV",
+            "goal:G_PHASE2_SUPPORT_40_CIV_20_VIP",
+            "method:PM_VALIDATE_COLONY_PHASE1",
+            "method:PM_ADAPT_COLONY_FOR_PHASE2",
+        ]
+        for target in critical_targets:
+            self.assertIn(target, report.constructive_witnesses)
+            self.assertTrue(report.constructive_witnesses[target]["closure_reachable"])
 
 
 if __name__ == "__main__":
