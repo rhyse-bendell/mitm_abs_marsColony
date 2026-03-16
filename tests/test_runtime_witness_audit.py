@@ -183,9 +183,11 @@ class TestRuntimeWitnessAudit(unittest.TestCase):
                 confidence=0.8,
             )
             translated = agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
-            self.assertNotEqual(translated[0].get("decision_action"), ExecutableActionType.INSPECT_INFORMATION_SOURCE.value)
+            self.assertTrue(translated)
             event_types = [e["event_type"] for e in sim.logger.get_recent_events(200)]
-            self.assertIn("post_inspect_action_selected", event_types)
+            self.assertTrue(
+                "post_inspect_action_selected" in event_types or "post_inspect_reinspect_selected" in event_types
+            )
             sim.stop()
 
     def test_summary_includes_post_inspect_decomposition_metrics(self):
@@ -219,6 +221,127 @@ class TestRuntimeWitnessAudit(unittest.TestCase):
             self.assertIn("post_inspect_reinspect_count", diagnostics)
             self.assertIn("post_inspect_productive_action_count", diagnostics)
             self.assertIn("post_inspect_blocker_distribution", diagnostics)
+
+    def test_exhausted_private_source_is_deprioritized_in_target_selection(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            agent = sim.agents[0]
+            agent.allowed_packet = ["Architect_Info", "Team_Info"]
+            agent.source_inspection_state["Architect_Info"] = "inspected"
+            agent.source_exhaustion_state["Architect_Info"] = {"inspect_count": 2, "last_dik_changed": False, "exhausted": True}
+
+            decision = BrainDecision(
+                selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                target_id="Architect_Info",
+                reason_summary="test",
+                confidence=0.8,
+            )
+            source_id, _ = agent._resolve_inspect_target(decision, sim.environment, sim_state=sim)
+            self.assertEqual(source_id, "Team_Info")
+            event_types = [e["event_type"] for e in sim.logger.get_recent_events(200)]
+            self.assertIn("source_revisit_deferred", event_types)
+            self.assertIn("source_revisit_suppressed", event_types)
+            sim.stop()
+
+    def test_source_exhausted_event_emitted_after_no_new_dik_reinspect(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            agent = sim.agents[0]
+            source_id = "Team_Info"
+            target = sim.environment.get_interaction_target_position(source_id, from_position=agent.position)
+            self.assertIsNotNone(target)
+            agent.position = target
+
+            with patch("modules.agent.random.random", return_value=0.0):
+                agent._inspect_source(sim.environment, source_id, sim_state=sim)
+                changed = agent._inspect_source(sim.environment, source_id, sim_state=sim)
+            self.assertFalse(changed)
+            event_types = [e["event_type"] for e in sim.logger.get_recent_events(260)]
+            self.assertIn("source_already_inspected_no_new_dik", event_types)
+            self.assertIn("source_exhausted_for_agent", event_types)
+            sim.stop()
+
+    def test_post_private_inspect_can_prefer_shared_source_needed_by_witness(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            agent = sim.agents[0]
+            agent.allowed_packet = ["Architect_Info", "Team_Info"]
+            followup = agent._choose_post_inspect_followup_decision(sim.environment, sim_state=sim)
+            self.assertEqual(followup.selected_action, ExecutableActionType.INSPECT_INFORMATION_SOURCE)
+            self.assertEqual(followup.target_id, "Team_Info")
+            sim.stop()
+
+    def test_mismatch_repair_gated_when_construction_not_ready(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            agent = sim.agents[0]
+            project = next(iter(sim.environment.construction.projects.values()))
+            project["in_progress"] = True
+            project["required_resources"] = {"bricks": 10}
+            project["delivered_resources"] = {"bricks": 0}
+            agent.mental_model["knowledge"].add_rule("K_ANY", [], inferred_by_agents=[agent.name])
+
+            with patch("modules.agent.random.random", return_value=0.0):
+                agent.compare_and_repair_construction(sim.environment.construction, sim_state=sim)
+            event_types = [e["event_type"] for e in sim.logger.get_recent_events(200)]
+            self.assertIn("mismatch_detection_skipped_not_ready", event_types)
+            self.assertNotIn("construction_mismatch_detected", event_types)
+            sim.stop()
+
+    def test_movement_between_knowledge_locations_is_logged(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            agent = sim.agents[0]
+            agent.position = (6.9, 1.2)
+            decision = BrainDecision(
+                selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                target_id="Team_Info",
+                reason_summary="test",
+                confidence=0.8,
+            )
+            agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
+            event_types = [e["event_type"] for e in sim.logger.get_recent_events(180)]
+            self.assertIn("movement_between_knowledge_locations", event_types)
+            self.assertIn("moving_to_shared_source", event_types)
+            sim.stop()
+
+    def test_runtime_witness_shared_source_access_failure_reduced_on_reach(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            agent = sim.agents[0]
+            team_target = sim.environment.get_interaction_target_position("Team_Info", from_position=agent.position)
+            self.assertIsNotNone(team_target)
+            agent.position = team_target
+            with patch("modules.agent.random.random", return_value=0.0):
+                agent._inspect_source(sim.environment, "Team_Info", sim_state=sim)
+            result = sim.runtime_witness_audit.finalize()
+            failures = result["summary"]["witness_step_failures_by_category"]
+            self.assertLess(failures.get("source_not_accessed", 0), result["summary"].get("critical_witness_targets_total", 0))
+            sim.stop()
+
+    def test_summary_includes_knowledge_transition_and_suppression_metrics(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            sim.logger.log_event(sim.time, "shared_source_target_selected", {"agent": sim.agents[0].name, "source_id": "Team_Info"})
+            sim.logger.log_event(sim.time, "source_access_succeeded", {"agent": sim.agents[0].name, "source_id": "Team_Info", "new_information_ids": [], "new_data_ids": []})
+            sim.logger.log_event(sim.time, "source_revisit_suppressed", {"agent": sim.agents[0].name, "source_id": "Architect_Info"})
+            sim.logger.log_event(sim.time, "source_exhausted_for_agent", {"agent": sim.agents[0].name, "source_id": "Architect_Info"})
+            sim.logger.log_event(sim.time, "movement_between_knowledge_locations", {"agent": sim.agents[0].name})
+            sim.logger.log_event(sim.time, "moving_to_externalization_site", {"agent": sim.agents[0].name})
+            sim.logger.log_event(sim.time, "mismatch_detection_skipped_not_ready", {"agent": sim.agents[0].name})
+            sim.logger.log_event(sim.time, "repair_trigger_suppressed_not_ready", {"agent": sim.agents[0].name})
+            sim.stop()
+            session_dir = next((Path(tmpdir) / "Outputs").iterdir())
+            run_summary = json.loads((session_dir / "measures" / "run_summary.json").read_text(encoding="utf-8"))
+            diagnostics = run_summary["process"]["inspect_readiness_diagnostics"]
+            self.assertIn("shared_source_target_count", diagnostics)
+            self.assertIn("shared_source_access_success_count", diagnostics)
+            self.assertIn("private_source_revisit_suppressed_count", diagnostics)
+            self.assertIn("source_exhausted_count", diagnostics)
+            self.assertIn("movement_between_knowledge_locations_count", diagnostics)
+            self.assertIn("externalization_target_selection_count", diagnostics)
+            self.assertIn("mismatch_detection_suppressed_not_ready_count", diagnostics)
+            self.assertIn("repair_trigger_suppressed_not_ready_count", diagnostics)
 
 
 if __name__ == "__main__":

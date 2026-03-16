@@ -696,6 +696,14 @@ class MetricsCollector:
                         reason: int(count)
                         for reason, count in self.reason_distributions.get("inspect_post_handoff_classified", {}).items()
                     },
+                    "shared_source_target_count": int(self.events_by_type.get("shared_source_target_selected", 0)),
+                    "shared_source_access_success_count": int(self.reason_distributions.get("source_access_succeeded", {}).get("Team_Info", 0)),
+                    "private_source_revisit_suppressed_count": int(self.events_by_type.get("source_revisit_suppressed", 0)),
+                    "source_exhausted_count": int(self.events_by_type.get("source_exhausted_for_agent", 0)),
+                    "movement_between_knowledge_locations_count": int(self.events_by_type.get("movement_between_knowledge_locations", 0)),
+                    "externalization_target_selection_count": int(self.events_by_type.get("moving_to_externalization_site", 0)),
+                    "mismatch_detection_suppressed_not_ready_count": int(self.events_by_type.get("mismatch_detection_skipped_not_ready", 0)),
+                    "repair_trigger_suppressed_not_ready_count": int(self.events_by_type.get("repair_trigger_suppressed_not_ready", 0)),
                 },
                 "startup_progression": {
                     "agents_left_spawn_count": int(sum(1 for moved in moved_map.values() if moved)),

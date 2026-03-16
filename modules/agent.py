@@ -134,6 +134,7 @@ class Agent:
         self.communication_log = []
         self.memory_seen_packets = set()
         self.source_inspection_state = {}
+        self.source_exhaustion_state = {}
         self.inspect_stall_counts = {}
         self.current_inspect_target_id = None
         self.inspect_session = {
@@ -155,6 +156,7 @@ class Agent:
             "expires_at": 0.0,
         }
         self.status_last_action = ""
+        self.construction_validation_state = {"mismatch_last_ts": {}, "repair_last_ts": {}}
 
         # Team dynamics
         self.shared_knowledge = set()
@@ -382,9 +384,31 @@ class Agent:
     def _ensure_source_state(self, environment):
         for packet_name in environment.knowledge_packets.keys():
             self.source_inspection_state.setdefault(packet_name, "unseen")
+            self.source_exhaustion_state.setdefault(
+                packet_name,
+                {"inspect_count": 0, "last_dik_changed": None, "exhausted": False},
+            )
 
-    def _candidate_information_sources(self, environment):
+    def _critical_unmet_source_targets(self, sim_state, environment):
+        audit = getattr(sim_state, "runtime_witness_audit", None)
+        if audit is None:
+            return {}
+        priorities = {}
+        for target in getattr(audit, "targets", {}).values():
+            steps = target.get("ordered_witness_steps", [])
+            first_pending = next((s for s in steps if getattr(s, "status", None) != "completed"), None)
+            if first_pending is None or not str(first_pending.raw_step).startswith("source_access:"):
+                continue
+            source_ref = str(first_pending.raw_step).split(":", 1)[1]
+            packet_name = environment.source_packet_name_map.get(source_ref, source_ref)
+            if packet_name not in environment.knowledge_packets:
+                continue
+            priorities[packet_name] = max(priorities.get(packet_name, 0), 1)
+        return priorities
+
+    def _candidate_information_sources(self, environment, sim_state=None):
         self._ensure_source_state(environment)
+        critical_needs = self._critical_unmet_source_targets(sim_state, environment)
         candidates = []
         for packet_name in environment.knowledge_packets.keys():
             if not self._has_packet_access(packet_name):
@@ -404,13 +428,18 @@ class Agent:
                 score += 2.0
             elif status == "inspected":
                 score -= 4.0
+            exhaustion = self.source_exhaustion_state.get(packet_name, {})
+            if exhaustion.get("exhausted"):
+                score -= 6.0
+            if packet_name in critical_needs:
+                score += 5.0
             if packet_name == f"{self.role}_Info":
                 score += 1.5
             if packet_name == "Team_Info":
                 score += 1.0
             score -= stalled * 1.5
             score -= math.hypot(point[0] - self.position[0], point[1] - self.position[1]) * 0.2
-            candidates.append((score, packet_name, point, status, stalled))
+            candidates.append((score, packet_name, point, status, stalled, bool(packet_name in critical_needs), bool(exhaustion.get("exhausted"))))
 
         candidates.sort(key=lambda c: c[0], reverse=True)
         return candidates
@@ -422,19 +451,27 @@ class Agent:
         if explicit_target:
             point = environment.get_interaction_target_position(explicit_target, from_position=self.position)
             if point is not None:
-                self._set_status(f"Inspect target selected: {explicit_target}")
-                self._emit_event(sim_state, "target_resolved", {"target_type": "information_source", "target_id": explicit_target, "candidate_count": 1})
-                return explicit_target, point
+                exhausted = bool(self.source_exhaustion_state.get(explicit_target, {}).get("exhausted"))
+                if exhausted:
+                    self._emit_event(sim_state, "source_revisit_deferred", {"current_source_target": explicit_target, "reason": "source_exhausted_for_agent"})
+                else:
+                    self._set_status(f"Inspect target selected: {explicit_target}")
+                    self._emit_event(sim_state, "target_resolved", {"target_type": "information_source", "target_id": explicit_target, "candidate_count": 1})
+                    return explicit_target, point
 
-        candidates = self._candidate_information_sources(environment)
+        candidates = self._candidate_information_sources(environment, sim_state=sim_state)
         if not candidates:
             self._set_status("Inspect target resolution failed: no accessible information sources")
             self._emit_event(sim_state, "target_resolution_failed", {"target_type": "information_source", "failure_category": "no_information_source_available"})
             return None, None
 
         # Conservative retargeting away from repeatedly stalled targets when alternatives exist.
-        non_stalled = [c for c in candidates if c[4] < 3]
+        non_stalled = [c for c in candidates if c[4] < 3 and not c[6]]
+        if not non_stalled:
+            non_stalled = [c for c in candidates if c[4] < 3]
         chosen = non_stalled[0] if non_stalled else candidates[0]
+        if chosen[6]:
+            self._emit_event(sim_state, "source_revisit_required", {"source_id": chosen[1], "reason": "all_sources_exhausted_or_stalled"})
         if explicit_target is None:
             self._set_status(
                 f"Inspect decision missing explicit target; resolved to {chosen[1]} (status={chosen[3]}, stalled={chosen[4]})"
@@ -443,6 +480,10 @@ class Agent:
             self._set_status(
                 f"Inspect target {explicit_target} unreachable; retargeted to {chosen[1]} (status={chosen[3]}, stalled={chosen[4]})"
             )
+            self._emit_event(sim_state, "source_revisit_suppressed", {"source_id": explicit_target, "next_source_target": chosen[1], "reason": "source_exhausted_or_unreachable"})
+        self._emit_event(sim_state, "next_source_target_selected", {"current_location": self.position, "current_source_target": explicit_target, "next_source_target": chosen[1], "critical_witness_source_need": chosen[5], "reason": "candidate_scoring"})
+        if chosen[5] and chosen[1] == "Team_Info":
+            self._emit_event(sim_state, "shared_source_target_selected", {"source_id": chosen[1], "reason": "critical_witness_source_need"})
         self._emit_event(sim_state, "target_resolved", {"target_type": "information_source", "target_id": chosen[1], "candidate_count": len(candidates)})
         return chosen[1], chosen[2]
 
@@ -525,6 +566,13 @@ class Agent:
         after_rules = set(self.mental_model["knowledge"].rules)
         new_rule_ids = sorted(after_rules - before_rules)
         dik_changed = bool(new_ids or new_data_from_source or new_rule_ids)
+        source_state = self.source_exhaustion_state.setdefault(source_id, {"inspect_count": 0, "last_dik_changed": None, "exhausted": False})
+        source_state["inspect_count"] = int(source_state.get("inspect_count", 0)) + 1
+        source_state["last_dik_changed"] = bool(dik_changed)
+        source_state["exhausted"] = bool((not dik_changed) and self.source_inspection_state.get(source_id) == "inspected")
+        if sim_state is not None and source_state["exhausted"]:
+            self._emit_event(sim_state, "source_already_inspected_no_new_dik", {"source_id": source_id, "inspect_count": source_state["inspect_count"]})
+            self._emit_event(sim_state, "source_exhausted_for_agent", {"source_id": source_id, "inspect_count": source_state["inspect_count"]})
         if sim_state is not None:
             self._emit_event(
                 sim_state,
@@ -694,7 +742,17 @@ class Agent:
         }
         return mapping.get(blocker_category, "inspect_success_readiness_blocked_missing_rule")
 
-    def _choose_post_inspect_followup_decision(self, environment):
+    def _choose_post_inspect_followup_decision(self, environment, sim_state=None):
+        critical_sources = self._critical_unmet_source_targets(sim_state, environment)
+        if critical_sources:
+            preferred = "Team_Info" if "Team_Info" in critical_sources else sorted(critical_sources.keys())[0]
+            if preferred in environment.knowledge_packets and not self.source_exhaustion_state.get(preferred, {}).get("exhausted"):
+                return BrainDecision(
+                    selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                    target_id=preferred,
+                    reason_summary="Post-inspect pivot to unmet critical witness source access.",
+                    confidence=0.84,
+                )
         if self._is_build_eligible(environment):
             build_selection = self._select_build_target(environment, require_readiness=True, include_project=True)
             if isinstance(build_selection, dict):
@@ -2068,7 +2126,7 @@ class Agent:
             handoff = dict(self.post_inspect_handoff or {})
             now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
             if handoff.get("pending") and handoff.get("expires_at", 0.0) >= now_ts:
-                followup = self._choose_post_inspect_followup_decision(environment)
+                followup = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
                 if followup.selected_action != ExecutableActionType.INSPECT_INFORMATION_SOURCE:
                     self._emit_event(
                         sim_state,
@@ -2139,6 +2197,15 @@ class Agent:
                     },
                 )
             self.current_inspect_target_id = source_id
+            current_zone = environment.get_zone(self.position)
+            next_zone = None
+            target_meta = environment.interaction_targets.get(source_id)
+            if isinstance(target_meta, dict):
+                next_zone = target_meta.get("zone")
+            if next_zone and current_zone != next_zone:
+                self._emit_event(sim_state, "movement_between_knowledge_locations", {"from_zone": current_zone, "to_zone": next_zone, "source_id": source_id})
+            if source_id == "Team_Info":
+                self._emit_event(sim_state, "moving_to_shared_source", {"source_id": source_id, "from_zone": current_zone, "to_zone": next_zone})
             now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
             if current_source != source_id:
                 self.inspect_session = {
@@ -2194,6 +2261,7 @@ class Agent:
 
         if decision.selected_action in {ExecutableActionType.EXTERNALIZE_PLAN, ExecutableActionType.CONSULT_TEAM_ARTIFACT}:
             action["artifact_action"] = decision.selected_action.value
+            self._emit_event(sim_state, "moving_to_externalization_site", {"selected_next_action": decision.selected_action.value, "current_location": self.position})
         if decision.selected_action == ExecutableActionType.REQUEST_ASSISTANCE:
             action["assist_action"] = decision.selected_action.value
 
@@ -2951,8 +3019,24 @@ class Agent:
                 continue
             if not project.get("in_progress", False):
                 continue
+            project_id = project.get("id", "unknown")
+            required = int(project.get("required_resources", {}).get("bricks", 0) or 0)
+            delivered = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
+            if required <= 0 or delivered <= 0:
+                self._emit_event(sim_state, "mismatch_detection_skipped_not_ready", {"project_id": project_id, "reason": "insufficient_build_state", "required": required, "delivered": delivered})
+                continue
+            readiness_ratio = delivered / max(1, required)
+            if readiness_ratio < 0.5:
+                self._emit_event(sim_state, "mismatch_detection_skipped_not_ready", {"project_id": project_id, "reason": "build_state_below_validation_threshold", "readiness_ratio": round(readiness_ratio, 3)})
+                continue
             known_rules = self.mental_model["knowledge"].rules
             if not known_rules:
+                self._emit_event(sim_state, "mismatch_detection_skipped_not_ready", {"project_id": project_id, "reason": "no_rules_to_validate_against"})
+                continue
+            now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+            last_mismatch = float(self.construction_validation_state["mismatch_last_ts"].get(project_id, -999.0))
+            if now_ts - last_mismatch < 5.0:
+                self._emit_event(sim_state, "mismatch_detection_skipped_not_ready", {"project_id": project_id, "reason": "cooldown_active", "cooldown_remaining": round(5.0 - (now_ts - last_mismatch), 3)})
                 continue
             rule_matches = False
             for rule in known_rules:
@@ -2963,6 +3047,7 @@ class Agent:
                 mismatch_sensitivity = max(self._hook_value("validation_check", "detect_mismatch", "sensitivity", default=0.5), self._trait_value("rule_accuracy"))
                 mismatch_detect_prob = min(1.0, 0.25 + 0.7 * mismatch_sensitivity)
                 if random.random() <= mismatch_detect_prob:
+                    self.construction_validation_state["mismatch_last_ts"][project_id] = now_ts
                     self.activity_log.append(f"Disagrees with approach for {project.get('name', 'Unknown')}")
                     if sim_state is not None:
                         sim_state.logger.log_event(
@@ -2970,7 +3055,15 @@ class Agent:
                             "construction_mismatch_detected",
                             {"agent": self.name, "project_id": project.get("id", "unknown")},
                         )
+                    if readiness_ratio < 0.8:
+                        self._emit_event(sim_state, "repair_trigger_suppressed_not_ready", {"project_id": project_id, "reason": "build_not_ready_for_repair", "readiness_ratio": round(readiness_ratio, 3)})
+                        continue
+                    last_repair = float(self.construction_validation_state["repair_last_ts"].get(project_id, -999.0))
+                    if now_ts - last_repair < 5.0:
+                        self._emit_event(sim_state, "repair_trigger_suppressed_not_ready", {"project_id": project_id, "reason": "repair_cooldown_active", "cooldown_remaining": round(5.0 - (now_ts - last_repair), 3)})
+                        continue
                     if random.random() < self._trait_value("help_tendency"):
+                        self.construction_validation_state["repair_last_ts"][project_id] = now_ts
                         project["correct"] = True
                         self.activity_log.append("Triggered correction/repair on construction externalization")
                         if sim_state is not None:
