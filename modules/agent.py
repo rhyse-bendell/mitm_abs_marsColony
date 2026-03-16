@@ -144,6 +144,16 @@ class Agent:
             "last_updated_at": None,
             "restarts": 0,
         }
+        self.post_inspect_handoff = {
+            "pending": False,
+            "source_id": None,
+            "dik_changed": False,
+            "readiness_changed": False,
+            "blockers": [],
+            "blocker_category": None,
+            "outcome": None,
+            "expires_at": 0.0,
+        }
         self.status_last_action = ""
 
         # Team dynamics
@@ -470,6 +480,7 @@ class Agent:
         before_data_ids = {d.id for d in self.mental_model["data"]}
         before_ids = {info.id for info in self.mental_model["information"]}
         before_rules = set(self.mental_model["knowledge"].rules)
+        derivations_before = set(self.executed_derivations)
         self.absorb_packet(packet, accuracy=0.95)
         after_ids = {info.id for info in self.mental_model["information"]}
         packet_info_ids = {info.id for info in packet.get("information", [])}
@@ -498,9 +509,51 @@ class Agent:
         held_data_ids = {d.id for d in self.mental_model["data"]}
         new_data_ids = sorted(packet_data_ids & held_data_ids)
         self._apply_task_derivations(sim_state=sim_state)
+        derivation_ids_triggered = sorted(set(self.executed_derivations) - derivations_before)
         after_rules = set(self.mental_model["knowledge"].rules)
         new_rule_ids = sorted(after_rules - before_rules)
         dik_changed = bool(new_ids or new_data_from_source or new_rule_ids)
+        if sim_state is not None:
+            self._emit_event(
+                sim_state,
+                "inspect_success_no_new_dik" if not dik_changed else "inspect_success_dik_changed",
+                {
+                    "source_id": source_id,
+                    "dik_changed": dik_changed,
+                    "new_information_count": len(new_ids),
+                    "new_data_count": len(new_data_from_source),
+                    "new_rule_count": len(new_rule_ids),
+                },
+            )
+            self._emit_event(
+                sim_state,
+                "inspect_success_derivation_triggered" if derivation_ids_triggered else "inspect_success_dik_no_derivation",
+                {
+                    "source_id": source_id,
+                    "dik_changed": dik_changed,
+                    "derivation_triggered": bool(derivation_ids_triggered),
+                    "derivation_ids": derivation_ids_triggered,
+                },
+            )
+            if new_rule_ids:
+                self._emit_event(
+                    sim_state,
+                    "inspect_success_rule_adopted",
+                    {
+                        "source_id": source_id,
+                        "dik_changed": dik_changed,
+                        "rule_ids": new_rule_ids,
+                    },
+                )
+            elif dik_changed:
+                self._emit_event(
+                    sim_state,
+                    "inspect_success_rule_not_adopted",
+                    {
+                        "source_id": source_id,
+                        "dik_changed": dik_changed,
+                    },
+                )
         if dik_changed:
             self.inspect_session["state"] = "dik_acquired"
             self.inspect_session["last_updated_at"] = now_ts
@@ -517,6 +570,24 @@ class Agent:
             )
         readiness_after = set(self._build_readiness_blockers(environment))
         readiness_changed = readiness_before != readiness_after
+        blocker_category = self._categorize_readiness_blockers(readiness_after)
+        post_inspect_outcome = self._categorize_post_inspect_outcome(
+            dik_changed=dik_changed,
+            derivation_triggered=bool(derivation_ids_triggered),
+            rule_adopted=bool(new_rule_ids),
+            readiness_after=readiness_after,
+        )
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        self.post_inspect_handoff = {
+            "pending": True,
+            "source_id": source_id,
+            "dik_changed": dik_changed,
+            "readiness_changed": readiness_changed,
+            "blockers": sorted(readiness_after),
+            "blocker_category": blocker_category,
+            "outcome": post_inspect_outcome,
+            "expires_at": now_ts + 5.0,
+        }
         if sim_state is not None:
             self._emit_event(
                 sim_state,
@@ -539,6 +610,31 @@ class Agent:
                         "remaining_blockers": sorted(readiness_after),
                     },
                 )
+            self._emit_event(
+                sim_state,
+                "inspect_success_readiness_changed" if readiness_changed else "inspect_success_no_readiness_change",
+                {
+                    "source_id": source_id,
+                    "dik_changed": dik_changed,
+                    "readiness_changed": readiness_changed,
+                    "readiness_unlocked": not readiness_after,
+                    "remaining_blockers": sorted(readiness_after),
+                    "post_inspect_blocker_category": blocker_category,
+                    "post_inspect_outcome": post_inspect_outcome,
+                },
+            )
+            self._emit_event(
+                sim_state,
+                "inspect_post_handoff_classified",
+                {
+                    "source_id": source_id,
+                    "dik_changed": dik_changed,
+                    "readiness_changed": readiness_changed,
+                    "post_inspect_outcome": post_inspect_outcome,
+                    "post_inspect_blocker_category": blocker_category,
+                    "remaining_blockers": sorted(readiness_after),
+                },
+            )
         self._emit_event(
             sim_state,
             "source_access_succeeded",
@@ -551,6 +647,64 @@ class Agent:
         self.inspect_session["state"] = "post_inspect_derivation_attempted"
         self.inspect_session["last_updated_at"] = now_ts
         return bool(new_ids)
+
+    @staticmethod
+    def _categorize_readiness_blockers(readiness_after):
+        blockers = set(readiness_after or set())
+        if not blockers:
+            return "none"
+        if any(b in blockers for b in {"missing_task_prerequisite_rules", "insufficient_rule_knowledge"}):
+            return "missing_rule"
+        if "no_navigable_build_target" in blockers:
+            return "missing_target"
+        if any("artifact" in b or "externalization" in b for b in blockers):
+            return "missing_artifact"
+        if any("phase" in b for b in blockers):
+            return "phase"
+        return "other"
+
+    def _categorize_post_inspect_outcome(self, dik_changed, derivation_triggered, rule_adopted, readiness_after):
+        if not dik_changed:
+            return "inspect_success_no_new_dik"
+        if not derivation_triggered:
+            return "inspect_success_dik_no_derivation"
+        if not rule_adopted:
+            return "inspect_success_rule_not_adopted"
+        if not readiness_after:
+            return "inspect_success_ready_for_action"
+        blocker_category = self._categorize_readiness_blockers(readiness_after)
+        mapping = {
+            "missing_rule": "inspect_success_readiness_blocked_missing_rule",
+            "missing_target": "inspect_success_readiness_blocked_missing_target",
+            "missing_artifact": "inspect_success_readiness_blocked_missing_artifact",
+            "phase": "inspect_success_readiness_blocked_phase",
+            "other": "inspect_success_readiness_blocked_missing_rule",
+        }
+        return mapping.get(blocker_category, "inspect_success_readiness_blocked_missing_rule")
+
+    def _choose_post_inspect_followup_decision(self, environment):
+        if self._is_build_eligible(environment):
+            build_selection = self._select_build_target(environment, require_readiness=True, include_project=True)
+            if isinstance(build_selection, dict):
+                return BrainDecision(
+                    selected_action=ExecutableActionType.START_CONSTRUCTION,
+                    target_id=build_selection.get("project_id"),
+                    reason_summary="Post-inspect readiness unlocked; pivoting to construction.",
+                    confidence=0.81,
+                )
+        build_selection = self._select_build_target(environment, require_readiness=False, include_project=True)
+        if isinstance(build_selection, dict):
+            return BrainDecision(
+                selected_action=ExecutableActionType.TRANSPORT_RESOURCES,
+                target_id=build_selection.get("project_id"),
+                reason_summary="Post-inspect pivot to logistics handoff.",
+                confidence=0.74,
+            )
+        return BrainDecision(
+            selected_action=ExecutableActionType.COMMUNICATE,
+            reason_summary="Post-inspect fallback to communication handoff.",
+            confidence=0.66,
+        )
 
 
 
@@ -1899,12 +2053,51 @@ class Agent:
                 action["task_parameters"] = dict(params.metadata)
 
         if decision.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
+            handoff = dict(self.post_inspect_handoff or {})
+            now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+            if handoff.get("pending") and handoff.get("expires_at", 0.0) >= now_ts:
+                followup = self._choose_post_inspect_followup_decision(environment)
+                if followup.selected_action != ExecutableActionType.INSPECT_INFORMATION_SOURCE:
+                    self._emit_event(
+                        sim_state,
+                        "post_inspect_action_selected",
+                        {
+                            "source_id": handoff.get("source_id"),
+                            "dik_changed": bool(handoff.get("dik_changed")),
+                            "readiness_changed": bool(handoff.get("readiness_changed")),
+                            "selected_next_action": followup.selected_action.value,
+                            "post_inspect_blocker_category": handoff.get("blocker_category"),
+                        },
+                    )
+                    self.post_inspect_handoff["pending"] = False
+                    return self._translate_brain_decision_to_legacy_action(followup, environment, sim_state=sim_state)
+                self._emit_event(
+                    sim_state,
+                    "post_inspect_reinspect_selected",
+                    {
+                        "source_id": handoff.get("source_id"),
+                        "dik_changed": bool(handoff.get("dik_changed")),
+                        "readiness_changed": bool(handoff.get("readiness_changed")),
+                        "selected_next_action": decision.selected_action.value,
+                        "post_inspect_blocker_category": handoff.get("blocker_category"),
+                    },
+                )
+                self.post_inspect_handoff["pending"] = False
             source_id, interaction_target = self._resolve_inspect_target(decision, environment, sim_state=sim_state)
             if source_id is None or interaction_target is None:
                 if not self.startup_state.get("first_productive_action_started"):
                     self.planner_state["startup_target_resolution_failures"] = int(self.planner_state.get("startup_target_resolution_failures", 0)) + 1
                     self._emit_event(sim_state, "first_target_resolution_failed", {"target_type": "information_source", "requested_target_id": decision.target_id})
                 self._emit_event(sim_state, "action_translation_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "unresolved_target"})
+                if isinstance(getattr(self, "post_inspect_handoff", None), dict) and self.post_inspect_handoff.get("source_id"):
+                    self._emit_event(sim_state, "post_inspect_action_translation_failed", {
+                        "source_id": self.post_inspect_handoff.get("source_id"),
+                        "dik_changed": bool(self.post_inspect_handoff.get("dik_changed")),
+                        "readiness_changed": bool(self.post_inspect_handoff.get("readiness_changed")),
+                        "selected_next_action": decision.selected_action.value,
+                        "failure_category": "unresolved_target",
+                        "post_inspect_blocker_category": self.post_inspect_handoff.get("blocker_category"),
+                    })
                 self._emit_event(sim_state, "first_action_translation_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "unresolved_target"})
                 return [{"type": "idle", "duration": 1.0, "priority": 1}]
             action["target"] = interaction_target
@@ -1993,6 +2186,8 @@ class Agent:
             action["assist_action"] = decision.selected_action.value
 
         self._emit_event(sim_state, "action_translation_succeeded", {"planner_action_type": decision.selected_action.value, "translated_action_type": action.get("type"), "target_id": decision.target_id, "target_zone": decision.target_zone})
+        if decision.selected_action != ExecutableActionType.INSPECT_INFORMATION_SOURCE and isinstance(getattr(self, "post_inspect_handoff", None), dict):
+            self.post_inspect_handoff["pending"] = False
         if action.get("type") in {"move_to", "communicate", "construct", "transport_resources"}:
             self._emit_startup_once(sim_state, "first_productive_action_started", "first_productive_action_started", {"planner_action_type": decision.selected_action.value, "translated_action_type": action.get("type")})
         return [action]

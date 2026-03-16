@@ -29,6 +29,13 @@ FAILURE_CATEGORIES = {
     "inspect_not_completed",
     "inspect_completed_dik_not_acquired",
     "dik_acquired_readiness_not_unlocked",
+    "inspect_success_no_new_dik",
+    "inspect_success_dik_no_derivation",
+    "inspect_success_rule_not_adopted",
+    "inspect_success_readiness_blocked_missing_rule",
+    "inspect_success_readiness_blocked_missing_target",
+    "inspect_success_readiness_blocked_missing_artifact",
+    "inspect_success_readiness_blocked_phase",
     "data_not_acquired",
     "derivation_not_triggered",
     "derivation_failed",
@@ -291,6 +298,22 @@ class RuntimeWitnessAudit:
                 category = "inspect_not_started"
             for tid in self.targets:
                 self._block_target(tid, category, payload, step_hint="source_access")
+
+        elif event_type == "inspect_post_handoff_classified":
+            outcome = str(payload.get("post_inspect_outcome") or "")
+            outcome_map = {
+                "inspect_success_no_new_dik": "inspect_success_no_new_dik",
+                "inspect_success_dik_no_derivation": "inspect_success_dik_no_derivation",
+                "inspect_success_rule_not_adopted": "inspect_success_rule_not_adopted",
+                "inspect_success_readiness_blocked_missing_rule": "inspect_success_readiness_blocked_missing_rule",
+                "inspect_success_readiness_blocked_missing_target": "inspect_success_readiness_blocked_missing_target",
+                "inspect_success_readiness_blocked_missing_artifact": "inspect_success_readiness_blocked_missing_artifact",
+                "inspect_success_readiness_blocked_phase": "inspect_success_readiness_blocked_phase",
+            }
+            category = outcome_map.get(outcome)
+            if category:
+                for tid in self.targets:
+                    self._block_target(tid, category, payload, step_hint="readiness_unlock")
 
         elif event_type == "dik_derivation_executed":
             did = payload.get("derivation_id")
