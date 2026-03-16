@@ -37,6 +37,7 @@ class TaskValidationReport:
     unsatisfied_plan_methods: List[str]
     proof_paths: Dict[str, List[str]]
     derivation_edges: List[Tuple[str, str, str]]
+    constructive_witnesses: Dict[str, Dict[str, object]]
 
     def to_dict(self) -> Dict[str, object]:
         errors = [asdict(i) for i in self.issues if i.severity == "error"]
@@ -58,6 +59,7 @@ class TaskValidationReport:
             "unsatisfied_goals": self.unsatisfied_goals,
             "unsatisfied_plan_methods": self.unsatisfied_plan_methods,
             "proof_paths": self.proof_paths,
+            "constructive_witnesses": self.constructive_witnesses,
         }
 
     def to_markdown(self) -> str:
@@ -86,6 +88,20 @@ class TaskValidationReport:
         else:
             lines.append("- None")
 
+        lines.extend(["", "## Constructive Witness Summary"])
+        if self.constructive_witnesses:
+            for target_id, witness in sorted(self.constructive_witnesses.items()):
+                lines.append(
+                    "- `{}`: closure_reachable={}, constructively_witnessed={}, type={}".format(
+                        target_id,
+                        witness.get("closure_reachable"),
+                        witness.get("constructively_witnessed"),
+                        witness.get("witness_type", "n/a"),
+                    )
+                )
+        else:
+            lines.append("- None")
+
         lines.extend(["", "## Diagnostics"])
         if self.issues:
             for issue in self.issues:
@@ -111,10 +127,47 @@ class TaskValidationReport:
             for src, dst, edge_type in self.derivation_edges:
                 writer.writerow([src, dst, edge_type])
 
+        constructive_json_path = out_dir / "constructive_witness_report.json"
+        constructive_json_path.write_text(
+            json.dumps(
+                {
+                    "task_id": self.task_id,
+                    "constructive_witnesses": self.constructive_witnesses,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        constructive_md_path = out_dir / "constructive_witness_report.md"
+        lines = [f"# Constructive Witness Report: `{self.task_id}`", ""]
+        for target_id, witness in sorted(self.constructive_witnesses.items()):
+            lines.append(f"## {target_id}")
+            lines.append(f"- closure_reachable: {witness.get('closure_reachable')}")
+            lines.append(f"- constructively_witnessed: {witness.get('constructively_witnessed')}")
+            lines.append(f"- witness_type: {witness.get('witness_type', 'n/a')}")
+            lines.append(f"- communication_required: {witness.get('communication_required', False)}")
+            lines.append(f"- phase_constrained: {witness.get('phase_constrained', False)}")
+            lines.append(f"- derivation_depth: {witness.get('derivation_depth', 0)}")
+            lines.append(f"- upstream_dependency_count: {witness.get('upstream_dependency_count', 0)}")
+            blockers = witness.get("blockers") or []
+            lines.append("- blockers:")
+            lines.extend([f"  - {b}" for b in blockers] or ["  - none"])
+            ordered_path = witness.get("ordered_path") or []
+            lines.append("- ordered_path:")
+            for step in ordered_path:
+                lines.append(f"  - {step}")
+            if not ordered_path:
+                lines.append("  - none")
+            lines.append("")
+        constructive_md_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
         return {
             "json": json_path,
             "markdown": md_path,
             "edges_csv": edges_path,
+            "constructive_json": constructive_json_path,
+            "constructive_markdown": constructive_md_path,
         }
 
 
@@ -250,6 +303,22 @@ class TaskValidator:
             )
 
         derivation_edges = self._derivation_edges(task_model)
+        constructive_witnesses = self._build_constructive_witnesses(
+            task_model,
+            role_states,
+            team_state,
+            reachable_rules_team,
+        )
+        for target_id, witness in constructive_witnesses.items():
+            if witness.get("closure_reachable") and not witness.get("constructively_witnessed"):
+                issues.append(
+                    ValidationIssue(
+                        severity="warning",
+                        code="CLOSURE_ONLY_REACHABLE",
+                        message=f"{target_id} is closure-reachable but lacks an ordered constructive witness.",
+                        context={"blockers": witness.get("blockers", [])},
+                    )
+                )
 
         errors = [i for i in issues if i.severity == "error"]
         return TaskValidationReport(
@@ -265,7 +334,265 @@ class TaskValidator:
             unsatisfied_plan_methods=sorted(unsatisfied_plan_methods),
             proof_paths={k: v for k, v in sorted(rule_proofs.items())},
             derivation_edges=derivation_edges,
+            constructive_witnesses={k: v for k, v in sorted(constructive_witnesses.items())},
         )
+
+    def _phase_compatible(self, scope: str, target_phase: str) -> bool:
+        s = (scope or "all").strip().lower()
+        p = (target_phase or "all").strip().lower()
+        return s in {"", "all", p}
+
+    def _roles_for_element(self, role_states: Dict[str, ReachabilityState], element_id: str) -> Set[str]:
+        return {role_id for role_id, state in role_states.items() if element_id in state.reachable}
+
+    def _element_witness(
+        self,
+        task_model: TaskModel,
+        element_id: str,
+        reachable_elements: Set[str],
+        phase_scope: str,
+        visited: Optional[Set[str]] = None,
+    ) -> Dict[str, object]:
+        seen = set(visited or set())
+        if element_id in seen:
+            return {"ok": False, "steps": [], "depth": 0, "deps": set(), "blockers": [f"cycle:{element_id}"]}
+        seen.add(element_id)
+
+        element = task_model.dik_elements.get(element_id)
+        if element is None or not element.enabled:
+            return {"ok": False, "steps": [], "depth": 0, "deps": set(), "blockers": [f"missing_element:{element_id}"]}
+        if element_id not in reachable_elements:
+            return {"ok": False, "steps": [], "depth": 0, "deps": set(), "blockers": [f"unreachable_element:{element_id}"]}
+        if not self._phase_compatible(element.phase_scope, phase_scope):
+            return {"ok": False, "steps": [], "depth": 0, "deps": set(), "blockers": [f"phase_mismatch:{element_id}"]}
+
+        source_steps = []
+        for row in task_model.source_contents:
+            if not row.enabled or row.element_id != element_id:
+                continue
+            src = task_model.sources.get(row.source_id)
+            if src is None or not src.enabled:
+                continue
+            source_steps.append(
+                {
+                    "ok": True,
+                    "steps": [f"source_access:{row.source_id}", f"acquire_{element.element_type}:{element_id}"],
+                    "depth": 0,
+                    "deps": {element_id},
+                    "blockers": [],
+                }
+            )
+        if source_steps:
+            return source_steps[0]
+
+        best: Optional[Dict[str, object]] = None
+        blockers: List[str] = []
+        for d in task_model.derivations.values():
+            if not d.enabled or d.output_element_id != element_id:
+                continue
+            inputs = sorted(set(d.required_inputs + d.optional_inputs) & reachable_elements)
+            if set(d.required_inputs) - set(inputs):
+                blockers.append(f"missing_required_inputs:{d.derivation_id}")
+                continue
+            if d.min_required_count > 0 and len(inputs) < d.min_required_count:
+                blockers.append(f"min_required_count_unsatisfied:{d.derivation_id}")
+                continue
+            step_lists: List[str] = []
+            max_depth = 0
+            deps: Set[str] = {element_id}
+            derivation_blockers: List[str] = []
+            ok = True
+            for inp in inputs:
+                sub = self._element_witness(task_model, inp, reachable_elements, phase_scope, seen)
+                if not sub["ok"]:
+                    ok = False
+                    derivation_blockers.extend(sub["blockers"])
+                    continue
+                step_lists.extend(sub["steps"])
+                max_depth = max(max_depth, int(sub["depth"]))
+                deps |= set(sub["deps"])
+            if not ok:
+                blockers.extend(derivation_blockers)
+                continue
+            candidate = {
+                "ok": True,
+                "steps": list(dict.fromkeys(step_lists + [f"derive:{d.derivation_id}->{element_id}"])),
+                "depth": max_depth + 1,
+                "deps": deps,
+                "blockers": [],
+            }
+            if best is None or len(candidate["steps"]) < len(best["steps"]):
+                best = candidate
+
+        return best or {"ok": False, "steps": [], "depth": 0, "deps": {element_id}, "blockers": sorted(set(blockers or [f"no_derivation:{element_id}"]))}
+
+    def _build_constructive_witnesses(
+        self,
+        task_model: TaskModel,
+        role_states: Dict[str, ReachabilityState],
+        team_state: ReachabilityState,
+        reachable_rules_team: Set[str],
+    ) -> Dict[str, Dict[str, object]]:
+        out: Dict[str, Dict[str, object]] = {}
+        enabled_rules = {r.rule_id for r in task_model.rules.values() if r.enabled}
+        critical_goal_ids = {
+            g.goal_id for g in task_model.goals.values() if g.enabled and str(g.goal_level).strip().lower() in {"mission", "phase"}
+        }
+        critical_rule_ids: Set[str] = set()
+        for gid in critical_goal_ids:
+            critical_rule_ids |= set(task_model.goals[gid].prerequisite_rules)
+        for method in task_model.plan_methods.values():
+            if method.enabled and (method.goal_id in critical_goal_ids or str(method.phase_scope).strip().lower() in {"planning", "phase1", "phase2"}):
+                critical_rule_ids |= set(method.required_rules)
+        for method in task_model.plan_methods.values():
+            if method.enabled:
+                critical_rule_ids |= set(method.required_rules)
+        critical_rule_ids &= enabled_rules
+
+        for rule_id in sorted(critical_rule_ids):
+            rule = task_model.rules[rule_id]
+            needed = sorted(set(rule.required_knowledge + rule.required_information))
+            phase_scope = rule.phase_scope or "all"
+            closure_reachable = rule_id in reachable_rules_team
+            team_parts = [self._element_witness(task_model, eid, team_state.reachable, phase_scope) for eid in needed]
+            constructively_witnessed = closure_reachable and all(p["ok"] for p in team_parts)
+            roles_by_req = {eid: self._roles_for_element(role_states, eid) for eid in needed}
+            individual_roles = [role for role, state in role_states.items() if set(needed).issubset(state.reachable)]
+            communication_required = not individual_roles and constructively_witnessed and bool(needed)
+            witness_type = "individual" if individual_roles else ("team-only" if constructively_witnessed else "unwitnessed")
+            ordered = []
+            for part in team_parts:
+                ordered.extend(part.get("steps", []))
+            if communication_required:
+                ordered.append("communicate_integrate:cross_role_dependency")
+            if constructively_witnessed:
+                ordered.append(f"derive_rule:{rule_id}")
+            deps = set().union(*[set(p.get("deps", set())) for p in team_parts]) if team_parts else set()
+            depth = max([int(p.get("depth", 0)) for p in team_parts] or [0])
+            blockers = sorted(set(b for p in team_parts for b in p.get("blockers", [])))
+            out[f"rule:{rule_id}"] = {
+                "closure_reachable": closure_reachable,
+                "constructively_witnessed": constructively_witnessed,
+                "witness_type": witness_type,
+                "phase_constrained": str(phase_scope).strip().lower() not in {"", "all"},
+                "phase_scope": phase_scope,
+                "communication_required": communication_required,
+                "derivation_depth": depth,
+                "upstream_dependency_count": len(deps),
+                "shared_or_team_only_dependencies": sorted(e for e in deps if task_model.dik_elements.get(e) and task_model.dik_elements[e].role_scope in {"team", "shared"}),
+                "brittle_chain": depth >= 4 or len(deps) >= 8,
+                "ordered_path": list(dict.fromkeys(ordered)),
+                "blockers": blockers,
+                "roles_covering_requirements": {k: sorted(v) for k, v in roles_by_req.items()},
+            }
+
+        for goal in task_model.goals.values():
+            if not goal.enabled or goal.goal_id not in critical_goal_ids:
+                continue
+            needed_rules = sorted(goal.prerequisite_rules)
+            closure_reachable = set(needed_rules).issubset(reachable_rules_team)
+            witness_refs = [out.get(f"rule:{rid}") for rid in needed_rules]
+            constructively_witnessed = closure_reachable and all(w and w.get("constructively_witnessed") for w in witness_refs)
+            ordered = []
+            blockers: List[str] = []
+            team_only = False
+            phase_constrained = str(goal.phase_scope).strip().lower() not in {"", "all"}
+            for rid, w in zip(needed_rules, witness_refs):
+                if w:
+                    ordered.extend(w.get("ordered_path", []))
+                    if w.get("witness_type") == "team-only":
+                        team_only = True
+                    if w.get("phase_constrained"):
+                        phase_constrained = True
+                    blockers.extend(w.get("blockers", []))
+                else:
+                    blockers.append(f"missing_rule_witness:{rid}")
+            if constructively_witnessed:
+                ordered.append(f"ground_goal:{goal.goal_id}")
+            out[f"goal:{goal.goal_id}"] = {
+                "closure_reachable": closure_reachable,
+                "constructively_witnessed": constructively_witnessed,
+                "witness_type": "team-only" if team_only else ("individual" if constructively_witnessed else "unwitnessed"),
+                "phase_constrained": phase_constrained,
+                "phase_scope": goal.phase_scope,
+                "communication_required": team_only,
+                "derivation_depth": max([w.get("derivation_depth", 0) for w in witness_refs if w] or [0]),
+                "upstream_dependency_count": sum(w.get("upstream_dependency_count", 0) for w in witness_refs if w),
+                "shared_or_team_only_dependencies": sorted({d for w in witness_refs if w for d in w.get("shared_or_team_only_dependencies", [])}),
+                "brittle_chain": any(w.get("brittle_chain") for w in witness_refs if w),
+                "ordered_path": list(dict.fromkeys(ordered)),
+                "blockers": sorted(set(blockers)),
+            }
+
+        for method in task_model.plan_methods.values():
+            if not method.enabled:
+                continue
+            target_id = f"method:{method.method_id}"
+            req_rules = sorted(method.required_rules)
+            phase_scope = method.phase_scope or "all"
+            closure_reachable = (
+                set(req_rules).issubset(reachable_rules_team)
+                and set(method.required_knowledge).issubset(team_state.reachable)
+                and set(method.required_information).issubset(team_state.reachable)
+                and set(method.required_data).issubset(team_state.reachable)
+            )
+            ordered: List[str] = []
+            blockers: List[str] = []
+            team_only = False
+            depth = 0
+            deps: Set[str] = set()
+
+            for rid in req_rules:
+                w = out.get(f"rule:{rid}")
+                if not w:
+                    blockers.append(f"missing_rule_witness:{rid}")
+                    continue
+                ordered.extend(w.get("ordered_path", []))
+                depth = max(depth, int(w.get("derivation_depth", 0)))
+                deps |= set(w.get("shared_or_team_only_dependencies", []))
+                if w.get("witness_type") == "team-only":
+                    team_only = True
+                blockers.extend(w.get("blockers", []))
+
+            for eid in sorted(set(method.required_knowledge + method.required_information + method.required_data)):
+                ew = self._element_witness(task_model, eid, team_state.reachable, phase_scope)
+                if ew["ok"]:
+                    ordered.extend(ew["steps"])
+                    depth = max(depth, int(ew["depth"]))
+                    deps |= set(ew["deps"])
+                    role_set = self._roles_for_element(role_states, eid)
+                    if len(role_set) == 0:
+                        if eid in team_state.reachable:
+                            team_only = True
+                        else:
+                            blockers.append(f"no_role_access:{eid}")
+                    elif len(role_set) > 1:
+                        team_only = True
+                else:
+                    blockers.extend(ew["blockers"])
+
+            constructively_witnessed = closure_reachable and not blockers
+            if team_only and constructively_witnessed:
+                ordered.append("communicate_integrate:cross_role_dependency")
+            if constructively_witnessed:
+                ordered.append(f"ground_plan_method:{method.method_id}")
+
+            out[target_id] = {
+                "closure_reachable": closure_reachable,
+                "constructively_witnessed": constructively_witnessed,
+                "witness_type": "team-only" if team_only else ("individual" if constructively_witnessed else "unwitnessed"),
+                "phase_constrained": str(phase_scope).strip().lower() not in {"", "all"},
+                "phase_scope": phase_scope,
+                "communication_required": team_only,
+                "derivation_depth": depth,
+                "upstream_dependency_count": len(deps),
+                "shared_or_team_only_dependencies": sorted(deps),
+                "brittle_chain": depth >= 4 or len(deps) >= 8,
+                "ordered_path": list(dict.fromkeys(ordered)),
+                "blockers": sorted(set(blockers)),
+            }
+
+        return out
 
     def _check_duplicate_ids(self, base_path: Path) -> List[ValidationIssue]:
         id_columns = {
