@@ -434,10 +434,10 @@ class TestStartupLLMSanity(unittest.TestCase):
             sim = SimulationState(phases=[], project_root=tmpdir, brain_backend="ollama")
             try:
                 self.assertTrue(sim.planner_defaults.get("unrestricted_local_qwen_mode"))
-                self.assertGreaterEqual(sim.startup_llm_sanity_config.timeout_s, 360.0)
-                self.assertGreaterEqual(sim.startup_llm_sanity_config.completion_max_tokens, 8192)
-                self.assertGreaterEqual(sim.brain_backend_config.completion_max_tokens, 8192)
-                self.assertGreaterEqual(sim.brain_backend_config.warmup_timeout_s, 240.0)
+                self.assertGreaterEqual(sim.startup_llm_sanity_config.timeout_s, 900.0)
+                self.assertGreaterEqual(sim.startup_llm_sanity_config.completion_max_tokens, 24576)
+                self.assertGreaterEqual(sim.brain_backend_config.completion_max_tokens, 24576)
+                self.assertGreaterEqual(sim.brain_backend_config.warmup_timeout_s, 600.0)
             finally:
                 sim.stop()
 

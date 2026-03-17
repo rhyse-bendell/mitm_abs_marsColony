@@ -202,6 +202,30 @@ class TestPlannerAsyncResilience(unittest.TestCase):
                 self.assertFalse(stale)
             sim.stop()
 
+
+    def test_unrestricted_mode_uses_extended_timeout_and_stale_grace(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                brain_backend="local_http",
+                brain_backend_options={"timeout_s": 0.2, "max_retries": 0, "fallback_backend": "rule_brain"},
+                planner_config={
+                    "unrestricted_local_qwen_mode": True,
+                    "planner_timeout_seconds": 900.0,
+                    "high_latency_stale_result_grace_s": 1800.0,
+                },
+            )
+            agent = sim.agents[0]
+            self.assertGreaterEqual(agent.planner_cadence.planner_timeout_seconds, 900.0)
+            self.assertGreaterEqual(agent.planner_cadence.high_latency_stale_result_grace_s, 1800.0)
+            agent.planner_state["status"] = "in_flight"
+            agent.planner_state["request_id"] = "unrestricted-timeout-check"
+            agent.planner_state["requested_wallclock_at"] = time.perf_counter() - 0.2
+            agent._check_inflight_timeout(sim)
+            self.assertEqual(agent.planner_state["status"], "in_flight")
+            sim.stop()
+
     def test_run_summary_contains_planner_responsiveness_metrics(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = self._build_sim(tmpdir)
