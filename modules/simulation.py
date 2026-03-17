@@ -87,6 +87,9 @@ class SimulationState:
             timeout_s=float(self.planner_defaults.get("startup_llm_sanity_timeout_seconds", 45.0) or 45.0),
             max_sources=max(1, int(self.planner_defaults.get("startup_llm_sanity_max_sources", 2) or 2)),
             max_items_per_type=max(1, int(self.planner_defaults.get("startup_llm_sanity_max_items_per_type", 3) or 3)),
+            completion_max_tokens=max(256, int(self.planner_defaults.get("startup_llm_sanity_completion_max_tokens", 1024) or 1024)),
+            json_only_mode=bool(self.planner_defaults.get("startup_llm_sanity_json_only_mode", True)),
+            reasoning_suppression=bool(self.planner_defaults.get("startup_llm_sanity_reasoning_suppression", True)),
             raw_response_max_chars=max(500, int(self.planner_defaults.get("startup_llm_sanity_raw_response_max_chars", 4000) or 4000)),
             artifact_name=str(self.planner_defaults.get("startup_llm_sanity_artifact_name", "startup_llm_sanity.json") or "startup_llm_sanity.json"),
         )

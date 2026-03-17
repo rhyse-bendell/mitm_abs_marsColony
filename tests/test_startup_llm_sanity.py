@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from modules.llm_sanity import SANITY_RESPONSE_FIELDS, build_startup_sanity_prompt, validate_sanity_response_schema
+from modules.llm_sanity import SANITY_RESPONSE_FIELDS, _extract_payload_from_wrapper, build_startup_sanity_prompt, validate_sanity_response_schema
 from modules.simulation import SimulationState
 
 
@@ -34,7 +34,56 @@ class TestStartupLLMSanity(unittest.TestCase):
             self.assertLessEqual(len(prompt_contract["bounded_context"]["data_examples"]), 2)
             self.assertIn("raw factual units", prompt_contract["dik_framing"]["data"])
             self.assertIn("do not provide a full execution plan", prompt_contract["mission_context"]["objective"].lower())
+            self.assertIn("do not include analysis", " ".join(prompt_contract["constraints"]).lower())
+            self.assertLess(len(payload["prompt_text"]), 2400)
             sim.stop()
+
+    def test_startup_request_config_uses_larger_configurable_budget_and_records_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            requests = []
+
+            def _side_effect(req, timeout):
+                req_payload = json.loads(req.data.decode("utf-8"))
+                requests.append(req_payload)
+                prompt_payload = json.loads(req_payload["messages"][1]["content"])
+                target_name = prompt_payload["agent_identity"]["agent_name"]
+                response_payload = {
+                    "agent_name": target_name,
+                    "role_or_focus": "role sanity",
+                    "understood_mission": "Support mission startup checks.",
+                    "relevant_data_ids": ["D001"],
+                    "relevant_information_ids": ["I001"],
+                    "relevant_knowledge_or_rule_ids": ["K001"],
+                    "first_information_priority": "Verify first bounded source.",
+                    "first_coordination_need": "Notify team lead.",
+                    "confidence": 0.8,
+                }
+                return _FakeHTTPResponse(json.dumps({"choices": [{"message": {"content": json.dumps(response_payload)}}]}))
+
+            with patch("modules.llm_sanity.request.urlopen", side_effect=_side_effect):
+                sim = SimulationState(
+                    phases=[],
+                    project_root=tmpdir,
+                    brain_backend="ollama",
+                    planner_config={
+                        "enable_startup_llm_sanity": True,
+                        "startup_llm_sanity_completion_max_tokens": 1400,
+                    },
+                )
+            try:
+                self.assertTrue(requests)
+                startup_request = next(r for r in requests if r.get("max_tokens") == 1400)
+                self.assertEqual(startup_request["response_format"], {"type": "json_object"})
+                self.assertIn("Do not include analysis", startup_request["messages"][0]["content"])
+
+                artifact = sim.logger.output_session.session_folder / sim.startup_llm_sanity_summary["startup_llm_sanity_artifact"]
+                payload = json.loads(artifact.read_text(encoding="utf-8"))
+                self.assertEqual(payload["startup_sanity_request_config"]["completion_max_tokens"], 1400)
+                self.assertTrue(payload["startup_sanity_request_config"]["json_only_mode_requested"])
+                self.assertTrue(payload["startup_sanity_request_config"]["reasoning_suppression_requested"])
+                self.assertEqual(payload["results"][0]["startup_request_config"]["completion_max_tokens"], 1400)
+            finally:
+                sim.stop()
 
     def test_schema_validation_accepts_valid_and_rejects_malformed(self):
         valid = {
@@ -315,6 +364,12 @@ class TestStartupLLMSanity(unittest.TestCase):
                 sim.stop()
 
     def test_reasoning_only_wrapper_has_specific_failure_category(self):
+        extraction = _extract_payload_from_wrapper(
+            {"choices": [{"finish_reason": "length", "message": {"content": "", "reasoning": "long chain of thought"}}]}
+        )
+        self.assertEqual(extraction["failure_category"], "reasoning_only_response")
+        self.assertTrue(extraction["truncated"])
+
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("modules.llm_sanity.request.urlopen") as mocked:
                 body = json.dumps({
@@ -341,6 +396,8 @@ class TestStartupLLMSanity(unittest.TestCase):
                 artifact = sim.logger.output_session.session_folder / sim.startup_llm_sanity_summary["startup_llm_sanity_artifact"]
                 payload = json.loads(artifact.read_text(encoding="utf-8"))
                 self.assertTrue(all(r.get("failure_category") == "truncated_response" for r in payload["results"]))
+                self.assertTrue(all(r.get("finish_reason") == "length" for r in payload["results"]))
+                self.assertTrue(all(r.get("truncated") is True for r in payload["results"]))
             finally:
                 sim.stop()
 

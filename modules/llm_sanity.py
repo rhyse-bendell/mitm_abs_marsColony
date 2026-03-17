@@ -29,6 +29,9 @@ class StartupLLMSanityConfig:
     timeout_s: float = 45.0
     max_sources: int = 2
     max_items_per_type: int = 3
+    completion_max_tokens: int = 1024
+    json_only_mode: bool = True
+    reasoning_suppression: bool = True
     raw_response_max_chars: int = 4000
     artifact_name: str = "startup_llm_sanity.json"
 
@@ -208,7 +211,7 @@ def build_startup_sanity_prompt(agent, task_model, *, max_sources: int = 2, max_
         "mission_context": {
             "task_id": task_model.task_id,
             "mission_summary": mission,
-            "objective": "Provide a startup sanity check response only; do not provide a full execution plan.",
+            "objective": "Startup sanity check only; do not provide a full execution plan or full construction solution.",
         },
         "dik_framing": {
             "data": "raw factual units",
@@ -225,6 +228,7 @@ def build_startup_sanity_prompt(agent, task_model, *, max_sources: int = 2, max_
         "response_schema": {field: "required" for field in SANITY_RESPONSE_FIELDS},
         "constraints": [
             "Return only a single JSON object.",
+            "Do not include analysis, reasoning, chain-of-thought, or markdown.",
             "Keep understood_mission to <= 24 words.",
             "Keep first_information_priority and first_coordination_need concise.",
             "Do not include a full construction solution.",
@@ -237,17 +241,30 @@ def build_startup_sanity_prompt(agent, task_model, *, max_sources: int = 2, max_
     }
 
 
-def _post_chat_completion(*, endpoint: str, model: str, prompt_text: str, timeout_s: float) -> Tuple[str, float]:
+def _post_chat_completion(
+    *,
+    endpoint: str,
+    model: str,
+    prompt_text: str,
+    timeout_s: float,
+    completion_max_tokens: int,
+    json_only_mode: bool,
+    reasoning_suppression: bool,
+) -> Tuple[str, float]:
+    system_instruction = "Return exactly one JSON object matching the requested schema."
+    if reasoning_suppression:
+        system_instruction += " Do not include analysis, reasoning, or chain-of-thought."
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": "Return only JSON matching the requested schema."},
+            {"role": "system", "content": system_instruction},
             {"role": "user", "content": prompt_text},
         ],
         "temperature": 0,
-        "response_format": {"type": "json_object"},
-        "max_tokens": 360,
+        "max_tokens": int(completion_max_tokens),
     }
+    if json_only_mode:
+        payload["response_format"] = {"type": "json_object"}
     started = time.perf_counter()
     req = request.Request(
         endpoint,
@@ -328,6 +345,11 @@ def run_startup_llm_sanity_check(simulation, *, config: StartupLLMSanityConfig) 
                 "knowledge_count": len(prompt["prompt_contract"]["bounded_context"]["knowledge_examples"]),
                 "rule_count": len(prompt["prompt_contract"]["bounded_context"]["role_rule_examples"]),
             },
+            "startup_request_config": {
+                "completion_max_tokens": int(config.completion_max_tokens),
+                "json_only_mode_requested": bool(config.json_only_mode),
+                "reasoning_suppression_requested": bool(config.reasoning_suppression),
+            },
             "raw_response_text": None,
             "parsed_response": None,
             "response_wrapper_summary": None,
@@ -357,6 +379,9 @@ def run_startup_llm_sanity_check(simulation, *, config: StartupLLMSanityConfig) 
                 model=runtime_config.local_model,
                 prompt_text=prompt["prompt_text"],
                 timeout_s=min(float(config.timeout_s), float(runtime_config.timeout_s)),
+                completion_max_tokens=config.completion_max_tokens,
+                json_only_mode=config.json_only_mode,
+                reasoning_suppression=config.reasoning_suppression,
             )
             row["latency_ms"] = latency_ms
             row["response_received"] = bool(raw_text)
@@ -461,6 +486,11 @@ def run_startup_llm_sanity_check(simulation, *, config: StartupLLMSanityConfig) 
 
     artifact_payload = {
         "summary": summary,
+        "startup_sanity_request_config": {
+            "completion_max_tokens": int(config.completion_max_tokens),
+            "json_only_mode_requested": bool(config.json_only_mode),
+            "reasoning_suppression_requested": bool(config.reasoning_suppression),
+        },
         "schema_fields": SANITY_RESPONSE_FIELDS,
         "session_semantics": {
             "simulator_agents_persistent": True,
