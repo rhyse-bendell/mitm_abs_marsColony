@@ -414,7 +414,46 @@ class TestRuntimeWitnessAudit(unittest.TestCase):
             self.assertNotEqual(source_target.get("status"), "failed")
             event_types = [e["event_type"] for e in sim.logger.get_recent_events(300)]
             self.assertIn("shared_source_step_recovered", event_types)
+            self.assertIn("shared_source_step_recovered_after_late_success", event_types)
+            self.assertIn("source_access_recovered", event_types)
             self.assertIn("witness_step_recovered_after_late_success", event_types)
+            sim.stop()
+
+    def test_role_private_source_witness_step_recovers_after_late_success(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            audit = sim.runtime_witness_audit
+            source_id = "Architect_Info"
+            source_candidates = []
+            for target in audit.targets.values():
+                for step in target["ordered_witness_steps"]:
+                    if step.raw_step == f"source_access:{source_id}":
+                        source_candidates.append(step)
+            if not source_candidates:
+                self.skipTest("No role-private source witness step found")
+            step_ref = source_candidates[0]
+            sim.logger.log_event(
+                sim.time,
+                "inspect_completion_failed",
+                {"agent": sim.agents[0].name, "source_id": source_id, "failure_category": "partial_packet_uptake"},
+            )
+            self.assertEqual(step_ref.status, "blocked")
+            sim.logger.log_event(
+                sim.time,
+                "source_access_succeeded",
+                {
+                    "agent": sim.agents[0].name,
+                    "source_id": source_id,
+                    "new_information_ids": [],
+                    "new_data_ids": [],
+                    "is_shared_source": False,
+                    "source_access_classification": "role_private_source",
+                },
+            )
+            self.assertEqual(step_ref.status, "completed")
+            event_types = [e["event_type"] for e in sim.logger.get_recent_events(300)]
+            self.assertIn("role_source_step_recovered_after_late_success", event_types)
+            self.assertIn("source_access_recovered", event_types)
             sim.stop()
 
     def test_strict_source_classification_shared_vs_private(self):
@@ -453,6 +492,7 @@ class TestRuntimeWitnessAudit(unittest.TestCase):
             self.assertIn("derivation_prerequisites_satisfied", event_types)
             self.assertIn("derivation_attempted", event_types)
             self.assertIn("derivation_attempted_no_output", event_types)
+            self.assertIn("derivation_blocked_missing_prereq", event_types)
             sim.stop()
 
     def test_rule_ready_but_not_adopted_is_logged(self):
