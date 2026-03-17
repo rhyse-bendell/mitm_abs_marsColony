@@ -52,6 +52,7 @@ class TestBrainBackendSelection(unittest.TestCase):
                     "timeout_s": 0.2,
                     "fallback_backend": "rule_brain",
                 },
+                planner_config={"unrestricted_local_qwen_mode": False, "high_latency_local_llm_mode": False},
             )
             self.assertEqual(sim.configured_brain_backend, "local_http")
             self.assertEqual(sim.brain_backend_config.local_model, "llama3.2")
@@ -121,6 +122,7 @@ class TestBrainBackendSelection(unittest.TestCase):
                 project_root=tmpdir,
                 brain_backend="ollama",
                 brain_backend_options={"local_model": "qwen3.5:9b", "timeout_s": 75.0},
+                planner_config={"unrestricted_local_qwen_mode": False, "high_latency_local_llm_mode": False},
             )
             sim.update(0.1)
             sim.stop()
@@ -140,12 +142,14 @@ class TestBrainBackendSelection(unittest.TestCase):
             manifest = json.loads((session_dir / "session_manifest.json").read_text(encoding="utf-8"))
             self.assertTrue(manifest.get("high_latency_local_llm_mode"))
             self.assertTrue(manifest.get("unrestricted_local_qwen_mode"))
-            self.assertGreaterEqual(float(manifest.get("effective_planner_timeout_seconds", 0.0)), 480.0)
-            self.assertGreaterEqual(float(manifest.get("effective_startup_llm_sanity_timeout_seconds", 0.0)), 360.0)
-            self.assertGreaterEqual(float(manifest.get("effective_warmup_timeout_seconds", 0.0)), 240.0)
-            self.assertGreaterEqual(int(manifest.get("effective_startup_llm_sanity_completion_max_tokens", 0)), 8192)
-            self.assertGreaterEqual(int(manifest.get("effective_planner_completion_max_tokens", 0)), 8192)
+            self.assertGreaterEqual(float(manifest.get("effective_planner_timeout_seconds", 0.0)), 900.0)
+            self.assertGreaterEqual(float(manifest.get("effective_startup_llm_sanity_timeout_seconds", 0.0)), 900.0)
+            self.assertGreaterEqual(float(manifest.get("effective_warmup_timeout_seconds", 0.0)), 600.0)
+            self.assertGreaterEqual(int(manifest.get("effective_startup_llm_sanity_completion_max_tokens", 0)), 24576)
+            self.assertGreaterEqual(int(manifest.get("effective_planner_completion_max_tokens", 0)), 24576)
             self.assertTrue(manifest.get("stale_result_relaxation_enabled"))
+            self.assertGreaterEqual(float(manifest.get("permissive_timeout_ceiling_s", 0.0)), 1800.0)
+            self.assertGreaterEqual(int(manifest.get("permissive_completion_ceiling_tokens", 0)), 32768)
 
     def test_disabling_unrestricted_mode_preserves_explicit_normal_budgets(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -246,7 +250,7 @@ class TestExperimentTabBackendControl(unittest.TestCase):
         try:
             app.root.withdraw()
             self.assertEqual(app.local_model_var.get(), "qwen3.5:9b")
-            self.assertAlmostEqual(float(app.local_timeout_var.get()), 480.0)
+            self.assertAlmostEqual(float(app.local_timeout_var.get()), 900.0)
             app.brain_backend_var.set("rule_brain")
             app.apply_experiment_settings()
             self.assertIsNotNone(app.sim)

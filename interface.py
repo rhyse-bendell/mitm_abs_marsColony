@@ -23,31 +23,31 @@ class MarsColonyInterface:
         "brain_backend": "ollama",
         "local_model": "qwen3.5:9b",
         "local_base_url": "http://127.0.0.1:11434",
-        "timeout_s": 480.0,
+        "timeout_s": 900.0,
         "fallback_backend": "rule_brain",
     }
     PLANNER_DEFAULTS = {
         "planner_interval_steps": 16,
-        "planner_timeout_seconds": 480.0,
+        "planner_timeout_seconds": 900.0,
         "planner_max_retries": 0,
-        "backend_timeout_s": 480.0,
+        "backend_timeout_s": 900.0,
         "backend_max_retries": 0,
-        "degraded_consecutive_failures_threshold": 6,
-        "degraded_cooldown_seconds": 45.0,
-        "degraded_step_interval_multiplier": 3.0,
+        "degraded_consecutive_failures_threshold": 24,
+        "degraded_cooldown_seconds": 300.0,
+        "degraded_step_interval_multiplier": 8.0,
         "enable_startup_llm_sanity": True,
-        "startup_llm_sanity_timeout_seconds": 360.0,
+        "startup_llm_sanity_timeout_seconds": 900.0,
         "startup_llm_sanity_max_sources": 2,
         "startup_llm_sanity_max_items_per_type": 3,
-        "startup_llm_sanity_completion_max_tokens": 8192,
-        "planner_completion_max_tokens": 8192,
-        "warmup_timeout_seconds": 240.0,
+        "startup_llm_sanity_completion_max_tokens": 24576,
+        "planner_completion_max_tokens": 24576,
+        "warmup_timeout_seconds": 600.0,
         "startup_llm_sanity_raw_response_max_chars": 4000,
         "enable_bootstrap_summary_reuse": True,
         "bootstrap_summary_max_chars": 280,
         "high_latency_local_llm_mode": True,
         "unrestricted_local_qwen_mode": True,
-        "high_latency_stale_result_grace_s": 420.0,
+        "high_latency_stale_result_grace_s": 1800.0,
     }
     RETRY_HELP_TEXT = {
         "backend_max_retries": "0 means make one attempt and then rely on fallback/degraded behavior instead of retrying immediately.",
@@ -462,6 +462,7 @@ class MarsColonyInterface:
             "bootstrap_summary_max_chars": max(80, int(self.bootstrap_summary_max_chars_var.get())),
             "high_latency_local_llm_mode": bool(self.high_latency_local_llm_mode_var.get()),
             "unrestricted_local_qwen_mode": bool(self.unrestricted_local_qwen_mode_var.get()),
+            "planner_timeout_seconds": max(0.1, float(self.planner_timeout_seconds_var.get())),
             "warmup_timeout_seconds": max(0.1, float(self.warmup_timeout_var.get())),
             "startup_llm_sanity_completion_max_tokens": max(256, int(self.startup_llm_sanity_completion_tokens_var.get())),
             "planner_completion_max_tokens": max(256, int(self.planner_completion_tokens_var.get())),
@@ -934,6 +935,7 @@ class MarsColonyInterface:
         self.startup_llm_sanity_raw_max_chars_var = IntVar(value=int(self.PLANNER_DEFAULTS["startup_llm_sanity_raw_response_max_chars"]))
         self.bootstrap_reuse_enabled_var = BooleanVar(value=bool(self.PLANNER_DEFAULTS["enable_bootstrap_summary_reuse"]))
         self.bootstrap_summary_max_chars_var = IntVar(value=int(self.PLANNER_DEFAULTS["bootstrap_summary_max_chars"]))
+        self.planner_timeout_seconds_var = DoubleVar(value=float(self.PLANNER_DEFAULTS["planner_timeout_seconds"]))
         self.high_latency_local_llm_mode_var = BooleanVar(value=bool(self.PLANNER_DEFAULTS["high_latency_local_llm_mode"]))
         self.unrestricted_local_qwen_mode_var = BooleanVar(value=bool(self.PLANNER_DEFAULTS["unrestricted_local_qwen_mode"]))
         self.warmup_timeout_var = DoubleVar(value=float(self.PLANNER_DEFAULTS["warmup_timeout_seconds"]))
@@ -965,33 +967,37 @@ class MarsColonyInterface:
         ttk.Entry(settings_frame, textvariable=self.planner_completion_tokens_var, width=10).grid(row=30, column=1, sticky="w", pady=3)
         self._add_help_text(settings_frame, 31, "Maximum tokens allowed for planner completions.")
 
-        ttk.Label(settings_frame, text="Warmup Timeout (s)").grid(row=32, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(settings_frame, textvariable=self.warmup_timeout_var, width=10).grid(row=32, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 33, "Startup backend warmup timeout budget.")
+        ttk.Label(settings_frame, text="Planner Timeout (s)").grid(row=32, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.planner_timeout_seconds_var, width=10).grid(row=32, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 33, "Per-request planner timeout budget for local LLM calls.")
 
-        ttk.Label(settings_frame, text="Raw Response Max Chars").grid(row=34, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(settings_frame, textvariable=self.startup_llm_sanity_raw_max_chars_var, width=10).grid(row=34, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 35, "Truncate captured raw startup responses to keep artifacts bounded.")
+        ttk.Label(settings_frame, text="Warmup Timeout (s)").grid(row=34, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.warmup_timeout_var, width=10).grid(row=34, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 35, "Startup backend warmup timeout budget.")
 
-        ttk.Label(settings_frame, text="Reuse Bootstrap Summary in Planner Requests").grid(row=36, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Checkbutton(settings_frame, text="Include compact bootstrap summary on future planner requests", variable=self.bootstrap_reuse_enabled_var).grid(row=36, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 37, "Agents remain persistent simulator entities for the session, but model calls stay explicit stateless requests. Reuse adds a compact inspectable summary field; no hidden model-side memory is assumed.")
+        ttk.Label(settings_frame, text="Raw Response Max Chars").grid(row=36, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.startup_llm_sanity_raw_max_chars_var, width=10).grid(row=36, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 37, "Truncate captured raw startup responses to keep artifacts bounded.")
 
-        ttk.Label(settings_frame, text="Bootstrap Summary Max Chars").grid(row=38, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(settings_frame, textvariable=self.bootstrap_summary_max_chars_var, width=10).grid(row=38, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 39, "Upper bound for compact bootstrap summaries attached to planner requests.")
+        ttk.Label(settings_frame, text="Reuse Bootstrap Summary in Planner Requests").grid(row=38, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Checkbutton(settings_frame, text="Include compact bootstrap summary on future planner requests", variable=self.bootstrap_reuse_enabled_var).grid(row=38, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 39, "Agents remain persistent simulator entities for the session, but model calls stay explicit stateless requests. Reuse adds a compact inspectable summary field; no hidden model-side memory is assumed.")
 
-        ttk.Label(settings_frame, text="High-Latency Local LLM Mode").grid(row=40, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Checkbutton(settings_frame, text="Let local LLM requests run with relaxed timing and stale-result tolerance", variable=self.high_latency_local_llm_mode_var).grid(row=40, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 41, "Diagnostic mode for slow local inference: relaxed timeouts, reduced planner pressure, and less eager stale-result discards.")
+        ttk.Label(settings_frame, text="Bootstrap Summary Max Chars").grid(row=40, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.bootstrap_summary_max_chars_var, width=10).grid(row=40, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 41, "Upper bound for compact bootstrap summaries attached to planner requests.")
 
-        ttk.Label(settings_frame, text="Unrestricted Local Qwen Mode").grid(row=42, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Checkbutton(settings_frame, text="Very permissive mode: multi-minute waits + very large completion budgets (with safety ceilings)", variable=self.unrestricted_local_qwen_mode_var).grid(row=42, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 43, "Intentionally patient diagnostics mode for slow local Qwen runs.")
+        ttk.Label(settings_frame, text="High-Latency Local LLM Mode").grid(row=42, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Checkbutton(settings_frame, text="Let local LLM requests run with relaxed timing and stale-result tolerance", variable=self.high_latency_local_llm_mode_var).grid(row=42, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 43, "Diagnostic mode for slow local inference: relaxed timeouts, reduced planner pressure, and less eager stale-result discards.")
 
-        ttk.Label(settings_frame, text="Stale Result Grace (s)").grid(row=44, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(settings_frame, textvariable=self.high_latency_stale_result_grace_var, width=10).grid(row=44, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 45, "Additional grace window to accept late but still relevant planner responses in high-latency mode.")
+        ttk.Label(settings_frame, text="Unrestricted Local Qwen Mode").grid(row=44, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Checkbutton(settings_frame, text="Very permissive mode: multi-minute waits + very large completion budgets (with safety ceilings)", variable=self.unrestricted_local_qwen_mode_var).grid(row=44, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 45, "Intentionally patient diagnostics mode for slow local Qwen runs.")
+
+        ttk.Label(settings_frame, text="Stale Result Grace (s)").grid(row=46, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.high_latency_stale_result_grace_var, width=10).grid(row=46, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 47, "Additional grace window to accept late but still relevant planner responses in high-latency mode.")
 
         self._local_backend_widgets = [local_model_entry, local_base_url_entry, local_timeout_entry, fallback_combo]
         self._update_backend_field_states()

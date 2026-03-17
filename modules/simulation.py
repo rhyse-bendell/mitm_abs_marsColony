@@ -16,6 +16,21 @@ from modules.construct_mapping import ConstructMapper
 from modules.task_model import load_task_model
 
 LOCAL_BACKEND_ALIASES = {"local_http", "openai_compatible_local", "ollama_local", "ollama"}
+UNRESTRICTED_QWEN_DEFAULTS = {
+    "planner_interval_steps": 24,
+    "planner_interval_time": 20.0,
+    "planner_timeout_seconds": 900.0,
+    "startup_llm_sanity_timeout_seconds": 900.0,
+    "startup_llm_sanity_completion_max_tokens": 24576,
+    "planner_completion_max_tokens": 24576,
+    "warmup_timeout_seconds": 600.0,
+    "degraded_consecutive_failures_threshold": 24,
+    "degraded_cooldown_seconds": 300.0,
+    "degraded_step_interval_multiplier": 8.0,
+    "high_latency_stale_result_grace_s": 1800.0,
+    "permissive_timeout_ceiling_s": 1800.0,
+    "permissive_completion_ceiling_tokens": 32768,
+}
 
 
 def _planner_defaults_with_high_latency_mode(planner_defaults, configured_backend):
@@ -35,19 +50,8 @@ def _planner_defaults_with_high_latency_mode(planner_defaults, configured_backen
         defaults.setdefault("high_latency_stale_result_grace_s", 60.0)
     if unrestricted_local_qwen_mode:
         defaults["high_latency_local_llm_mode"] = True
-        defaults.setdefault("planner_interval_steps", 16)
-        defaults.setdefault("planner_interval_time", 12.0)
-        defaults.setdefault("planner_timeout_seconds", 480.0)
-        defaults.setdefault("startup_llm_sanity_timeout_seconds", 360.0)
-        defaults.setdefault("startup_llm_sanity_completion_max_tokens", 8192)
-        defaults.setdefault("planner_completion_max_tokens", 8192)
-        defaults.setdefault("warmup_timeout_seconds", 240.0)
-        defaults.setdefault("degraded_consecutive_failures_threshold", 12)
-        defaults.setdefault("degraded_cooldown_seconds", 120.0)
-        defaults.setdefault("degraded_step_interval_multiplier", 4.0)
-        defaults.setdefault("high_latency_stale_result_grace_s", 420.0)
-        defaults.setdefault("permissive_timeout_ceiling_s", 1200.0)
-        defaults.setdefault("permissive_completion_ceiling_tokens", 16384)
+        for key, value in UNRESTRICTED_QWEN_DEFAULTS.items():
+            defaults.setdefault(key, value)
     return defaults
 
 
@@ -155,8 +159,16 @@ class SimulationState:
             effective_timeout_ceiling = max(60.0, float(self.brain_backend_config.permissive_timeout_ceiling_s))
             effective_completion_ceiling = max(512, int(self.brain_backend_config.permissive_completion_ceiling_tokens))
             effective_startup_timeout = min(float(self.startup_llm_sanity_config.timeout_s), effective_timeout_ceiling)
-            effective_planner_timeout = min(float(self.brain_backend_config.timeout_s), effective_timeout_ceiling)
-            effective_warmup_timeout = min(float(self.brain_backend_config.warmup_timeout_s), effective_timeout_ceiling)
+            requested_planner_timeout = max(
+                float(self.brain_backend_config.timeout_s),
+                float(self.planner_defaults.get("planner_timeout_seconds", self.brain_backend_config.timeout_s) or self.brain_backend_config.timeout_s),
+            )
+            requested_warmup_timeout = max(
+                float(self.brain_backend_config.warmup_timeout_s),
+                float(self.planner_defaults.get("warmup_timeout_seconds", self.brain_backend_config.warmup_timeout_s) or self.brain_backend_config.warmup_timeout_s),
+            )
+            effective_planner_timeout = min(requested_planner_timeout, effective_timeout_ceiling)
+            effective_warmup_timeout = min(requested_warmup_timeout, effective_timeout_ceiling)
             effective_startup_tokens = min(int(self.startup_llm_sanity_config.completion_max_tokens), effective_completion_ceiling)
             effective_planner_tokens = min(int(self.brain_backend_config.completion_max_tokens), effective_completion_ceiling)
             self.startup_llm_sanity_config = StartupLLMSanityConfig(
