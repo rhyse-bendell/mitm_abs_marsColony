@@ -35,6 +35,7 @@ class MetricsCollector:
         self.construction_creation_by_type = Counter()
         self.construction_revision_by_type = Counter()
         self.construction_validation_by_type = Counter()
+        self.construction_event_counts = Counter()
         self._seen_construction_projects = set()
         self._artifact_state = {}
 
@@ -121,6 +122,15 @@ class MetricsCollector:
                 "dik_counts": Counter(),
                 "construction_externalization_create_events": 0,
                 "construction_externalization_revision_events": 0,
+                "construction_attempt_started": 0,
+                "construction_resource_delivered": 0,
+                "construction_build_episode": 0,
+                "construction_progress_updated": 0,
+                "construction_externalization_updated": 0,
+                "construction_ready_for_validation": 0,
+                "construction_completed": 0,
+                "construction_validated_correct": 0,
+                "construction_validated_incorrect": 0,
                 "validation_events": 0,
                 "phase_transitions": 0,
                 "planning_actions": 0,
@@ -165,6 +175,8 @@ class MetricsCollector:
             "derivation_succeeded",
             "derivation_attempted_no_output",
             "derivation_ready_but_not_attempted",
+            "derivation_blocked_missing_prereq",
+            "rule_candidate_generated",
             "rule_ready_but_not_adopted",
         }:
             self.breakdown_counts["derivation_audit"][event_type] += 1
@@ -267,6 +279,24 @@ class MetricsCollector:
         if event_type in {"externalization_created", "construction_externalization_update"}:
             self.phase_stats[-1]["externalization_events"] += 1
 
+        construction_events = {
+            "construction_attempt_started",
+            "construction_resource_delivered",
+            "construction_build_episode",
+            "construction_progress_updated",
+            "construction_externalization_updated",
+            "construction_ready_for_validation",
+            "construction_completed",
+            "construction_validated_correct",
+            "construction_validated_incorrect",
+        }
+        if event_type in construction_events:
+            self.construction_event_counts[event_type] += 1
+            self.phase_stats[-1][event_type] += 1
+            project_id = payload.get("project_id")
+            if project_id:
+                self.phase_stats[-1]["_seen_projects"].add(project_id)
+
         if event_type == "externalization_created":
             artifact_type = payload.get("type", "unknown")
             self.externalization_by_type[artifact_type] += 1
@@ -339,6 +369,11 @@ class MetricsCollector:
                 self.phase_stats[-1]["structures_validated_correct"] += 1
                 self.phase_stats[-1]["validation_events"] += 1
                 self.construction_validation_by_type[structure_type] += 1
+
+        if event_type == "construction_validated_correct":
+            structure_type = payload.get("structure_type", "unknown")
+            self.construction_validation_by_type[structure_type] += 1
+            self.phase_stats[-1]["validation_events"] += 1
 
         if event_type == "artifact_consulted":
             self.phase_stats[-1]["artifact_consultations"] += 1
@@ -465,6 +500,15 @@ class MetricsCollector:
         projects = self.simulation.environment.construction.projects.values()
         summary = {
             "attempted": 0,
+            "attempt_started_events": int(self.construction_event_counts.get("construction_attempt_started", 0)),
+            "resource_delivery_events": int(self.construction_event_counts.get("construction_resource_delivered", 0)),
+            "build_episode_events": int(self.construction_event_counts.get("construction_build_episode", 0)),
+            "progress_update_events": int(self.construction_event_counts.get("construction_progress_updated", 0)),
+            "ready_for_validation_events": int(self.construction_event_counts.get("construction_ready_for_validation", 0)),
+            "externalization_update_events": int(self.construction_event_counts.get("construction_externalization_updated", 0)),
+            "completion_events": int(self.construction_event_counts.get("construction_completed", 0)),
+            "validated_correct_events": int(self.construction_event_counts.get("construction_validated_correct", 0)),
+            "validated_incorrect_events": int(self.construction_event_counts.get("construction_validated_incorrect", 0)),
             "completed": 0,
             "validated_correct": 0,
             "repaired_or_corrected": self.events_by_type["construction_repair_episode"],
@@ -588,6 +632,15 @@ class MetricsCollector:
                     "structures_completed": phase["structures_completed"],
                     "structures_validated_correct": phase["structures_validated_correct"],
                     "structures_repaired_or_corrected": phase["structures_repaired_or_corrected"],
+                    "construction_attempt_started": phase["construction_attempt_started"],
+                    "construction_resource_delivered": phase["construction_resource_delivered"],
+                    "construction_build_episode": phase["construction_build_episode"],
+                    "construction_progress_updated": phase["construction_progress_updated"],
+                    "construction_externalization_updated": phase["construction_externalization_updated"],
+                    "construction_ready_for_validation": phase["construction_ready_for_validation"],
+                    "construction_completed": phase["construction_completed"],
+                    "construction_validated_correct": phase["construction_validated_correct"],
+                    "construction_validated_incorrect": phase["construction_validated_incorrect"],
                     "communication_events": phase["communication_events"],
                     "externalization_events": phase["externalization_events"],
                     "artifact_consultations": phase["artifact_consultations"],
@@ -677,7 +730,11 @@ class MetricsCollector:
                     ) if structure_summary["attempted"] else 0.0,
                 },
                 "phase_objective_completion": {
-                    phase["phase_name"]: phase["events"].get("construction_externalization_update", 0) > 0
+                    phase["phase_name"]: (
+                        phase["construction_progress_updated"] > 0
+                        or phase["construction_completed"] > 0
+                        or phase["construction_externalization_updated"] > 0
+                    )
                     for phase in self.phase_stats
                 },
             },
@@ -693,6 +750,7 @@ class MetricsCollector:
                 ],
                 "construction_externalization_creations_by_type": dict(self.construction_creation_by_type),
                 "construction_externalization_revisions_by_type": dict(self.construction_revision_by_type),
+                "construction_event_counts": {k: int(v) for k, v in self.construction_event_counts.items()},
                 "validation_events": self.events_by_type["artifact_validated"],
                 "mismatch_detections": self.events_by_type["construction_mismatch_detected"],
                 "repair_or_correction_episodes": self.events_by_type["construction_repair_episode"],
@@ -709,6 +767,8 @@ class MetricsCollector:
                     "derivation_succeeded_count": int(self.breakdown_counts.get("derivation_audit", {}).get("derivation_succeeded", 0)),
                     "derivation_attempted_no_output_count": int(self.breakdown_counts.get("derivation_audit", {}).get("derivation_attempted_no_output", 0)),
                     "derivation_ready_but_not_attempted_count": int(self.breakdown_counts.get("derivation_audit", {}).get("derivation_ready_but_not_attempted", 0)),
+                    "derivation_blocked_missing_prereq_count": int(self.breakdown_counts.get("derivation_audit", {}).get("derivation_blocked_missing_prereq", 0)),
+                    "rule_candidate_generated_count": int(self.breakdown_counts.get("derivation_audit", {}).get("rule_candidate_generated", 0)),
                     "rule_ready_but_not_adopted_count": int(self.breakdown_counts.get("derivation_audit", {}).get("rule_ready_but_not_adopted", 0)),
                     "brute_force_progression_cycles": int(self.breakdown_counts.get("derivation_audit", {}).get("brute_force_progression_cycles", 0)),
                 },
@@ -757,6 +817,12 @@ class MetricsCollector:
                     "shared_source_access_strict_accounting": {
                         k: int(v) for k, v in self.breakdown_counts.get("shared_source_access_success_strict", {}).items()
                     },
+                    "source_access_recovery": {
+                        "source_access_recovered_count": int(self.events_by_type.get("source_access_recovered", 0)),
+                        "witness_step_recovered_count": int(self.events_by_type.get("witness_step_recovered", 0)),
+                        "shared_source_step_recovered_after_late_success_count": int(self.events_by_type.get("shared_source_step_recovered_after_late_success", 0)),
+                        "role_source_step_recovered_after_late_success_count": int(self.events_by_type.get("role_source_step_recovered_after_late_success", 0)),
+                    },
                     "shared_source_failure_distribution": {
                         reason: int(count)
                         for reason, count in self.reason_distributions.get("shared_source_access_blocked", {}).items()
@@ -767,6 +833,13 @@ class MetricsCollector:
                     "externalization_target_selection_count": int(self.events_by_type.get("moving_to_externalization_site", 0)),
                     "mismatch_detection_suppressed_not_ready_count": int(self.events_by_type.get("mismatch_detection_skipped_not_ready", 0)),
                     "repair_trigger_suppressed_not_ready_count": int(self.events_by_type.get("repair_trigger_suppressed_not_ready", 0)),
+                },
+                "readiness_world_state_alignment": {
+                    "execution_readiness_passed_count": int(self.events_by_type.get("execution_readiness_passed", 0)),
+                    "execution_readiness_failed_count": int(self.events_by_type.get("execution_readiness_failed", 0)),
+                    "construction_progress_updated_count": int(self.construction_event_counts.get("construction_progress_updated", 0)),
+                    "construction_completed_count": int(self.construction_event_counts.get("construction_completed", 0)),
+                    "construction_externalization_updated_count": int(self.construction_event_counts.get("construction_externalization_updated", 0)),
                 },
                 "startup_progression": {
                     "agents_left_spawn_count": int(sum(1 for moved in moved_map.values() if moved)),
@@ -790,6 +863,7 @@ class MetricsCollector:
                 "construction_artifact_creation_by_type": dict(self.construction_creation_by_type),
                 "construction_artifact_revision_by_type": dict(self.construction_revision_by_type),
                 "construction_artifact_validation_by_type": dict(self.construction_validation_by_type),
+                "construction_pipeline_event_counts": {k: int(v) for k, v in self.construction_event_counts.items()},
                 "artifact_validation_rate": team_knowledge_summary["artifact_validation_rate"],
                 "artifact_revision_or_repair_rate": round(
                     self.events_by_type["construction_repair_episode"] / max(1, len(self.simulation.team_knowledge_manager.artifacts)),

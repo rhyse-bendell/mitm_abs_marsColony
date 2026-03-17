@@ -156,6 +156,50 @@ class TestMetricsOutputs(unittest.TestCase):
             sim.stop()
             self.assertGreater(sim.time, 0.0)
 
+    def test_construction_pipeline_events_are_accounted_in_summaries(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            agent = sim.agents[0]
+            action = {
+                "type": "construct",
+                "progress": 0,
+                "duration": 2.0,
+                "project_id": "Build_Table_A",
+                "decision_action": "start_construction",
+            }
+            starting_bricks = sim.environment.construction.projects["Build_Table_A"]["delivered_resources"]["bricks"]
+            agent.inventory_resources["bricks"] = 2
+            agent.active_actions = [action]
+            agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.2)
+            sim.stop()
+
+            session_dir = next((Path(tmpdir) / "Outputs").iterdir())
+            run_summary = json.loads((session_dir / "measures" / "run_summary.json").read_text(encoding="utf-8"))
+            phase_summary = json.loads((session_dir / "measures" / "phase_summary.json").read_text(encoding="utf-8"))
+
+            pipeline = run_summary["process"]["construction_event_counts"]
+            self.assertGreaterEqual(pipeline.get("construction_attempt_started", 0), 1)
+            self.assertGreaterEqual(pipeline.get("construction_resource_delivered", 0), 1)
+            self.assertGreaterEqual(pipeline.get("construction_progress_updated", 0), 1)
+            self.assertGreaterEqual(pipeline.get("construction_externalization_updated", 0), 1)
+            self.assertEqual(
+                sim.environment.construction.projects["Build_Table_A"]["delivered_resources"]["bricks"],
+                starting_bricks + 1,
+            )
+            self.assertGreaterEqual(phase_summary[0].get("construction_resource_delivered", 0), 1)
+
+    def test_readiness_alignment_summary_tracks_readiness_vs_world_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            sim.logger.log_event(sim.time, "execution_readiness_passed", {"agent": sim.agents[0].name})
+            sim.logger.log_event(sim.time, "construction_progress_updated", {"agent": sim.agents[0].name, "project_id": "Build_Table_A"})
+            sim.stop()
+            session_dir = next((Path(tmpdir) / "Outputs").iterdir())
+            run_summary = json.loads((session_dir / "measures" / "run_summary.json").read_text(encoding="utf-8"))
+            alignment = run_summary["process"]["readiness_world_state_alignment"]
+            self.assertEqual(alignment["execution_readiness_passed_count"], 1)
+            self.assertEqual(alignment["construction_progress_updated_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

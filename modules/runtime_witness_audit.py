@@ -206,6 +206,15 @@ class RuntimeWitnessAudit:
         target["failure_category"] = None
         target["first_failure_step"] = None
         self._emit_witness_event(
+            "source_access_recovered" if step_type == "source_access" else "witness_step_recovered",
+            {
+                "witness_id": target_id,
+                "target_id": target_id,
+                "agent": payload.get("agent"),
+                "step_type": step_type,
+            },
+        )
+        self._emit_witness_event(
             "witness_step_recovered_after_late_success",
             {
                 "witness_id": target_id,
@@ -226,6 +235,35 @@ class RuntimeWitnessAudit:
                 if self._recover_failed_target_for_step(tid, "source_access", payload):
                     self._emit_witness_event(
                         "shared_source_step_recovered",
+                        {
+                            "witness_id": tid,
+                            "target_id": tid,
+                            "agent": payload.get("agent"),
+                            "source_id": source_id,
+                            "step_type": "source_access",
+                        },
+                    )
+                    self._emit_witness_event(
+                        "shared_source_step_recovered_after_late_success",
+                        {
+                            "witness_id": tid,
+                            "target_id": tid,
+                            "agent": payload.get("agent"),
+                            "source_id": source_id,
+                            "step_type": "source_access",
+                        },
+                    )
+
+    def _recover_role_source_steps(self, source_id: str, payload: Dict[str, object]):
+        for tid, idx in self._raw_index.get(f"source_access:{source_id}", []):
+            target = self.targets.get(tid)
+            if not target:
+                continue
+            step = target["ordered_witness_steps"][idx]
+            if step.status == "blocked" and step.step_type == "source_access":
+                if self._recover_failed_target_for_step(tid, "source_access", payload):
+                    self._emit_witness_event(
+                        "role_source_step_recovered_after_late_success",
                         {
                             "witness_id": tid,
                             "target_id": tid,
@@ -338,6 +376,8 @@ class RuntimeWitnessAudit:
             if source_id:
                 if payload.get("is_shared_source"):
                     self._recover_shared_source_steps(source_id, payload)
+                else:
+                    self._recover_role_source_steps(source_id, payload)
                 for tid, idx in self._raw_index.get(f"source_access:{source_id}", []):
                     self._complete_step(tid, idx, payload)
             for element_id in payload.get("new_data_ids", []) + payload.get("new_information_ids", []):

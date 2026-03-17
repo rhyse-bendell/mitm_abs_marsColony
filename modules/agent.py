@@ -289,6 +289,7 @@ class Agent:
         self.last_dik_change_time = -1.0
         self.executed_derivations = set()
         self.derivation_events = []
+        self._construction_attempted_projects = set()
         self.task_model = None
 
 
@@ -579,7 +580,16 @@ class Agent:
             self.inspect_session["state"] = "target_reached" if self.inspect_session.get("state") == "target_reached" else "target_selected"
             self._emit_event(sim_state, "inspect_progressed", {"source_id": source_id, "stage": self.inspect_session.get("state"), "target": target_pos, "goal": self.goal})
             if shared_source:
-                self._emit_event(sim_state, "shared_source_access_blocked", {"source_id": source_id, "reason": "too_far_or_role_mismatch", "source_meta": source_meta})
+                self._emit_event(
+                    sim_state,
+                    "shared_source_access_blocked",
+                    {
+                        "source_id": source_id,
+                        "reason": "too_far_or_role_mismatch",
+                        "source_meta": source_meta,
+                        "source_access_classification": source_access_classification.get("classification"),
+                    },
+                )
             return False
 
         self.inspect_session["state"] = "target_reached"
@@ -936,6 +946,16 @@ class Agent:
 
             required = set(derivation.required_inputs)
             if required and not required.issubset(held_ids):
+                if sim_state is not None and trigger_source is not None:
+                    self._emit_event(
+                        sim_state,
+                        "derivation_blocked_missing_prereq",
+                        {
+                            "derivation_id": derivation.derivation_id,
+                            "missing_required_inputs": sorted(required - held_ids),
+                            "trigger_source": trigger_source,
+                        },
+                    )
                 continue
             if derivation.min_required_count and len(required & held_ids) < derivation.min_required_count:
                 continue
@@ -985,6 +1005,17 @@ class Agent:
             rule_ready_not_adopted = False
             if derivation.output_type == "knowledge" or element.element_type == "knowledge":
                 if output_id not in self.mental_model["knowledge"].rules:
+                    if sim_state is not None:
+                        self._emit_event(
+                            sim_state,
+                            "rule_candidate_generated",
+                            {
+                                "derivation_id": derivation.derivation_id,
+                                "rule_id": output_id,
+                                "required_inputs": sorted(required),
+                                "trigger_source": trigger_source,
+                            },
+                        )
                     self.mental_model["knowledge"].add_rule(output_id, sorted(required), inferred_by_agents=[self.name])
                     produced = True
                 else:
@@ -3022,8 +3053,33 @@ class Agent:
                 project_id = action.get("project_id") or "Build_Table_B"
                 project = environment.construction.projects.get(project_id)
                 if project:
+                    required_before = int(project.get("required_resources", {}).get("bricks", 0) or 0)
+                    delivered_before = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
+                    status_before = project.get("status", "in_progress")
                     decision_action = action.get("decision_action")
                     legacy_direct = decision_action is None
+                    if project_id not in self._construction_attempted_projects:
+                        self._construction_attempted_projects.add(project_id)
+                        self._emit_event(
+                            sim_state,
+                            "construction_attempt_started",
+                            {
+                                "agent": self.name,
+                                "project_id": project_id,
+                                "structure_type": project.get("type", "unknown"),
+                                "decision_action": decision_action,
+                            },
+                        )
+                    self._emit_event(
+                        sim_state,
+                        "construction_build_episode",
+                        {
+                            "agent": self.name,
+                            "project_id": project_id,
+                            "decision_action": decision_action,
+                            "status_before": status_before,
+                        },
+                    )
                     if not legacy_direct and self.inventory_resources.get("bricks", 0) <= 0:
                         self.activity_log.append("Construction paused: missing transported bricks")
                         sim_state.logger.log_event(sim_state.time, "construction_waiting_for_logistics", {"agent": self.name, "project_id": project_id})
@@ -3034,6 +3090,65 @@ class Agent:
                     environment.construction.assign_builder(project_id, self.name)
                     environment.construction.deliver_resource(project_id, "bricks", quantity=1)
 
+                    delivered_after = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
+                    required_after = int(project.get("required_resources", {}).get("bricks", 0) or 0)
+                    status_after = project.get("status", "in_progress")
+                    progress_before = (delivered_before / required_before) if required_before > 0 else 0.0
+                    progress_after = (delivered_after / required_after) if required_after > 0 else 0.0
+
+                    self._emit_event(
+                        sim_state,
+                        "construction_resource_delivered",
+                        {
+                            "agent": self.name,
+                            "project_id": project_id,
+                            "resource_type": "bricks",
+                            "quantity": max(0, delivered_after - delivered_before),
+                            "delivered_before": delivered_before,
+                            "delivered_after": delivered_after,
+                            "required_total": required_after,
+                            "progress_before": round(progress_before, 4),
+                            "progress_after": round(progress_after, 4),
+                        },
+                    )
+
+                    if delivered_after != delivered_before:
+                        self._emit_event(
+                            sim_state,
+                            "construction_progress_updated",
+                            {
+                                "agent": self.name,
+                                "project_id": project_id,
+                                "delivered_before": delivered_before,
+                                "delivered_after": delivered_after,
+                                "required_total": required_after,
+                                "progress_before": round(progress_before, 4),
+                                "progress_after": round(progress_after, 4),
+                                "status_after": status_after,
+                            },
+                        )
+                    if required_after > 0 and delivered_before < required_after <= delivered_after:
+                        self._emit_event(
+                            sim_state,
+                            "construction_ready_for_validation",
+                            {
+                                "agent": self.name,
+                                "project_id": project_id,
+                                "required_total": required_after,
+                                "delivered_total": delivered_after,
+                            },
+                        )
+                    if status_before != "complete" and status_after == "complete":
+                        self._emit_event(
+                            sim_state,
+                            "construction_completed",
+                            {
+                                "agent": self.name,
+                                "project_id": project_id,
+                                "structure_type": project.get("type", "unknown"),
+                            },
+                        )
+
                     fidelity = max(self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5), self._trait_value("rule_accuracy"))
                     if random.random() > fidelity:
                         project["correct"] = False
@@ -3041,6 +3156,19 @@ class Agent:
                     if decision_action == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value:
                         project["correct"] = True
                     sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
+                    self._emit_event(
+                        sim_state,
+                        "construction_externalization_updated",
+                        {
+                            "agent": self.name,
+                            "project_id": project_id,
+                            "correct": project.get("correct", True),
+                            "structure_type": project.get("type", "unknown"),
+                            "status": project.get("status", "in_progress"),
+                            "decision_action": decision_action,
+                            "progress": round((int(project.get("delivered_resources", {}).get("bricks", 0) or 0) / max(1, int(project.get("required_resources", {}).get("bricks", 0) or 0))), 4),
+                        },
+                    )
                     sim_state.logger.log_event(
                         sim_state.time,
                         "construction_externalization_update",
@@ -3054,6 +3182,17 @@ class Agent:
                             "inventory_bricks_remaining": self.inventory_resources.get("bricks", 0),
                         },
                     )
+                    if project.get("status") == "complete":
+                        self._emit_event(
+                            sim_state,
+                            "construction_validated_correct" if project.get("correct", True) else "construction_validated_incorrect",
+                            {
+                                "agent": self.name,
+                                "project_id": project_id,
+                                "structure_type": project.get("type", "unknown"),
+                                "decision_action": decision_action,
+                            },
+                        )
 
     def update_active_actions(self, dt):
         """Deprecated wrapper: use `_advance_active_actions(...)` in live path."""
