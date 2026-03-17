@@ -6,6 +6,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from modules.interaction_graph import InteractionTraceWriter
+
 
 class OutputSessionManager:
     def __init__(self, experiment_name="experiment", timestamp=None, project_root=None):
@@ -164,6 +166,9 @@ class SimulationLogger:
         self.event_listeners = []
         self.last_dump_time = 0.0
         self.planner_trace_writer = PlannerTraceWriter(self.output_session, enabled=False)
+        self.interaction_trace_writer = InteractionTraceWriter(self.output_session.build_log_path("interaction_trace.jsonl"))
+        self.recent_interactions = []
+        self.max_recent_interactions = 300
 
     def _append_recent_event(self, event):
         self.recent_events.append(event)
@@ -216,6 +221,17 @@ class SimulationLogger:
 
     def register_event_listener(self, listener):
         self.event_listeners.append(listener)
+
+
+    def log_interaction(self, payload):
+        row = dict(payload or {})
+        self.interaction_trace_writer.append(row)
+        self.recent_interactions.append(row)
+        if len(self.recent_interactions) > self.max_recent_interactions:
+            self.recent_interactions = self.recent_interactions[-self.max_recent_interactions:]
+
+    def get_recent_interactions(self, count=120):
+        return self.recent_interactions[-count:]
 
     def get_recent_events(self, count=80):
         return self.recent_events[-count:]

@@ -18,6 +18,7 @@ OPTIONAL_PATHS = {
     "agent_summary": Path("measures/agent_summary.csv"),
     "events": Path("logs/events.csv"),
     "planner_trace": Path("logs/planner_trace.jsonl"),
+    "interaction_trace": Path("logs/interaction_trace.jsonl"),
     "movement": Path("logs/movement.csv"),
     "clock": Path("logs/clock.csv"),
 }
@@ -93,6 +94,7 @@ def load_analysis_session(session_dir: Path | str) -> AnalysisSession:
         events=_safe_csv(session_path / OPTIONAL_PATHS["events"], warnings),
         state_rows=_load_state_rows(session_path, warnings),
         planner_trace=_safe_jsonl(session_path / OPTIONAL_PATHS["planner_trace"], warnings),
+        interaction_trace=_safe_jsonl(session_path / OPTIONAL_PATHS["interaction_trace"], warnings),
         movement_rows=_safe_csv(session_path / OPTIONAL_PATHS["movement"], warnings),
         clock_rows=_safe_csv(session_path / OPTIONAL_PATHS["clock"], warnings),
     )
