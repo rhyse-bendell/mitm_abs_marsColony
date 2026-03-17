@@ -139,10 +139,37 @@ class TestBrainBackendSelection(unittest.TestCase):
             session_dir = next((sim.logger.output_session.outputs_root).iterdir())
             manifest = json.loads((session_dir / "session_manifest.json").read_text(encoding="utf-8"))
             self.assertTrue(manifest.get("high_latency_local_llm_mode"))
-            self.assertGreaterEqual(float(manifest.get("effective_planner_timeout_seconds", 0.0)), 90.0)
-            self.assertGreaterEqual(float(manifest.get("effective_startup_llm_sanity_timeout_seconds", 0.0)), 45.0)
-            self.assertGreaterEqual(float(manifest.get("warmup_timeout_s", 0.0)), 45.0)
+            self.assertTrue(manifest.get("unrestricted_local_qwen_mode"))
+            self.assertGreaterEqual(float(manifest.get("effective_planner_timeout_seconds", 0.0)), 480.0)
+            self.assertGreaterEqual(float(manifest.get("effective_startup_llm_sanity_timeout_seconds", 0.0)), 360.0)
+            self.assertGreaterEqual(float(manifest.get("effective_warmup_timeout_seconds", 0.0)), 240.0)
+            self.assertGreaterEqual(int(manifest.get("effective_startup_llm_sanity_completion_max_tokens", 0)), 8192)
+            self.assertGreaterEqual(int(manifest.get("effective_planner_completion_max_tokens", 0)), 8192)
             self.assertTrue(manifest.get("stale_result_relaxation_enabled"))
+
+    def test_disabling_unrestricted_mode_preserves_explicit_normal_budgets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                brain_backend="ollama",
+                planner_config={
+                    "unrestricted_local_qwen_mode": False,
+                    "high_latency_local_llm_mode": False,
+                    "planner_timeout_seconds": 90.0,
+                    "startup_llm_sanity_timeout_seconds": 45.0,
+                    "startup_llm_sanity_completion_max_tokens": 1024,
+                    "planner_completion_max_tokens": 2048,
+                    "warmup_timeout_seconds": 45.0,
+                },
+            )
+            self.assertFalse(sim.planner_defaults.get("unrestricted_local_qwen_mode"))
+            self.assertEqual(sim.brain_backend_config.timeout_s, 90.0)
+            self.assertEqual(sim.startup_llm_sanity_config.timeout_s, 45.0)
+            self.assertEqual(sim.startup_llm_sanity_config.completion_max_tokens, 1024)
+            self.assertEqual(sim.brain_backend_config.completion_max_tokens, 2048)
+            self.assertEqual(sim.brain_backend_config.warmup_timeout_s, 45.0)
+            sim.stop()
 
     def test_aggregate_outputs_include_backend_columns(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -219,7 +246,7 @@ class TestExperimentTabBackendControl(unittest.TestCase):
         try:
             app.root.withdraw()
             self.assertEqual(app.local_model_var.get(), "qwen3.5:9b")
-            self.assertAlmostEqual(float(app.local_timeout_var.get()), 75.0)
+            self.assertAlmostEqual(float(app.local_timeout_var.get()), 480.0)
             app.brain_backend_var.set("rule_brain")
             app.apply_experiment_settings()
             self.assertIsNotNone(app.sim)

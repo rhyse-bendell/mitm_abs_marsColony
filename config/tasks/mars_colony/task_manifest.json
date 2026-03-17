@@ -6,15 +6,15 @@
   "default": true,
   "planner_defaults": {
     "planner_enabled": true,
-    "planner_interval_steps": 8,
-    "planner_interval_time": 6.0,
+    "planner_interval_steps": 16,
+    "planner_interval_time": 12.0,
     "planner_trigger_mask": [
       "phase_transition",
       "new_dik_acquired",
       "contradiction_detected",
       "build_readiness_changed"
     ],
-    "planner_timeout_seconds": 90.0,
+    "planner_timeout_seconds": 480.0,
     "planner_fallback_backend": "rule_brain",
     "planner_max_retries": 0,
     "explanation_mode": "never",
@@ -24,18 +24,24 @@
     "planner_trace_mode": "full",
     "planner_trace_max_chars": 12000,
     "enable_startup_llm_sanity": true,
-    "startup_llm_sanity_timeout_seconds": 45.0,
+    "startup_llm_sanity_timeout_seconds": 360.0,
     "startup_llm_sanity_max_sources": 2,
     "startup_llm_sanity_max_items_per_type": 3,
     "startup_llm_sanity_raw_response_max_chars": 4000,
     "startup_llm_sanity_artifact_name": "startup_llm_sanity.json",
     "enable_bootstrap_summary_reuse": true,
     "bootstrap_summary_max_chars": 280,
-    "degraded_consecutive_failures_threshold": 6,
-    "degraded_cooldown_seconds": 45.0,
-    "degraded_step_interval_multiplier": 3.0,
+    "degraded_consecutive_failures_threshold": 12,
+    "degraded_cooldown_seconds": 120.0,
+    "degraded_step_interval_multiplier": 4.0,
     "high_latency_local_llm_mode": true,
-    "high_latency_stale_result_grace_s": 60.0
+    "high_latency_stale_result_grace_s": 420.0,
+    "startup_llm_sanity_completion_max_tokens": 8192,
+    "planner_completion_max_tokens": 8192,
+    "warmup_timeout_seconds": 240.0,
+    "unrestricted_local_qwen_mode": true,
+    "permissive_timeout_ceiling_s": 1200.0,
+    "permissive_completion_ceiling_tokens": 16384
   },
   "agent_templates": {
     "mars_architect": {

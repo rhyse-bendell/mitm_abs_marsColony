@@ -151,6 +151,7 @@ class TestPlannerAsyncResilience(unittest.TestCase):
                     "planner_timeout_seconds": 0.8,
                     "high_latency_local_llm_mode": True,
                     "high_latency_stale_result_grace_s": 1.0,
+                    "unrestricted_local_qwen_mode": False,
                     "degraded_consecutive_failures_threshold": 6,
                     "degraded_cooldown_seconds": 5.0,
                 },
@@ -180,6 +181,7 @@ class TestPlannerAsyncResilience(unittest.TestCase):
                     "planner_timeout_seconds": 0.05,
                     "high_latency_local_llm_mode": True,
                     "high_latency_stale_result_grace_s": 1.0,
+                    "unrestricted_local_qwen_mode": False,
                 },
             )
 

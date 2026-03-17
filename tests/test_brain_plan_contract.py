@@ -53,9 +53,52 @@ class BrainContractTests(unittest.TestCase):
     def test_mock_provider_round_trip_with_plan_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = SimulationState(phases=[], project_root=tmpdir, brain_backend="local_stub")
-            sim.update(0.2)
+            for _ in range(4):
+                sim.update(0.2)
             self.assertIsNotNone(sim.agents[0].current_plan)
 
+
+    def test_provider_request_payload_includes_configured_completion_budget(self):
+        provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", completion_max_tokens=7777, max_retries=0), fallback=RuleBrain())
+        req = AgentBrainRequest(
+            request_id="q2",
+            tick=1,
+            sim_time=1.0,
+            agent_id="a1",
+            display_name="A1",
+            agent_label="A",
+            task_id="mars_colony",
+            phase="p1",
+            local_context_summary="ctx",
+            local_observations=[],
+            working_memory_summary={},
+            inbox_summary=[],
+            current_goal_stack=[],
+            current_plan_summary={},
+            allowed_actions=[{"action_type": "wait"}],
+            planning_horizon_config={"max_steps": 2},
+            request_explanation=False,
+        )
+
+        class _FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+            def read(self):
+                return self.payload.encode("utf-8")
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return False
+
+        captured = {}
+        def _urlopen(req_obj, timeout):
+            captured["payload"] = req_obj.data.decode("utf-8")
+            body = '{"choices":[{"message":{"content":"{\"response_id\":\"r\",\"agent_id\":\"a1\",\"plan\":{\"plan_id\":\"p\",\"plan_horizon\":1,\"ordered_goals\":[],\"ordered_actions\":[{\"step_index\":0,\"action_type\":\"wait\",\"expected_purpose\":\"ok\"}],\"next_action\":{\"step_index\":0,\"action_type\":\"wait\",\"expected_purpose\":\"ok\"},\"confidence\":0.7}}"}}]}'
+            return _FakeResponse(body)
+
+        with patch("modules.brain_provider.request.urlopen", side_effect=_urlopen):
+            provider.generate_plan(req)
+        self.assertIn('"max_tokens": 7777', captured["payload"])
 
 class OllamaProviderFallbackTests(unittest.TestCase):
     def test_ollama_provider_falls_back_on_malformed_payload(self):

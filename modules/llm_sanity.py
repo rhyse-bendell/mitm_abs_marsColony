@@ -346,9 +346,11 @@ def run_startup_llm_sanity_check(simulation, *, config: StartupLLMSanityConfig) 
                 "rule_count": len(prompt["prompt_contract"]["bounded_context"]["role_rule_examples"]),
             },
             "startup_request_config": {
+                "timeout_s": float(config.timeout_s),
                 "completion_max_tokens": int(config.completion_max_tokens),
                 "json_only_mode_requested": bool(config.json_only_mode),
                 "reasoning_suppression_requested": bool(config.reasoning_suppression),
+                "unrestricted_local_qwen_mode": bool(getattr(runtime_config, "unrestricted_local_qwen_mode", False)),
             },
             "raw_response_text": None,
             "parsed_response": None,
@@ -487,9 +489,11 @@ def run_startup_llm_sanity_check(simulation, *, config: StartupLLMSanityConfig) 
     artifact_payload = {
         "summary": summary,
         "startup_sanity_request_config": {
+            "timeout_s": float(config.timeout_s),
             "completion_max_tokens": int(config.completion_max_tokens),
             "json_only_mode_requested": bool(config.json_only_mode),
             "reasoning_suppression_requested": bool(config.reasoning_suppression),
+            "unrestricted_local_qwen_mode": bool(getattr(getattr(simulation, "brain_backend_config", None), "unrestricted_local_qwen_mode", False)),
         },
         "schema_fields": SANITY_RESPONSE_FIELDS,
         "session_semantics": {
