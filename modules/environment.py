@@ -31,6 +31,8 @@ from modules.knowledge import init_dik_packets
 # Default proximity radius required to access information packets,
 # used when the object does not specify its own `access_radius`.
 DEFAULT_INFO_ACCESS_RADIUS = 0.4
+SOURCE_SLOT_DISTANCE = 0.28
+SOURCE_QUEUE_SPACING = 0.22
 
 TABLE_INTERACTION_RADIUS = 0.35
 VIEWPORT_MARGIN = 0.2
@@ -306,6 +308,8 @@ class Environment:
         self.interaction_targets = _targets_from_task_model(task_model) if task_model and task_model.interaction_targets else INTERACTION_TARGETS
         self._time = 0.0
         self._path_cache = {}
+        self._source_slot_reservations = {}
+        self._source_queue_reservations = {}
 
     @staticmethod
     def _quantize_point(point, step=0.2):
@@ -552,6 +556,11 @@ class Environment:
         if not target:
             return None
 
+        if target.get("kind") == "information":
+            slot = self.select_source_access_point(target_name, agent_id=None, from_position=from_position)
+            if slot is not None:
+                return tuple(slot.get("position"))
+
         candidates = [p for p in self._zone_candidate_points(target["zone"]) if self.is_point_navigable(p)]
         if target.get("kind") == "build":
             candidates = [
@@ -574,6 +583,157 @@ class Environment:
             candidates = clear_candidates
 
         return min(candidates, key=lambda p: math.hypot(p[0] - from_position[0], p[1] - from_position[1]))
+
+    def get_source_access_slots(self, packet_name):
+        obj = self.objects.get(packet_name)
+        if obj is None:
+            return []
+
+        slots = []
+        if obj.get("type") == "rect":
+            x, y = obj["position"]
+            w, h = obj["size"]
+            cx = x + (w / 2.0)
+            cy = y + (h / 2.0)
+            q1x = x + (w * 0.25)
+            q3x = x + (w * 0.75)
+            q1y = y + (h * 0.25)
+            q3y = y + (h * 0.75)
+            slots = [
+                {"slot_id": "bottom_left", "position": (q1x, y - SOURCE_SLOT_DISTANCE), "queue_dir": (0.0, -1.0)},
+                {"slot_id": "bottom_right", "position": (q3x, y - SOURCE_SLOT_DISTANCE), "queue_dir": (0.0, -1.0)},
+                {"slot_id": "top_left", "position": (q1x, y + h + SOURCE_SLOT_DISTANCE), "queue_dir": (0.0, 1.0)},
+                {"slot_id": "top_right", "position": (q3x, y + h + SOURCE_SLOT_DISTANCE), "queue_dir": (0.0, 1.0)},
+                {"slot_id": "left_mid", "position": (x - SOURCE_SLOT_DISTANCE, cy), "queue_dir": (-1.0, 0.0)},
+                {"slot_id": "right_mid", "position": (x + w + SOURCE_SLOT_DISTANCE, cy), "queue_dir": (1.0, 0.0)},
+            ]
+        elif obj.get("type") == "circle":
+            x, y = obj["position"]
+            r = float(obj.get("radius", 0.3)) + SOURCE_SLOT_DISTANCE
+            slots = [
+                {"slot_id": "north", "position": (x, y + r), "queue_dir": (0.0, 1.0)},
+                {"slot_id": "south", "position": (x, y - r), "queue_dir": (0.0, -1.0)},
+                {"slot_id": "west", "position": (x - r, y), "queue_dir": (-1.0, 0.0)},
+                {"slot_id": "east", "position": (x + r, y), "queue_dir": (1.0, 0.0)},
+            ]
+        else:
+            pos = tuple(obj.get("position", (0.0, 0.0)))
+            slots = [{"slot_id": "default", "position": pos, "queue_dir": (0.0, -1.0)}]
+
+        return [s for s in slots if self.is_point_navigable(s["position"]) or self.can_access_info(s["position"], packet_name)]
+
+    def _slot_key(self, packet_name, slot_id):
+        return f"{packet_name}:{slot_id}"
+
+    def reserve_source_access_slot(self, packet_name, slot_id, agent_id):
+        key = self._slot_key(packet_name, slot_id)
+        owner = self._source_slot_reservations.get(key)
+        if owner is None or owner == agent_id:
+            self._source_slot_reservations[key] = agent_id
+            return True
+        return False
+
+    def release_source_access_slot(self, packet_name, agent_id=None, slot_id=None):
+        released = []
+        for slot in self.get_source_access_slots(packet_name):
+            sid = slot.get("slot_id")
+            if slot_id is not None and sid != slot_id:
+                continue
+            key = self._slot_key(packet_name, sid)
+            owner = self._source_slot_reservations.get(key)
+            if owner is None:
+                continue
+            if agent_id is None or owner == agent_id:
+                self._source_slot_reservations.pop(key, None)
+                released.append(sid)
+        self._source_queue_reservations = {
+            k: v for k, v in self._source_queue_reservations.items()
+            if not (k.startswith(f"{packet_name}:") and (agent_id is None or v == agent_id))
+        }
+        return released
+
+    def select_source_access_point(self, packet_name, agent_id=None, from_position=None):
+        slots = self.get_source_access_slots(packet_name)
+        if not slots:
+            return None
+
+        def _distance(p):
+            if from_position is None:
+                return 0.0
+            return math.hypot(p["position"][0] - from_position[0], p["position"][1] - from_position[1])
+
+        ranked = sorted(slots, key=lambda s: (_distance(s), s["slot_id"]))
+        free = []
+        owned = []
+        busy = []
+        for slot in ranked:
+            key = self._slot_key(packet_name, slot["slot_id"])
+            owner = self._source_slot_reservations.get(key)
+            if owner is None:
+                free.append(slot)
+            elif agent_id is not None and owner == agent_id:
+                owned.append(slot)
+            else:
+                busy.append(slot)
+
+        if owned:
+            chosen = owned[0]
+            return {"kind": "slot", "slot_id": chosen["slot_id"], "position": chosen["position"], "reason": "owned"}
+        if free:
+            chosen = free[0]
+            if agent_id is not None:
+                self.reserve_source_access_slot(packet_name, chosen["slot_id"], agent_id)
+            return {"kind": "slot", "slot_id": chosen["slot_id"], "position": chosen["position"], "reason": "free"}
+        if not busy:
+            return None
+
+        anchor = busy[0]
+        queue_index = sum(1 for k in self._source_queue_reservations if k.startswith(f"{packet_name}:{anchor['slot_id']}:"))
+        qx = anchor["position"][0] + (anchor["queue_dir"][0] * SOURCE_QUEUE_SPACING * (queue_index + 1))
+        qy = anchor["position"][1] + (anchor["queue_dir"][1] * SOURCE_QUEUE_SPACING * (queue_index + 1))
+        queue_pos = (qx, qy)
+        queue_key = f"{packet_name}:{anchor['slot_id']}:q{queue_index + 1}:{agent_id}"
+        if agent_id is not None:
+            self._source_queue_reservations[queue_key] = agent_id
+        return {
+            "kind": "queue",
+            "slot_id": anchor["slot_id"],
+            "position": queue_pos,
+            "queue_index": queue_index + 1,
+            "reason": "all_slots_occupied",
+        }
+
+    def can_agent_use_source_slot(self, packet_name, agent_id, position, slot_id=None, role=None):
+        if not self.can_access_info(position, packet_name, role=role):
+            return False, "too_far_or_role_mismatch"
+        slots = self.get_source_access_slots(packet_name)
+        if not slots:
+            return False, "no_slots"
+        slot = None
+        if slot_id is not None:
+            slot = next((s for s in slots if s["slot_id"] == slot_id), None)
+        if slot is None:
+            slot = min(slots, key=lambda s: math.hypot(position[0] - s["position"][0], position[1] - s["position"][1]))
+        if math.hypot(position[0] - slot["position"][0], position[1] - slot["position"][1]) > 0.24:
+            return False, "not_at_interaction_slot"
+        key = self._slot_key(packet_name, slot["slot_id"])
+        owner = self._source_slot_reservations.get(key)
+        if owner is not None and owner != agent_id:
+            return False, "slot_reserved_by_other"
+        return True, "slot_access_ok"
+
+    def source_slot_snapshot(self, packet_name):
+        slots = self.get_source_access_slots(packet_name)
+        occupancy = {}
+        for s in slots:
+            occupancy[s["slot_id"]] = self._source_slot_reservations.get(self._slot_key(packet_name, s["slot_id"]))
+        return {"slots": [s["slot_id"] for s in slots], "occupancy": occupancy}
+
+    def is_source_slot_context(self, point, packet_name):
+        for slot in self.get_source_access_slots(packet_name):
+            if math.hypot(point[0] - slot["position"][0], point[1] - slot["position"][1]) <= 0.32:
+                return True
+        return False
 
     def get_spawn_points(self):
         if self.task_model and self.task_model.spawn_points:

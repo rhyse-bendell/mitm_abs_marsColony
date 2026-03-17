@@ -150,6 +150,13 @@ class Agent:
             "last_updated_at": None,
             "restarts": 0,
         }
+        self.source_access_state = {
+            "source_id": None,
+            "slot_id": None,
+            "slot_position": None,
+            "target_kind": None,
+            "blocked_attempts": 0,
+        }
         self.post_inspect_handoff = {
             "pending": False,
             "source_id": None,
@@ -354,9 +361,11 @@ class Agent:
             self.activity_log.append(message)
 
     def _emit_startup_once(self, sim_state, flag_name, event_type, payload=None):
+        if sim_state is None:
+            return
         if not self.startup_state.get(flag_name):
             self.startup_state[flag_name] = True
-            self.startup_state[f"{flag_name}_time"] = float(sim_state.time) if sim_state is not None else None
+            self.startup_state[f"{flag_name}_time"] = float(sim_state.time)
             self._emit_event(sim_state, event_type, payload or {})
 
     def _trait_value(self, name, default=0.5):
@@ -395,6 +404,48 @@ class Agent:
                 packet_name,
                 {"inspect_count": 0, "last_dik_changed": None, "exhausted": False},
             )
+
+    def _release_source_slot(self, environment, source_id=None, emit=False, sim_state=None, reason="released"):
+        source = source_id or self.source_access_state.get("source_id")
+        slot_id = self.source_access_state.get("slot_id")
+        if not source or not hasattr(environment, "release_source_access_slot"):
+            return
+        released = environment.release_source_access_slot(source, agent_id=self.agent_id, slot_id=slot_id)
+        if released and emit:
+            self._emit_event(sim_state, "source_slot_released", {"source_id": source, "slot_id": slot_id, "reason": reason})
+        self.source_access_state = {
+            "source_id": None,
+            "slot_id": None,
+            "slot_position": None,
+            "target_kind": None,
+            "blocked_attempts": 0,
+        }
+
+    def _select_source_access_target(self, environment, source_id, sim_state=None):
+        if not hasattr(environment, "select_source_access_point"):
+            point = environment.get_interaction_target_position(source_id, from_position=self.position)
+            return {"kind": "slot", "slot_id": None, "position": point, "reason": "legacy_selection"} if point is not None else None
+
+        selection = environment.select_source_access_point(source_id, agent_id=self.agent_id, from_position=self.position)
+        if selection is None:
+            return None
+        slot_id = selection.get("slot_id")
+        position = selection.get("position")
+        kind = selection.get("kind")
+        self.source_access_state.update(
+            {
+                "source_id": source_id,
+                "slot_id": slot_id,
+                "slot_position": position,
+                "target_kind": kind,
+            }
+        )
+        self._emit_event(sim_state, "source_slot_selected", {"source_id": source_id, "slot_id": slot_id, "target_kind": kind, "selection_reason": selection.get("reason")})
+        if kind == "slot":
+            self._emit_event(sim_state, "source_slot_reserved", {"source_id": source_id, "slot_id": slot_id})
+        else:
+            self._emit_event(sim_state, "source_access_queue_wait", {"source_id": source_id, "slot_id": slot_id, "queue_index": selection.get("queue_index", 1)})
+        return selection
 
     def _critical_unmet_source_targets(self, sim_state, environment):
         audit = getattr(sim_state, "runtime_witness_audit", None)
@@ -456,15 +507,15 @@ class Agent:
         explicit_target = decision.target_id
         self._emit_event(sim_state, "target_resolution_started", {"target_type": "information_source", "requested_target_id": explicit_target})
         if explicit_target:
-            point = environment.get_interaction_target_position(explicit_target, from_position=self.position)
-            if point is not None:
+            selection = self._select_source_access_target(environment, explicit_target, sim_state=sim_state)
+            if selection is not None and selection.get("position") is not None:
                 exhausted = bool(self.source_exhaustion_state.get(explicit_target, {}).get("exhausted"))
                 if exhausted:
                     self._emit_event(sim_state, "source_revisit_deferred", {"current_source_target": explicit_target, "reason": "source_exhausted_for_agent"})
                 else:
                     self._set_status(f"Inspect target selected: {explicit_target}")
                     self._emit_event(sim_state, "target_resolved", {"target_type": "information_source", "target_id": explicit_target, "candidate_count": 1})
-                    return explicit_target, point
+                    return explicit_target, selection.get("position")
 
         candidates = self._candidate_information_sources(environment, sim_state=sim_state)
         if not candidates:
@@ -492,7 +543,10 @@ class Agent:
         if chosen[5] and chosen[1] == "Team_Info":
             self._emit_event(sim_state, "shared_source_target_selected", {"source_id": chosen[1], "reason": "critical_witness_source_need"})
         self._emit_event(sim_state, "target_resolved", {"target_type": "information_source", "target_id": chosen[1], "candidate_count": len(candidates)})
-        return chosen[1], chosen[2]
+        if self.source_access_state.get("source_id") and self.source_access_state.get("source_id") != chosen[1]:
+            self._release_source_slot(environment, emit=True, sim_state=sim_state, reason="retargeted_source")
+        selection = self._select_source_access_target(environment, chosen[1], sim_state=sim_state)
+        return chosen[1], (selection or {}).get("position")
 
     def mark_source_revisitable(self, source_id, reason="identified_gap"):
         self.source_inspection_state[source_id] = "revisitable_due_to_gap"
@@ -568,17 +622,44 @@ class Agent:
                 "restarts": 0,
             }
         self.source_inspection_state[source_id] = "in_progress"
-        target_pos = environment.get_interaction_target_position(source_id, from_position=self.position)
+        selection = self._select_source_access_target(environment, source_id, sim_state=sim_state)
+        target_pos = (selection or {}).get("position")
         self.inspect_session["target"] = target_pos
         if target_pos is None:
             self._set_status(f"Inspect failed: no navigable target for {source_id}")
             self._emit_event(sim_state, "inspect_completion_blocked", {"source_id": source_id, "failure_category": "target_resolution_failed"})
             return False
-        if not environment.can_access_info(self.position, source_id, role=self.role):
-            self._set_status(f"Inspect pending: not yet in source zone for {source_id}")
+
+        # Distinguish source vicinity from legal slot-based interaction access.
+        slot_id = self.source_access_state.get("slot_id")
+        usable, access_reason = (True, "legacy")
+        if hasattr(environment, "can_agent_use_source_slot"):
+            usable, access_reason = environment.can_agent_use_source_slot(
+                source_id,
+                agent_id=self.agent_id,
+                position=self.position,
+                slot_id=slot_id,
+                role=self.role,
+            )
+
+        if not usable:
+            self.source_access_state["blocked_attempts"] = int(self.source_access_state.get("blocked_attempts", 0)) + 1
+            blocked_attempts = int(self.source_access_state.get("blocked_attempts", 0))
+            self._set_status(f"Inspect pending: usable source access not obtained for {source_id} ({access_reason})")
             self.inspect_session["last_updated_at"] = now_ts
             self.inspect_session["state"] = "target_reached" if self.inspect_session.get("state") == "target_reached" else "target_selected"
             self._emit_event(sim_state, "inspect_progressed", {"source_id": source_id, "stage": self.inspect_session.get("state"), "target": target_pos, "goal": self.goal})
+            self._emit_event(sim_state, "source_access_blocked_by_occupancy", {"source_id": source_id, "slot_id": slot_id, "reason": access_reason, "blocked_attempts": blocked_attempts})
+            if access_reason in {"slot_reserved_by_other", "not_at_interaction_slot"}:
+                alt = self._select_source_access_target(environment, source_id, sim_state=sim_state)
+                if alt is not None and alt.get("slot_id") != slot_id:
+                    self.target = alt.get("position")
+                    self._emit_event(sim_state, "source_access_retargeted_alternate_slot", {"source_id": source_id, "previous_slot_id": slot_id, "next_slot_id": alt.get("slot_id")})
+            if blocked_attempts >= 4:
+                self._emit_event(sim_state, "source_access_unstuck_backoff", {"source_id": source_id, "slot_id": slot_id, "blocked_attempts": blocked_attempts})
+                self._release_source_slot(environment, source_id=source_id, emit=True, sim_state=sim_state, reason="unstuck_backoff")
+                self.source_access_state["blocked_attempts"] = 0
+                self.target = self.spawn_position
             if shared_source:
                 self._emit_event(
                     sim_state,
@@ -591,6 +672,8 @@ class Agent:
                     },
                 )
             return False
+
+        self.source_access_state["blocked_attempts"] = 0
 
         self.inspect_session["state"] = "target_reached"
         self.inspect_session["last_updated_at"] = now_ts
@@ -834,6 +917,7 @@ class Agent:
             )
         self.inspect_session["state"] = "post_inspect_derivation_attempted"
         self.inspect_session["last_updated_at"] = now_ts
+        self._release_source_slot(environment, source_id=source_id, emit=True, sim_state=sim_state, reason="inspection_completed")
         return bool(net_dik_changed)
 
     @staticmethod
@@ -2473,6 +2557,7 @@ class Agent:
                     },
                 )
             elif current_source and current_source != source_id and current_state not in {"idle"}:
+                self._release_source_slot(environment, source_id=current_source, emit=True, sim_state=sim_state, reason="retargeted_source")
                 self._emit_event(
                     sim_state,
                     "inspect_reset",
@@ -2767,10 +2852,14 @@ class Agent:
             if blocked_by_env:
                 return False, "blocked_zone"
             if not nav.get("ignore_agent_collision", True):
+                near_source_slot = False
+                if self.current_inspect_target_id and hasattr(environment, "is_source_slot_context"):
+                    near_source_slot = environment.is_source_slot_context(point, self.current_inspect_target_id)
                 for other in getattr(environment, "agents", []):
                     if other is self:
                         continue
-                    if math.hypot(point[0] - other.position[0], point[1] - other.position[1]) < 0.15:
+                    threshold = 0.1 if near_source_slot else 0.15
+                    if math.hypot(point[0] - other.position[0], point[1] - other.position[1]) < threshold:
                         return False, "agent_collision_block"
             return True, None
 
@@ -3223,6 +3312,7 @@ class Agent:
                     "artifact_action": action.get("artifact_action"),
                     "assist_action": action.get("assist_action"),
                     "decision_action": action.get("decision_action"),
+                    "source_target_id": action.get("source_target_id"),
                 })
             self.current_action = []
 

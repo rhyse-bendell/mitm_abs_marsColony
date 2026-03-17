@@ -827,6 +827,13 @@ class MetricsCollector:
                         reason: int(count)
                         for reason, count in self.reason_distributions.get("shared_source_access_blocked", {}).items()
                     },
+                    "source_slot_selected_count": int(self.events_by_type.get("source_slot_selected", 0)),
+                    "source_slot_reserved_count": int(self.events_by_type.get("source_slot_reserved", 0)),
+                    "source_slot_released_count": int(self.events_by_type.get("source_slot_released", 0)),
+                    "source_access_blocked_by_occupancy_count": int(self.events_by_type.get("source_access_blocked_by_occupancy", 0)),
+                    "source_access_queue_wait_count": int(self.events_by_type.get("source_access_queue_wait", 0)),
+                    "source_access_retargeted_alternate_slot_count": int(self.events_by_type.get("source_access_retargeted_alternate_slot", 0)),
+                    "source_access_unstuck_backoff_count": int(self.events_by_type.get("source_access_unstuck_backoff", 0)),
                     "private_source_revisit_suppressed_count": int(self.events_by_type.get("source_revisit_suppressed", 0)),
                     "source_exhausted_count": int(self.events_by_type.get("source_exhausted_for_agent", 0)),
                     "movement_between_knowledge_locations_count": int(self.events_by_type.get("movement_between_knowledge_locations", 0)),
