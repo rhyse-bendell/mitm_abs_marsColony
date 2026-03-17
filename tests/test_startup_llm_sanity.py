@@ -254,6 +254,124 @@ class TestStartupLLMSanity(unittest.TestCase):
             finally:
                 sim.stop()
 
+    def test_wrapper_with_content_blocks_extracts_and_validates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("modules.llm_sanity.request.urlopen") as mocked:
+                def _side_effect(req, timeout):
+                    req_payload = json.loads(req.data.decode("utf-8"))
+                    prompt_payload = json.loads(req_payload["messages"][1]["content"])
+                    target_name = prompt_payload["agent_identity"]["agent_name"]
+                    response_payload = {
+                        "agent_name": target_name,
+                        "role_or_focus": "role sanity",
+                        "understood_mission": "Support mission startup checks.",
+                        "relevant_data_ids": ["D001"],
+                        "relevant_information_ids": ["I001"],
+                        "relevant_knowledge_or_rule_ids": ["K001"],
+                        "first_information_priority": "Verify first bounded source.",
+                        "first_coordination_need": "Notify team lead.",
+                        "confidence": 0.8,
+                    }
+                    body = json.dumps({
+                        "choices": [{"message": {"content": [{"type": "output_text", "text": json.dumps(response_payload)}]}}]
+                    })
+                    return _FakeHTTPResponse(body)
+
+                mocked.side_effect = _side_effect
+                sim = SimulationState(phases=[], project_root=tmpdir, brain_backend="ollama", planner_config={"enable_startup_llm_sanity": True})
+            try:
+                self.assertEqual(sim.startup_llm_sanity_summary["startup_llm_sanity_failure_count"], 0)
+            finally:
+                sim.stop()
+
+    def test_empty_content_with_parseable_json_elsewhere_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("modules.llm_sanity.request.urlopen") as mocked:
+                def _side_effect(req, timeout):
+                    req_payload = json.loads(req.data.decode("utf-8"))
+                    prompt_payload = json.loads(req_payload["messages"][1]["content"])
+                    target_name = prompt_payload["agent_identity"]["agent_name"]
+                    response_payload = {
+                        "agent_name": target_name,
+                        "role_or_focus": "role sanity",
+                        "understood_mission": "Support mission startup checks.",
+                        "relevant_data_ids": ["D001"],
+                        "relevant_information_ids": ["I001"],
+                        "relevant_knowledge_or_rule_ids": ["K001"],
+                        "first_information_priority": "Verify first bounded source.",
+                        "first_coordination_need": "Notify team lead.",
+                        "confidence": 0.8,
+                    }
+                    body = json.dumps({
+                        "choices": [{"message": {"content": "", "output_text": json.dumps(response_payload)}}]
+                    })
+                    return _FakeHTTPResponse(body)
+
+                mocked.side_effect = _side_effect
+                sim = SimulationState(phases=[], project_root=tmpdir, brain_backend="ollama", planner_config={"enable_startup_llm_sanity": True})
+            try:
+                self.assertEqual(sim.startup_llm_sanity_summary["startup_llm_sanity_failure_count"], 0)
+            finally:
+                sim.stop()
+
+    def test_reasoning_only_wrapper_has_specific_failure_category(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("modules.llm_sanity.request.urlopen") as mocked:
+                body = json.dumps({
+                    "choices": [{"finish_reason": "stop", "message": {"content": "", "reasoning": "thinking only no json"}}]
+                })
+                mocked.return_value = _FakeHTTPResponse(body)
+                sim = SimulationState(phases=[], project_root=tmpdir, brain_backend="ollama", planner_config={"enable_startup_llm_sanity": True})
+            try:
+                artifact = sim.logger.output_session.session_folder / sim.startup_llm_sanity_summary["startup_llm_sanity_artifact"]
+                payload = json.loads(artifact.read_text(encoding="utf-8"))
+                self.assertTrue(all(r.get("failure_category") == "reasoning_only_response" for r in payload["results"]))
+            finally:
+                sim.stop()
+
+    def test_finish_reason_length_with_truncated_json_reports_truncation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("modules.llm_sanity.request.urlopen") as mocked:
+                body = json.dumps({
+                    "choices": [{"finish_reason": "length", "message": {"content": '{"agent_name":"Architect"'}}]
+                })
+                mocked.return_value = _FakeHTTPResponse(body)
+                sim = SimulationState(phases=[], project_root=tmpdir, brain_backend="ollama", planner_config={"enable_startup_llm_sanity": True})
+            try:
+                artifact = sim.logger.output_session.session_folder / sim.startup_llm_sanity_summary["startup_llm_sanity_artifact"]
+                payload = json.loads(artifact.read_text(encoding="utf-8"))
+                self.assertTrue(all(r.get("failure_category") == "truncated_response" for r in payload["results"]))
+            finally:
+                sim.stop()
+
+    def test_finish_reason_length_with_complete_json_still_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("modules.llm_sanity.request.urlopen") as mocked:
+                def _side_effect(req, timeout):
+                    req_payload = json.loads(req.data.decode("utf-8"))
+                    prompt_payload = json.loads(req_payload["messages"][1]["content"])
+                    target_name = prompt_payload["agent_identity"]["agent_name"]
+                    response_payload = {
+                        "agent_name": target_name,
+                        "role_or_focus": "role sanity",
+                        "understood_mission": "Support mission startup checks.",
+                        "relevant_data_ids": ["D001"],
+                        "relevant_information_ids": ["I001"],
+                        "relevant_knowledge_or_rule_ids": ["K001"],
+                        "first_information_priority": "Verify first bounded source.",
+                        "first_coordination_need": "Notify team lead.",
+                        "confidence": 0.8,
+                    }
+                    body = json.dumps({"choices": [{"finish_reason": "length", "message": {"content": json.dumps(response_payload)}}]})
+                    return _FakeHTTPResponse(body)
+
+                mocked.side_effect = _side_effect
+                sim = SimulationState(phases=[], project_root=tmpdir, brain_backend="ollama", planner_config={"enable_startup_llm_sanity": True})
+            try:
+                self.assertEqual(sim.startup_llm_sanity_summary["startup_llm_sanity_failure_count"], 0)
+            finally:
+                sim.stop()
+
 
 if __name__ == "__main__":
     unittest.main()
