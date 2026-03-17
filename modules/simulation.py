@@ -8,6 +8,7 @@ from modules.brain_provider import BrainBackendConfig, create_brain_provider
 from modules.environment import Environment
 from modules.logging_tools import SimulationLogger
 from modules.llm_sanity import StartupLLMSanityConfig, run_startup_llm_sanity_check
+from modules.interaction_graph import InteractionTelemetryBridge
 from modules.metrics import MetricsCollector
 from modules.runtime_witness_audit import RuntimeWitnessAudit
 from modules.team_knowledge import TeamKnowledgeManager
@@ -311,6 +312,8 @@ class SimulationState:
         self.metrics = MetricsCollector(self)
         self.logger.register_event_listener(self.runtime_witness_audit.on_event)
         self.logger.register_event_listener(self.metrics.on_event)
+        self.interaction_telemetry = InteractionTelemetryBridge(self.logger)
+        self.logger.register_event_listener(self.interaction_telemetry.on_event)
         self.logger.initialize_session_outputs(
             speed=speed,
             flash_mode=self.flash_mode,

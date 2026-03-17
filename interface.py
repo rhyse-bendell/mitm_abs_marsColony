@@ -9,6 +9,7 @@ from tkinter import StringVar, BooleanVar, DoubleVar, IntVar
 from modules.construction import ConstructionManager
 from modules.phase_definitions import MISSION_PHASES
 from modules.task_model import load_task_model
+from modules.interaction_graph import CANONICAL_NODES
 
 
 class MarsColonyInterface:
@@ -98,6 +99,7 @@ class MarsColonyInterface:
         self.create_construction_tab()
         self.create_agents_tab()
         self.create_event_monitor_tab()
+        self.create_interaction_tab()
 
     def _build_environment_canvas(self, parent):
         fig, ax = plt.subplots(figsize=(6, 6))
@@ -216,6 +218,97 @@ class MarsColonyInterface:
         for col in self.agent_state_table["columns"]:
             self.agent_state_table.heading(col, text=col)
         self.agent_state_table.pack(fill="both", expand=True)
+
+
+    def create_interaction_tab(self):
+        self.tab_interaction = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_interaction, text="Interactions")
+
+        controls = ttk.Frame(self.tab_interaction, padding=6)
+        controls.pack(fill="x")
+        ttk.Label(controls, text="Agent").pack(side="left")
+        self.interaction_agent_filter = StringVar(value="All")
+        ttk.Combobox(controls, textvariable=self.interaction_agent_filter, values=["All", "Architect", "Engineer", "Botanist"], width=12, state="readonly").pack(side="left", padx=(4, 10))
+        ttk.Label(controls, text="Type").pack(side="left")
+        self.interaction_type_filter = StringVar(value="All")
+        ttk.Entry(controls, textvariable=self.interaction_type_filter, width=20).pack(side="left", padx=(4, 10))
+        ttk.Label(controls, text="Window (s)").pack(side="left")
+        self.interaction_window = DoubleVar(value=20.0)
+        ttk.Entry(controls, textvariable=self.interaction_window, width=8).pack(side="left", padx=(4, 10))
+
+        panes = ttk.PanedWindow(self.tab_interaction, orient="horizontal")
+        panes.pack(fill="both", expand=True, padx=6, pady=6)
+
+        left = ttk.Frame(panes)
+        right = ttk.Frame(panes)
+        panes.add(left, weight=3)
+        panes.add(right, weight=2)
+
+        self.interaction_canvas = tk.Canvas(left, bg="#10141b", height=560)
+        self.interaction_canvas.pack(fill="both", expand=True)
+
+        self.interaction_list = tk.Text(right, wrap="word", height=30)
+        self.interaction_list.pack(fill="both", expand=True)
+
+    def update_interaction_tab(self):
+        if not self.sim or not hasattr(self.sim, "logger"):
+            return
+        interactions = list(self.sim.logger.get_recent_interactions(180))
+        agent_filter = self.interaction_agent_filter.get()
+        type_filter = self.interaction_type_filter.get().strip().lower()
+        window_s = max(1.0, float(self.interaction_window.get() or 20.0))
+        now_t = float(getattr(self.sim, "time", 0.0))
+
+        filtered = []
+        for row in interactions:
+            if now_t - float(row.get("time", 0.0) or 0.0) > window_s:
+                continue
+            aid = str(row.get("agent_id") or "")
+            if agent_filter != "All" and agent_filter.lower() not in aid.lower():
+                continue
+            itype = str(row.get("interaction_type") or "")
+            if type_filter and type_filter != "all" and type_filter not in itype.lower():
+                continue
+            filtered.append(row)
+
+        self._draw_interaction_graph(filtered)
+        self.interaction_list.delete("1.0", tk.END)
+        for row in filtered[-40:]:
+            self.interaction_list.insert(tk.END, f"t={row.get('time')} {row.get('interaction_type')} {row.get('source_node')} -> {row.get('target_node')} [{row.get('status')}] {row.get('payload_summary')}\n")
+
+    def _draw_interaction_graph(self, interactions):
+        canvas = self.interaction_canvas
+        canvas.delete("all")
+        w = max(200, canvas.winfo_width() or 900)
+        h = max(200, canvas.winfo_height() or 560)
+
+        active_nodes = set()
+        active_edges = set()
+        for row in interactions[-30:]:
+            src = row.get("source_node")
+            tgt = row.get("target_node")
+            if src:
+                active_nodes.add(src)
+            if tgt:
+                active_nodes.add(tgt)
+            if src and tgt:
+                active_edges.add((src, tgt))
+
+        for src, tgt in active_edges:
+            src_node = next((n for n in CANONICAL_NODES if n.node_id == src), None)
+            tgt_node = next((n for n in CANONICAL_NODES if n.node_id == tgt), None)
+            if not src_node or not tgt_node:
+                continue
+            x1, y1 = src_node.pos[0] * w, src_node.pos[1] * h
+            x2, y2 = tgt_node.pos[0] * w, tgt_node.pos[1] * h
+            canvas.create_line(x1, y1, x2, y2, fill="#3fb0ff", width=2, arrow=tk.LAST)
+
+        for node in CANONICAL_NODES:
+            x, y = node.pos[0] * w, node.pos[1] * h
+            r = 18
+            fill = "#ffd166" if node.node_id in active_nodes else "#303846"
+            canvas.create_oval(x-r, y-r, x+r, y+r, fill=fill, outline="#dddddd")
+            canvas.create_text(x, y-26, text=node.label, fill="#e5e7eb", font=("Arial", 8))
 
     def create_event_monitor_tab(self):
         self.tab_event = ttk.Frame(self.notebook)
@@ -487,6 +580,7 @@ class MarsColonyInterface:
         self._sync_construction_summaries()
         self._update_system_log()
         self._update_backend_status_display()
+        self.update_interaction_tab()
 
     def _cancel_run_loop(self):
         if self._run_loop_job is not None:
@@ -509,6 +603,7 @@ class MarsColonyInterface:
         self.update_dashboard()
         self._sync_construction_summaries()
         self._update_backend_status_display()
+        self.update_interaction_tab()
         self._schedule_next_tick()
 
     def _update_control_states(self):

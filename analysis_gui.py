@@ -13,6 +13,7 @@ from modules.analysis_plots import PLOT_OPTIONS, build_plot
 from modules.analysis_stats import aggregate_statistics, phase_statistics
 from modules.analysis_widgets import fill_text_widget, populate_key_value_tree
 from modules.replay_engine import ReplayEngine
+from modules.interaction_graph import CANONICAL_NODES
 
 
 class AnalysisGUI:
@@ -41,6 +42,7 @@ class AnalysisGUI:
         self.notebook.pack(fill="both", expand=True)
 
         self._build_replay_tab()
+        self._build_interaction_tab()
         self._build_graphs_tab()
         self._build_aggregate_tab()
         self._build_phase_tab()
@@ -86,6 +88,32 @@ class AnalysisGUI:
         self.jump_list = tk.Listbox(right, height=8)
         self.jump_list.pack(fill="x", pady=(6, 0))
         self.jump_list.bind("<<ListboxSelect>>", self.on_jump_event)
+
+
+    def _build_interaction_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="Interaction Replay")
+
+        controls = ttk.Frame(tab, padding=6)
+        controls.pack(fill="x")
+        self.interaction_status = ttk.Label(controls, text="No interaction trace loaded")
+        self.interaction_status.pack(side="left")
+
+        self.interaction_slider = ttk.Scale(tab, from_=0, to=1, orient="horizontal", command=self.on_interaction_slider)
+        self.interaction_slider.pack(fill="x", padx=8)
+
+        panes = ttk.PanedWindow(tab, orient="horizontal")
+        panes.pack(fill="both", expand=True, padx=8, pady=8)
+        left = ttk.Frame(panes)
+        right = ttk.Frame(panes)
+        panes.add(left, weight=3)
+        panes.add(right, weight=2)
+
+        self.interaction_canvas = tk.Canvas(left, bg="#10141b", height=520)
+        self.interaction_canvas.pack(fill="both", expand=True)
+
+        self.interaction_detail = tk.Text(right, wrap="word")
+        self.interaction_detail.pack(fill="both", expand=True)
 
     def _build_graphs_tab(self):
         tab = ttk.Frame(self.notebook)
@@ -145,15 +173,29 @@ class AnalysisGUI:
             self.warn_text.insert(tk.END, f"- {msg}\n")
 
         self.refresh_replay()
+        self.refresh_interaction_replay()
         self.refresh_aggregate()
         self.refresh_phase()
         self.render_plot()
+
+    def refresh_interaction_replay(self):
+        trace = self.session.artifacts.interaction_trace if self.session else []
+        if not trace:
+            self.interaction_status.config(text="This session has no logs/interaction_trace.jsonl artifact.")
+            self.interaction_detail.delete("1.0", tk.END)
+            self.interaction_detail.insert(tk.END, "No interaction trace available for replay.")
+            self._draw_interaction_state([])
+            return
+        self.interaction_status.config(text=f"Interaction events: {len(trace)}")
+        self.interaction_slider.configure(to=max(0, len(self.replay_engine.frames) - 1 if self.replay_engine else 0))
+        self.update_interaction_frame_view()
 
     def refresh_replay(self):
         if not self.replay_engine or not self.replay_engine.frames:
             return
         self.replay_slider.configure(to=max(0, len(self.replay_engine.frames) - 1))
         self.update_frame_view()
+        self.update_interaction_frame_view()
 
         self.jump_list.delete(0, tk.END)
         for ev in self.replay_engine.important_events():
@@ -200,18 +242,64 @@ class AnalysisGUI:
             return
         self.replay_index = max(0, self.replay_index - 1)
         self.update_frame_view()
+        self.update_interaction_frame_view()
 
     def step_forward(self):
         if not self.replay_engine or not self.replay_engine.frames:
             return
         self.replay_index = min(len(self.replay_engine.frames) - 1, self.replay_index + 1)
         self.update_frame_view()
+        self.update_interaction_frame_view()
+
+    def on_interaction_slider(self, value):
+        if not self.replay_engine or not self.replay_engine.frames:
+            return
+        self.replay_index = int(float(value))
+        self.update_interaction_frame_view()
 
     def on_slider(self, value):
         if not self.replay_engine or not self.replay_engine.frames:
             return
         self.replay_index = int(float(value))
         self.update_frame_view()
+        self.update_interaction_frame_view()
+
+    def update_interaction_frame_view(self):
+        if not self.replay_engine or not self.replay_engine.frames:
+            return
+        frame = self.replay_engine.frames[self.replay_index]
+        self.interaction_slider.set(self.replay_index)
+        interactions = list(frame.interaction_events_at_time)
+        self._draw_interaction_state(interactions)
+        self.interaction_detail.delete("1.0", tk.END)
+        for row in interactions[-30:]:
+            self.interaction_detail.insert(tk.END, f"t={row.get('time')} {row.get('interaction_type')} {row.get('source_node')} -> {row.get('target_node')} [{row.get('status')}]\n{row.get('payload_summary')}\n\n")
+
+    def _draw_interaction_state(self, interactions):
+        canvas = self.interaction_canvas
+        canvas.delete("all")
+        w = max(200, canvas.winfo_width() or 900)
+        h = max(200, canvas.winfo_height() or 520)
+        active_nodes = set()
+        active_edges = set()
+        for row in interactions:
+            s, t = row.get("source_node"), row.get("target_node")
+            if s:
+                active_nodes.add(s)
+            if t:
+                active_nodes.add(t)
+            if s and t:
+                active_edges.add((s, t))
+        for s, t in active_edges:
+            sn = next((n for n in CANONICAL_NODES if n.node_id == s), None)
+            tn = next((n for n in CANONICAL_NODES if n.node_id == t), None)
+            if sn and tn:
+                canvas.create_line(sn.pos[0]*w, sn.pos[1]*h, tn.pos[0]*w, tn.pos[1]*h, fill="#3fb0ff", width=2, arrow=tk.LAST)
+        for node in CANONICAL_NODES:
+            x, y = node.pos[0]*w, node.pos[1]*h
+            fill = "#ffd166" if node.node_id in active_nodes else "#303846"
+            canvas.create_oval(x-18, y-18, x+18, y+18, fill=fill, outline="#dddddd")
+            canvas.create_text(x, y-26, text=node.label, fill="#e5e7eb", font=("Arial", 8))
 
     def play(self):
         self.pause()
@@ -222,6 +310,7 @@ class AnalysisGUI:
             if self.replay_index < len(self.replay_engine.frames) - 1:
                 self.replay_index += 1
                 self.update_frame_view()
+                self.update_interaction_frame_view()
                 self.replay_job = self.root.after(300, _tick)
 
         self.replay_job = self.root.after(50, _tick)
@@ -246,6 +335,7 @@ class AnalysisGUI:
         nearest = min(range(len(self.replay_engine.frames)), key=lambda i: abs(self.replay_engine.frames[i].time - target_time))
         self.replay_index = nearest
         self.update_frame_view()
+        self.update_interaction_frame_view()
 
     def render_plot(self):
         if not self.session:

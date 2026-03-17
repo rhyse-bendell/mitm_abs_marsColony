@@ -13,6 +13,7 @@ class ReplayFrame:
     time: float
     agent_states: Dict[str, Dict[str, Any]]
     events_at_time: List[Dict[str, Any]]
+    interaction_events_at_time: List[Dict[str, Any]]
     construction_state: Dict[str, Any]
 
 
@@ -43,13 +44,16 @@ class ReplayEngine:
     def _build_frames(self) -> List[ReplayFrame]:
         state_rows = list(self.session.artifacts.state_rows)
         events = list(self.session.artifacts.events)
+        interactions = list(self.session.artifacts.interaction_trace)
         state_rows.sort(key=lambda r: self._to_float(r.get("time")))
         events.sort(key=lambda r: self._to_float(r.get("time")))
+        interactions.sort(key=lambda r: self._to_float(r.get("time")))
 
         times = sorted(
             {
                 *[round(self._to_float(r.get("time")), 3) for r in state_rows],
                 *[round(self._to_float(r.get("time")), 3) for r in events],
+                *[round(self._to_float(r.get("time")), 3) for r in interactions],
             }
         )
         if not times:
@@ -60,6 +64,7 @@ class ReplayEngine:
         construction_state: Dict[str, Any] = {}
         state_idx = 0
         event_idx = 0
+        interaction_idx = 0
 
         for idx, t in enumerate(times):
             while state_idx < len(state_rows) and round(self._to_float(state_rows[state_idx].get("time")), 3) <= t:
@@ -80,12 +85,20 @@ class ReplayEngine:
                     construction_state[key] = payload
                 event_idx += 1
 
+            interaction_events_at_time: List[Dict[str, Any]] = []
+            while interaction_idx < len(interactions) and round(self._to_float(interactions[interaction_idx].get("time")), 3) <= t:
+                interaction = interactions[interaction_idx]
+                if round(self._to_float(interaction.get("time")), 3) == t:
+                    interaction_events_at_time.append(interaction)
+                interaction_idx += 1
+
             frames.append(
                 ReplayFrame(
                     index=idx,
                     time=t,
                     agent_states=dict(latest_agent_state),
                     events_at_time=events_at_time,
+                    interaction_events_at_time=interaction_events_at_time,
                     construction_state=dict(construction_state),
                 )
             )

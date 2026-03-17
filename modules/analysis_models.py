@@ -17,6 +17,7 @@ class SessionArtifacts:
     events: List[Dict[str, Any]] = field(default_factory=list)
     state_rows: List[Dict[str, Any]] = field(default_factory=list)
     planner_trace: List[Dict[str, Any]] = field(default_factory=list)
+    interaction_trace: List[Dict[str, Any]] = field(default_factory=list)
     movement_rows: List[Dict[str, Any]] = field(default_factory=list)
     clock_rows: List[Dict[str, Any]] = field(default_factory=list)
 
