@@ -13,6 +13,7 @@ from modules.analysis_plots import PLOT_OPTIONS, build_plot
 from modules.analysis_stats import aggregate_statistics, phase_statistics
 from modules.analysis_widgets import fill_text_widget, populate_key_value_tree
 from modules.replay_engine import ReplayEngine
+from modules.interaction_graph import render_interaction_graph
 
 
 class AnalysisGUI:
@@ -44,6 +45,7 @@ class AnalysisGUI:
         self._build_graphs_tab()
         self._build_aggregate_tab()
         self._build_phase_tab()
+        self._build_interaction_tab()
 
     def _build_replay_tab(self):
         tab = ttk.Frame(self.notebook)
@@ -128,6 +130,74 @@ class AnalysisGUI:
         self.phase_detail_text = tk.Text(right, wrap="word")
         self.phase_detail_text.pack(fill="both", expand=True)
 
+
+    def _build_interaction_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="Interaction Replay")
+
+        controls = ttk.Frame(tab, padding=6)
+        controls.pack(fill="x")
+        ttk.Label(controls, text="Window (s)").pack(side="left")
+        self.interaction_window_var = tk.DoubleVar(value=12.0)
+        ttk.Scale(controls, from_=2.0, to=60.0, orient="horizontal", variable=self.interaction_window_var, command=lambda _v: self.update_interaction_view()).pack(side="left", fill="x", expand=True, padx=8)
+
+        panes = ttk.PanedWindow(tab, orient="horizontal")
+        panes.pack(fill="both", expand=True, padx=8, pady=8)
+        left = ttk.Frame(panes)
+        right = ttk.Frame(panes)
+        panes.add(left, weight=3)
+        panes.add(right, weight=2)
+
+        import matplotlib.pyplot as plt
+
+        self.interaction_fig, self.interaction_ax = plt.subplots(figsize=(6, 6))
+        self.interaction_canvas = FigureCanvasTkAgg(self.interaction_fig, master=left)
+        self.interaction_canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        self.interaction_status_var = tk.StringVar(value="No interaction trace loaded")
+        ttk.Label(right, textvariable=self.interaction_status_var).pack(anchor="w")
+
+        self.interaction_list = tk.Listbox(right, height=12)
+        self.interaction_list.pack(fill="x", pady=(6, 0))
+        self.interaction_list.bind("<<ListboxSelect>>", self.on_interaction_select)
+
+        self.interaction_detail_text = tk.Text(right, wrap="word", height=14)
+        self.interaction_detail_text.pack(fill="both", expand=True, pady=(6, 0))
+
+    def update_interaction_view(self):
+        if not self.replay_engine or not self.replay_engine.frames:
+            return
+        frame = self.replay_engine.frames[self.replay_index]
+        events = list(self.session.artifacts.interaction_trace) if self.session else []
+        if not events:
+            self.interaction_status_var.set("Interaction trace missing for this session (logs/interaction_trace.jsonl)")
+            self.interaction_ax.clear()
+            self.interaction_ax.set_title("Interaction Replay (no trace)")
+            self.interaction_ax.axis("off")
+            self.interaction_canvas.draw()
+            self.interaction_list.delete(0, tk.END)
+            self.interaction_detail_text.delete("1.0", tk.END)
+            return
+
+        self.interaction_status_var.set(f"Loaded {len(events)} interaction events")
+        render_interaction_graph(self.interaction_ax, events, now_time=frame.time, window_s=float(self.interaction_window_var.get()))
+        self.interaction_canvas.draw()
+
+        self.interaction_list.delete(0, tk.END)
+        recent = [e for e in events if float(e.get("time", 0.0)) <= frame.time][-40:]
+        for e in recent:
+            self.interaction_list.insert(tk.END, f"t={e.get('time')} {e.get('interaction_type')} {e.get('source_node')}->{e.get('target_node')}")
+
+    def on_interaction_select(self, _event):
+        if not self.session:
+            return
+        selection = self.interaction_list.curselection()
+        if not selection:
+            return
+        text = self.interaction_list.get(selection[0])
+        self.interaction_detail_text.delete("1.0", tk.END)
+        self.interaction_detail_text.insert(tk.END, text + "\n")
+
     def open_session_folder(self):
         selected = filedialog.askdirectory(title="Select session output folder")
         if not selected:
@@ -148,12 +218,14 @@ class AnalysisGUI:
         self.refresh_aggregate()
         self.refresh_phase()
         self.render_plot()
+        self.update_interaction_view()
 
     def refresh_replay(self):
         if not self.replay_engine or not self.replay_engine.frames:
             return
         self.replay_slider.configure(to=max(0, len(self.replay_engine.frames) - 1))
         self.update_frame_view()
+        self.update_interaction_view()
 
         self.jump_list.delete(0, tk.END)
         for ev in self.replay_engine.important_events():
@@ -200,18 +272,21 @@ class AnalysisGUI:
             return
         self.replay_index = max(0, self.replay_index - 1)
         self.update_frame_view()
+        self.update_interaction_view()
 
     def step_forward(self):
         if not self.replay_engine or not self.replay_engine.frames:
             return
         self.replay_index = min(len(self.replay_engine.frames) - 1, self.replay_index + 1)
         self.update_frame_view()
+        self.update_interaction_view()
 
     def on_slider(self, value):
         if not self.replay_engine or not self.replay_engine.frames:
             return
         self.replay_index = int(float(value))
         self.update_frame_view()
+        self.update_interaction_view()
 
     def play(self):
         self.pause()
@@ -222,6 +297,7 @@ class AnalysisGUI:
             if self.replay_index < len(self.replay_engine.frames) - 1:
                 self.replay_index += 1
                 self.update_frame_view()
+                self.update_interaction_view()
                 self.replay_job = self.root.after(300, _tick)
 
         self.replay_job = self.root.after(50, _tick)
@@ -246,6 +322,7 @@ class AnalysisGUI:
         nearest = min(range(len(self.replay_engine.frames)), key=lambda i: abs(self.replay_engine.frames[i].time - target_time))
         self.replay_index = nearest
         self.update_frame_view()
+        self.update_interaction_view()
 
     def render_plot(self):
         if not self.session:
