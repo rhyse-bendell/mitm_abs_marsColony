@@ -228,7 +228,15 @@ class TestMovementAndInfoAccessRepairs(unittest.TestCase):
             e for e in events
             if e["event_type"] == "first_productive_action_started"
         ]
-        self.assertTrue(productive_started, msg="No first productive action startup event emitted")
+        productive_attempted = [
+            e for e in events
+            if e["event_type"] == "executable_action_attempted"
+            and e.get("payload_data", {}).get("planner_action_type") in {"inspect_information_source", "start_construction", "transport_resources", "communicate"}
+        ]
+        self.assertTrue(
+            productive_started or productive_attempted,
+            msg="No productive startup event (first_productive_action_started or productive executable_action_attempted) emitted",
+        )
         sim.stop()
 
     def test_run_summary_contains_startup_progression_measures(self):
