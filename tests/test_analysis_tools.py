@@ -44,6 +44,7 @@ def _build_session(tmp_path: Path, include_optional: bool = True) -> Path:
     )
     (session / "logs").mkdir(parents=True, exist_ok=True)
     (session / "logs" / "planner_trace.jsonl").write_text('{"trace": 1}\n', encoding="utf-8")
+    (session / "logs" / "interaction_trace.jsonl").write_text('{"time":0.5,"interaction_type":"planner_request","source_node":"Agent:Architect","target_node":"Planner:OllamaQwen","status":"started"}\n', encoding="utf-8")
 
     if include_optional:
         _write_json(session / "measures" / "runtime_witness_coverage.json", {"coverage": 0.9})
@@ -58,6 +59,7 @@ def test_analysis_loader_full_artifacts(tmp_path):
     assert len(loaded.artifacts.events) == 3
     assert len(loaded.artifacts.state_rows) == 2
     assert loaded.artifacts.runtime_witness_coverage == {"coverage": 0.9}
+    assert len(loaded.artifacts.interaction_trace) == 1
 
 
 def test_analysis_loader_missing_optional_files(tmp_path):

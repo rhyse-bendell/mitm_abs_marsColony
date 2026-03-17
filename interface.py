@@ -9,6 +9,7 @@ from tkinter import StringVar, BooleanVar, DoubleVar, IntVar
 from modules.construction import ConstructionManager
 from modules.phase_definitions import MISSION_PHASES
 from modules.task_model import load_task_model
+from modules.interaction_graph import render_interaction_graph
 
 
 class MarsColonyInterface:
@@ -98,6 +99,7 @@ class MarsColonyInterface:
         self.create_construction_tab()
         self.create_agents_tab()
         self.create_event_monitor_tab()
+        self.create_interaction_tab()
 
     def _build_environment_canvas(self, parent):
         fig, ax = plt.subplots(figsize=(6, 6))
@@ -243,6 +245,74 @@ class MarsColonyInterface:
         self.tab_event.rowconfigure(1, weight=1)
         self.tab_event.columnconfigure(0, weight=1)
         self.tab_event.columnconfigure(1, weight=1)
+
+
+    def create_interaction_tab(self):
+        self.tab_interaction = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_interaction, text="Interaction")
+
+        controls = ttk.Frame(self.tab_interaction, padding=6)
+        controls.pack(fill="x")
+        ttk.Label(controls, text="Agent Filter").pack(side="left")
+        self.interaction_agent_filter_var = StringVar(value="All")
+        self.interaction_agent_filter = ttk.Combobox(controls, textvariable=self.interaction_agent_filter_var, values=["All"], state="readonly", width=18)
+        self.interaction_agent_filter.pack(side="left", padx=(4, 12))
+
+        ttk.Label(controls, text="Type Filter").pack(side="left")
+        self.interaction_type_filter_var = StringVar(value="All")
+        self.interaction_type_filter = ttk.Combobox(controls, textvariable=self.interaction_type_filter_var, values=["All"], state="readonly", width=22)
+        self.interaction_type_filter.pack(side="left", padx=(4, 12))
+
+        ttk.Label(controls, text="Window (s)").pack(side="left")
+        self.interaction_window_var = DoubleVar(value=10.0)
+        tk.Scale(controls, variable=self.interaction_window_var, from_=2.0, to=60.0, resolution=1.0, orient="horizontal", length=180).pack(side="left")
+
+        panes = ttk.PanedWindow(self.tab_interaction, orient="horizontal")
+        panes.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        left = ttk.Frame(panes)
+        right = ttk.Frame(panes)
+        panes.add(left, weight=3)
+        panes.add(right, weight=2)
+
+        self.interaction_fig, self.interaction_ax, self.interaction_canvas = self._build_environment_canvas(left)
+
+        self.interaction_log_text = tk.Text(right, wrap="word", height=24)
+        self.interaction_log_text.pack(side="left", fill="both", expand=True)
+        scroll = ttk.Scrollbar(right, orient="vertical", command=self.interaction_log_text.yview)
+        scroll.pack(side="right", fill="y")
+        self.interaction_log_text.configure(yscrollcommand=scroll.set)
+
+    def update_interaction_tab(self):
+        if not self.sim or not hasattr(self.sim, "logger"):
+            return
+        events = list(self.sim.logger.get_recent_interactions(120))
+
+        agents = sorted({str(e.get("agent_id")) for e in events if e.get("agent_id")})
+        types = sorted({str(e.get("interaction_type")) for e in events if e.get("interaction_type")})
+        self.interaction_agent_filter.configure(values=["All", *agents])
+        self.interaction_type_filter.configure(values=["All", *types])
+
+        agent_filter = self.interaction_agent_filter_var.get()
+        type_filter = self.interaction_type_filter_var.get()
+        filtered = []
+        for e in events:
+            if agent_filter not in {"", "All"} and str(e.get("agent_id")) != agent_filter:
+                continue
+            if type_filter not in {"", "All"} and str(e.get("interaction_type")) != type_filter:
+                continue
+            filtered.append(e)
+
+        now_time = float(getattr(self.sim, "time", 0.0))
+        window_s = float(self.interaction_window_var.get())
+        render_interaction_graph(self.interaction_ax, filtered, now_time=now_time, window_s=window_s)
+        self.interaction_canvas.draw()
+
+        self.interaction_log_text.delete("1.0", tk.END)
+        for event in filtered[-30:]:
+            self.interaction_log_text.insert(
+                tk.END,
+                f"t={event.get('time')} | {event.get('interaction_type')} | {event.get('source_node')} -> {event.get('target_node')} | {event.get('status')} | {event.get('payload_summary')}\n"
+            )
 
     def build_agent_configs(self):
         agent_configs = []
@@ -487,6 +557,7 @@ class MarsColonyInterface:
         self._sync_construction_summaries()
         self._update_system_log()
         self._update_backend_status_display()
+        self.update_interaction_tab()
 
     def _cancel_run_loop(self):
         if self._run_loop_job is not None:
@@ -509,6 +580,7 @@ class MarsColonyInterface:
         self.update_dashboard()
         self._sync_construction_summaries()
         self._update_backend_status_display()
+        self.update_interaction_tab()
         self._schedule_next_tick()
 
     def _update_control_states(self):

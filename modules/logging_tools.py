@@ -6,6 +6,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from modules.interaction_graph import build_interaction_from_sim_event
+
 
 class OutputSessionManager:
     def __init__(self, experiment_name="experiment", timestamp=None, project_root=None):
@@ -164,6 +166,22 @@ class SimulationLogger:
         self.event_listeners = []
         self.last_dump_time = 0.0
         self.planner_trace_writer = PlannerTraceWriter(self.output_session, enabled=False)
+        self.interaction_trace_path = self.output_session.build_log_path("interaction_trace.jsonl")
+        self.recent_interactions = []
+        self.max_recent_interactions = 300
+
+    def _append_recent_interaction(self, interaction):
+        self.recent_interactions.append(interaction)
+        if len(self.recent_interactions) > self.max_recent_interactions:
+            self.recent_interactions = self.recent_interactions[-self.max_recent_interactions:]
+
+    def get_recent_interactions(self, count=80):
+        return self.recent_interactions[-count:]
+
+    def _append_interaction_trace(self, interaction):
+        self.interaction_trace_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.interaction_trace_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(interaction, default=str) + "\n")
 
     def _append_recent_event(self, event):
         self.recent_events.append(event)
@@ -203,6 +221,7 @@ class SimulationLogger:
             self.last_dump_time = current_time
 
     def log_event(self, time, event_type, payload):
+        payload = dict(payload or {})
         event = {
             "time": round(time, 2),
             "event_type": event_type,
@@ -211,6 +230,11 @@ class SimulationLogger:
         }
         self.event_buffer.append(event)
         self._append_recent_event(event)
+        interaction = build_interaction_from_sim_event(time, event_type, payload)
+        if interaction is not None:
+            interaction_row = interaction.to_row()
+            self._append_interaction_trace(interaction_row)
+            self._append_recent_interaction(interaction_row)
         for listener in self.event_listeners:
             listener(event)
 
