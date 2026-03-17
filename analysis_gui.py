@@ -25,6 +25,7 @@ class AnalysisGUI:
         self.replay_engine: ReplayEngine | None = None
         self.replay_index = 0
         self.replay_job = None
+        self._interaction_slider_updating = False
 
         self._build_ui()
 
@@ -180,19 +181,23 @@ class AnalysisGUI:
 
     def refresh_interaction_replay(self):
         trace = self.session.artifacts.interaction_trace if self.session else []
+        self._sync_interaction_slider()
         if not trace:
-            self.interaction_status.config(text="This session has no logs/interaction_trace.jsonl artifact.")
-            self.interaction_detail.delete("1.0", tk.END)
-            self.interaction_detail.insert(tk.END, "No interaction trace available for replay.")
+            if self._widget_available(getattr(self, "interaction_status", None)):
+                self.interaction_status.config(text="This session has no logs/interaction_trace.jsonl artifact.")
+            if self._widget_available(getattr(self, "interaction_detail", None)):
+                self.interaction_detail.delete("1.0", tk.END)
+                self.interaction_detail.insert(tk.END, "No interaction trace available for replay.")
             self._draw_interaction_state([])
             return
-        self.interaction_status.config(text=f"Interaction events: {len(trace)}")
-        self.interaction_slider.configure(to=max(0, len(self.replay_engine.frames) - 1 if self.replay_engine else 0))
+        if self._widget_available(getattr(self, "interaction_status", None)):
+            self.interaction_status.config(text=f"Interaction events: {len(trace)}")
         self.update_interaction_frame_view()
 
     def refresh_replay(self):
         if not self.replay_engine or not self.replay_engine.frames:
             return
+        self.replay_index = self._clamp_replay_index(self.replay_index)
         self.replay_slider.configure(to=max(0, len(self.replay_engine.frames) - 1))
         self.update_frame_view()
         self.update_interaction_frame_view()
@@ -204,6 +209,7 @@ class AnalysisGUI:
     def update_frame_view(self):
         if not self.replay_engine or not self.replay_engine.frames:
             return
+        self.replay_index = self._clamp_replay_index(self.replay_index)
         frame = self.replay_engine.frames[self.replay_index]
         self.replay_slider.set(self.replay_index)
         self.time_label.config(text=f"t={frame.time:.2f} ({frame.index + 1}/{len(self.replay_engine.frames)})")
@@ -252,31 +258,39 @@ class AnalysisGUI:
         self.update_interaction_frame_view()
 
     def on_interaction_slider(self, value):
+        if self._interaction_slider_updating:
+            return
         if not self.replay_engine or not self.replay_engine.frames:
             return
-        self.replay_index = int(float(value))
+        self.replay_index = self._clamp_replay_index(int(float(value)))
         self.update_interaction_frame_view()
+        self.update_frame_view()
 
     def on_slider(self, value):
         if not self.replay_engine or not self.replay_engine.frames:
             return
-        self.replay_index = int(float(value))
+        self.replay_index = self._clamp_replay_index(int(float(value)))
         self.update_frame_view()
         self.update_interaction_frame_view()
 
     def update_interaction_frame_view(self):
         if not self.replay_engine or not self.replay_engine.frames:
+            self._sync_interaction_slider()
             return
+        self.replay_index = self._clamp_replay_index(self.replay_index)
         frame = self.replay_engine.frames[self.replay_index]
-        self.interaction_slider.set(self.replay_index)
+        self._sync_interaction_slider()
         interactions = list(frame.interaction_events_at_time)
         self._draw_interaction_state(interactions)
-        self.interaction_detail.delete("1.0", tk.END)
-        for row in interactions[-30:]:
-            self.interaction_detail.insert(tk.END, f"t={row.get('time')} {row.get('interaction_type')} {row.get('source_node')} -> {row.get('target_node')} [{row.get('status')}]\n{row.get('payload_summary')}\n\n")
+        if self._widget_available(getattr(self, "interaction_detail", None)):
+            self.interaction_detail.delete("1.0", tk.END)
+            for row in interactions[-30:]:
+                self.interaction_detail.insert(tk.END, f"t={row.get('time')} {row.get('interaction_type')} {row.get('source_node')} -> {row.get('target_node')} [{row.get('status')}]\n{row.get('payload_summary')}\n\n")
 
     def _draw_interaction_state(self, interactions):
-        canvas = self.interaction_canvas
+        canvas = getattr(self, "interaction_canvas", None)
+        if not self._widget_available(canvas):
+            return
         canvas.delete("all")
         w = max(200, canvas.winfo_width() or 900)
         h = max(200, canvas.winfo_height() or 520)
@@ -300,6 +314,40 @@ class AnalysisGUI:
             fill = "#ffd166" if node.node_id in active_nodes else "#303846"
             canvas.create_oval(x-18, y-18, x+18, y+18, fill=fill, outline="#dddddd")
             canvas.create_text(x, y-26, text=node.label, fill="#e5e7eb", font=("Arial", 8))
+
+    def _clamp_replay_index(self, index):
+        if not self.replay_engine or not self.replay_engine.frames:
+            return 0
+        return max(0, min(int(index), len(self.replay_engine.frames) - 1))
+
+    def _interaction_slider_available(self):
+        return self._widget_available(getattr(self, "interaction_slider", None))
+
+    def _widget_available(self, widget):
+        if widget is None:
+            return False
+        try:
+            return bool(widget.winfo_exists())
+        except Exception:
+            return False
+
+    def _sync_interaction_slider(self):
+        if not self._interaction_slider_available():
+            return
+        maximum = max(0, len(self.replay_engine.frames) - 1) if self.replay_engine else 0
+        self.interaction_slider.configure(to=maximum)
+        target = min(self.replay_index, maximum)
+        try:
+            current = int(float(self.interaction_slider.get()))
+        except (ValueError, tk.TclError):
+            current = None
+        if current == target:
+            return
+        self._interaction_slider_updating = True
+        try:
+            self.interaction_slider.set(target)
+        finally:
+            self._interaction_slider_updating = False
 
     def play(self):
         self.pause()
