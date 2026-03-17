@@ -63,6 +63,7 @@ class PlannerCadenceConfig:
     degraded_cooldown_seconds: float = 12.0
     degraded_step_interval_multiplier: float = 2.0
     high_latency_local_llm_mode: bool = False
+    unrestricted_local_qwen_mode: bool = False
     high_latency_stale_result_grace_s: float = 0.0
 
     @classmethod
@@ -90,6 +91,7 @@ class PlannerCadenceConfig:
             degraded_cooldown_seconds=max(0.0, float(payload.get("degraded_cooldown_seconds", 12.0))),
             degraded_step_interval_multiplier=max(1.0, float(payload.get("degraded_step_interval_multiplier", 2.0))),
             high_latency_local_llm_mode=bool(payload.get("high_latency_local_llm_mode", False)),
+            unrestricted_local_qwen_mode=bool(payload.get("unrestricted_local_qwen_mode", False)),
             high_latency_stale_result_grace_s=max(0.0, float(payload.get("high_latency_stale_result_grace_s", 0.0))),
         )
 
@@ -1919,6 +1921,8 @@ class Agent:
         if requested_at is None:
             return
         timeout_s = float(self.planner_cadence.planner_timeout_seconds)
+        if self.planner_cadence.unrestricted_local_qwen_mode:
+            timeout_s = max(timeout_s, float(self.planner_cadence.planner_timeout_seconds))
         elapsed = max(0.0, time.perf_counter() - float(requested_at))
         if elapsed < timeout_s:
             return
@@ -3050,9 +3054,12 @@ class Agent:
                         runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend, "effective_backend": sim_state.effective_brain_backend, "provider": sim_state.brain_provider}
                         self._emit_event(sim_state, "planner_request_skipped_inflight", {"reason": planner_reason, "request_id": self.planner_state.get("request_id"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
                         if self.current_plan is None and not self.active_actions and not self.current_action:
-                            startup_decision = BrainDecision(selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE, reason_summary="startup-safe action while planner request is in flight", confidence=0.4)
-                            self.current_action = self._translate_brain_decision_to_legacy_action(startup_decision, environment, sim_state=sim_state)
-                            self._emit_event(sim_state, "ui_safe_fallback_used", {"reason": "inflight_without_plan", "request_state": self.planner_state.get("status"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
+                            if self.planner_cadence.unrestricted_local_qwen_mode:
+                                self._emit_event(sim_state, "planner_waiting_on_inflight_unrestricted", {"reason": "inflight_without_plan", "request_state": self.planner_state.get("status"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
+                            else:
+                                startup_decision = BrainDecision(selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE, reason_summary="startup-safe action while planner request is in flight", confidence=0.4)
+                                self.current_action = self._translate_brain_decision_to_legacy_action(startup_decision, environment, sim_state=sim_state)
+                                self._emit_event(sim_state, "ui_safe_fallback_used", {"reason": "inflight_without_plan", "request_state": self.planner_state.get("status"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
                     else:
                         pending_trace_id = self._make_planner_trace_id(f"{self.agent_id}-{self.sim_step_count}")
                         self._emit_event(sim_state, "planner_invocation_started", {"trigger_reason": planner_reason, "tick": self.sim_step_count, "current_plan_id": getattr(self.current_plan, "plan_id", None), "trace_id": pending_trace_id})

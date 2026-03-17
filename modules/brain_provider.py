@@ -81,6 +81,11 @@ class BrainBackendConfig:
     local_model: str = "qwen3.5:9b"
     timeout_s: float = 75.0
     warmup_timeout_s: float = 45.0
+    completion_max_tokens: int = 2048
+    startup_completion_max_tokens: int = 1024
+    permissive_timeout_ceiling_s: float = 1200.0
+    permissive_completion_ceiling_tokens: int = 16384
+    unrestricted_local_qwen_mode: bool = False
     max_retries: int = 0
     fallback_backend: str = "rule_brain"
     debug: bool = False
@@ -418,6 +423,9 @@ class OllamaLocalBrainProvider(BrainProvider):
             "local_base_url": self.config.local_base_url,
             "local_endpoint": self.config.local_endpoint,
             "timeout_s": self.config.timeout_s,
+            "completion_max_tokens": self.config.completion_max_tokens,
+            "startup_completion_max_tokens": self.config.startup_completion_max_tokens,
+            "unrestricted_local_qwen_mode": bool(getattr(self.config, "unrestricted_local_qwen_mode", False)),
             "fallback_backend": self.config.fallback_backend,
         }
 
@@ -440,6 +448,7 @@ class OllamaLocalBrainProvider(BrainProvider):
                 },
             ],
             "temperature": 0,
+            "max_tokens": int(self.config.completion_max_tokens),
             "response_format": {"type": "json_object"},
         }
 
@@ -473,6 +482,8 @@ class OllamaLocalBrainProvider(BrainProvider):
             "model": self.config.local_model,
             "endpoint": endpoint,
             "timeout_s": self.config.timeout_s,
+            "completion_max_tokens": int(self.config.completion_max_tokens),
+            "unrestricted_local_qwen_mode": bool(getattr(self.config, "unrestricted_local_qwen_mode", False)),
             "request_started_epoch_ms": started_at_epoch_ms,
             "agent_brain_request_size_chars": len(json.dumps(request_packet.to_dict(), default=str)),
             "provider_request_payload": None,
@@ -567,6 +578,8 @@ class OllamaLocalBrainProvider(BrainProvider):
             "configured_base_url": self.config.local_base_url,
             "configured_endpoint": self.config.local_endpoint,
             "timeout_s": self.config.timeout_s,
+            "completion_max_tokens": int(self.config.completion_max_tokens),
+            "unrestricted_local_qwen_mode": bool(getattr(self.config, "unrestricted_local_qwen_mode", False)),
         }
         trace.update(
             {

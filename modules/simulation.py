@@ -21,7 +21,9 @@ LOCAL_BACKEND_ALIASES = {"local_http", "openai_compatible_local", "ollama_local"
 def _planner_defaults_with_high_latency_mode(planner_defaults, configured_backend):
     defaults = dict(planner_defaults or {})
     high_latency_enabled = bool(defaults.get("high_latency_local_llm_mode", configured_backend in LOCAL_BACKEND_ALIASES))
+    unrestricted_local_qwen_mode = bool(defaults.get("unrestricted_local_qwen_mode", high_latency_enabled and configured_backend in LOCAL_BACKEND_ALIASES))
     defaults["high_latency_local_llm_mode"] = high_latency_enabled
+    defaults["unrestricted_local_qwen_mode"] = unrestricted_local_qwen_mode
     if high_latency_enabled:
         defaults.setdefault("planner_interval_steps", 8)
         defaults.setdefault("planner_interval_time", 6.0)
@@ -31,6 +33,21 @@ def _planner_defaults_with_high_latency_mode(planner_defaults, configured_backen
         defaults.setdefault("degraded_step_interval_multiplier", 3.0)
         defaults.setdefault("startup_llm_sanity_timeout_seconds", 45.0)
         defaults.setdefault("high_latency_stale_result_grace_s", 60.0)
+    if unrestricted_local_qwen_mode:
+        defaults["high_latency_local_llm_mode"] = True
+        defaults.setdefault("planner_interval_steps", 16)
+        defaults.setdefault("planner_interval_time", 12.0)
+        defaults.setdefault("planner_timeout_seconds", 480.0)
+        defaults.setdefault("startup_llm_sanity_timeout_seconds", 360.0)
+        defaults.setdefault("startup_llm_sanity_completion_max_tokens", 8192)
+        defaults.setdefault("planner_completion_max_tokens", 8192)
+        defaults.setdefault("warmup_timeout_seconds", 240.0)
+        defaults.setdefault("degraded_consecutive_failures_threshold", 12)
+        defaults.setdefault("degraded_cooldown_seconds", 120.0)
+        defaults.setdefault("degraded_step_interval_multiplier", 4.0)
+        defaults.setdefault("high_latency_stale_result_grace_s", 420.0)
+        defaults.setdefault("permissive_timeout_ceiling_s", 1200.0)
+        defaults.setdefault("permissive_completion_ceiling_tokens", 16384)
     return defaults
 
 
@@ -120,11 +137,63 @@ class SimulationState:
             backend_options["timeout_s"] = self.planner_defaults.get("planner_timeout_seconds")
         if "max_retries" not in backend_options and "planner_max_retries" in self.planner_defaults:
             backend_options["max_retries"] = self.planner_defaults.get("planner_max_retries")
-        if "warmup_timeout_s" not in backend_options and "startup_llm_sanity_timeout_seconds" in self.planner_defaults:
-            backend_options["warmup_timeout_s"] = self.planner_defaults.get("startup_llm_sanity_timeout_seconds")
+        if "warmup_timeout_s" not in backend_options:
+            backend_options["warmup_timeout_s"] = self.planner_defaults.get("warmup_timeout_seconds", self.planner_defaults.get("startup_llm_sanity_timeout_seconds"))
         if "fallback_backend" not in backend_options and "planner_fallback_backend" in self.planner_defaults:
             backend_options["fallback_backend"] = self.planner_defaults.get("planner_fallback_backend")
+        if "completion_max_tokens" not in backend_options:
+            backend_options["completion_max_tokens"] = self.planner_defaults.get("planner_completion_max_tokens", 2048)
+        if "startup_completion_max_tokens" not in backend_options:
+            backend_options["startup_completion_max_tokens"] = self.planner_defaults.get("startup_llm_sanity_completion_max_tokens", 1024)
+        if "permissive_timeout_ceiling_s" not in backend_options:
+            backend_options["permissive_timeout_ceiling_s"] = self.planner_defaults.get("permissive_timeout_ceiling_s", 1200.0)
+        if "permissive_completion_ceiling_tokens" not in backend_options:
+            backend_options["permissive_completion_ceiling_tokens"] = self.planner_defaults.get("permissive_completion_ceiling_tokens", 16384)
+        backend_options.setdefault("unrestricted_local_qwen_mode", self.planner_defaults.get("unrestricted_local_qwen_mode", False))
         self.brain_backend_config = BrainBackendConfig(backend=brain_backend, **backend_options)
+        if self.brain_backend_config.unrestricted_local_qwen_mode:
+            effective_timeout_ceiling = max(60.0, float(self.brain_backend_config.permissive_timeout_ceiling_s))
+            effective_completion_ceiling = max(512, int(self.brain_backend_config.permissive_completion_ceiling_tokens))
+            effective_startup_timeout = min(float(self.startup_llm_sanity_config.timeout_s), effective_timeout_ceiling)
+            effective_planner_timeout = min(float(self.brain_backend_config.timeout_s), effective_timeout_ceiling)
+            effective_warmup_timeout = min(float(self.brain_backend_config.warmup_timeout_s), effective_timeout_ceiling)
+            effective_startup_tokens = min(int(self.startup_llm_sanity_config.completion_max_tokens), effective_completion_ceiling)
+            effective_planner_tokens = min(int(self.brain_backend_config.completion_max_tokens), effective_completion_ceiling)
+            self.startup_llm_sanity_config = StartupLLMSanityConfig(
+                enabled=self.startup_llm_sanity_config.enabled,
+                timeout_s=effective_startup_timeout,
+                max_sources=self.startup_llm_sanity_config.max_sources,
+                max_items_per_type=self.startup_llm_sanity_config.max_items_per_type,
+                completion_max_tokens=effective_startup_tokens,
+                json_only_mode=self.startup_llm_sanity_config.json_only_mode,
+                reasoning_suppression=self.startup_llm_sanity_config.reasoning_suppression,
+                raw_response_max_chars=self.startup_llm_sanity_config.raw_response_max_chars,
+                artifact_name=self.startup_llm_sanity_config.artifact_name,
+            )
+            self.brain_backend_config = BrainBackendConfig(
+                backend=self.brain_backend_config.backend,
+                local_base_url=self.brain_backend_config.local_base_url,
+                local_endpoint=self.brain_backend_config.local_endpoint,
+                local_model=self.brain_backend_config.local_model,
+                timeout_s=effective_planner_timeout,
+                warmup_timeout_s=effective_warmup_timeout,
+                completion_max_tokens=effective_planner_tokens,
+                startup_completion_max_tokens=effective_startup_tokens,
+                permissive_timeout_ceiling_s=effective_timeout_ceiling,
+                permissive_completion_ceiling_tokens=effective_completion_ceiling,
+                unrestricted_local_qwen_mode=True,
+                max_retries=self.brain_backend_config.max_retries,
+                fallback_backend=self.brain_backend_config.fallback_backend,
+                debug=self.brain_backend_config.debug,
+                planner_trace_enabled=self.brain_backend_config.planner_trace_enabled,
+                planner_trace_mode=self.brain_backend_config.planner_trace_mode,
+                planner_trace_max_chars=self.brain_backend_config.planner_trace_max_chars,
+            )
+            self.planner_defaults["planner_timeout_seconds"] = effective_planner_timeout
+            self.planner_defaults["startup_llm_sanity_timeout_seconds"] = effective_startup_timeout
+            self.planner_defaults["warmup_timeout_seconds"] = effective_warmup_timeout
+            self.planner_defaults["planner_completion_max_tokens"] = effective_planner_tokens
+            self.planner_defaults["startup_llm_sanity_completion_max_tokens"] = effective_startup_tokens
         self.configured_brain_backend = self.brain_backend_config.backend
         self.brain_provider = create_brain_provider(self.brain_backend_config)
         self.provider_warmup_status = None
@@ -388,6 +457,9 @@ class SimulationState:
             "degraded_consecutive_failures_threshold": agent.planner_cadence.degraded_consecutive_failures_threshold,
             "degraded_cooldown_seconds": agent.planner_cadence.degraded_cooldown_seconds,
             "degraded_step_interval_multiplier": agent.planner_cadence.degraded_step_interval_multiplier,
+            "high_latency_local_llm_mode": bool(agent.planner_cadence.high_latency_local_llm_mode),
+            "unrestricted_local_qwen_mode": bool(agent.planner_cadence.unrestricted_local_qwen_mode),
+            "high_latency_stale_result_grace_s": float(agent.planner_cadence.high_latency_stale_result_grace_s),
         }
 
     def _register_agent_brain_runtime(self, agent):
@@ -397,6 +469,12 @@ class SimulationState:
             local_endpoint=str(agent.brain_config.get("local_endpoint", self.brain_backend_config.local_endpoint) or self.brain_backend_config.local_endpoint),
             local_model=str(agent.brain_config.get("local_model", self.brain_backend_config.local_model) or self.brain_backend_config.local_model),
             timeout_s=float(agent.brain_config.get("timeout_s", self.brain_backend_config.timeout_s)),
+            warmup_timeout_s=float(agent.brain_config.get("warmup_timeout_s", self.brain_backend_config.warmup_timeout_s)),
+            completion_max_tokens=int(agent.brain_config.get("completion_max_tokens", self.brain_backend_config.completion_max_tokens)),
+            startup_completion_max_tokens=int(agent.brain_config.get("startup_completion_max_tokens", self.brain_backend_config.startup_completion_max_tokens)),
+            permissive_timeout_ceiling_s=float(agent.brain_config.get("permissive_timeout_ceiling_s", self.brain_backend_config.permissive_timeout_ceiling_s)),
+            permissive_completion_ceiling_tokens=int(agent.brain_config.get("permissive_completion_ceiling_tokens", self.brain_backend_config.permissive_completion_ceiling_tokens)),
+            unrestricted_local_qwen_mode=bool(agent.brain_config.get("unrestricted_local_qwen_mode", self.brain_backend_config.unrestricted_local_qwen_mode)),
             max_retries=int(agent.brain_config.get("max_retries", self.brain_backend_config.max_retries)),
             fallback_backend=str(agent.brain_config.get("fallback_backend", self.brain_backend_config.fallback_backend) or self.brain_backend_config.fallback_backend),
             debug=bool(agent.brain_config.get("debug", self.brain_backend_config.debug)),
@@ -474,10 +552,16 @@ class SimulationState:
             "timeout_s": cfg.timeout_s if self.configured_brain_backend != "rule_brain" else None,
             "warmup_timeout_s": cfg.warmup_timeout_s if self.configured_brain_backend != "rule_brain" else None,
             "high_latency_local_llm_mode": bool(self.planner_defaults.get("high_latency_local_llm_mode", False)),
+            "unrestricted_local_qwen_mode": bool(self.planner_defaults.get("unrestricted_local_qwen_mode", False)),
             "effective_planner_timeout_seconds": float(self.planner_defaults.get("planner_timeout_seconds", 0.0) or 0.0),
             "effective_startup_llm_sanity_timeout_seconds": float(self.planner_defaults.get("startup_llm_sanity_timeout_seconds", 0.0) or 0.0),
+            "effective_warmup_timeout_seconds": float(self.brain_backend_config.warmup_timeout_s or 0.0),
+            "effective_startup_llm_sanity_completion_max_tokens": int(self.startup_llm_sanity_config.completion_max_tokens),
+            "effective_planner_completion_max_tokens": int(self.brain_backend_config.completion_max_tokens),
             "stale_result_relaxation_enabled": bool(self.planner_defaults.get("high_latency_local_llm_mode", False)) and float(self.planner_defaults.get("high_latency_stale_result_grace_s", 0.0) or 0.0) > 0.0,
             "high_latency_stale_result_grace_s": float(self.planner_defaults.get("high_latency_stale_result_grace_s", 0.0) or 0.0),
+            "permissive_timeout_ceiling_s": float(self.brain_backend_config.permissive_timeout_ceiling_s or 0.0),
+            "permissive_completion_ceiling_tokens": int(self.brain_backend_config.permissive_completion_ceiling_tokens or 0),
             "provider_class": self.brain_provider.__class__.__name__,
             "local_backend_alias": "ollama_openai_compatible" if self.configured_brain_backend in {"local_http", "openai_compatible_local", "ollama_local", "ollama"} else None,
             "fallback_occurred": self.backend_fallback_count > 0,
