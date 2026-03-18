@@ -148,6 +148,20 @@ class TestMetricsOutputs(unittest.TestCase):
             self.assertIn("plan_source_distribution", team_summary["backend"])
             self.assertIn("fallback_reason_distribution", team_summary["backend"])
 
+    def test_summary_contains_behavioral_sanity_audit_metrics(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sim, session_dir = self._run_sim(tmpdir)
+            run_summary = json.loads((session_dir / "measures" / "run_summary.json").read_text(encoding="utf-8"))
+            audit = run_summary["process"]["behavioral_sanity_audit"]
+            self.assertIn("packet_absorption_attempted_count", audit)
+            self.assertIn("packet_absorption_succeeded_count", audit)
+            self.assertIn("derivation_attempted_count", audit)
+            self.assertIn("data_to_information_attempted_count", audit)
+            self.assertIn("information_to_knowledge_attempted_count", audit)
+            self.assertIn("communication_attempt_count", audit)
+            self.assertIn("artifact_externalization_created_count", audit)
+            self.assertIn("construction_repair_success_count", audit)
+
     def test_headless_simulation_still_runs_cleanly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)

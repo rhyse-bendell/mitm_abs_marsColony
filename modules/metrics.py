@@ -29,6 +29,7 @@ class MetricsCollector:
         self.breakdown_counts = defaultdict(Counter)
         self.reason_distributions = defaultdict(Counter)
         self.communication_by_type = Counter()
+        self.behavioral_audit_counts = Counter()
         self.dik_counts = defaultdict(Counter)
         self.externalization_by_type = Counter()
         self.construction_externalizations_by_type = Counter()
@@ -173,6 +174,7 @@ class MetricsCollector:
             "derivation_prerequisites_satisfied",
             "derivation_attempted",
             "derivation_succeeded",
+            "derivation_failed",
             "derivation_attempted_no_output",
             "derivation_ready_but_not_attempted",
             "derivation_blocked_missing_prereq",
@@ -275,6 +277,43 @@ class MetricsCollector:
             for mtype in payload.get("message_types", []):
                 self.communication_by_type[mtype] += 1
             self.phase_stats[-1]["communication_events"] += 1
+
+        if event_type == "brain_decision_outcome":
+            selected_action = payload.get("selected_action")
+            if selected_action == "communicate":
+                self.behavioral_audit_counts["communication_attempts"] += 1
+            if selected_action == "request_assistance":
+                self.behavioral_audit_counts["assistance_request_attempts"] += 1
+            if selected_action == "externalize_plan":
+                self.behavioral_audit_counts["artifact_externalization_attempts"] += 1
+            if selected_action == "consult_team_artifact":
+                self.behavioral_audit_counts["artifact_consult_attempts"] += 1
+            if selected_action == "validate_construction":
+                self.behavioral_audit_counts["construction_validation_attempts"] += 1
+            if selected_action == "repair_or_correct_construction":
+                self.behavioral_audit_counts["construction_repair_attempts"] += 1
+
+        if event_type == "packet_absorption_attempted":
+            self.behavioral_audit_counts["packet_absorption_attempted"] += 1
+            elem_type = str(payload.get("element_type", "unknown"))
+            self.behavioral_audit_counts[f"packet_absorption_attempted_{elem_type}"] += 1
+        if event_type == "packet_absorption_failed":
+            self.behavioral_audit_counts["packet_absorption_failed"] += 1
+            elem_type = str(payload.get("element_type", "unknown"))
+            self.behavioral_audit_counts[f"packet_absorption_failed_{elem_type}"] += 1
+
+        if event_type == "derivation_attempted":
+            self.behavioral_audit_counts["derivation_attempted"] += 1
+            hook_target = str(payload.get("hook_target", "unknown"))
+            self.behavioral_audit_counts[f"derivation_attempted_{hook_target}"] += 1
+        if event_type == "derivation_failed":
+            self.behavioral_audit_counts["derivation_failed"] += 1
+            hook_target = str(payload.get("hook_target", "unknown"))
+            self.behavioral_audit_counts[f"derivation_failed_{hook_target}"] += 1
+        if event_type == "derivation_succeeded":
+            output_type = str(payload.get("derivation_kind", "unknown"))
+            self.behavioral_audit_counts["derivation_succeeded"] += 1
+            self.behavioral_audit_counts[f"derivation_succeeded_kind_{output_type}"] += 1
 
         if event_type in {"externalization_created", "construction_externalization_update"}:
             self.phase_stats[-1]["externalization_events"] += 1
@@ -859,6 +898,43 @@ class MetricsCollector:
                         for e in self.simulation.logger.get_recent_events(5000)
                         if e.get("event_type") == "movement_arrived"
                     ], default=None),
+                },
+                "behavioral_sanity_audit": {
+                    "packet_absorption_attempted_count": int(self.behavioral_audit_counts.get("packet_absorption_attempted", 0)),
+                    "packet_absorption_failed_count": int(self.behavioral_audit_counts.get("packet_absorption_failed", 0)),
+                    "packet_absorption_succeeded_count": int(
+                        self.behavioral_audit_counts.get("packet_absorption_attempted", 0)
+                        - self.behavioral_audit_counts.get("packet_absorption_failed", 0)
+                    ),
+                    "packet_absorption_attempted_data_count": int(self.behavioral_audit_counts.get("packet_absorption_attempted_data", 0)),
+                    "packet_absorption_failed_data_count": int(self.behavioral_audit_counts.get("packet_absorption_failed_data", 0)),
+                    "packet_absorption_attempted_information_count": int(self.behavioral_audit_counts.get("packet_absorption_attempted_information", 0)),
+                    "packet_absorption_failed_information_count": int(self.behavioral_audit_counts.get("packet_absorption_failed_information", 0)),
+                    "derivation_attempted_count": int(self.behavioral_audit_counts.get("derivation_attempted", 0)),
+                    "derivation_failed_count": int(self.behavioral_audit_counts.get("derivation_failed", 0)),
+                    "derivation_succeeded_count": int(self.behavioral_audit_counts.get("derivation_succeeded", 0)),
+                    "data_to_information_attempted_count": int(self.behavioral_audit_counts.get("derivation_attempted_transform_data_to_information", 0)),
+                    "data_to_information_failed_count": int(self.behavioral_audit_counts.get("derivation_failed_transform_data_to_information", 0)),
+                    "data_to_information_succeeded_count": int(
+                        self.behavioral_audit_counts.get("derivation_attempted_transform_data_to_information", 0)
+                        - self.behavioral_audit_counts.get("derivation_failed_transform_data_to_information", 0)
+                    ),
+                    "information_to_knowledge_attempted_count": int(self.behavioral_audit_counts.get("derivation_attempted_transform_information_to_knowledge", 0)),
+                    "information_to_knowledge_failed_count": int(self.behavioral_audit_counts.get("derivation_failed_transform_information_to_knowledge", 0)),
+                    "information_to_knowledge_succeeded_count": int(
+                        self.behavioral_audit_counts.get("derivation_attempted_transform_information_to_knowledge", 0)
+                        - self.behavioral_audit_counts.get("derivation_failed_transform_information_to_knowledge", 0)
+                    ),
+                    "communication_attempt_count": int(self.behavioral_audit_counts.get("communication_attempts", 0)),
+                    "communication_success_count": int(self.events_by_type.get("communication_exchange", 0)),
+                    "artifact_externalization_attempt_count": int(self.behavioral_audit_counts.get("artifact_externalization_attempts", 0)),
+                    "artifact_externalization_created_count": int(self.events_by_type.get("externalization_created", 0)),
+                    "artifact_consult_attempt_count": int(self.behavioral_audit_counts.get("artifact_consult_attempts", 0)),
+                    "artifact_consult_success_count": int(self.events_by_type.get("artifact_consulted", 0)),
+                    "construction_validation_attempt_count": int(self.behavioral_audit_counts.get("construction_validation_attempts", 0)),
+                    "construction_repair_attempt_count": int(self.behavioral_audit_counts.get("construction_repair_attempts", 0)),
+                    "mismatch_detected_count": int(self.events_by_type.get("construction_mismatch_detected", 0)),
+                    "construction_repair_success_count": int(self.events_by_type.get("construction_repair_episode", 0)),
                 },
             },
             "externalization_metrics": {
