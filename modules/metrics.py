@@ -363,9 +363,10 @@ class MetricsCollector:
             if project_id:
                 self.phase_stats[-1]["_seen_projects"].add(project_id)
 
-            if payload.get("status") == "complete":
+            is_validated_complete = payload.get("status") == "complete"
+            if is_validated_complete:
                 self.phase_stats[-1]["structures_completed"] += 1
-            if payload.get("correct") is True:
+            if is_validated_complete and payload.get("correct") is True:
                 self.phase_stats[-1]["structures_validated_correct"] += 1
                 self.phase_stats[-1]["validation_events"] += 1
                 self.construction_validation_by_type[structure_type] += 1
@@ -518,10 +519,11 @@ class MetricsCollector:
             ptype = project.get("type", "unknown")
             summary["attempted"] += 1
             summary["by_type"][ptype]["attempted"] += 1
-            if project.get("status") == "complete":
+            is_validated_complete = project.get("status") == "complete"
+            if is_validated_complete:
                 summary["completed"] += 1
                 summary["by_type"][ptype]["completed"] += 1
-            if project.get("correct", True):
+            if is_validated_complete and project.get("correct", True):
                 summary["validated_correct"] += 1
                 summary["by_type"][ptype]["validated_correct"] += 1
         summary["by_type"] = dict(summary["by_type"])
