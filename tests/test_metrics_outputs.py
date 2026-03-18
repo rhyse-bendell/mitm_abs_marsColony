@@ -111,6 +111,18 @@ class TestMetricsOutputs(unittest.TestCase):
             self.assertIn("artifact_validation_rate", external)
             self.assertIn("artifact_revision_or_repair_rate", external)
 
+    def test_colony_support_capacity_proxy_present(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _sim, session_dir = self._run_sim(tmpdir)
+            run_summary = json.loads((session_dir / "measures" / "run_summary.json").read_text(encoding="utf-8"))
+            outcomes = run_summary["outcomes"]
+            self.assertIn("colony_survivability_proxy", outcomes)
+            self.assertIn("colony_support_capacity_proxy", outcomes)
+            support = outcomes["colony_support_capacity_proxy"]
+            self.assertIn("capacity_estimate", support)
+            self.assertIn("phase_support_ratio_estimate", support)
+            self.assertIn("effective_colony_support_ratio_current_phase", support)
+
     def test_agent_and_team_summaries_have_expected_fields(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             _sim, session_dir = self._run_sim(tmpdir)

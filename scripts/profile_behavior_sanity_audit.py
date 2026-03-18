@@ -74,6 +74,8 @@ def _extract_metrics(run_summary: dict) -> dict:
     i2k_success = int(audit.get("information_to_knowledge_succeeded_count", 0))
 
     colony_proxy = outcomes.get("colony_survivability_proxy", {})
+    support_proxy = outcomes.get("colony_support_capacity_proxy", {})
+    support_capacity = support_proxy.get("capacity_estimate", {})
 
     return {
         "packet_absorption_attempts": packet_attempts,
@@ -106,6 +108,11 @@ def _extract_metrics(run_summary: dict) -> dict:
         "completed_structures": int(outcomes.get("total_structures_completed", 0)),
         "structures_repaired": int(outcomes.get("total_structures_repaired_or_corrected", 0)),
         "colony_validated_ratio": float(colony_proxy.get("validated_structure_ratio", 0.0) or 0.0),
+        "effective_colony_support_ratio": float(
+            support_proxy.get("effective_colony_support_ratio_current_phase", 0.0) or 0.0
+        ),
+        "supported_civilians": int(support_capacity.get("supported_civilians", 0) or 0),
+        "supported_vips": int(support_capacity.get("supported_vips", 0) or 0),
         "phase_objectives_completed": int(sum(1 for ok in outcomes.get("phase_objective_completion", {}).values() if ok)),
     }
 
@@ -187,6 +194,12 @@ def run_audit(
                 ("low_task_high_team", "low_task_low_team"),
                 "colony_validated_ratio",
             ),
+            "effective_colony_support_ratio": _directional_delta(
+                condition_means,
+                ("high_task_high_team", "high_task_low_team"),
+                ("low_task_high_team", "low_task_low_team"),
+                "effective_colony_support_ratio",
+            ),
         },
         "team_high_minus_low": {
             "communication_successes": _directional_delta(
@@ -230,7 +243,7 @@ def _regime_score(regime: dict) -> float:
     directional = regime.get("directional_deltas", {})
     task_sep = abs(float(directional.get("task_high_minus_low", {}).get("packet_absorption_success_rate", 0.0)))
     team_sep = abs(float(directional.get("team_high_minus_low", {}).get("communication_successes", 0.0)))
-    outcome_values = [float(row.get("colony_validated_ratio", 0.0)) for row in condition_means.values()]
+    outcome_values = [float(row.get("effective_colony_support_ratio", 0.0)) for row in condition_means.values()]
     outcome_spread = max(outcome_values) - min(outcome_values) if outcome_values else 0.0
     externalization = mean(float(row.get("externalization_created", 0.0)) for row in condition_means.values()) if condition_means else 0.0
     repair = mean(float(row.get("repair_successes", 0.0)) for row in condition_means.values()) if condition_means else 0.0
