@@ -299,6 +299,7 @@ class Agent:
         self.last_dik_change_time = -1.0
         self.executed_derivations = set()
         self.derivation_events = []
+        self.derivation_attempt_counts = {}
         self._construction_attempted_projects = set()
         self.task_model = None
 
@@ -379,6 +380,71 @@ class Agent:
         if default is None:
             default = 0.0 if parameter in {"utility_weight", "priority_weight", "externalization_weight", "persistence_weight", "adoption_weight", "sensitivity"} else 1.0
         return float(getattr(self, "hook_effects", {}).get((hook_type, hook_target, parameter), default))
+
+    def _epistemic_success_probability(self, hook_target, *, base_trait="rule_accuracy", context_modifier=0.0, retry_bonus=0.0):
+        hook_base = self._hook_value("dik_update", hook_target, "success_probability", default=0.5)
+        trait_base = self._trait_value(base_trait, default=0.5)
+        mechanism_base = max(hook_base, trait_base)
+        deterministic_component = 0.2 + (0.75 * mechanism_base)
+        residual_noise = random.uniform(-0.04, 0.04)
+        probability = deterministic_component + context_modifier + retry_bonus + residual_noise
+        return max(0.05, min(0.98, probability))
+
+    def _attempt_epistemic_transition(
+        self,
+        *,
+        hook_target,
+        sim_state=None,
+        event_payload=None,
+        attempt_event,
+        failed_event,
+        context_modifier=0.0,
+        retry_bonus=0.0,
+    ):
+        probability = self._epistemic_success_probability(
+            hook_target,
+            context_modifier=context_modifier,
+            retry_bonus=retry_bonus,
+        )
+        roll = random.random()
+        payload = dict(event_payload or {})
+        payload.update(
+            {
+                "hook_target": hook_target,
+                "success_probability": round(probability, 4),
+                "stochastic_roll": round(roll, 4),
+                "context_modifier": round(context_modifier, 4),
+                "retry_bonus": round(retry_bonus, 4),
+            }
+        )
+        if sim_state is not None:
+            self._emit_event(sim_state, attempt_event, payload)
+        if roll <= probability:
+            return True, payload
+        if sim_state is not None:
+            self._emit_event(sim_state, failed_event, payload)
+        return False, payload
+
+    def _derivation_context_modifier(self, derivation):
+        if not getattr(self, "task_model", None):
+            return 0.0
+        required = set(derivation.required_inputs)
+        role_scopes = set()
+        for required_id in required:
+            element = self.task_model.dik_elements.get(required_id)
+            if element is None:
+                continue
+            scope = (element.role_scope or "").strip().lower()
+            if scope:
+                role_scopes.add(scope)
+        role_key = (self.role or "").strip().lower()
+        local_scopes = {"", "all", "team", "shared", role_key}
+        external_role_dependencies = [scope for scope in role_scopes if scope not in local_scopes]
+        if external_role_dependencies:
+            return -0.08
+        if "shared" in role_scopes or "team" in role_scopes:
+            return -0.03
+        return 0.0
 
     def _duration_scale(self, action_name):
         scale = self._hook_value("action_duration", action_name, "duration_scale", default=1.0)
@@ -695,7 +761,7 @@ class Agent:
         before_ids = {info.id for info in self.mental_model["information"]}
         before_rules = set(self.mental_model["knowledge"].rules)
         derivations_before = set(self.executed_derivations)
-        self.absorb_packet(packet, accuracy=0.95)
+        self.absorb_packet(packet, accuracy=0.95, sim_state=sim_state, source_id=source_id)
         after_ids = {info.id for info in self.mental_model["information"]}
         packet_info_ids = {info.id for info in packet.get("information", [])}
         new_ids = after_ids - before_ids
@@ -1079,17 +1145,32 @@ class Agent:
                 continue
 
             attempted_count += 1
-            if sim_state is not None:
-                self._emit_event(
-                    sim_state,
-                    "derivation_attempted",
-                    {
-                        "derivation_id": derivation.derivation_id,
-                        "output_element_id": output_id,
-                        "required_inputs": sorted(required),
-                        "trigger_source": trigger_source,
-                    },
+            hook_target = "transform_information_to_knowledge" if (derivation.output_type == "knowledge" or element.element_type == "knowledge") else "transform_data_to_information"
+            prior_attempts = int(self.derivation_attempt_counts.get(derivation.derivation_id, 0))
+            retry_bonus = min(0.12, 0.03 * prior_attempts)
+            context_modifier = self._derivation_context_modifier(derivation)
+            derivation_allowed, attempt_payload = self._attempt_epistemic_transition(
+                hook_target=hook_target,
+                sim_state=sim_state,
+                event_payload={
+                    "derivation_id": derivation.derivation_id,
+                    "output_element_id": output_id,
+                    "required_inputs": sorted(required),
+                    "trigger_source": trigger_source,
+                    "attempt_index": prior_attempts + 1,
+                },
+                attempt_event="derivation_attempted",
+                failed_event="derivation_failed",
+                context_modifier=context_modifier,
+                retry_bonus=retry_bonus,
+            )
+            self.derivation_attempt_counts[derivation.derivation_id] = prior_attempts + 1
+            if not derivation_allowed:
+                self.activity_log.append(
+                    f"Derivation attempt failed {derivation.derivation_id} "
+                    f"(p={attempt_payload['success_probability']:.2f}, roll={attempt_payload['stochastic_roll']:.2f})"
                 )
+                continue
 
             produced = False
             rule_ready_not_adopted = False
@@ -1135,6 +1216,7 @@ class Agent:
                 }
                 self.executed_derivations.add(derivation.derivation_id)
                 self.derivation_events.append(event)
+                self.derivation_attempt_counts.pop(derivation.derivation_id, None)
                 self.activity_log.append(f"Executed derivation {derivation.derivation_id} -> {output_id}")
                 DIK_LOG.append({
                     "time": now,
@@ -2876,11 +2958,25 @@ class Agent:
             elif action["type"] == "idle":
                 self.activity_log.append("Idling...")
 
-    def absorb_packet(self, packet, accuracy=1.0):
-        effective_base = max(self._hook_value("dik_update", "absorb_packet", "success_probability", default=0.5), self._trait_value("rule_accuracy"))
-        effective_accuracy = max(0.05, min(1.0, accuracy * (0.6 + 0.4 * effective_base)))
+    def absorb_packet(self, packet, accuracy=1.0, sim_state=None, source_id=None):
+        source_ref = source_id or packet.get("source_id") or "unknown_source"
+        accuracy_modifier = max(-0.2, min(0.2, (float(accuracy) - 1.0) * 0.35))
         for d in packet.get("data", []):
-            if random.random() <= effective_accuracy:
+            success, _ = self._attempt_epistemic_transition(
+                hook_target="absorb_packet",
+                sim_state=sim_state,
+                event_payload={
+                    "source_id": source_ref,
+                    "element_id": d.id,
+                    "element_type": "data",
+                    "requested_accuracy": float(accuracy),
+                },
+                attempt_event="packet_absorption_attempted",
+                failed_event="packet_absorption_failed",
+                context_modifier=accuracy_modifier,
+                retry_bonus=0.0,
+            )
+            if success:
                 if d not in self.mental_model["data"]:
                     self.mental_model["data"].add(d)
                     d.acquired_by[self.name] = {"mode": "direct", "from": d.source}
@@ -2896,7 +2992,21 @@ class Agent:
                     self.last_dik_change_time = getattr(self, "current_time", 0.0)
 
         for info in packet.get("information", []):
-            if random.random() <= effective_accuracy:
+            success, _ = self._attempt_epistemic_transition(
+                hook_target="absorb_packet",
+                sim_state=sim_state,
+                event_payload={
+                    "source_id": source_ref,
+                    "element_id": info.id,
+                    "element_type": "information",
+                    "requested_accuracy": float(accuracy),
+                },
+                attempt_event="packet_absorption_attempted",
+                failed_event="packet_absorption_failed",
+                context_modifier=accuracy_modifier,
+                retry_bonus=0.0,
+            )
+            if success:
                 if info not in self.mental_model["information"]:
                     self.mental_model["information"].add(info)
                     info.acquired_by[self.name] = {"mode": "direct", "from": info.source}
@@ -3076,7 +3186,7 @@ class Agent:
                     continue
                 if environment.can_access_info(self.position, packet_name, role=self.role):
                     before = len(self.mental_model["information"])
-                    self.absorb_packet(packet_content, accuracy=0.95)
+                    self.absorb_packet(packet_content, accuracy=0.95, sim_state=sim_state, source_id=packet_name)
                     after = len(self.mental_model["information"])
                     if after > before:
                         self.source_inspection_state[packet_name] = "inspected"
