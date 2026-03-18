@@ -241,13 +241,37 @@ def run_audit(
 def _regime_score(regime: dict) -> float:
     condition_means = regime.get("condition_means", {})
     directional = regime.get("directional_deltas", {})
-    task_sep = abs(float(directional.get("task_high_minus_low", {}).get("packet_absorption_success_rate", 0.0)))
-    team_sep = abs(float(directional.get("team_high_minus_low", {}).get("communication_successes", 0.0)))
-    outcome_values = [float(row.get("effective_colony_support_ratio", 0.0)) for row in condition_means.values()]
-    outcome_spread = max(outcome_values) - min(outcome_values) if outcome_values else 0.0
+    task_process_sep = abs(float(directional.get("task_high_minus_low", {}).get("packet_absorption_success_rate", 0.0)))
+    team_process_sep = abs(float(directional.get("team_high_minus_low", {}).get("communication_successes", 0.0)))
+
+    support_ratios = [float(row.get("effective_colony_support_ratio", 0.0)) for row in condition_means.values()]
+    supported_civ = [float(row.get("supported_civilians", 0.0)) for row in condition_means.values()]
+    supported_vip = [float(row.get("supported_vips", 0.0)) for row in condition_means.values()]
+
+    support_ratio_spread = (max(support_ratios) - min(support_ratios)) if support_ratios else 0.0
+    civ_spread = (max(supported_civ) - min(supported_civ)) if supported_civ else 0.0
+    vip_spread = (max(supported_vip) - min(supported_vip)) if supported_vip else 0.0
+    support_ratio_avg = mean(support_ratios) if support_ratios else 0.0
+    civ_avg = mean(supported_civ) if supported_civ else 0.0
+    vip_avg = mean(supported_vip) if supported_vip else 0.0
+
     externalization = mean(float(row.get("externalization_created", 0.0)) for row in condition_means.values()) if condition_means else 0.0
     repair = mean(float(row.get("repair_successes", 0.0)) for row in condition_means.values()) if condition_means else 0.0
-    return (task_sep * 2.0) + (team_sep / 100.0) + (outcome_spread * 4.0) + externalization + repair
+
+    # Primary objective: mission-level support metrics should be informative (non-flat) and substantial.
+    # Secondary objective: preserve interpretable process/profile separability and activate artifact/repair pathways.
+    return (
+        (support_ratio_avg * 3.0)
+        + (support_ratio_spread * 6.0)
+        + (civ_avg / 20.0)
+        + (vip_avg / 10.0)
+        + (civ_spread / 4.0)
+        + (vip_spread / 3.0)
+        + (externalization * 0.5)
+        + repair
+        + (task_process_sep * 1.5)
+        + (team_process_sep / 200.0)
+    )
 
 
 def run_calibration_sweep(
@@ -370,10 +394,15 @@ def main():
             name = regime.get("regime", {}).get("name", "regime")
             cm = regime.get("condition_means", {})
             avg_ratio = mean(float(v.get("colony_validated_ratio", 0.0)) for v in cm.values()) if cm else 0.0
+            avg_support_ratio = mean(float(v.get("effective_colony_support_ratio", 0.0)) for v in cm.values()) if cm else 0.0
+            avg_supported_civilians = mean(float(v.get("supported_civilians", 0.0)) for v in cm.values()) if cm else 0.0
+            avg_supported_vips = mean(float(v.get("supported_vips", 0.0)) for v in cm.values()) if cm else 0.0
             avg_ext = mean(float(v.get("externalization_created", 0.0)) for v in cm.values()) if cm else 0.0
             avg_repair = mean(float(v.get("repair_successes", 0.0)) for v in cm.values()) if cm else 0.0
             print(
                 f"- {name}: avg_validated_ratio={avg_ratio:.3f}, "
+                f"avg_support_ratio={avg_support_ratio:.3f}, "
+                f"avg_supported_civilians={avg_supported_civilians:.2f}, avg_supported_vips={avg_supported_vips:.2f}, "
                 f"avg_externalization_created={avg_ext:.2f}, avg_repair_successes={avg_repair:.2f}, "
                 f"score={regime.get('regime_score', 0.0):.3f}"
             )
