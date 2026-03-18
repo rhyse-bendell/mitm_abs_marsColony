@@ -84,6 +84,69 @@ class TestBrainContextAndDecision(unittest.TestCase):
             self.assertTrue(all(a.get("target_id") for a in inspect_affordances))
             self.assertTrue(all(a.get("target_zone") for a in inspect_affordances))
 
+    def test_rule_brain_prioritizes_productive_build_after_readiness_unlock(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir)
+            agent = sim.agents[0]
+            packet = BrainContextBuilder().build(sim, agent)
+
+            packet.world_snapshot["phase_profile"]["stage"] = "execution"
+            packet.individual_cognitive_state["known_gaps"] = ["need_help"]
+            packet.individual_cognitive_state["traits"]["help_tendency"] = 0.95
+            packet.individual_cognitive_state["build_readiness"]["ready_for_build"] = True
+            packet.individual_cognitive_state["build_readiness"]["status"] = "plausible"
+            packet.world_snapshot["built_state"] = [
+                {
+                    "structure_id": "Build_Table_A",
+                    "state": "in_progress",
+                    "progress": 0.0,
+                }
+            ]
+            packet.action_affordances = [
+                {"action_type": ExecutableActionType.REQUEST_ASSISTANCE.value, "utility": 0.95, "target_id": "nearby_agent"},
+                {"action_type": ExecutableActionType.TRANSPORT_RESOURCES.value, "utility": 0.5, "target_id": "resource_zone_to_work_zone"},
+                {"action_type": ExecutableActionType.START_CONSTRUCTION.value, "utility": 0.4, "target_id": "Build_Table_A"},
+                {"action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, "utility": 0.3, "target_id": "Team_Info"},
+            ]
+
+            decision = RuleBrain().decide(packet)
+            self.assertIn(
+                decision.selected_action,
+                {
+                    ExecutableActionType.TRANSPORT_RESOURCES,
+                    ExecutableActionType.START_CONSTRUCTION,
+                    ExecutableActionType.CONTINUE_CONSTRUCTION,
+                },
+            )
+            self.assertNotEqual(decision.selected_action, ExecutableActionType.REQUEST_ASSISTANCE)
+
+    def test_rule_brain_keeps_assistance_when_no_productive_build_affordance(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir)
+            agent = sim.agents[0]
+            packet = BrainContextBuilder().build(sim, agent)
+
+            packet.world_snapshot["phase_profile"]["stage"] = "execution"
+            packet.individual_cognitive_state["known_gaps"] = ["need_help"]
+            packet.individual_cognitive_state["traits"]["help_tendency"] = 0.95
+            packet.individual_cognitive_state["build_readiness"]["ready_for_build"] = True
+            packet.individual_cognitive_state["build_readiness"]["status"] = "plausible"
+            packet.world_snapshot["built_state"] = [
+                {
+                    "structure_id": "Build_Table_A",
+                    "state": "in_progress",
+                    "progress": 0.0,
+                }
+            ]
+            packet.action_affordances = [
+                {"action_type": ExecutableActionType.REQUEST_ASSISTANCE.value, "utility": 0.95, "target_id": "nearby_agent"},
+                {"action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, "utility": 0.6, "target_id": "Team_Info"},
+                {"action_type": ExecutableActionType.WAIT.value, "utility": 0.1},
+            ]
+
+            decision = RuleBrain().decide(packet)
+            self.assertEqual(decision.selected_action, ExecutableActionType.REQUEST_ASSISTANCE)
+
 
 class TestTeamKnowledgeManagerAndIntegration(unittest.TestCase):
     def test_team_knowledge_manager_store_and_retrieve_artifact(self):
