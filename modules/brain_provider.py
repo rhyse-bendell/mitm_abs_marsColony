@@ -162,6 +162,20 @@ def _request_from_context_packet(context_packet) -> AgentBrainRequest:
 class RuleBrain(BrainProvider):
     """Deterministic baseline brain used as default backend."""
 
+    @staticmethod
+    def _best_affordance(
+        sorted_affordances: list[dict[str, Any]],
+        allowed_action_types: set[str],
+    ) -> dict[str, Any] | None:
+        reachable = [
+            item
+            for item in sorted_affordances
+            if item.get("action_type") in allowed_action_types and item.get("reachable", True)
+        ]
+        if reachable:
+            return reachable[0]
+        return next((item for item in sorted_affordances if item.get("action_type") in allowed_action_types), None)
+
     def _decision_logic(self, context_packet) -> BrainDecision:
         affordances = context_packet.action_affordances
         affordance_types = [item["action_type"] for item in affordances]
@@ -184,6 +198,26 @@ class RuleBrain(BrainProvider):
 
         sorted_affordances = sorted(affordances, key=lambda a: float(a.get("utility", 0.0)), reverse=True)
         top_affordance = sorted_affordances[0] if sorted_affordances else None
+        built_state = context_packet.world_snapshot.get("built_state", [])
+        active_incomplete_projects = [
+            item
+            for item in built_state
+            if item.get("state") == "in_progress" and float(item.get("progress", 0.0)) < 1.0
+        ]
+        needs_resource_delivery = any(float(item.get("progress", 0.0)) < 1.0 for item in active_incomplete_projects)
+        productive_build_types = {
+            ExecutableActionType.TRANSPORT_RESOURCES.value,
+            ExecutableActionType.START_CONSTRUCTION.value,
+            ExecutableActionType.CONTINUE_CONSTRUCTION.value,
+        }
+        productive_build_affordance = None
+        if ready_for_build and active_incomplete_projects:
+            if needs_resource_delivery:
+                productive_build_affordance = self._best_affordance(
+                    sorted_affordances, {ExecutableActionType.TRANSPORT_RESOURCES.value}
+                )
+            if productive_build_affordance is None:
+                productive_build_affordance = self._best_affordance(sorted_affordances, productive_build_types)
 
         if (
             stage in {"early", "execution"}
@@ -218,6 +252,11 @@ class RuleBrain(BrainProvider):
             ExecutableActionType.REQUEST_ASSISTANCE.value in affordance_types
             and help_tendency >= 0.7
             and has_known_gaps
+            and (
+                not ready_for_build
+                or not active_incomplete_projects
+                or productive_build_affordance is None
+            )
         ):
             return BrainDecision(
                 selected_action=ExecutableActionType.REQUEST_ASSISTANCE,
@@ -226,6 +265,24 @@ class RuleBrain(BrainProvider):
                 plan_steps=["ask for clarification", "integrate support"],
                 reason_summary="Help tendency and known gaps prompt assistance-seeking.",
                 confidence=0.76,
+            )
+
+        if productive_build_affordance is not None:
+            selected = ExecutableActionType(productive_build_affordance["action_type"])
+            goal_update = "execute_build"
+            reason = "Build readiness unlocked; prioritize highest-utility productive construction progression affordance."
+            if selected == ExecutableActionType.TRANSPORT_RESOURCES:
+                goal_update = "satisfy_build_logistics"
+                reason = "Build readiness unlocked with incomplete projects; prioritize resource transport progression."
+            return BrainDecision(
+                selected_action=selected,
+                target_id=productive_build_affordance.get("target_id"),
+                target_zone=productive_build_affordance.get("target_zone"),
+                goal_update=goal_update,
+                plan_steps=["advance active construction project"],
+                reason_summary=reason,
+                confidence=0.82,
+                assumptions=["duration_s=30"] if selected == ExecutableActionType.TRANSPORT_RESOURCES else [],
             )
 
         if stage == "late" and mismatch_signals and ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value in affordance_types:

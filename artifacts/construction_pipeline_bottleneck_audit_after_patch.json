@@ -1,0 +1,1772 @@
+{
+  "config": {
+    "runs_per_condition": 2,
+    "steps": 80,
+    "dt": 0.5,
+    "seed_base": 20260318,
+    "conditions": {
+      "high_task_high_team": {
+        "taskwork_potential": 0.9,
+        "teamwork_potential": 0.9
+      },
+      "high_task_low_team": {
+        "taskwork_potential": 0.9,
+        "teamwork_potential": 0.1
+      },
+      "low_task_high_team": {
+        "taskwork_potential": 0.1,
+        "teamwork_potential": 0.9
+      },
+      "low_task_low_team": {
+        "taskwork_potential": 0.1,
+        "teamwork_potential": 0.1
+      }
+    }
+  },
+  "runs": [
+    {
+      "condition": "high_task_high_team",
+      "seed": 20260319,
+      "steps": 80,
+      "dt": 0.5,
+      "counts_by_type": {
+        "house": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        },
+        "greenhouse": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        },
+        "water_generator": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        }
+      },
+      "first_times_by_type": {
+        "house": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "greenhouse": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "water_generator": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        }
+      },
+      "validate_selected_count": 0,
+      "validate_executed_count": 0,
+      "repair_selected_count": 0,
+      "repair_executed_count": 0,
+      "selected_action_counts": {
+        "request_assistance": 12
+      },
+      "final_project_states": {
+        "Build_Table_A": {
+          "type": "greenhouse",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 12
+        },
+        "Build_Table_B": {
+          "type": "house",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 14
+        },
+        "Build_Table_C": {
+          "type": "water_generator",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 10
+        }
+      },
+      "support_proxy": {
+        "validated_structures_used": {
+          "house": 0,
+          "greenhouse": 0,
+          "water_generator": 0
+        },
+        "connection_model": {
+          "water_reliant_structures": 0,
+          "water_connection_coverable": 0,
+          "connection_satisfaction_ratio": 0.0
+        },
+        "capacity_estimate": {
+          "housing_capacity_civilians": 0,
+          "housing_capacity_vips": 0,
+          "food_capacity_civilians": 0,
+          "food_capacity_vips": 0,
+          "water_capacity_civilians": 0,
+          "water_capacity_vips": 0,
+          "supported_civilians": 0,
+          "supported_vips": 0
+        },
+        "phase_support_ratio_estimate": {
+          "Phase 1": {
+            "required_civilians": 50,
+            "required_vips": 0,
+            "support_ratio": 0.0
+          },
+          "Phase 2": {
+            "required_civilians": 40,
+            "required_vips": 20,
+            "support_ratio": 0.0
+          }
+        },
+        "effective_colony_support_ratio_current_phase": 0.0,
+        "notes": [
+          "Conservative proxy from validated structures only.",
+          "Connection coverage uses water_generator max-2-direct-structures topology.",
+          "House/greenhouse capacities are lower-bound estimates from DIK atoms; detailed geometry, pink-floor, and exact connector graph are not encoded in runtime construction state."
+        ]
+      },
+      "effective_support_ratio": 0.0,
+      "validated_mix": {
+        "house": 0,
+        "greenhouse": 0,
+        "water_generator": 0
+      },
+      "summary_path": "/tmp/tmptl_7k4ni/Outputs/pipeline_high_task_high_team_20260318_222941/measures/run_summary.json",
+      "events_path": "/tmp/tmptl_7k4ni/Outputs/pipeline_high_task_high_team_20260318_222941/logs/events.csv"
+    },
+    {
+      "condition": "high_task_high_team",
+      "seed": 20260320,
+      "steps": 80,
+      "dt": 0.5,
+      "counts_by_type": {
+        "house": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        },
+        "greenhouse": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        },
+        "water_generator": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        }
+      },
+      "first_times_by_type": {
+        "house": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "greenhouse": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "water_generator": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        }
+      },
+      "validate_selected_count": 0,
+      "validate_executed_count": 0,
+      "repair_selected_count": 0,
+      "repair_executed_count": 0,
+      "selected_action_counts": {
+        "request_assistance": 12
+      },
+      "final_project_states": {
+        "Build_Table_A": {
+          "type": "greenhouse",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 12
+        },
+        "Build_Table_B": {
+          "type": "house",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 14
+        },
+        "Build_Table_C": {
+          "type": "water_generator",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 10
+        }
+      },
+      "support_proxy": {
+        "validated_structures_used": {
+          "house": 0,
+          "greenhouse": 0,
+          "water_generator": 0
+        },
+        "connection_model": {
+          "water_reliant_structures": 0,
+          "water_connection_coverable": 0,
+          "connection_satisfaction_ratio": 0.0
+        },
+        "capacity_estimate": {
+          "housing_capacity_civilians": 0,
+          "housing_capacity_vips": 0,
+          "food_capacity_civilians": 0,
+          "food_capacity_vips": 0,
+          "water_capacity_civilians": 0,
+          "water_capacity_vips": 0,
+          "supported_civilians": 0,
+          "supported_vips": 0
+        },
+        "phase_support_ratio_estimate": {
+          "Phase 1": {
+            "required_civilians": 50,
+            "required_vips": 0,
+            "support_ratio": 0.0
+          },
+          "Phase 2": {
+            "required_civilians": 40,
+            "required_vips": 20,
+            "support_ratio": 0.0
+          }
+        },
+        "effective_colony_support_ratio_current_phase": 0.0,
+        "notes": [
+          "Conservative proxy from validated structures only.",
+          "Connection coverage uses water_generator max-2-direct-structures topology.",
+          "House/greenhouse capacities are lower-bound estimates from DIK atoms; detailed geometry, pink-floor, and exact connector graph are not encoded in runtime construction state."
+        ]
+      },
+      "effective_support_ratio": 0.0,
+      "validated_mix": {
+        "house": 0,
+        "greenhouse": 0,
+        "water_generator": 0
+      },
+      "summary_path": "/tmp/tmptl_7k4ni/Outputs/pipeline_high_task_high_team_20260318_222942/measures/run_summary.json",
+      "events_path": "/tmp/tmptl_7k4ni/Outputs/pipeline_high_task_high_team_20260318_222942/logs/events.csv"
+    },
+    {
+      "condition": "high_task_low_team",
+      "seed": 20260321,
+      "steps": 80,
+      "dt": 0.5,
+      "counts_by_type": {
+        "house": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        },
+        "greenhouse": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        },
+        "water_generator": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        }
+      },
+      "first_times_by_type": {
+        "house": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "greenhouse": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "water_generator": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        }
+      },
+      "validate_selected_count": 0,
+      "validate_executed_count": 0,
+      "repair_selected_count": 0,
+      "repair_executed_count": 0,
+      "selected_action_counts": {
+        "inspect_information_source": 9,
+        "transport_resources": 6
+      },
+      "final_project_states": {
+        "Build_Table_A": {
+          "type": "greenhouse",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 12
+        },
+        "Build_Table_B": {
+          "type": "house",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 14
+        },
+        "Build_Table_C": {
+          "type": "water_generator",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 10
+        }
+      },
+      "support_proxy": {
+        "validated_structures_used": {
+          "house": 0,
+          "greenhouse": 0,
+          "water_generator": 0
+        },
+        "connection_model": {
+          "water_reliant_structures": 0,
+          "water_connection_coverable": 0,
+          "connection_satisfaction_ratio": 0.0
+        },
+        "capacity_estimate": {
+          "housing_capacity_civilians": 0,
+          "housing_capacity_vips": 0,
+          "food_capacity_civilians": 0,
+          "food_capacity_vips": 0,
+          "water_capacity_civilians": 0,
+          "water_capacity_vips": 0,
+          "supported_civilians": 0,
+          "supported_vips": 0
+        },
+        "phase_support_ratio_estimate": {
+          "Phase 1": {
+            "required_civilians": 50,
+            "required_vips": 0,
+            "support_ratio": 0.0
+          },
+          "Phase 2": {
+            "required_civilians": 40,
+            "required_vips": 20,
+            "support_ratio": 0.0
+          }
+        },
+        "effective_colony_support_ratio_current_phase": 0.0,
+        "notes": [
+          "Conservative proxy from validated structures only.",
+          "Connection coverage uses water_generator max-2-direct-structures topology.",
+          "House/greenhouse capacities are lower-bound estimates from DIK atoms; detailed geometry, pink-floor, and exact connector graph are not encoded in runtime construction state."
+        ]
+      },
+      "effective_support_ratio": 0.0,
+      "validated_mix": {
+        "house": 0,
+        "greenhouse": 0,
+        "water_generator": 0
+      },
+      "summary_path": "/tmp/tmptl_7k4ni/Outputs/pipeline_high_task_low_team_20260318_222943/measures/run_summary.json",
+      "events_path": "/tmp/tmptl_7k4ni/Outputs/pipeline_high_task_low_team_20260318_222943/logs/events.csv"
+    },
+    {
+      "condition": "high_task_low_team",
+      "seed": 20260322,
+      "steps": 80,
+      "dt": 0.5,
+      "counts_by_type": {
+        "house": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        },
+        "greenhouse": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        },
+        "water_generator": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        }
+      },
+      "first_times_by_type": {
+        "house": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "greenhouse": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "water_generator": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        }
+      },
+      "validate_selected_count": 0,
+      "validate_executed_count": 0,
+      "repair_selected_count": 0,
+      "repair_executed_count": 0,
+      "selected_action_counts": {
+        "inspect_information_source": 9,
+        "transport_resources": 6
+      },
+      "final_project_states": {
+        "Build_Table_A": {
+          "type": "greenhouse",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 12
+        },
+        "Build_Table_B": {
+          "type": "house",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 14
+        },
+        "Build_Table_C": {
+          "type": "water_generator",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 10
+        }
+      },
+      "support_proxy": {
+        "validated_structures_used": {
+          "house": 0,
+          "greenhouse": 0,
+          "water_generator": 0
+        },
+        "connection_model": {
+          "water_reliant_structures": 0,
+          "water_connection_coverable": 0,
+          "connection_satisfaction_ratio": 0.0
+        },
+        "capacity_estimate": {
+          "housing_capacity_civilians": 0,
+          "housing_capacity_vips": 0,
+          "food_capacity_civilians": 0,
+          "food_capacity_vips": 0,
+          "water_capacity_civilians": 0,
+          "water_capacity_vips": 0,
+          "supported_civilians": 0,
+          "supported_vips": 0
+        },
+        "phase_support_ratio_estimate": {
+          "Phase 1": {
+            "required_civilians": 50,
+            "required_vips": 0,
+            "support_ratio": 0.0
+          },
+          "Phase 2": {
+            "required_civilians": 40,
+            "required_vips": 20,
+            "support_ratio": 0.0
+          }
+        },
+        "effective_colony_support_ratio_current_phase": 0.0,
+        "notes": [
+          "Conservative proxy from validated structures only.",
+          "Connection coverage uses water_generator max-2-direct-structures topology.",
+          "House/greenhouse capacities are lower-bound estimates from DIK atoms; detailed geometry, pink-floor, and exact connector graph are not encoded in runtime construction state."
+        ]
+      },
+      "effective_support_ratio": 0.0,
+      "validated_mix": {
+        "house": 0,
+        "greenhouse": 0,
+        "water_generator": 0
+      },
+      "summary_path": "/tmp/tmptl_7k4ni/Outputs/pipeline_high_task_low_team_20260318_222944/measures/run_summary.json",
+      "events_path": "/tmp/tmptl_7k4ni/Outputs/pipeline_high_task_low_team_20260318_222944/logs/events.csv"
+    },
+    {
+      "condition": "low_task_high_team",
+      "seed": 20260323,
+      "steps": 80,
+      "dt": 0.5,
+      "counts_by_type": {
+        "house": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        },
+        "greenhouse": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        },
+        "water_generator": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        }
+      },
+      "first_times_by_type": {
+        "house": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "greenhouse": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "water_generator": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        }
+      },
+      "validate_selected_count": 0,
+      "validate_executed_count": 0,
+      "repair_selected_count": 0,
+      "repair_executed_count": 0,
+      "selected_action_counts": {
+        "request_assistance": 12
+      },
+      "final_project_states": {
+        "Build_Table_A": {
+          "type": "greenhouse",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 12
+        },
+        "Build_Table_B": {
+          "type": "house",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 14
+        },
+        "Build_Table_C": {
+          "type": "water_generator",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 10
+        }
+      },
+      "support_proxy": {
+        "validated_structures_used": {
+          "house": 0,
+          "greenhouse": 0,
+          "water_generator": 0
+        },
+        "connection_model": {
+          "water_reliant_structures": 0,
+          "water_connection_coverable": 0,
+          "connection_satisfaction_ratio": 0.0
+        },
+        "capacity_estimate": {
+          "housing_capacity_civilians": 0,
+          "housing_capacity_vips": 0,
+          "food_capacity_civilians": 0,
+          "food_capacity_vips": 0,
+          "water_capacity_civilians": 0,
+          "water_capacity_vips": 0,
+          "supported_civilians": 0,
+          "supported_vips": 0
+        },
+        "phase_support_ratio_estimate": {
+          "Phase 1": {
+            "required_civilians": 50,
+            "required_vips": 0,
+            "support_ratio": 0.0
+          },
+          "Phase 2": {
+            "required_civilians": 40,
+            "required_vips": 20,
+            "support_ratio": 0.0
+          }
+        },
+        "effective_colony_support_ratio_current_phase": 0.0,
+        "notes": [
+          "Conservative proxy from validated structures only.",
+          "Connection coverage uses water_generator max-2-direct-structures topology.",
+          "House/greenhouse capacities are lower-bound estimates from DIK atoms; detailed geometry, pink-floor, and exact connector graph are not encoded in runtime construction state."
+        ]
+      },
+      "effective_support_ratio": 0.0,
+      "validated_mix": {
+        "house": 0,
+        "greenhouse": 0,
+        "water_generator": 0
+      },
+      "summary_path": "/tmp/tmptl_7k4ni/Outputs/pipeline_low_task_high_team_20260318_222946/measures/run_summary.json",
+      "events_path": "/tmp/tmptl_7k4ni/Outputs/pipeline_low_task_high_team_20260318_222946/logs/events.csv"
+    },
+    {
+      "condition": "low_task_high_team",
+      "seed": 20260324,
+      "steps": 80,
+      "dt": 0.5,
+      "counts_by_type": {
+        "house": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        },
+        "greenhouse": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        },
+        "water_generator": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        }
+      },
+      "first_times_by_type": {
+        "house": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "greenhouse": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "water_generator": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        }
+      },
+      "validate_selected_count": 0,
+      "validate_executed_count": 0,
+      "repair_selected_count": 0,
+      "repair_executed_count": 0,
+      "selected_action_counts": {
+        "request_assistance": 12
+      },
+      "final_project_states": {
+        "Build_Table_A": {
+          "type": "greenhouse",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 12
+        },
+        "Build_Table_B": {
+          "type": "house",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 14
+        },
+        "Build_Table_C": {
+          "type": "water_generator",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 10
+        }
+      },
+      "support_proxy": {
+        "validated_structures_used": {
+          "house": 0,
+          "greenhouse": 0,
+          "water_generator": 0
+        },
+        "connection_model": {
+          "water_reliant_structures": 0,
+          "water_connection_coverable": 0,
+          "connection_satisfaction_ratio": 0.0
+        },
+        "capacity_estimate": {
+          "housing_capacity_civilians": 0,
+          "housing_capacity_vips": 0,
+          "food_capacity_civilians": 0,
+          "food_capacity_vips": 0,
+          "water_capacity_civilians": 0,
+          "water_capacity_vips": 0,
+          "supported_civilians": 0,
+          "supported_vips": 0
+        },
+        "phase_support_ratio_estimate": {
+          "Phase 1": {
+            "required_civilians": 50,
+            "required_vips": 0,
+            "support_ratio": 0.0
+          },
+          "Phase 2": {
+            "required_civilians": 40,
+            "required_vips": 20,
+            "support_ratio": 0.0
+          }
+        },
+        "effective_colony_support_ratio_current_phase": 0.0,
+        "notes": [
+          "Conservative proxy from validated structures only.",
+          "Connection coverage uses water_generator max-2-direct-structures topology.",
+          "House/greenhouse capacities are lower-bound estimates from DIK atoms; detailed geometry, pink-floor, and exact connector graph are not encoded in runtime construction state."
+        ]
+      },
+      "effective_support_ratio": 0.0,
+      "validated_mix": {
+        "house": 0,
+        "greenhouse": 0,
+        "water_generator": 0
+      },
+      "summary_path": "/tmp/tmptl_7k4ni/Outputs/pipeline_low_task_high_team_20260318_222947/measures/run_summary.json",
+      "events_path": "/tmp/tmptl_7k4ni/Outputs/pipeline_low_task_high_team_20260318_222947/logs/events.csv"
+    },
+    {
+      "condition": "low_task_low_team",
+      "seed": 20260325,
+      "steps": 80,
+      "dt": 0.5,
+      "counts_by_type": {
+        "house": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        },
+        "greenhouse": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        },
+        "water_generator": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        }
+      },
+      "first_times_by_type": {
+        "house": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "greenhouse": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "water_generator": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        }
+      },
+      "validate_selected_count": 0,
+      "validate_executed_count": 0,
+      "repair_selected_count": 0,
+      "repair_executed_count": 0,
+      "selected_action_counts": {
+        "inspect_information_source": 9,
+        "transport_resources": 4
+      },
+      "final_project_states": {
+        "Build_Table_A": {
+          "type": "greenhouse",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 12
+        },
+        "Build_Table_B": {
+          "type": "house",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 14
+        },
+        "Build_Table_C": {
+          "type": "water_generator",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 10
+        }
+      },
+      "support_proxy": {
+        "validated_structures_used": {
+          "house": 0,
+          "greenhouse": 0,
+          "water_generator": 0
+        },
+        "connection_model": {
+          "water_reliant_structures": 0,
+          "water_connection_coverable": 0,
+          "connection_satisfaction_ratio": 0.0
+        },
+        "capacity_estimate": {
+          "housing_capacity_civilians": 0,
+          "housing_capacity_vips": 0,
+          "food_capacity_civilians": 0,
+          "food_capacity_vips": 0,
+          "water_capacity_civilians": 0,
+          "water_capacity_vips": 0,
+          "supported_civilians": 0,
+          "supported_vips": 0
+        },
+        "phase_support_ratio_estimate": {
+          "Phase 1": {
+            "required_civilians": 50,
+            "required_vips": 0,
+            "support_ratio": 0.0
+          },
+          "Phase 2": {
+            "required_civilians": 40,
+            "required_vips": 20,
+            "support_ratio": 0.0
+          }
+        },
+        "effective_colony_support_ratio_current_phase": 0.0,
+        "notes": [
+          "Conservative proxy from validated structures only.",
+          "Connection coverage uses water_generator max-2-direct-structures topology.",
+          "House/greenhouse capacities are lower-bound estimates from DIK atoms; detailed geometry, pink-floor, and exact connector graph are not encoded in runtime construction state."
+        ]
+      },
+      "effective_support_ratio": 0.0,
+      "validated_mix": {
+        "house": 0,
+        "greenhouse": 0,
+        "water_generator": 0
+      },
+      "summary_path": "/tmp/tmptl_7k4ni/Outputs/pipeline_low_task_low_team_20260318_222948/measures/run_summary.json",
+      "events_path": "/tmp/tmptl_7k4ni/Outputs/pipeline_low_task_low_team_20260318_222948/logs/events.csv"
+    },
+    {
+      "condition": "low_task_low_team",
+      "seed": 20260326,
+      "steps": 80,
+      "dt": 0.5,
+      "counts_by_type": {
+        "house": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        },
+        "greenhouse": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        },
+        "water_generator": {
+          "created": 1,
+          "any_progress": 0,
+          "resource_complete": 0,
+          "ready_for_validation": 0,
+          "validate_attempted": 0,
+          "validated_complete": 0,
+          "needs_repair": 0,
+          "repair_attempted": 0,
+          "repair_succeeded": 0
+        }
+      },
+      "first_times_by_type": {
+        "house": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "greenhouse": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "water_generator": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        }
+      },
+      "validate_selected_count": 0,
+      "validate_executed_count": 0,
+      "repair_selected_count": 0,
+      "repair_executed_count": 0,
+      "selected_action_counts": {
+        "inspect_information_source": 7,
+        "transport_resources": 4
+      },
+      "final_project_states": {
+        "Build_Table_A": {
+          "type": "greenhouse",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 12
+        },
+        "Build_Table_B": {
+          "type": "house",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 14
+        },
+        "Build_Table_C": {
+          "type": "water_generator",
+          "status": "in_progress",
+          "resource_complete": false,
+          "validated_complete": false,
+          "correct": true,
+          "delivered": 0,
+          "required": 10
+        }
+      },
+      "support_proxy": {
+        "validated_structures_used": {
+          "house": 0,
+          "greenhouse": 0,
+          "water_generator": 0
+        },
+        "connection_model": {
+          "water_reliant_structures": 0,
+          "water_connection_coverable": 0,
+          "connection_satisfaction_ratio": 0.0
+        },
+        "capacity_estimate": {
+          "housing_capacity_civilians": 0,
+          "housing_capacity_vips": 0,
+          "food_capacity_civilians": 0,
+          "food_capacity_vips": 0,
+          "water_capacity_civilians": 0,
+          "water_capacity_vips": 0,
+          "supported_civilians": 0,
+          "supported_vips": 0
+        },
+        "phase_support_ratio_estimate": {
+          "Phase 1": {
+            "required_civilians": 50,
+            "required_vips": 0,
+            "support_ratio": 0.0
+          },
+          "Phase 2": {
+            "required_civilians": 40,
+            "required_vips": 20,
+            "support_ratio": 0.0
+          }
+        },
+        "effective_colony_support_ratio_current_phase": 0.0,
+        "notes": [
+          "Conservative proxy from validated structures only.",
+          "Connection coverage uses water_generator max-2-direct-structures topology.",
+          "House/greenhouse capacities are lower-bound estimates from DIK atoms; detailed geometry, pink-floor, and exact connector graph are not encoded in runtime construction state."
+        ]
+      },
+      "effective_support_ratio": 0.0,
+      "validated_mix": {
+        "house": 0,
+        "greenhouse": 0,
+        "water_generator": 0
+      },
+      "summary_path": "/tmp/tmptl_7k4ni/Outputs/pipeline_low_task_low_team_20260318_222950/measures/run_summary.json",
+      "events_path": "/tmp/tmptl_7k4ni/Outputs/pipeline_low_task_low_team_20260318_222950/logs/events.csv"
+    }
+  ],
+  "condition_aggregates": {
+    "high_task_high_team": {
+      "run_count": 2,
+      "average_counts_by_type": {
+        "house": {
+          "created": 1.0,
+          "any_progress": 0.0,
+          "resource_complete": 0.0,
+          "ready_for_validation": 0.0,
+          "validate_attempted": 0.0,
+          "validated_complete": 0.0,
+          "needs_repair": 0.0,
+          "repair_attempted": 0.0,
+          "repair_succeeded": 0.0
+        },
+        "greenhouse": {
+          "created": 1.0,
+          "any_progress": 0.0,
+          "resource_complete": 0.0,
+          "ready_for_validation": 0.0,
+          "validate_attempted": 0.0,
+          "validated_complete": 0.0,
+          "needs_repair": 0.0,
+          "repair_attempted": 0.0,
+          "repair_succeeded": 0.0
+        },
+        "water_generator": {
+          "created": 1.0,
+          "any_progress": 0.0,
+          "resource_complete": 0.0,
+          "ready_for_validation": 0.0,
+          "validate_attempted": 0.0,
+          "validated_complete": 0.0,
+          "needs_repair": 0.0,
+          "repair_attempted": 0.0,
+          "repair_succeeded": 0.0
+        }
+      },
+      "earliest_first_times_by_type": {
+        "house": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "greenhouse": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "water_generator": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        }
+      },
+      "avg_validate_selected": 0,
+      "avg_validate_executed": 0,
+      "avg_repair_selected": 0,
+      "avg_repair_executed": 0,
+      "avg_effective_support_ratio": 0.0,
+      "nonzero_support_ratio_runs": 0,
+      "avg_validated_mix": {
+        "house": 0.0,
+        "greenhouse": 0.0,
+        "water_generator": 0.0
+      },
+      "selected_action_counts_total": {
+        "request_assistance": 24
+      },
+      "selected_action_counts_avg_per_run": {
+        "request_assistance": 12.0
+      }
+    },
+    "high_task_low_team": {
+      "run_count": 2,
+      "average_counts_by_type": {
+        "house": {
+          "created": 1.0,
+          "any_progress": 0.0,
+          "resource_complete": 0.0,
+          "ready_for_validation": 0.0,
+          "validate_attempted": 0.0,
+          "validated_complete": 0.0,
+          "needs_repair": 0.0,
+          "repair_attempted": 0.0,
+          "repair_succeeded": 0.0
+        },
+        "greenhouse": {
+          "created": 1.0,
+          "any_progress": 0.0,
+          "resource_complete": 0.0,
+          "ready_for_validation": 0.0,
+          "validate_attempted": 0.0,
+          "validated_complete": 0.0,
+          "needs_repair": 0.0,
+          "repair_attempted": 0.0,
+          "repair_succeeded": 0.0
+        },
+        "water_generator": {
+          "created": 1.0,
+          "any_progress": 0.0,
+          "resource_complete": 0.0,
+          "ready_for_validation": 0.0,
+          "validate_attempted": 0.0,
+          "validated_complete": 0.0,
+          "needs_repair": 0.0,
+          "repair_attempted": 0.0,
+          "repair_succeeded": 0.0
+        }
+      },
+      "earliest_first_times_by_type": {
+        "house": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "greenhouse": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "water_generator": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        }
+      },
+      "avg_validate_selected": 0,
+      "avg_validate_executed": 0,
+      "avg_repair_selected": 0,
+      "avg_repair_executed": 0,
+      "avg_effective_support_ratio": 0.0,
+      "nonzero_support_ratio_runs": 0,
+      "avg_validated_mix": {
+        "house": 0.0,
+        "greenhouse": 0.0,
+        "water_generator": 0.0
+      },
+      "selected_action_counts_total": {
+        "inspect_information_source": 18,
+        "transport_resources": 12
+      },
+      "selected_action_counts_avg_per_run": {
+        "inspect_information_source": 9.0,
+        "transport_resources": 6.0
+      }
+    },
+    "low_task_high_team": {
+      "run_count": 2,
+      "average_counts_by_type": {
+        "house": {
+          "created": 1.0,
+          "any_progress": 0.0,
+          "resource_complete": 0.0,
+          "ready_for_validation": 0.0,
+          "validate_attempted": 0.0,
+          "validated_complete": 0.0,
+          "needs_repair": 0.0,
+          "repair_attempted": 0.0,
+          "repair_succeeded": 0.0
+        },
+        "greenhouse": {
+          "created": 1.0,
+          "any_progress": 0.0,
+          "resource_complete": 0.0,
+          "ready_for_validation": 0.0,
+          "validate_attempted": 0.0,
+          "validated_complete": 0.0,
+          "needs_repair": 0.0,
+          "repair_attempted": 0.0,
+          "repair_succeeded": 0.0
+        },
+        "water_generator": {
+          "created": 1.0,
+          "any_progress": 0.0,
+          "resource_complete": 0.0,
+          "ready_for_validation": 0.0,
+          "validate_attempted": 0.0,
+          "validated_complete": 0.0,
+          "needs_repair": 0.0,
+          "repair_attempted": 0.0,
+          "repair_succeeded": 0.0
+        }
+      },
+      "earliest_first_times_by_type": {
+        "house": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "greenhouse": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "water_generator": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        }
+      },
+      "avg_validate_selected": 0,
+      "avg_validate_executed": 0,
+      "avg_repair_selected": 0,
+      "avg_repair_executed": 0,
+      "avg_effective_support_ratio": 0.0,
+      "nonzero_support_ratio_runs": 0,
+      "avg_validated_mix": {
+        "house": 0.0,
+        "greenhouse": 0.0,
+        "water_generator": 0.0
+      },
+      "selected_action_counts_total": {
+        "request_assistance": 24
+      },
+      "selected_action_counts_avg_per_run": {
+        "request_assistance": 12.0
+      }
+    },
+    "low_task_low_team": {
+      "run_count": 2,
+      "average_counts_by_type": {
+        "house": {
+          "created": 1.0,
+          "any_progress": 0.0,
+          "resource_complete": 0.0,
+          "ready_for_validation": 0.0,
+          "validate_attempted": 0.0,
+          "validated_complete": 0.0,
+          "needs_repair": 0.0,
+          "repair_attempted": 0.0,
+          "repair_succeeded": 0.0
+        },
+        "greenhouse": {
+          "created": 1.0,
+          "any_progress": 0.0,
+          "resource_complete": 0.0,
+          "ready_for_validation": 0.0,
+          "validate_attempted": 0.0,
+          "validated_complete": 0.0,
+          "needs_repair": 0.0,
+          "repair_attempted": 0.0,
+          "repair_succeeded": 0.0
+        },
+        "water_generator": {
+          "created": 1.0,
+          "any_progress": 0.0,
+          "resource_complete": 0.0,
+          "ready_for_validation": 0.0,
+          "validate_attempted": 0.0,
+          "validated_complete": 0.0,
+          "needs_repair": 0.0,
+          "repair_attempted": 0.0,
+          "repair_succeeded": 0.0
+        }
+      },
+      "earliest_first_times_by_type": {
+        "house": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "greenhouse": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        },
+        "water_generator": {
+          "created": 0.0,
+          "any_progress": null,
+          "resource_complete": null,
+          "ready_for_validation": null,
+          "validate_attempted": null,
+          "validated_complete": null,
+          "needs_repair": null,
+          "repair_attempted": null,
+          "repair_succeeded": null
+        }
+      },
+      "avg_validate_selected": 0,
+      "avg_validate_executed": 0,
+      "avg_repair_selected": 0,
+      "avg_repair_executed": 0,
+      "avg_effective_support_ratio": 0.0,
+      "nonzero_support_ratio_runs": 0,
+      "avg_validated_mix": {
+        "house": 0.0,
+        "greenhouse": 0.0,
+        "water_generator": 0.0
+      },
+      "selected_action_counts_total": {
+        "inspect_information_source": 16,
+        "transport_resources": 8
+      },
+      "selected_action_counts_avg_per_run": {
+        "inspect_information_source": 8.0,
+        "transport_resources": 4.0
+      }
+    }
+  },
+  "global_aggregate": {
+    "run_count": 8,
+    "average_counts_by_type": {
+      "house": {
+        "created": 1.0,
+        "any_progress": 0.0,
+        "resource_complete": 0.0,
+        "ready_for_validation": 0.0,
+        "validate_attempted": 0.0,
+        "validated_complete": 0.0,
+        "needs_repair": 0.0,
+        "repair_attempted": 0.0,
+        "repair_succeeded": 0.0
+      },
+      "greenhouse": {
+        "created": 1.0,
+        "any_progress": 0.0,
+        "resource_complete": 0.0,
+        "ready_for_validation": 0.0,
+        "validate_attempted": 0.0,
+        "validated_complete": 0.0,
+        "needs_repair": 0.0,
+        "repair_attempted": 0.0,
+        "repair_succeeded": 0.0
+      },
+      "water_generator": {
+        "created": 1.0,
+        "any_progress": 0.0,
+        "resource_complete": 0.0,
+        "ready_for_validation": 0.0,
+        "validate_attempted": 0.0,
+        "validated_complete": 0.0,
+        "needs_repair": 0.0,
+        "repair_attempted": 0.0,
+        "repair_succeeded": 0.0
+      }
+    },
+    "earliest_first_times_by_type": {
+      "house": {
+        "created": 0.0,
+        "any_progress": null,
+        "resource_complete": null,
+        "ready_for_validation": null,
+        "validate_attempted": null,
+        "validated_complete": null,
+        "needs_repair": null,
+        "repair_attempted": null,
+        "repair_succeeded": null
+      },
+      "greenhouse": {
+        "created": 0.0,
+        "any_progress": null,
+        "resource_complete": null,
+        "ready_for_validation": null,
+        "validate_attempted": null,
+        "validated_complete": null,
+        "needs_repair": null,
+        "repair_attempted": null,
+        "repair_succeeded": null
+      },
+      "water_generator": {
+        "created": 0.0,
+        "any_progress": null,
+        "resource_complete": null,
+        "ready_for_validation": null,
+        "validate_attempted": null,
+        "validated_complete": null,
+        "needs_repair": null,
+        "repair_attempted": null,
+        "repair_succeeded": null
+      }
+    },
+    "avg_validate_selected": 0,
+    "avg_validate_executed": 0,
+    "avg_repair_selected": 0,
+    "avg_repair_executed": 0,
+    "avg_effective_support_ratio": 0.0,
+    "nonzero_support_ratio_runs": 0,
+    "avg_validated_mix": {
+      "house": 0.0,
+      "greenhouse": 0.0,
+      "water_generator": 0.0
+    },
+    "selected_action_counts_total": {
+      "request_assistance": 48,
+      "inspect_information_source": 34,
+      "transport_resources": 20
+    },
+    "selected_action_counts_avg_per_run": {
+      "request_assistance": 6.0,
+      "inspect_information_source": 4.25,
+      "transport_resources": 2.5
+    }
+  }
+}
