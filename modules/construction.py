@@ -1,5 +1,7 @@
 # File: modules/construction.py
 
+from modules.task_model import normalize_rule_token
+
 
 class ConstructionManager:
     def __init__(self, task_model=None):
@@ -23,7 +25,10 @@ class ConstructionManager:
                     "correct": True,
                     "required_resources": dict(template.required_resources),
                     "delivered_resources": {k: 0 for k in template.required_resources},
-                    "expected_rules": list(template.expected_rules),
+                    "expected_rules": [normalize_rule_token(r) for r in template.expected_rules],
+                    "resource_complete": False,
+                    "structurally_complete": False,
+                    "validated_complete": False,
                     "builders": set(),
                     "author": "system",
                     "artifact_type": template.artifact_type,
@@ -55,7 +60,10 @@ class ConstructionManager:
                 "correct": True,
                 "required_resources": {"bricks": 12},
                 "delivered_resources": {"bricks": 0},
-                "expected_rules": ["rule:greenhouse_requires_water"],
+                "expected_rules": [normalize_rule_token("rule:greenhouse_requires_water")],
+                "resource_complete": False,
+                "structurally_complete": False,
+                "validated_complete": False,
                 "builders": set(),
                 "author": "system",
                 "artifact_type": "greenhouse_construction",
@@ -70,7 +78,10 @@ class ConstructionManager:
                 "correct": True,
                 "required_resources": {"bricks": 14},
                 "delivered_resources": {"bricks": 0},
-                "expected_rules": ["rule:house_enclosed"],
+                "expected_rules": [normalize_rule_token("rule:house_enclosed")],
+                "resource_complete": False,
+                "structurally_complete": False,
+                "validated_complete": False,
                 "builders": set(),
                 "author": "system",
                 "artifact_type": "house_construction",
@@ -85,7 +96,10 @@ class ConstructionManager:
                 "correct": True,
                 "required_resources": {"bricks": 10},
                 "delivered_resources": {"bricks": 0},
-                "expected_rules": ["rule:water_generator_2x2"],
+                "expected_rules": [normalize_rule_token("rule:water_generator_2x2")],
+                "resource_complete": False,
+                "structurally_complete": False,
+                "validated_complete": False,
                 "builders": set(),
                 "author": "system",
                 "artifact_type": "water_generator_construction",
@@ -94,12 +108,22 @@ class ConstructionManager:
 
     def update(self):
         for project in self.projects.values():
-            if project["status"] == "in_progress":
-                required = project["required_resources"].get("bricks", 0)
-                delivered = project["delivered_resources"].get("bricks", 0)
-                if delivered >= required:
-                    project["status"] = "complete"
-                    project["in_progress"] = False
+            required = project["required_resources"].get("bricks", 0)
+            delivered = project["delivered_resources"].get("bricks", 0)
+            resource_complete = delivered >= required if required > 0 else False
+            project["resource_complete"] = resource_complete
+            project["structurally_complete"] = resource_complete
+            if resource_complete and project.get("validated_complete", False):
+                project["status"] = "complete"
+                project["in_progress"] = False
+            elif resource_complete:
+                project["status"] = "ready_for_validation"
+                project["in_progress"] = True
+                project["validated_complete"] = False
+            else:
+                project["status"] = "in_progress"
+                project["in_progress"] = True
+                project["validated_complete"] = False
 
     def get_active_projects(self):
         return [p for p in self.projects.values() if p["status"] != "complete"]
@@ -110,6 +134,25 @@ class ConstructionManager:
             if resource_type in p["required_resources"]:
                 p["delivered_resources"][resource_type] += quantity
                 self.update()
+
+    def mark_validated(self, project_id, is_valid=True):
+        project = self.projects.get(project_id)
+        if not project:
+            return
+        if not is_valid:
+            project["correct"] = False
+            project["validated_complete"] = False
+            project["status"] = "needs_repair"
+            project["in_progress"] = True
+            return
+        if project.get("resource_complete"):
+            project["validated_complete"] = True
+            project["status"] = "complete"
+            project["in_progress"] = False
+        else:
+            project["validated_complete"] = False
+            project["status"] = "in_progress"
+            project["in_progress"] = True
 
     def assign_builder(self, project_id, agent_name):
         if project_id in self.projects:

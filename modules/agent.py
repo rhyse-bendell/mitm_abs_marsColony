@@ -26,6 +26,7 @@ from modules.brain_provider import select_productive_fallback_action
 from modules.goal_manager import GoalManager
 from modules.goal_state import GOAL_SOURCES, GOAL_STATUSES
 from modules.plan_state import PlanRecord
+from modules.task_model import normalize_rule_token
 
 DIK_LOG = []
 
@@ -635,7 +636,10 @@ class Agent:
         # Distinguish source vicinity from legal slot-based interaction access.
         slot_id = self.source_access_state.get("slot_id")
         usable, access_reason = (True, "legacy")
-        if hasattr(environment, "can_agent_use_source_slot"):
+        if sim_state is None and hasattr(environment, "can_access_info"):
+            usable = bool(environment.can_access_info(self.position, source_id, role=self.role))
+            access_reason = "legacy_direct_inspection" if usable else "not_at_interaction_slot"
+        elif hasattr(environment, "can_agent_use_source_slot"):
             usable, access_reason = environment.can_agent_use_source_slot(
                 source_id,
                 agent_id=self.agent_id,
@@ -995,7 +999,7 @@ class Agent:
     def _held_dik_ids(self):
         data_ids = {d.id for d in self.mental_model["data"]}
         info_ids = {i.id for i in self.mental_model["information"]}
-        knowledge_ids = set(self.mental_model["knowledge"].rules)
+        knowledge_ids = {normalize_rule_token(r) for r in self.mental_model["knowledge"].rules}
         return data_ids, info_ids, knowledge_ids
 
     def _team_validated_ids(self, sim_state=None):
@@ -1190,11 +1194,77 @@ class Agent:
 
     def _effective_knowledge_for_readiness(self, sim_state=None):
         info_ids = {i.id for i in self.mental_model["information"]}
-        rule_ids = set(self.mental_model["knowledge"].rules)
+        rule_ids = {normalize_rule_token(r) for r in self.mental_model["knowledge"].rules}
         _, team_info_ids, team_rule_ids = self._team_validated_ids(sim_state=sim_state)
         info_ids.update(team_info_ids)
-        rule_ids.update(team_rule_ids)
+        rule_ids.update(normalize_rule_token(r) for r in team_rule_ids)
         return info_ids, rule_ids
+
+    def _construction_project_for_action(self, decision, action, environment):
+        requested_project_id = decision.target_id or action.get("project_id")
+        if requested_project_id in environment.construction.projects:
+            return requested_project_id
+        build_selection = self._select_build_target(environment, require_readiness=False, include_project=True)
+        if isinstance(build_selection, dict):
+            return build_selection.get("project_id")
+        return None
+
+    def _construction_rule_match(self, project_id, environment=None, sim_state=None, include_team=True):
+        project = None
+        if environment is not None and getattr(environment, "construction", None) is not None:
+            project = environment.construction.projects.get(project_id)
+        elif sim_state is not None and getattr(sim_state, "environment", None) is not None:
+            project = sim_state.environment.construction.projects.get(project_id)
+        expected = {
+            normalize_rule_token(r)
+            for r in ((project or {}).get("expected_rules") or [])
+            if normalize_rule_token(r)
+        }
+        if not expected:
+            return True, []
+        local_rules = {normalize_rule_token(r) for r in self.mental_model["knowledge"].rules}
+        team_rules = set()
+        if include_team:
+            _, _, team_rule_ids = self._team_validated_ids(sim_state=sim_state)
+            team_rules = {normalize_rule_token(r) for r in team_rule_ids}
+        held_rules = local_rules | team_rules
+        missing = sorted(expected - held_rules)
+        return len(missing) == 0, missing
+
+    def _construction_action_blockers(self, decision, action, environment, sim_state=None):
+        blockers = []
+        project_id = self._construction_project_for_action(decision, action, environment)
+        if project_id is None:
+            blockers.append("no_navigable_build_target")
+            return blockers, None
+        project = environment.construction.projects.get(project_id)
+        if not isinstance(project, dict):
+            blockers.append("unknown_project")
+            return blockers, project_id
+
+        action_type = decision.selected_action
+        if action_type in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION}:
+            blockers.extend(self._build_readiness_blockers(environment, sim_state=sim_state))
+            if self.current_plan is not None and self.current_plan.plan_method_status == "low_trust":
+                notes = set(self.current_plan.validation_notes or [])
+                if any(n.startswith("missing_") for n in notes):
+                    blockers.append("plan_method_not_grounded")
+            if project.get("status") == "complete":
+                blockers.append("project_already_complete")
+        elif action_type == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION:
+            blockers.extend(self._build_readiness_blockers(environment, sim_state=sim_state))
+            mismatch_detected = (project.get("correct", True) is False) or any(
+                "mismatch with construction" in str(e).lower() for e in self.activity_log[-8:]
+            )
+            if not mismatch_detected:
+                blockers.append("no_detected_mismatch")
+        elif action_type == ExecutableActionType.VALIDATE_CONSTRUCTION:
+            has_match, missing_rules = self._construction_rule_match(project_id, environment=environment, sim_state=sim_state, include_team=True)
+            if not has_match:
+                blockers.append("missing_validation_rule_knowledge")
+                blockers.extend([f"missing_expected_rule:{rid}" for rid in missing_rules[:3]])
+
+        return sorted(set(blockers)), project_id
 
     def _build_readiness_blockers(self, environment, sim_state=None):
         blockers = []
@@ -2606,6 +2676,7 @@ class Agent:
                 ExecutableActionType.START_CONSTRUCTION,
                 ExecutableActionType.CONTINUE_CONSTRUCTION,
                 ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
+                ExecutableActionType.VALIDATE_CONSTRUCTION,
             }:
                 action["project_id"] = decision.target_id
         if decision.selected_action == ExecutableActionType.TRANSPORT_RESOURCES:
@@ -2628,12 +2699,27 @@ class Agent:
             ExecutableActionType.CONTINUE_CONSTRUCTION,
             ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
             ExecutableActionType.VALIDATE_CONSTRUCTION,
+        } and action.get("project_id") not in environment.construction.projects:
+            selected = self._select_build_target(environment, require_readiness=False, include_project=True)
+            if isinstance(selected, dict):
+                action["project_id"] = selected.get("project_id")
+                if not action.get("target"):
+                    action["target"] = selected.get("target")
+
+        if decision.selected_action in {
+            ExecutableActionType.START_CONSTRUCTION,
+            ExecutableActionType.CONTINUE_CONSTRUCTION,
+            ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
+            ExecutableActionType.VALIDATE_CONSTRUCTION,
         }:
-            blockers = self._build_readiness_blockers(environment, sim_state=sim_state)
+            blockers, project_id = self._construction_action_blockers(decision, action, environment, sim_state=sim_state)
+            if project_id:
+                action["project_id"] = project_id
             if blockers:
-                self._emit_event(sim_state, "execution_readiness_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "readiness_not_unlocked", "blockers": blockers})
+                self._emit_event(sim_state, "execution_readiness_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "readiness_not_unlocked", "blockers": blockers, "project_id": project_id})
+                return [{"type": "idle", "duration": 1.0, "priority": 1, "decision_action": ExecutableActionType.WAIT.value}]
             else:
-                self._emit_event(sim_state, "execution_readiness_passed", {"planner_action_type": decision.selected_action.value, "goal_id": "G_MISSION_BUILD_COMPLETE"})
+                self._emit_event(sim_state, "execution_readiness_passed", {"planner_action_type": decision.selected_action.value, "goal_id": "G_MISSION_BUILD_COMPLETE", "project_id": project_id})
 
         if decision.selected_action in {ExecutableActionType.EXTERNALIZE_PLAN, ExecutableActionType.CONSULT_TEAM_ARTIFACT}:
             action["artifact_action"] = decision.selected_action.value
@@ -3145,6 +3231,40 @@ class Agent:
             if action["type"] == "communicate" and action.get("assist_action") == ExecutableActionType.REQUEST_ASSISTANCE.value and action["progress"] == 0:
                 sim_state.logger.log_event(sim_state.time, "assistance_requested", {"agent": self.name})
 
+            if action["type"] == "idle" and action.get("decision_action") == ExecutableActionType.VALIDATE_CONSTRUCTION.value and action["progress"] == 0:
+                project_id = action.get("project_id") or "Build_Table_B"
+                project = environment.construction.projects.get(project_id)
+                if project:
+                    has_required_rules, missing_rules = self._construction_rule_match(project_id, environment=environment, sim_state=sim_state, include_team=True)
+                    is_valid = bool(project.get("correct", True)) and has_required_rules and bool(project.get("resource_complete", False))
+                    if has_required_rules:
+                        environment.construction.mark_validated(project_id, is_valid=is_valid)
+                    else:
+                        environment.construction.mark_validated(project_id, is_valid=False)
+                    sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
+                    self._emit_event(
+                        sim_state,
+                        "construction_validated_correct" if is_valid else "construction_validated_incorrect",
+                        {
+                            "agent": self.name,
+                            "project_id": project_id,
+                            "structure_type": project.get("type", "unknown"),
+                            "decision_action": action.get("decision_action"),
+                            "missing_expected_rules": missing_rules,
+                        },
+                    )
+                    if is_valid:
+                        self._emit_event(
+                            sim_state,
+                            "construction_completed",
+                            {
+                                "agent": self.name,
+                                "project_id": project_id,
+                                "structure_type": project.get("type", "unknown"),
+                                "completion_mode": "validated",
+                            },
+                        )
+
             if action["type"] == "construct" and action["progress"] == 0:
                 project_id = action.get("project_id") or "Build_Table_B"
                 project = environment.construction.projects.get(project_id)
@@ -3251,6 +3371,8 @@ class Agent:
 
                     if decision_action == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value:
                         project["correct"] = True
+                        if project.get("resource_complete", False):
+                            environment.construction.mark_validated(project_id, is_valid=True)
                     sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
                     self._emit_event(
                         sim_state,
@@ -3521,7 +3643,7 @@ class Agent:
             if readiness_ratio < 0.5:
                 self._emit_event(sim_state, "mismatch_detection_skipped_not_ready", {"project_id": project_id, "reason": "build_state_below_validation_threshold", "readiness_ratio": round(readiness_ratio, 3)})
                 continue
-            known_rules = self.mental_model["knowledge"].rules
+            known_rules = {normalize_rule_token(r) for r in self.mental_model["knowledge"].rules}
             if not known_rules:
                 self._emit_event(sim_state, "mismatch_detection_skipped_not_ready", {"project_id": project_id, "reason": "no_rules_to_validate_against"})
                 continue
@@ -3530,11 +3652,8 @@ class Agent:
             if now_ts - last_mismatch < 5.0:
                 self._emit_event(sim_state, "mismatch_detection_skipped_not_ready", {"project_id": project_id, "reason": "cooldown_active", "cooldown_remaining": round(5.0 - (now_ts - last_mismatch), 3)})
                 continue
-            rule_matches = False
-            for rule in known_rules:
-                if rule in project.get("expected_rules", []):
-                    rule_matches = True
-                    break
+            expected_rules = {normalize_rule_token(r) for r in project.get("expected_rules", [])}
+            rule_matches = bool(known_rules.intersection(expected_rules))
             if not rule_matches:
                 mismatch_sensitivity = max(self._hook_value("validation_check", "detect_mismatch", "sensitivity", default=0.5), self._trait_value("rule_accuracy"))
                 mismatch_detect_prob = min(1.0, 0.25 + 0.7 * mismatch_sensitivity)
