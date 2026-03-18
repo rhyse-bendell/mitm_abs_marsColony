@@ -1,0 +1,16 @@
+{
+  "benchmark_spec": {
+    "condition": "high_task_high_team",
+    "seed": 20260319,
+    "steps": 120,
+    "dt": 0.5,
+    "brain": "rule_brain"
+  },
+  "session": "tmp_trace_after/Outputs/trace_high_high_after_20260318_224833",
+  "selected_action_counts": {
+    "request_assistance": 15
+  },
+  "selected_transport_resources": 0,
+  "construction_resource_delivered_event_count": 0,
+  "construction_progress_updated_event_count": 0
+}

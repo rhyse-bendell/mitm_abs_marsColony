@@ -2953,8 +2953,11 @@ class Agent:
             elif action["type"] == "construct":
                 self.activity_log.append("Building...")
             elif action["type"] == "transport_resources":
-                self.inventory_resources["bricks"] = self.inventory_resources.get("bricks", 0) + 1
-                self.activity_log.append("Transporting resources... (+1 bricks inventory)")
+                if action.get("project_id"):
+                    self.activity_log.append(f"Transporting resources to {action.get('project_id')}...")
+                else:
+                    self.inventory_resources["bricks"] = self.inventory_resources.get("bricks", 0) + 1
+                    self.activity_log.append("Transporting resources... (+1 bricks inventory)")
             elif action["type"] == "idle":
                 self.activity_log.append("Idling...")
 
@@ -3521,6 +3524,114 @@ class Agent:
                                 "decision_action": decision_action,
                             },
                         )
+
+            if action["type"] == "transport_resources" and action["progress"] == 0:
+                project_id = action.get("project_id")
+                if not project_id:
+                    self._emit_event(
+                        sim_state,
+                        "construction_transport_blocked",
+                        {
+                            "agent": self.name,
+                            "failure_category": "missing_project_binding",
+                            "decision_action": action.get("decision_action"),
+                        },
+                    )
+                    continue
+                project = environment.construction.projects.get(project_id)
+                if not project:
+                    self._emit_event(
+                        sim_state,
+                        "construction_transport_blocked",
+                        {
+                            "agent": self.name,
+                            "project_id": project_id,
+                            "failure_category": "unknown_project",
+                            "decision_action": action.get("decision_action"),
+                        },
+                    )
+                    continue
+                if project.get("status") == "complete":
+                    self._emit_event(
+                        sim_state,
+                        "construction_transport_blocked",
+                        {
+                            "agent": self.name,
+                            "project_id": project_id,
+                            "failure_category": "project_already_complete",
+                            "decision_action": action.get("decision_action"),
+                        },
+                    )
+                    continue
+
+                required_before = int(project.get("required_resources", {}).get("bricks", 0) or 0)
+                delivered_before = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
+                status_before = project.get("status", "in_progress")
+                environment.construction.assign_builder(project_id, self.name)
+                environment.construction.deliver_resource(project_id, "bricks", quantity=1)
+
+                delivered_after = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
+                required_after = int(project.get("required_resources", {}).get("bricks", 0) or 0)
+                status_after = project.get("status", "in_progress")
+                progress_before = (delivered_before / required_before) if required_before > 0 else 0.0
+                progress_after = (delivered_after / required_after) if required_after > 0 else 0.0
+
+                self._emit_event(
+                    sim_state,
+                    "construction_resource_delivered",
+                    {
+                        "agent": self.name,
+                        "project_id": project_id,
+                        "resource_type": "bricks",
+                        "quantity": max(0, delivered_after - delivered_before),
+                        "delivered_before": delivered_before,
+                        "delivered_after": delivered_after,
+                        "required_total": required_after,
+                        "progress_before": round(progress_before, 4),
+                        "progress_after": round(progress_after, 4),
+                        "decision_action": action.get("decision_action"),
+                    },
+                )
+
+                if delivered_after != delivered_before:
+                    self._emit_event(
+                        sim_state,
+                        "construction_progress_updated",
+                        {
+                            "agent": self.name,
+                            "project_id": project_id,
+                            "delivered_before": delivered_before,
+                            "delivered_after": delivered_after,
+                            "required_total": required_after,
+                            "progress_before": round(progress_before, 4),
+                            "progress_after": round(progress_after, 4),
+                            "status_after": status_after,
+                            "decision_action": action.get("decision_action"),
+                        },
+                    )
+                if required_after > 0 and delivered_before < required_after <= delivered_after:
+                    self._emit_event(
+                        sim_state,
+                        "construction_ready_for_validation",
+                        {
+                            "agent": self.name,
+                            "project_id": project_id,
+                            "required_total": required_after,
+                            "delivered_total": delivered_after,
+                            "decision_action": action.get("decision_action"),
+                        },
+                    )
+                if status_before != "complete" and status_after == "complete":
+                    self._emit_event(
+                        sim_state,
+                        "construction_completed",
+                        {
+                            "agent": self.name,
+                            "project_id": project_id,
+                            "structure_type": project.get("type", "unknown"),
+                            "decision_action": action.get("decision_action"),
+                        },
+                    )
 
     def update_active_actions(self, dt):
         """Deprecated wrapper: use `_advance_active_actions(...)` in live path."""
