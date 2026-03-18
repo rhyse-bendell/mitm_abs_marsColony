@@ -1,5 +1,6 @@
 import csv
 import json
+import math
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -18,6 +19,16 @@ class MetricsCollector:
         "Zone_Table_B": "table_b",
         "Zone_Table_C": "table_c",
     }
+
+    # Conservative lower-bound capacity atoms derived from canonical Mars task DIK.
+    HOUSE_MIN_CIV_CAPACITY = 3
+    HOUSE_MIN_VIP_CAPACITY = 2
+    GREENHOUSE_MIN_CIV_CAPACITY = 5
+    GREENHOUSE_MIN_VIP_CAPACITY = 2
+    WATERGEN_WATER_UNITS = 60
+    WATER_PER_CIVILIAN = 2
+    WATER_PER_VIP = 3
+    WATERGEN_MAX_CONNECTED_STRUCTURES = 2
 
     def __init__(self, simulation):
         self.simulation = simulation
@@ -560,11 +571,102 @@ class MetricsCollector:
             if project.get("status") == "complete":
                 summary["completed"] += 1
                 summary["by_type"][ptype]["completed"] += 1
-            if project.get("correct", True):
+            # "validated_correct" should only include structures explicitly validated complete.
+            if project.get("validated_complete", False):
                 summary["validated_correct"] += 1
                 summary["by_type"][ptype]["validated_correct"] += 1
         summary["by_type"] = dict(summary["by_type"])
         return summary
+
+    def _phase_demands(self):
+        demands = {}
+        for idx, phase in enumerate(self.simulation.environment.phases or []):
+            name = str(phase.get("name") or f"phase_{idx}")
+            manifest = dict(phase.get("colonist_manifest") or {})
+            demands[name] = {
+                "civilians": max(0, int(manifest.get("civilians", 0) or 0)),
+                "VIPs": max(0, int(manifest.get("VIPs", 0) or 0)),
+            }
+        return demands
+
+    def _colony_support_capacity_proxy(self, structure_summary):
+        by_type = structure_summary.get("by_type", {}) or {}
+        house_count = int((by_type.get("house", {}) or {}).get("validated_correct", 0) or 0)
+        greenhouse_count = int((by_type.get("greenhouse", {}) or {}).get("validated_correct", 0) or 0)
+        watergen_count = int((by_type.get("water_generator", {}) or {}).get("validated_correct", 0) or 0)
+
+        water_reliant_structures = house_count + greenhouse_count
+        water_connection_coverable = min(
+            water_reliant_structures,
+            watergen_count * self.WATERGEN_MAX_CONNECTED_STRUCTURES,
+        )
+        connection_satisfaction_ratio = (
+            float(water_connection_coverable) / float(water_reliant_structures)
+            if water_reliant_structures > 0
+            else 0.0
+        )
+
+        # Conservative lower-bound capacities from validated structures + direct-connection topology cap.
+        housing_civ_capacity = house_count * self.HOUSE_MIN_CIV_CAPACITY * connection_satisfaction_ratio
+        housing_vip_capacity = house_count * self.HOUSE_MIN_VIP_CAPACITY * connection_satisfaction_ratio
+        food_civ_capacity = greenhouse_count * self.GREENHOUSE_MIN_CIV_CAPACITY * connection_satisfaction_ratio
+        food_vip_capacity = greenhouse_count * self.GREENHOUSE_MIN_VIP_CAPACITY * connection_satisfaction_ratio
+        water_civ_capacity = watergen_count * (self.WATERGEN_WATER_UNITS / self.WATER_PER_CIVILIAN)
+        water_vip_capacity = watergen_count * (self.WATERGEN_WATER_UNITS / self.WATER_PER_VIP)
+
+        supported_civilians = int(math.floor(min(housing_civ_capacity, food_civ_capacity, water_civ_capacity)))
+        supported_vips = int(math.floor(min(housing_vip_capacity, food_vip_capacity, water_vip_capacity)))
+
+        phase_demands = self._phase_demands()
+        phase_support = {}
+        for phase_name, demand in phase_demands.items():
+            required_civ = int(demand.get("civilians", 0) or 0)
+            required_vips = int(demand.get("VIPs", 0) or 0)
+            civ_ratio = (supported_civilians / required_civ) if required_civ > 0 else 1.0
+            vip_ratio = (supported_vips / required_vips) if required_vips > 0 else 1.0
+            phase_support[phase_name] = {
+                "required_civilians": required_civ,
+                "required_vips": required_vips,
+                "support_ratio": round(min(civ_ratio, vip_ratio), 4),
+            }
+
+        current_phase = self.simulation.environment.get_current_phase() or {}
+        current_phase_name = str(current_phase.get("name") or "")
+        current_phase_ratio = (
+            phase_support.get(current_phase_name, {}).get("support_ratio", 0.0)
+            if current_phase_name
+            else 0.0
+        )
+
+        return {
+            "validated_structures_used": {
+                "house": house_count,
+                "greenhouse": greenhouse_count,
+                "water_generator": watergen_count,
+            },
+            "connection_model": {
+                "water_reliant_structures": water_reliant_structures,
+                "water_connection_coverable": water_connection_coverable,
+                "connection_satisfaction_ratio": round(connection_satisfaction_ratio, 4),
+            },
+            "capacity_estimate": {
+                "housing_capacity_civilians": int(math.floor(housing_civ_capacity)),
+                "housing_capacity_vips": int(math.floor(housing_vip_capacity)),
+                "food_capacity_civilians": int(math.floor(food_civ_capacity)),
+                "food_capacity_vips": int(math.floor(food_vip_capacity)),
+                "water_capacity_civilians": int(math.floor(water_civ_capacity)),
+                "water_capacity_vips": int(math.floor(water_vip_capacity)),
+                "supported_civilians": supported_civilians,
+                "supported_vips": supported_vips,
+            },
+            "phase_support_ratio_estimate": phase_support,
+            "effective_colony_support_ratio_current_phase": round(float(current_phase_ratio), 4),
+            "notes": [
+                "Conservative proxy from validated structures only.",
+                "Connection coverage uses water_generator max-2-direct-structures topology.",
+                "House/greenhouse capacities are lower-bound estimates from DIK atoms; detailed geometry, pink-floor, and exact connector graph are not encoded in runtime construction state.",
+            ],
+        }
 
     def _team_knowledge_summary(self):
         artifacts = self.simulation.team_knowledge_manager.artifacts
@@ -702,6 +804,7 @@ class MetricsCollector:
             self.agent_stats[agent.name]["knowledge_rules_end"] = len(agent.mental_model["knowledge"].rules)
 
         structure_summary = self._structure_summary()
+        support_capacity_proxy = self._colony_support_capacity_proxy(structure_summary)
         team_knowledge_summary = self._team_knowledge_summary()
         planner_states = [getattr(agent, "planner_state", {}) for agent in self.simulation.agents]
         witness_result = getattr(self.simulation, "runtime_witness_audit_result", None) or {}
@@ -768,6 +871,7 @@ class MetricsCollector:
                         structure_summary["validated_correct"] / structure_summary["attempted"], 4
                     ) if structure_summary["attempted"] else 0.0,
                 },
+                "colony_support_capacity_proxy": support_capacity_proxy,
                 "phase_objective_completion": {
                     phase["phase_name"]: (
                         phase["construction_progress_updated"] > 0
