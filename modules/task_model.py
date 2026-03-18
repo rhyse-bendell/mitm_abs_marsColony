@@ -36,6 +36,35 @@ REQUIRED_TASK_FILES = {
 }
 
 
+LEGACY_RULE_ALIASES = {
+    "house_enclosed": "R_HOUSE_VALIDITY",
+    "rule:house_enclosed": "R_HOUSE_VALIDITY",
+    "greenhouse_requires_water": "R_GREENHOUSE_SUPPORT_DEPENDENCY",
+    "rule:greenhouse_requires_water": "R_GREENHOUSE_SUPPORT_DEPENDENCY",
+    "water_generator_2x2": "R_WATERGEN_VALIDITY",
+    "rule:water_generator_2x2": "R_WATERGEN_VALIDITY",
+}
+
+
+def normalize_rule_token(token: str) -> str:
+    value = str(token or "").strip()
+    if not value:
+        return value
+    if value.startswith("R_"):
+        return value
+    mapped = LEGACY_RULE_ALIASES.get(value)
+    if mapped:
+        return mapped
+    if value.startswith("rule:"):
+        suffix = value.split(":", 1)[1].strip()
+        mapped = LEGACY_RULE_ALIASES.get(suffix)
+        if mapped:
+            return mapped
+        if suffix.startswith("R_"):
+            return suffix
+    return value
+
+
 def _parse_bool(value: str) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
@@ -532,7 +561,7 @@ class TaskModelLoader:
                 label=row["label"],
                 description=row["description"],
                 phase_scope=row["phase_scope"],
-                required_rules=_split_pipe(row["required_rules"]),
+                required_rules=[normalize_rule_token(r) for r in _split_pipe(row["required_rules"])],
                 required_knowledge=_split_pipe(row["required_knowledge"]),
                 required_information=_split_pipe(row["required_information"]),
                 required_data=_split_pipe(row["required_data"]),
@@ -742,7 +771,7 @@ class TaskModelLoader:
                 location_x=_parse_float(row["location_x"]),
                 location_y=_parse_float(row["location_y"]),
                 required_resources=json.loads(row.get("required_resources_json", "{}") or "{}"),
-                expected_rules=_split_pipe(row.get("expected_rules", "")),
+                expected_rules=[normalize_rule_token(r) for r in _split_pipe(row.get("expected_rules", ""))],
                 artifact_type=row.get("artifact_type", ""),
                 enabled=_parse_bool(row.get("enabled", "true")),
             )

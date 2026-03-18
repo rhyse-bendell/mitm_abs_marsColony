@@ -6,7 +6,7 @@ import csv
 import json
 from typing import Dict, List, Optional, Set, Tuple
 
-from modules.task_model import TaskModel, load_task_model
+from modules.task_model import TaskModel, load_task_model, normalize_rule_token
 
 
 @dataclass(frozen=True)
@@ -741,9 +741,8 @@ class TaskValidator:
             if template.artifact_type and template.artifact_type not in task_model.artifacts:
                 issues.append(ValidationIssue("error", "MISSING_CONSTRUCTION_ARTIFACT", f"Construction template '{template.project_id}' uses unknown artifact_type '{template.artifact_type}'."))
             for token in template.expected_rules:
-                if token.startswith("rule:"):
-                    continue
-                if token and token not in task_model.rules:
+                normalized = normalize_rule_token(token)
+                if normalized and normalized not in task_model.rules:
                     issues.append(ValidationIssue("warning", "UNKNOWN_EXPECTED_RULE_TOKEN", f"Construction template '{template.project_id}' has unrecognized expected_rules token '{token}'."))
 
         for action_id in task_model.action_parameters:
