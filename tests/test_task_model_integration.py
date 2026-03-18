@@ -86,7 +86,8 @@ class TaskModelIntegrationTests(unittest.TestCase):
             if d.id in wanted:
                 agent.mental_model["data"].add(d)
 
-        agent._apply_task_derivations(sim_state=None)
+        with patch("modules.agent.random.uniform", return_value=0.0), patch("modules.agent.random.random", return_value=0.0):
+            agent._apply_task_derivations(sim_state=None)
         info_ids = {i.id for i in agent.mental_model["information"]}
 
         self.assertIn("I_SHARED_PHASE_OBJECTIVES", info_ids)
@@ -101,7 +102,8 @@ class TaskModelIntegrationTests(unittest.TestCase):
 
         phase_objective_info = next(i for i in env.knowledge_packets["Team_Info"]["information"] if i.id == "I_SHARED_PHASE_OBJECTIVES")
         agent.mental_model["information"].add(phase_objective_info)
-        agent._apply_task_derivations(sim_state=None)
+        with patch("modules.agent.random.uniform", return_value=0.0), patch("modules.agent.random.random", return_value=0.0):
+            agent._apply_task_derivations(sim_state=None)
 
         self.assertIn("K_PHASE1_SUPPORT_TARGET", set(agent.mental_model["knowledge"].rules))
         self.assertIn("DRV_PHASE1_TARGET_KNOWLEDGE", agent.executed_derivations)
