@@ -1,0 +1,245 @@
+{
+  "benchmark_spec": {
+    "steps": 120,
+    "dt": 0.5,
+    "seed": 20260321,
+    "condition": "high_task_low_team",
+    "brain": "rule_brain"
+  },
+  "before_reference_from_artifact": {
+    "seed": 20260321,
+    "steps": 80,
+    "dt": 0.5,
+    "selected_transport_resources": 6,
+    "construction_resource_delivered": 0,
+    "construction_progress_updated_any_progress_by_type": {
+      "house": 0,
+      "greenhouse": 0,
+      "water_generator": 0
+    },
+    "delivered_by_project": {
+      "Build_Table_A": 0,
+      "Build_Table_B": 0,
+      "Build_Table_C": 0
+    }
+  },
+  "after_run": {
+    "session": "tmp_trace_transport/Outputs/transport_case_after_20260318_224911",
+    "selected_action_counts": {
+      "inspect_information_source": 9,
+      "transport_resources": 8
+    },
+    "selected_transport_resources": 8,
+    "construction_resource_delivered_event_count": 15,
+    "construction_progress_updated_event_count": 15
+  },
+  "trace_first_transport_decisions": [
+    {
+      "agent": "Architect",
+      "time": 19.5,
+      "events": [
+        {
+          "time": 19.5,
+          "event_type": "action_translation_succeeded",
+          "payload": {
+            "agent_id": "architect_1",
+            "agent": "Architect",
+            "planner_action_type": "transport_resources",
+            "translated_action_type": "transport_resources",
+            "target_id": "resource_zone_to_work_zone",
+            "target_zone": null
+          }
+        },
+        {
+          "time": 19.5,
+          "event_type": "brain_decision_outcome",
+          "payload": {
+            "agent": "Architect",
+            "trigger_reason": "trigger:new_dik_acquired",
+            "provider": "RuleBrain",
+            "configured_brain_backend": "rule_brain",
+            "effective_brain_backend": "rule_brain",
+            "decision_status": "accepted",
+            "selected_action": "transport_resources",
+            "confidence": 0.82,
+            "errors": [],
+            "request_explanation": false,
+            "explanation_present": false,
+            "planner_call_count": 3,
+            "result_source": "rule_brain",
+            "fallback_used": false,
+            "trace_outcome_category": "llm_success"
+          }
+        },
+        {
+          "time": 19.5,
+          "event_type": "action_translation_succeeded",
+          "payload": {
+            "agent_id": "architect_1",
+            "agent": "Architect",
+            "planner_action_type": "transport_resources",
+            "translated_action_type": "transport_resources",
+            "target_id": "resource_zone_to_work_zone",
+            "target_zone": null
+          }
+        },
+        {
+          "time": 19.5,
+          "event_type": "construction_resource_delivered",
+          "payload": {
+            "agent_id": "architect_1",
+            "agent": "Architect",
+            "project_id": "Build_Table_C",
+            "resource_type": "bricks",
+            "quantity": 1,
+            "delivered_before": 0,
+            "delivered_after": 1,
+            "required_total": 10,
+            "progress_before": 0.0,
+            "progress_after": 0.1,
+            "decision_action": "transport_resources"
+          }
+        },
+        {
+          "time": 19.5,
+          "event_type": "construction_progress_updated",
+          "payload": {
+            "agent_id": "architect_1",
+            "agent": "Architect",
+            "project_id": "Build_Table_C",
+            "delivered_before": 0,
+            "delivered_after": 1,
+            "required_total": 10,
+            "progress_before": 0.0,
+            "progress_after": 0.1,
+            "status_after": "in_progress",
+            "decision_action": "transport_resources"
+          }
+        }
+      ]
+    },
+    {
+      "agent": "Botanist",
+      "time": 20.0,
+      "events": [
+        {
+          "time": 20.0,
+          "event_type": "action_translation_succeeded",
+          "payload": {
+            "agent_id": "botanist_1",
+            "agent": "Botanist",
+            "planner_action_type": "transport_resources",
+            "translated_action_type": "transport_resources",
+            "target_id": "resource_zone_to_work_zone",
+            "target_zone": null
+          }
+        },
+        {
+          "time": 20.0,
+          "event_type": "brain_decision_outcome",
+          "payload": {
+            "agent": "Botanist",
+            "trigger_reason": "trigger:new_dik_acquired",
+            "provider": "RuleBrain",
+            "configured_brain_backend": "rule_brain",
+            "effective_brain_backend": "rule_brain",
+            "decision_status": "accepted",
+            "selected_action": "transport_resources",
+            "confidence": 0.82,
+            "errors": [],
+            "request_explanation": false,
+            "explanation_present": false,
+            "planner_call_count": 4,
+            "result_source": "rule_brain",
+            "fallback_used": false,
+            "trace_outcome_category": "llm_success"
+          }
+        }
+      ]
+    },
+    {
+      "agent": "Botanist",
+      "time": 29.0,
+      "events": [
+        {
+          "time": 29.0,
+          "event_type": "action_translation_succeeded",
+          "payload": {
+            "agent_id": "botanist_1",
+            "agent": "Botanist",
+            "planner_action_type": "transport_resources",
+            "translated_action_type": "transport_resources",
+            "target_id": "resource_zone_to_work_zone",
+            "target_zone": null
+          }
+        },
+        {
+          "time": 29.0,
+          "event_type": "brain_decision_outcome",
+          "payload": {
+            "agent": "Botanist",
+            "trigger_reason": "trigger:new_dik_acquired",
+            "provider": "RuleBrain",
+            "configured_brain_backend": "rule_brain",
+            "effective_brain_backend": "rule_brain",
+            "decision_status": "accepted",
+            "selected_action": "transport_resources",
+            "confidence": 0.82,
+            "errors": [],
+            "request_explanation": false,
+            "explanation_present": false,
+            "planner_call_count": 5,
+            "result_source": "rule_brain",
+            "fallback_used": false,
+            "trace_outcome_category": "llm_success"
+          }
+        },
+        {
+          "time": 29.0,
+          "event_type": "action_translation_succeeded",
+          "payload": {
+            "agent_id": "botanist_1",
+            "agent": "Botanist",
+            "planner_action_type": "transport_resources",
+            "translated_action_type": "transport_resources",
+            "target_id": "resource_zone_to_work_zone",
+            "target_zone": null
+          }
+        },
+        {
+          "time": 29.0,
+          "event_type": "construction_resource_delivered",
+          "payload": {
+            "agent_id": "botanist_1",
+            "agent": "Botanist",
+            "project_id": "Build_Table_C",
+            "resource_type": "bricks",
+            "quantity": 1,
+            "delivered_before": 4,
+            "delivered_after": 5,
+            "required_total": 10,
+            "progress_before": 0.4,
+            "progress_after": 0.5,
+            "decision_action": "transport_resources"
+          }
+        },
+        {
+          "time": 29.0,
+          "event_type": "construction_progress_updated",
+          "payload": {
+            "agent_id": "botanist_1",
+            "agent": "Botanist",
+            "project_id": "Build_Table_C",
+            "delivered_before": 4,
+            "delivered_after": 5,
+            "required_total": 10,
+            "progress_before": 0.4,
+            "progress_after": 0.5,
+            "status_after": "in_progress",
+            "decision_action": "transport_resources"
+          }
+        }
+      ]
+    }
+  ]
+}
