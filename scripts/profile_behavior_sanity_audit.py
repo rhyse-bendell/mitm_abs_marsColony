@@ -123,7 +123,27 @@ def _directional_delta(condition_means: dict[str, dict], high_keys: tuple[str, s
     return high - low
 
 
-def run_audit(runs_per_condition: int, steps: int, dt: float, seed_base: int, project_root: Path) -> dict:
+def _apply_resource_requirement_scale(sim: SimulationState, requirement_scale: float) -> None:
+    if abs(requirement_scale - 1.0) < 1e-9:
+        return
+    for project in sim.environment.construction.projects.values():
+        required = dict(project.get("required_resources", {}))
+        if "bricks" not in required:
+            continue
+        baseline = max(1, int(required.get("bricks", 0) or 0))
+        required["bricks"] = max(1, int(round(baseline * requirement_scale)))
+        project["required_resources"] = required
+    sim.environment.construction.update()
+
+
+def run_audit(
+    runs_per_condition: int,
+    steps: int,
+    dt: float,
+    seed_base: int,
+    project_root: Path,
+    resource_requirement_scale: float = 1.0,
+) -> dict:
     task = load_task_model("mars_colony")
     per_condition_runs: dict[str, list[dict]] = defaultdict(list)
 
@@ -138,6 +158,7 @@ def run_audit(runs_per_condition: int, steps: int, dt: float, seed_base: int, pr
                 project_root=project_root,
                 brain_backend="rule_brain",
             )
+            _apply_resource_requirement_scale(sim, resource_requirement_scale)
             for _ in range(steps):
                 sim.update(dt)
             sim.stop()
@@ -195,11 +216,88 @@ def run_audit(runs_per_condition: int, steps: int, dt: float, seed_base: int, pr
             "steps": steps,
             "dt": dt,
             "seed_base": seed_base,
+            "resource_requirement_scale": resource_requirement_scale,
             "conditions": CONDITIONS,
         },
         "condition_means": condition_means,
         "condition_runs": per_condition_runs,
         "directional_deltas": directional,
+    }
+
+
+def _regime_score(regime: dict) -> float:
+    condition_means = regime.get("condition_means", {})
+    directional = regime.get("directional_deltas", {})
+    task_sep = abs(float(directional.get("task_high_minus_low", {}).get("packet_absorption_success_rate", 0.0)))
+    team_sep = abs(float(directional.get("team_high_minus_low", {}).get("communication_successes", 0.0)))
+    outcome_values = [float(row.get("colony_validated_ratio", 0.0)) for row in condition_means.values()]
+    outcome_spread = max(outcome_values) - min(outcome_values) if outcome_values else 0.0
+    externalization = mean(float(row.get("externalization_created", 0.0)) for row in condition_means.values()) if condition_means else 0.0
+    repair = mean(float(row.get("repair_successes", 0.0)) for row in condition_means.values()) if condition_means else 0.0
+    return (task_sep * 2.0) + (team_sep / 100.0) + (outcome_spread * 4.0) + externalization + repair
+
+
+def run_calibration_sweep(
+    runs_per_condition: int,
+    dt: float,
+    seed_base: int,
+    project_root: Path,
+    horizon_steps: list[int],
+    pressure_scales: list[float],
+    pressure_steps: int,
+) -> dict:
+    regimes = []
+    regime_index = 0
+    for steps in horizon_steps:
+        regime_index += 1
+        regime = run_audit(
+            runs_per_condition=runs_per_condition,
+            steps=steps,
+            dt=dt,
+            seed_base=seed_base + (regime_index * 10000),
+            project_root=project_root,
+            resource_requirement_scale=1.0,
+        )
+        regime["regime"] = {"name": f"horizon_{steps}", "steps": steps, "resource_requirement_scale": 1.0}
+        regime["regime_score"] = _regime_score(regime)
+        regimes.append(regime)
+
+    for scale in pressure_scales:
+        if abs(scale - 1.0) < 1e-9:
+            continue
+        regime_index += 1
+        regime = run_audit(
+            runs_per_condition=runs_per_condition,
+            steps=pressure_steps,
+            dt=dt,
+            seed_base=seed_base + (regime_index * 10000),
+            project_root=project_root,
+            resource_requirement_scale=scale,
+        )
+        regime["regime"] = {
+            "name": f"horizon_{pressure_steps}_resource_scale_{scale:.2f}",
+            "steps": pressure_steps,
+            "resource_requirement_scale": scale,
+        }
+        regime["regime_score"] = _regime_score(regime)
+        regimes.append(regime)
+
+    top_regimes = sorted(
+        [{"name": r["regime"]["name"], "regime_score": r.get("regime_score", 0.0)} for r in regimes],
+        key=lambda r: r["regime_score"],
+        reverse=True,
+    )[:2]
+    return {
+        "config": {
+            "runs_per_condition": runs_per_condition,
+            "dt": dt,
+            "seed_base": seed_base,
+            "horizon_steps": horizon_steps,
+            "pressure_scales": pressure_scales,
+            "pressure_steps": pressure_steps,
+        },
+        "regimes": regimes,
+        "recommended_regimes": top_regimes,
     }
 
 
@@ -211,35 +309,79 @@ def main():
     parser.add_argument("--seed-base", type=int, default=20260318)
     parser.add_argument("--out", type=Path, default=Path("artifacts/profile_behavior_sanity_audit.json"))
     parser.add_argument("--project-root", type=Path, default=None, help="Optional explicit project root for simulation Outputs.")
+    parser.add_argument("--calibration-sweep", action="store_true", help="Run horizon + mild pressure calibration sweep.")
+    parser.add_argument("--horizon-steps", type=str, default="40,60,80", help="Comma-separated horizon steps for calibration sweep.")
+    parser.add_argument("--pressure-scales", type=str, default="1.15", help="Comma-separated resource requirement scales for mild pressure stage.")
+    parser.add_argument("--pressure-steps", type=int, default=80, help="Step count used during mild pressure stage.")
     args = parser.parse_args()
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    horizon_steps = [int(v.strip()) for v in str(args.horizon_steps).split(",") if v.strip()]
+    pressure_scales = [float(v.strip()) for v in str(args.pressure_scales).split(",") if v.strip()]
     if args.project_root is not None:
         args.project_root.mkdir(parents=True, exist_ok=True)
-        results = run_audit(args.runs_per_condition, args.steps, args.dt, args.seed_base, args.project_root)
+        if args.calibration_sweep:
+            results = run_calibration_sweep(
+                runs_per_condition=args.runs_per_condition,
+                dt=args.dt,
+                seed_base=args.seed_base,
+                project_root=args.project_root,
+                horizon_steps=horizon_steps,
+                pressure_scales=pressure_scales,
+                pressure_steps=args.pressure_steps,
+            )
+        else:
+            results = run_audit(args.runs_per_condition, args.steps, args.dt, args.seed_base, args.project_root)
     else:
         with TemporaryDirectory() as tmpdir:
-            results = run_audit(args.runs_per_condition, args.steps, args.dt, args.seed_base, Path(tmpdir))
+            if args.calibration_sweep:
+                results = run_calibration_sweep(
+                    runs_per_condition=args.runs_per_condition,
+                    dt=args.dt,
+                    seed_base=args.seed_base,
+                    project_root=Path(tmpdir),
+                    horizon_steps=horizon_steps,
+                    pressure_scales=pressure_scales,
+                    pressure_steps=args.pressure_steps,
+                )
+            else:
+                results = run_audit(args.runs_per_condition, args.steps, args.dt, args.seed_base, Path(tmpdir))
 
     args.out.write_text(json.dumps(results, indent=2), encoding="utf-8")
 
     print("\n=== Profile Behavior Sanity Audit ===")
     print(json.dumps(results["config"], indent=2))
-    print("\nCondition means:")
-    for name, metrics in results["condition_means"].items():
-        print(
-            f"- {name}: "
-            f"packet_sr={metrics['packet_absorption_success_rate']:.3f}, "
-            f"deriv_sr={metrics['derivation_success_rate']:.3f}, "
-            f"comm={metrics['communication_successes']:.2f}, "
-            f"ext={metrics['externalization_created']:.2f}, "
-            f"adopt={metrics['artifact_adoptions']:.2f}, "
-            f"validated={metrics['validated_structures']:.2f}, "
-            f"survival_ratio={metrics['colony_validated_ratio']:.3f}"
-        )
+    if args.calibration_sweep:
+        print("\nRegime summaries:")
+        for regime in results["regimes"]:
+            name = regime.get("regime", {}).get("name", "regime")
+            cm = regime.get("condition_means", {})
+            avg_ratio = mean(float(v.get("colony_validated_ratio", 0.0)) for v in cm.values()) if cm else 0.0
+            avg_ext = mean(float(v.get("externalization_created", 0.0)) for v in cm.values()) if cm else 0.0
+            avg_repair = mean(float(v.get("repair_successes", 0.0)) for v in cm.values()) if cm else 0.0
+            print(
+                f"- {name}: avg_validated_ratio={avg_ratio:.3f}, "
+                f"avg_externalization_created={avg_ext:.2f}, avg_repair_successes={avg_repair:.2f}, "
+                f"score={regime.get('regime_score', 0.0):.3f}"
+            )
+        print("\nTop regimes:")
+        print(json.dumps(results.get("recommended_regimes", []), indent=2))
+    else:
+        print("\nCondition means:")
+        for name, metrics in results["condition_means"].items():
+            print(
+                f"- {name}: "
+                f"packet_sr={metrics['packet_absorption_success_rate']:.3f}, "
+                f"deriv_sr={metrics['derivation_success_rate']:.3f}, "
+                f"comm={metrics['communication_successes']:.2f}, "
+                f"ext={metrics['externalization_created']:.2f}, "
+                f"adopt={metrics['artifact_adoptions']:.2f}, "
+                f"validated={metrics['validated_structures']:.2f}, "
+                f"survival_ratio={metrics['colony_validated_ratio']:.3f}"
+            )
 
-    print("\nDirectional deltas (high - low):")
-    print(json.dumps(results["directional_deltas"], indent=2))
+        print("\nDirectional deltas (high - low):")
+        print(json.dumps(results["directional_deltas"], indent=2))
     print(f"\nSaved: {args.out}")
 
 
