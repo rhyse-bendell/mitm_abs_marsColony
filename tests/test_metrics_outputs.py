@@ -188,6 +188,32 @@ class TestMetricsOutputs(unittest.TestCase):
             )
             self.assertGreaterEqual(phase_summary[0].get("construction_resource_delivered", 0), 1)
 
+    def test_summary_counts_validated_structures_only_after_completion(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            agent = sim.agents[0]
+            action = {
+                "type": "construct",
+                "progress": 0,
+                "duration": 2.0,
+                "project_id": "Build_Table_A",
+                "decision_action": "start_construction",
+            }
+            agent.inventory_resources["bricks"] = 1
+            agent.active_actions = [action]
+            agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.2)
+            sim.stop()
+
+            project = sim.environment.construction.projects["Build_Table_A"]
+            self.assertNotEqual(project.get("status"), "complete")
+
+            session_dir = next((Path(tmpdir) / "Outputs").iterdir())
+            run_summary = json.loads((session_dir / "measures" / "run_summary.json").read_text(encoding="utf-8"))
+            phase_summary = json.loads((session_dir / "measures" / "phase_summary.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(run_summary["outcomes"]["total_structures_validated_correct"], 0)
+            self.assertEqual(phase_summary[0]["structures_validated_correct"], 0)
+
     def test_readiness_alignment_summary_tracks_readiness_vs_world_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
