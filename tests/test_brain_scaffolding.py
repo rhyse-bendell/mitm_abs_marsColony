@@ -147,6 +147,34 @@ class TestBrainContextAndDecision(unittest.TestCase):
             decision = RuleBrain().decide(packet)
             self.assertEqual(decision.selected_action, ExecutableActionType.REQUEST_ASSISTANCE)
 
+    def test_rule_brain_pivots_to_start_when_ready_with_absent_projects(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir)
+            agent = sim.agents[0]
+            packet = BrainContextBuilder().build(sim, agent)
+
+            packet.world_snapshot["phase_profile"]["stage"] = "execution"
+            packet.individual_cognitive_state["known_gaps"] = ["need_help"]
+            packet.individual_cognitive_state["traits"]["help_tendency"] = 0.95
+            packet.individual_cognitive_state["build_readiness"]["ready_for_build"] = True
+            packet.individual_cognitive_state["build_readiness"]["status"] = "plausible"
+            packet.individual_cognitive_state["seconds_since_dik_change"] = 9.0
+            packet.world_snapshot["built_state"] = [
+                {
+                    "structure_id": "Build_Table_A",
+                    "state": "absent",
+                    "progress": 0.0,
+                }
+            ]
+            packet.action_affordances = [
+                {"action_type": ExecutableActionType.REQUEST_ASSISTANCE.value, "utility": 0.95, "target_id": "nearby_agent"},
+                {"action_type": ExecutableActionType.START_CONSTRUCTION.value, "utility": 0.4, "target_id": "Build_Table_A"},
+                {"action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, "utility": 0.6, "target_id": "Team_Info"},
+            ]
+
+            decision = RuleBrain().decide(packet)
+            self.assertEqual(decision.selected_action, ExecutableActionType.START_CONSTRUCTION)
+
 
 class TestTeamKnowledgeManagerAndIntegration(unittest.TestCase):
     def test_team_knowledge_manager_store_and_retrieve_artifact(self):

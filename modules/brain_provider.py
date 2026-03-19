@@ -202,7 +202,7 @@ class RuleBrain(BrainProvider):
         active_incomplete_projects = [
             item
             for item in built_state
-            if item.get("state") == "in_progress" and float(item.get("progress", 0.0)) < 1.0
+            if item.get("state") in {"absent", "in_progress"} and float(item.get("progress", 0.0)) < 1.0
         ]
         needs_resource_delivery = any(float(item.get("progress", 0.0)) < 1.0 for item in active_incomplete_projects)
         productive_build_types = {
@@ -214,9 +214,14 @@ class RuleBrain(BrainProvider):
         repeated_action_count = int(loop_counters.get("action_repeats", 0) or 0)
         repeated_selected_action_count = int(loop_counters.get("selected_action_repeats", 0) or 0)
         seconds_since_dik_change = context_packet.individual_cognitive_state.get("seconds_since_dik_change")
+        recent_meaningful_epistemic_change = (
+            seconds_since_dik_change is not None
+            and float(seconds_since_dik_change) <= 2.0
+            and (has_known_gaps or bool(mismatch_signals))
+        )
         productive_build_affordance = None
         if ready_for_build and active_incomplete_projects:
-            if needs_resource_delivery:
+            if needs_resource_delivery and not recent_meaningful_epistemic_change:
                 productive_build_affordance = self._best_affordance(
                     sorted_affordances, {ExecutableActionType.TRANSPORT_RESOURCES.value}
                 )
