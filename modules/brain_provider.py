@@ -217,7 +217,7 @@ class RuleBrain(BrainProvider):
         recent_meaningful_epistemic_change = (
             seconds_since_dik_change is not None
             and float(seconds_since_dik_change) <= 2.0
-            and (has_known_gaps or bool(mismatch_signals))
+            and (bool(mismatch_signals) or (has_known_gaps and not ready_for_build))
         )
         productive_build_affordance = None
         if ready_for_build and active_incomplete_projects:
@@ -227,11 +227,35 @@ class RuleBrain(BrainProvider):
                 )
             if productive_build_affordance is None:
                 productive_build_affordance = self._best_affordance(sorted_affordances, productive_build_types)
+        post_readiness_pivot_active = (
+            ready_for_build
+            and bool(active_incomplete_projects)
+            and productive_build_affordance is not None
+            and not recent_meaningful_epistemic_change
+        )
 
         assistance_stalled = (
             max(repeated_action_count, repeated_selected_action_count) >= 3
             and (seconds_since_dik_change is None or float(seconds_since_dik_change) > 8.0)
         )
+
+        if post_readiness_pivot_active:
+            selected = ExecutableActionType(productive_build_affordance["action_type"])
+            goal_update = "execute_build"
+            reason = "Readiness unlocked with incomplete projects; pivot from epistemic actions to productive build progression."
+            if selected == ExecutableActionType.TRANSPORT_RESOURCES:
+                goal_update = "satisfy_build_logistics"
+                reason = "Readiness unlocked with incomplete projects; prioritize logistics delivery before construction."
+            return BrainDecision(
+                selected_action=selected,
+                target_id=productive_build_affordance.get("target_id"),
+                target_zone=productive_build_affordance.get("target_zone"),
+                goal_update=goal_update,
+                plan_steps=["advance active construction project"],
+                reason_summary=reason,
+                confidence=0.84,
+                assumptions=["duration_s=30"] if selected == ExecutableActionType.TRANSPORT_RESOURCES else [],
+            )
 
         if (
             stage in {"early", "execution"}
