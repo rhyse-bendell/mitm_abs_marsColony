@@ -2649,14 +2649,37 @@ class Agent:
                     key=lambda a: float(a.get("utility", 0.0)),
                     reverse=True,
                 )
+                needs_resource_delivery = any(float(item.get("progress", 0.0)) < 1.0 for item in active_incomplete_projects)
                 previous_action = self.current_plan.decision.selected_action.value
-                for candidate in sorted_affordances:
-                    if candidate.get("action_type") not in {
+                build_candidates = [
+                    c
+                    for c in sorted_affordances
+                    if c.get("action_type")
+                    in {
                         ExecutableActionType.TRANSPORT_RESOURCES.value,
                         ExecutableActionType.START_CONSTRUCTION.value,
                         ExecutableActionType.CONTINUE_CONSTRUCTION.value,
-                    }:
-                        continue
+                    }
+                ]
+                preferred_order = (
+                    [
+                        ExecutableActionType.TRANSPORT_RESOURCES.value,
+                        ExecutableActionType.START_CONSTRUCTION.value,
+                        ExecutableActionType.CONTINUE_CONSTRUCTION.value,
+                    ]
+                    if needs_resource_delivery
+                    else [
+                        ExecutableActionType.CONTINUE_CONSTRUCTION.value,
+                        ExecutableActionType.START_CONSTRUCTION.value,
+                        ExecutableActionType.TRANSPORT_RESOURCES.value,
+                    ]
+                )
+                candidate = None
+                for action_type in preferred_order:
+                    candidate = next((c for c in build_candidates if c.get("action_type") == action_type), None)
+                    if candidate is not None:
+                        break
+                if candidate is not None:
                     self.current_plan.decision = BrainDecision(
                         selected_action=ExecutableActionType(candidate["action_type"]),
                         target_id=candidate.get("target_id"),
@@ -2676,7 +2699,6 @@ class Agent:
                             "previous_action": previous_action,
                         },
                     )
-                    break
 
         self.current_action = self._translate_brain_decision_to_legacy_action(self.current_plan.decision, environment, sim_state=sim_state)
         self.current_plan.remaining_executions -= 1
