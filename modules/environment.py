@@ -551,9 +551,21 @@ class Environment:
                 return False
         return True
 
+    def _bridge_access_unlocked(self):
+        phase = self.get_current_phase() or {}
+        unlocks = phase.get("unlocks", [])
+        if isinstance(unlocks, str):
+            unlocks = [unlocks]
+        return "bridge_to_zone_C" in {str(u).strip() for u in unlocks if str(u).strip()}
+
+    def _is_build_target_locked(self, target_name):
+        return target_name == "Build_Table_C" and not self._bridge_access_unlocked()
+
     def get_interaction_target_position(self, target_name, from_position=None):
         target = self.interaction_targets.get(target_name)
         if not target:
+            return None
+        if self._is_build_target_locked(target_name):
             return None
 
         if target.get("kind") == "information":
@@ -739,9 +751,9 @@ class Environment:
         if self.task_model and self.task_model.spawn_points:
             return [(sp.x, sp.y) for sp in self.task_model.spawn_points if sp.enabled]
         return [
-            (6.0, 1.0),
-            (5.0, 1.0),
-            (4.0, 1.0)
+            (7.35, 3.05),
+            (7.75, 3.40),
+            (7.35, 3.75)
         ]
 
     def update(self, time):
@@ -845,6 +857,8 @@ class Environment:
         target = self.interaction_targets.get(target_name)
         if not target:
             return {"accessible": False, "reason": "unknown_target"}
+        if self._is_build_target_locked(target_name):
+            return {"accessible": False, "reason": "bridge_access_locked"}
 
         if target.get("kind") == "information":
             zone_name = target.get("zone")
@@ -893,9 +907,9 @@ class Environment:
                     return pos
 
         candidate_spawns = {
-            "Architect": (6.9, 1.2),
-            "Engineer": (3.9, 1.2),
-            "Botanist": (5.0, 1.0)
+            "Architect": (7.35, 3.75),
+            "Engineer": (7.35, 3.05),
+            "Botanist": (7.75, 3.40)
         }
         pos = candidate_spawns.get(role, (6.0, 3.0))
         if not self.is_in_blocked_zone(pos):
