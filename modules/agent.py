@@ -275,6 +275,7 @@ class Agent:
         self.fallback_bootstrap = {
             "active": False,
             "required_sources": [],
+            "stage": "shared",
             "activation_reason": None,
             "activated_at": None,
             "completed_at": None,
@@ -401,6 +402,7 @@ class Agent:
                 {
                     "active": True,
                     "required_sources": list(required_sources),
+                    "stage": "shared",
                     "activation_reason": reason,
                     "activated_at": float(getattr(sim_state, "time", getattr(self, "current_time", 0.0))),
                     "completed_at": None,
@@ -421,12 +423,48 @@ class Agent:
                 merged.append(source_id)
             self.fallback_bootstrap["required_sources"] = merged
 
+    def _is_source_bootstrap_satisfied(self, source_id):
+        if not source_id:
+            return True
+        if self.source_inspection_state.get(source_id) == "inspected":
+            return True
+        if bool(self.source_exhaustion_state.get(source_id, {}).get("exhausted")):
+            return True
+        return False
+
     def _fallback_bootstrap_complete(self, sim_state=None):
         required_sources = list(self.fallback_bootstrap.get("required_sources", []))
-        inspected_all = all(self.source_inspection_state.get(source_id) == "inspected" for source_id in required_sources)
-        return bool(self.startup_state.get("left_spawn")) and inspected_all
+        completed_all = all(self._is_source_bootstrap_satisfied(source_id) for source_id in required_sources)
+        return bool(self.startup_state.get("left_spawn")) and completed_all
 
     def _next_bootstrap_source(self, environment):
+        stage = str(self.fallback_bootstrap.get("stage") or "shared")
+        required_sources = list(self.fallback_bootstrap.get("required_sources", []))
+        team_source = "Team_Info" if "Team_Info" in required_sources else None
+        role_source = next((s for s in required_sources if s != "Team_Info"), None)
+
+        if stage == "shared":
+            if self._is_source_bootstrap_satisfied(team_source):
+                self.fallback_bootstrap["stage"] = "role"
+                stage = "role"
+            elif team_source and self._has_packet_access(team_source) and team_source in environment.knowledge_packets:
+                return team_source
+            else:
+                return None
+
+        if stage == "role":
+            if not role_source:
+                self.fallback_bootstrap["stage"] = "complete"
+                return None
+            if self._is_source_bootstrap_satisfied(role_source):
+                self.fallback_bootstrap["stage"] = "complete"
+                return None
+            if self._has_packet_access(role_source) and role_source in environment.knowledge_packets:
+                return role_source
+            return None
+        if stage == "complete":
+            return None
+
         required_sources = list(self.fallback_bootstrap.get("required_sources", []))
         for source_id in required_sources:
             if not self._has_packet_access(source_id):
@@ -462,6 +500,8 @@ class Agent:
             return None
         source_id = self._next_bootstrap_source(environment)
         if source_id:
+            if isinstance(getattr(self, "post_inspect_handoff", None), dict):
+                self.post_inspect_handoff["pending"] = False
             self.fallback_bootstrap["last_forced_action"] = "inspect_information_source"
             return BrainDecision(
                 selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
