@@ -442,6 +442,7 @@ class SimulationState:
                 validation_success = bool(row.get("validation_success"))
                 agent.fallback_bootstrap["startup_sanity_status"] = "success" if validation_success else "failed"
                 if not validation_success:
+                    self.hard_demote_agent_backend(agent, reason="startup_sanity_failed", activate_bootstrap=False)
                     agent.activate_fallback_bootstrap(sim_state=self, reason="startup_sanity_failed")
             self.logger.update_session_manifest(extra_metadata=self._backend_settings_for_manifest())
             return dict(self.startup_llm_sanity_summary)
@@ -456,6 +457,7 @@ class SimulationState:
             )
             for agent in self.agents:
                 agent.fallback_bootstrap["startup_sanity_status"] = "failed"
+                self.hard_demote_agent_backend(agent, reason="startup_sanity_exception", activate_bootstrap=False)
                 agent.activate_fallback_bootstrap(sim_state=self, reason="startup_sanity_exception")
             self.logger.log_event(
                 self.time,
@@ -474,6 +476,8 @@ class SimulationState:
             "role": agent.role,
             "configured_backend": runtime["configured_backend"],
             "effective_backend": runtime.get("effective_backend"),
+            "hard_demoted": bool(runtime.get("hard_demoted")),
+            "hard_demoted_reason": runtime.get("hard_demoted_reason"),
             "fallback_count": runtime.get("fallback_count", 0),
             "fallback_backend": runtime["config"].fallback_backend,
             "local_model": runtime["config"].local_model if runtime["configured_backend"] != "rule_brain" else None,
@@ -511,6 +515,8 @@ class SimulationState:
             "provider": provider,
             "configured_backend": cfg.backend,
             "effective_backend": cfg.backend,
+            "hard_demoted": False,
+            "hard_demoted_reason": None,
             "fallback_count": 0,
             "last_outcome_signature": None,
             "bootstrap": {
@@ -543,6 +549,17 @@ class SimulationState:
 
     def refresh_agent_backend_effective_state(self, agent, reason="runtime_update"):
         runtime = self.get_agent_brain_runtime(agent)
+        if runtime.get("hard_demoted"):
+            runtime["effective_backend"] = runtime["config"].fallback_backend or "rule_brain"
+            agent.planner_state["fallback_only_ticks"] = int(agent.planner_state.get("fallback_only_ticks", 0)) + 1
+            any_fallback = any(
+                (rt.get("effective_backend") != rt.get("configured_backend")) or bool(rt.get("hard_demoted"))
+                for rt in self.agent_brain_runtime.values()
+            )
+            self.effective_brain_backend = self.brain_backend_config.fallback_backend if any_fallback else self.configured_brain_backend
+            self.backend_fallback_count = sum(int(rt.get("fallback_count", 0)) for rt in self.agent_brain_runtime.values())
+            self.fallback_occurred = self.backend_fallback_count > 0
+            return
         provider = runtime["provider"]
         configured = runtime["configured_backend"]
         effective = configured
@@ -560,10 +577,50 @@ class SimulationState:
         if effective != configured:
             agent.planner_state["fallback_only_ticks"] = int(agent.planner_state.get("fallback_only_ticks", 0)) + 1
 
-        any_fallback = any(rt.get("effective_backend") != rt.get("configured_backend") for rt in self.agent_brain_runtime.values())
+        any_fallback = any(
+            (rt.get("effective_backend") != rt.get("configured_backend")) or bool(rt.get("hard_demoted"))
+            for rt in self.agent_brain_runtime.values()
+        )
         self.effective_brain_backend = self.brain_backend_config.fallback_backend if any_fallback else self.configured_brain_backend
         self.backend_fallback_count = sum(int(rt.get("fallback_count", 0)) for rt in self.agent_brain_runtime.values())
         self.fallback_occurred = self.backend_fallback_count > 0
+
+    def is_agent_backend_hard_demoted(self, agent):
+        runtime = self.get_agent_brain_runtime(agent)
+        return bool(runtime.get("hard_demoted"))
+
+    def hard_demote_agent_backend(self, agent, reason, activate_bootstrap=True):
+        runtime = self.get_agent_brain_runtime(agent)
+        if runtime.get("hard_demoted"):
+            return False
+        fallback_backend = runtime["config"].fallback_backend or "rule_brain"
+        runtime["provider"] = create_brain_provider(BrainBackendConfig(backend=fallback_backend))
+        runtime["effective_backend"] = fallback_backend
+        runtime["hard_demoted"] = True
+        runtime["hard_demoted_reason"] = str(reason)
+        runtime["fallback_count"] = int(runtime.get("fallback_count", 0)) + 1
+        self.backend_fallback_count = sum(int(rt.get("fallback_count", 0)) for rt in self.agent_brain_runtime.values())
+        self.fallback_occurred = True
+        if hasattr(agent, "planner_state") and isinstance(agent.planner_state, dict):
+            agent.planner_state["fallback_only_ticks"] = int(agent.planner_state.get("fallback_only_ticks", 0)) + 1
+        if hasattr(agent, "clear_planner_inflight_state"):
+            agent.clear_planner_inflight_state(sim_state=self, reason=f"hard_demote:{reason}")
+        if activate_bootstrap and hasattr(agent, "activate_fallback_bootstrap"):
+            agent.activate_fallback_bootstrap(sim_state=self, reason=f"hard_demote:{reason}")
+        self.logger.log_event(
+            self.time,
+            "agent_backend_hard_demoted",
+            {
+                "agent": agent.name,
+                "agent_id": agent.agent_id,
+                "configured_backend": runtime.get("configured_backend"),
+                "effective_backend": runtime.get("effective_backend"),
+                "reason": str(reason),
+                "fallback_backend": fallback_backend,
+            },
+        )
+        self.logger.update_session_manifest(extra_metadata=self._backend_settings_for_manifest())
+        return True
 
 
     def _backend_settings_for_manifest(self):

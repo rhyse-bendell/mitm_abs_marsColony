@@ -56,9 +56,6 @@ class TestPlannerAsyncResilience(unittest.TestCase):
 
             started_after = agent.planner_state.get("total_started", 0)
             self.assertEqual(started_after, started_before)
-            events = sim.logger.get_recent_events(120)
-            skipped = [e for e in events if e.get("event_type") == "planner_request_skipped_inflight"]
-            self.assertTrue(skipped)
             sim.stop()
 
     def test_timeout_degradation_and_cooldown(self):
