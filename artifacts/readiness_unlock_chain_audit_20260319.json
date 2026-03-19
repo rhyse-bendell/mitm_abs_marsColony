@@ -1,0 +1,184 @@
+{
+  "benchmark_spec": {
+    "condition": "high_task_high_team",
+    "seed": 20260319,
+    "steps": 120,
+    "dt": 0.5,
+    "brain": "rule_brain"
+  },
+  "session": "tmp_readiness_audit/Outputs/readiness_unlock_audit_20260319_024206",
+  "event_counts": {
+    "inspect_selected": 3,
+    "inspect_completed": 90,
+    "packet_absorption_attempted": 1620,
+    "packet_absorption_failed": 102,
+    "derivation_attempted": 919,
+    "derivation_succeeded": 14,
+    "construction_resource_delivered": 0,
+    "construction_progress_updated": 0,
+    "productive_actions_selected_total": 0
+  },
+  "selected_action_counts": {
+    "request_assistance": 19,
+    "inspect_information_source": 3
+  },
+  "milestones": {
+    "first_inspect_selection": {
+      "time": 13.0,
+      "event_type": "brain_decision_outcome",
+      "payload": {
+        "agent": "Architect",
+        "trigger_reason": "plan_completed",
+        "provider": "RuleBrain",
+        "configured_brain_backend": "rule_brain",
+        "effective_brain_backend": "rule_brain",
+        "decision_status": "accepted",
+        "selected_action": "inspect_information_source",
+        "confidence": 0.78,
+        "errors": [],
+        "request_explanation": false,
+        "explanation_present": false,
+        "planner_call_count": 2,
+        "result_source": "rule_brain",
+        "fallback_used": false,
+        "trace_outcome_category": "llm_success"
+      }
+    },
+    "first_source_inspected": {
+      "time": 14.5,
+      "event_type": "inspect_completed",
+      "payload": {
+        "agent_id": "engineer_1",
+        "agent": "Engineer",
+        "source_id": "Engineer_Info",
+        "target": [
+          3.55,
+          1.58
+        ],
+        "goal": "Maximize colonist survival"
+      }
+    },
+    "first_packet_absorption_attempt": {
+      "time": 14.5,
+      "event_type": "packet_absorption_attempted",
+      "payload": {
+        "agent_id": "engineer_1",
+        "agent": "Engineer",
+        "source_id": "Engineer_Info",
+        "element_id": "D_ENG_WATERGEN_REQUIRED",
+        "element_type": "data",
+        "requested_accuracy": 0.95,
+        "hook_target": "absorb_packet",
+        "success_probability": 0.9641,
+        "stochastic_roll": 0.8291,
+        "context_modifier": -0.0175,
+        "retry_bonus": 0.0
+      }
+    },
+    "first_derivation_attempt": {
+      "time": 14.5,
+      "event_type": "derivation_attempted",
+      "payload": {
+        "agent_id": "engineer_1",
+        "agent": "Engineer",
+        "derivation_id": "DRV_ENG_WATER_CAPACITY",
+        "output_element_id": "I_ENG_WATER_CAPACITY",
+        "required_inputs": [
+          "D_ENG_10SOIL_60_WATER",
+          "D_ENG_20VIP_60_WATER",
+          "D_ENG_30CIV_60_WATER",
+          "D_ENG_WATERGEN_60_UNITS"
+        ],
+        "trigger_source": "Engineer_Info",
+        "attempt_index": 1,
+        "hook_target": "transform_data_to_information",
+        "success_probability": 0.9688,
+        "stochastic_roll": 0.7145,
+        "context_modifier": 0.0,
+        "retry_bonus": 0.0
+      }
+    },
+    "first_derivation_success": {
+      "time": 14.5,
+      "event_type": "derivation_succeeded",
+      "payload": {
+        "agent_id": "engineer_1",
+        "agent": "Engineer",
+        "time": 14.5,
+        "derivation_id": "DRV_WATERGEN_VALIDITY_KNOWLEDGE",
+        "output_element_id": "K_WATERGEN_VALIDITY_REQUIREMENTS",
+        "derivation_kind": "information_to_knowledge",
+        "required_inputs": [
+          "I_ENG_DISTRIBUTION_TOPOLOGY",
+          "I_ENG_WATERGEN_GEOMETRY",
+          "I_ENG_WATER_CAPACITY"
+        ],
+        "trigger_source": "Engineer_Info"
+      }
+    },
+    "first_known_gap_change_event": null,
+    "first_ready_for_build_true": null,
+    "first_productive_affordance_available": null,
+    "first_productive_action_selected": null
+  },
+  "readiness": {
+    "recomputed_after_inspect_count": 90,
+    "readiness_unlocked_count": 0,
+    "after_blockers_top": {
+      "missing_task_prerequisite_rules": 90
+    },
+    "plausible_build_status_count": 0
+  },
+  "dik_change_summary": {
+    "known_gap_event_count": 0,
+    "known_gaps_count_variants": [
+      0,
+      1
+    ],
+    "knowledge_count_variants": [
+      0
+    ],
+    "information_count_variants": [
+      0
+    ]
+  },
+  "timeline": [
+    {
+      "milestone": "inspect_selected",
+      "time": 13.0
+    },
+    {
+      "milestone": "source_inspected",
+      "time": 14.5
+    },
+    {
+      "milestone": "packet_absorption_attempt",
+      "time": 14.5
+    },
+    {
+      "milestone": "derivation_success",
+      "time": 14.5
+    },
+    {
+      "milestone": "known_gap_change",
+      "time": null
+    },
+    {
+      "milestone": "ready_for_build_true",
+      "time": null
+    },
+    {
+      "milestone": "productive_affordance_available",
+      "time": null
+    },
+    {
+      "milestone": "productive_action_selected",
+      "time": null
+    }
+  ],
+  "log_paths": {
+    "events_csv": "tmp_readiness_audit/Outputs/readiness_unlock_audit_20260319_024206/logs/events.csv",
+    "planner_trace_jsonl": "tmp_readiness_audit/Outputs/readiness_unlock_audit_20260319_024206/logs/planner_trace.jsonl",
+    "run_summary_json": "tmp_readiness_audit/Outputs/readiness_unlock_audit_20260319_024206/measures/run_summary.json"
+  }
+}
