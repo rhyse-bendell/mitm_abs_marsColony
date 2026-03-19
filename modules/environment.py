@@ -555,6 +555,8 @@ class Environment:
         target = self.interaction_targets.get(target_name)
         if not target:
             return None
+        if not self.is_interaction_target_unlocked(target_name):
+            return None
 
         if target.get("kind") == "information":
             slot = self.select_source_access_point(target_name, agent_id=None, from_position=from_position)
@@ -739,9 +741,9 @@ class Environment:
         if self.task_model and self.task_model.spawn_points:
             return [(sp.x, sp.y) for sp in self.task_model.spawn_points if sp.enabled]
         return [
-            (6.0, 1.0),
-            (5.0, 1.0),
-            (4.0, 1.0)
+            (7.35, 3.05),
+            (7.75, 3.40),
+            (7.35, 3.75)
         ]
 
     def update(self, time):
@@ -762,6 +764,23 @@ class Environment:
 
     def get_current_phase(self):
         return self.phases[self.current_phase_index] if self.phases else None
+
+    def has_phase_unlock(self, unlock_id):
+        if not unlock_id or not self.phases:
+            return False
+        normalized = str(unlock_id).strip().lower()
+        for idx, phase in enumerate(self.phases):
+            if idx > self.current_phase_index:
+                break
+            unlocks = phase.get("unlocks") or []
+            if any(str(u).strip().lower() == normalized for u in unlocks):
+                return True
+        return False
+
+    def is_interaction_target_unlocked(self, target_name):
+        if target_name == "Build_Table_C":
+            return self.has_phase_unlock("bridge_to_zone_C")
+        return True
 
     def is_near_object(self, agent_pos, object_name, threshold=0.5):
         obj = self.objects[object_name]
@@ -846,6 +865,9 @@ class Environment:
         if not target:
             return {"accessible": False, "reason": "unknown_target"}
 
+        if not self.is_interaction_target_unlocked(target_name):
+            return {"accessible": False, "reason": "locked_until_bridge_access"}
+
         if target.get("kind") == "information":
             zone_name = target.get("zone")
             obj = self.objects.get(target_name)
@@ -893,9 +915,9 @@ class Environment:
                     return pos
 
         candidate_spawns = {
-            "Architect": (6.9, 1.2),
-            "Engineer": (3.9, 1.2),
-            "Botanist": (5.0, 1.0)
+            "Architect": (7.35, 3.75),
+            "Engineer": (7.35, 3.05),
+            "Botanist": (7.75, 3.40)
         }
         pos = candidate_spawns.get(role, (6.0, 3.0))
         if not self.is_in_blocked_zone(pos):
