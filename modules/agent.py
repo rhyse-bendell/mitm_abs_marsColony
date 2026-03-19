@@ -1277,10 +1277,19 @@ class Agent:
 
     def _effective_knowledge_for_readiness(self, sim_state=None):
         info_ids = {i.id for i in self.mental_model["information"]}
-        rule_ids = {normalize_rule_token(r) for r in self.mental_model["knowledge"].rules}
+        knowledge_ids = {str(r).strip() for r in self.mental_model["knowledge"].rules if str(r).strip()}
+        rule_ids = {normalize_rule_token(r) for r in knowledge_ids}
         _, team_info_ids, team_rule_ids = self._team_validated_ids(sim_state=sim_state)
         info_ids.update(team_info_ids)
         rule_ids.update(normalize_rule_token(r) for r in team_rule_ids)
+        if getattr(self, "task_model", None):
+            for rule in self.task_model.rules.values():
+                if not rule.enabled:
+                    continue
+                needed_k = {k for k in rule.required_knowledge if k}
+                needed_i = {i for i in rule.required_information if i}
+                if needed_k.issubset(knowledge_ids) and needed_i.issubset(info_ids):
+                    rule_ids.add(rule.rule_id)
         return info_ids, rule_ids
 
     def _construction_project_for_action(self, decision, action, environment):

@@ -1,0 +1,28 @@
+{
+  "benchmark_spec": {
+    "condition": "high_task_high_team",
+    "seed": 20260319,
+    "steps": 120,
+    "dt": 0.5,
+    "brain": "rule_brain"
+  },
+  "session": "Outputs/readiness_unlock_bridge_fix_20260319_025156",
+  "readiness": {
+    "recomputed_after_inspect_count": 90,
+    "after_blockers_top": {},
+    "missing_task_prerequisite_rules_frequency": 0
+  },
+  "milestones": {
+    "first_ready_for_build_true": 14.5,
+    "first_productive_affordance_available": null
+  },
+  "productive_affordance_availability_count": 0,
+  "top_selected_actions": {
+    "request_assistance": 19,
+    "inspect_information_source": 3
+  },
+  "log_paths": {
+    "events_csv": "Outputs/readiness_unlock_bridge_fix_20260319_025156/logs/events.csv",
+    "run_summary_json": "Outputs/readiness_unlock_bridge_fix_20260319_025156/measures/run_summary.json"
+  }
+}
