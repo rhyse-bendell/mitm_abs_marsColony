@@ -213,6 +213,7 @@ class Agent:
         self.last_planner_time = -1.0
         self.planner_call_count = 0
         self.loop_counters = {"action_signature": None, "action_repeats": 0, "plan_signature": None, "plan_repeats": 0, "target_failures": {}}
+        self.selection_loop_guard = {"last_action": None, "consecutive_count": 0}
         self._planner_request_seq = 0
         self.planner_state = {
             "status": "idle",
@@ -2257,6 +2258,12 @@ class Agent:
             "action_translation_outcome": "succeeded" if translated_actions else "none",
             "translated_actions": translated_actions,
         })
+        selected_action_value = decision.selected_action.value
+        if self.selection_loop_guard.get("last_action") == selected_action_value:
+            self.selection_loop_guard["consecutive_count"] = int(self.selection_loop_guard.get("consecutive_count", 0) or 0) + 1
+        else:
+            self.selection_loop_guard["last_action"] = selected_action_value
+            self.selection_loop_guard["consecutive_count"] = 1
         sim_state.logger.log_event(
             sim_state.time,
             "brain_decision_outcome",
@@ -2267,7 +2274,7 @@ class Agent:
                 "configured_brain_backend": result["configured_backend"],
                 "effective_brain_backend": result["effective_backend"],
                 "decision_status": status,
-                "selected_action": decision.selected_action.value,
+                "selected_action": selected_action_value,
                 "confidence": decision.confidence,
                 "errors": result["errors"],
                 "request_explanation": result["request_explanation"],
@@ -2289,6 +2296,17 @@ class Agent:
         ext_utility = self._hook_value("action_utility", "externalize_plan", "utility_weight", default=0.5)
         consult_utility = self._hook_value("action_utility", "consult_team_artifact", "utility_weight", default=0.5)
         assist_utility = self._hook_value("action_utility", "request_assistance", "utility_weight", default=0.5)
+        action_repeat_count = int(getattr(self, "loop_counters", {}).get("action_repeats", 0) or 0)
+        repeated_selected_action_count = int(getattr(self, "selection_loop_guard", {}).get("consecutive_count", 0) or 0)
+        seconds_since_dik_change = (
+            None
+            if float(getattr(self, "last_dik_change_time", -1.0) or -1.0) < 0.0
+            else max(0.0, float(sim_state.time) - float(getattr(self, "last_dik_change_time", 0.0)))
+        )
+        assistance_stalled = (
+            max(action_repeat_count, repeated_selected_action_count) >= 3
+            and (seconds_since_dik_change is None or float(seconds_since_dik_change) > 8.0)
+        )
         force_externalize = trigger_reason == "new_dik_acquired" and comm >= 0.7 and random.random() < ((comm + ext_utility) / 2.0)
 
         if force_externalize:
@@ -2299,7 +2317,12 @@ class Agent:
             selected = ExecutableActionType.CONSULT_TEAM_ARTIFACT
             reason_bits.append("goal_alignment favored validated team artifact consultation")
 
-        if help_t >= 0.7 and self._help_context_available(sim_state) and random.random() < ((help_t + assist_utility) / 2.0):
+        if (
+            help_t >= 0.7
+            and self._help_context_available(sim_state)
+            and not assistance_stalled
+            and random.random() < ((help_t + assist_utility) / 2.0)
+        ):
             selected = ExecutableActionType.REQUEST_ASSISTANCE
             reason_bits.append("help_tendency redirected toward assistance exchange")
 
