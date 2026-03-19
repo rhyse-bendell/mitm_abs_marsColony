@@ -205,6 +205,10 @@ class RuleBrain(BrainProvider):
             if item.get("state") in {"absent", "in_progress"} and float(item.get("progress", 0.0)) < 1.0
         ]
         needs_resource_delivery = any(float(item.get("progress", 0.0)) < 1.0 for item in active_incomplete_projects)
+        in_progress_resource_incomplete = any(
+            item.get("state") == "in_progress" and float(item.get("progress", 0.0)) < 1.0
+            for item in active_incomplete_projects
+        )
         productive_build_types = {
             ExecutableActionType.TRANSPORT_RESOURCES.value,
             ExecutableActionType.START_CONSTRUCTION.value,
@@ -221,7 +225,7 @@ class RuleBrain(BrainProvider):
         )
         productive_build_affordance = None
         if ready_for_build and active_incomplete_projects:
-            if needs_resource_delivery and not recent_meaningful_epistemic_change:
+            if needs_resource_delivery and (in_progress_resource_incomplete or not recent_meaningful_epistemic_change):
                 productive_build_affordance = self._best_affordance(
                     sorted_affordances, {ExecutableActionType.TRANSPORT_RESOURCES.value}
                 )

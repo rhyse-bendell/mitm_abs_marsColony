@@ -175,6 +175,32 @@ class TestBrainContextAndDecision(unittest.TestCase):
             decision = RuleBrain().decide(packet)
             self.assertEqual(decision.selected_action, ExecutableActionType.START_CONSTRUCTION)
 
+    def test_rule_brain_prefers_transport_for_in_progress_incomplete_project_even_with_mismatch_signal(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir)
+            agent = sim.agents[0]
+            packet = BrainContextBuilder().build(sim, agent)
+
+            packet.world_snapshot["phase_profile"]["stage"] = "execution"
+            packet.individual_cognitive_state["build_readiness"]["ready_for_build"] = True
+            packet.individual_cognitive_state["build_readiness"]["status"] = "plausible"
+            packet.individual_cognitive_state["seconds_since_dik_change"] = 1.0
+            packet.history_bands["semantic_plan_evolution"]["unresolved_contradictions"] = ["construction mismatch"]
+            packet.world_snapshot["built_state"] = [
+                {
+                    "structure_id": "Build_Table_A",
+                    "state": "in_progress",
+                    "progress": 0.0,
+                }
+            ]
+            packet.action_affordances = [
+                {"action_type": ExecutableActionType.START_CONSTRUCTION.value, "utility": 0.9, "target_id": "Build_Table_A"},
+                {"action_type": ExecutableActionType.TRANSPORT_RESOURCES.value, "utility": 0.5, "target_id": "resource_zone_to_work_zone"},
+            ]
+
+            decision = RuleBrain().decide(packet)
+            self.assertEqual(decision.selected_action, ExecutableActionType.TRANSPORT_RESOURCES)
+
 
 class TestTeamKnowledgeManagerAndIntegration(unittest.TestCase):
     def test_team_knowledge_manager_store_and_retrieve_artifact(self):

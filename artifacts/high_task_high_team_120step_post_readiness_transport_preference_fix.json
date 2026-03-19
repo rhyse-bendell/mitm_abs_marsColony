@@ -1,0 +1,161 @@
+{
+  "benchmark_spec": {
+    "condition": "high_task_high_team",
+    "seed": 20260319,
+    "steps": 120,
+    "dt": 0.5,
+    "brain": "rule_brain"
+  },
+  "session": "Outputs/diag_after_transport_preference_20260319_035458",
+  "first_ready_for_build_true": 14.5,
+  "first_actions_after_readiness_unlock": [
+    [
+      14.5,
+      "Architect",
+      "inspect_information_source"
+    ],
+    [
+      15.0,
+      "Engineer",
+      "request_assistance"
+    ],
+    [
+      15.0,
+      "Botanist",
+      "request_assistance"
+    ],
+    [
+      15.5,
+      "Engineer",
+      "request_assistance"
+    ],
+    [
+      15.5,
+      "Botanist",
+      "request_assistance"
+    ],
+    [
+      16.5,
+      "Architect",
+      "request_assistance"
+    ],
+    [
+      16.5,
+      "Architect",
+      "request_assistance"
+    ],
+    [
+      17.0,
+      "Engineer",
+      "request_assistance"
+    ],
+    [
+      17.0,
+      "Engineer",
+      "transport_resources"
+    ],
+    [
+      17.0,
+      "Botanist",
+      "request_assistance"
+    ],
+    [
+      17.0,
+      "Botanist",
+      "request_assistance"
+    ],
+    [
+      17.5,
+      "Architect",
+      "request_assistance"
+    ],
+    [
+      18.0,
+      "Botanist",
+      "request_assistance"
+    ],
+    [
+      18.5,
+      "Architect",
+      "request_assistance"
+    ],
+    [
+      19.0,
+      "Botanist",
+      "request_assistance"
+    ],
+    [
+      19.5,
+      "Architect",
+      "request_assistance"
+    ],
+    [
+      20.0,
+      "Botanist",
+      "request_assistance"
+    ],
+    [
+      20.5,
+      "Architect",
+      "request_assistance"
+    ],
+    [
+      21.0,
+      "Botanist",
+      "request_assistance"
+    ],
+    [
+      21.5,
+      "Architect",
+      "request_assistance"
+    ],
+    [
+      22.0,
+      "Botanist",
+      "request_assistance"
+    ],
+    [
+      22.5,
+      "Architect",
+      "request_assistance"
+    ],
+    [
+      23.0,
+      "Botanist",
+      "request_assistance"
+    ],
+    [
+      23.5,
+      "Architect",
+      "request_assistance"
+    ],
+    [
+      24.0,
+      "Botanist",
+      "request_assistance"
+    ]
+  ],
+  "top_actions_after_readiness_unlock": [
+    [
+      "request_assistance",
+      99
+    ],
+    [
+      "transport_resources",
+      6
+    ],
+    [
+      "inspect_information_source",
+      1
+    ]
+  ],
+  "construction_resource_delivered": 6,
+  "construction_progress_updated": 6,
+  "any_progress": true,
+  "construction_waiting_for_logistics": 0,
+  "construction_transport_blocked": 0,
+  "start_construction_selected_after_readiness": 0,
+  "transport_resources_selected_after_readiness": 6,
+  "post_readiness_productive_pivot": 3,
+  "first_start_construction_execution_trace": []
+}
