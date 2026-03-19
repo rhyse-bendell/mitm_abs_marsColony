@@ -272,6 +272,16 @@ class Agent:
             "first_movement_time": None,
             "left_spawn_time": None,
         }
+        self.fallback_bootstrap = {
+            "active": False,
+            "required_sources": [],
+            "activation_reason": None,
+            "activated_at": None,
+            "completed_at": None,
+            "runtime_fallback_triggers": 0,
+            "startup_sanity_status": "unknown",
+            "last_forced_action": None,
+        }
         self.navigation = {
             "path_mode": str((planner_config or {}).get("path_mode", "grid_astar") or "grid_astar"),
             "ignore_agent_collision": bool((planner_config or {}).get("ignore_agent_collision", True)),
@@ -372,6 +382,99 @@ class Agent:
             self.startup_state[flag_name] = True
             self.startup_state[f"{flag_name}_time"] = float(sim_state.time)
             self._emit_event(sim_state, event_type, payload or {})
+
+    def _fallback_bootstrap_required_sources(self):
+        role_source = f"{self.role}_Info"
+        allowed = getattr(self, "allowed_packet", None)
+        if isinstance(allowed, str):
+            allowed = [allowed]
+        normalized_allowed = {self._normalize_packet_name(p) for p in (allowed or [])}
+        required = ["Team_Info"]
+        if (not normalized_allowed) or role_source in normalized_allowed:
+            required.append(role_source)
+        return required
+
+    def activate_fallback_bootstrap(self, sim_state=None, reason="runtime_fallback"):
+        required_sources = self._fallback_bootstrap_required_sources()
+        if not self.fallback_bootstrap.get("active"):
+            self.fallback_bootstrap.update(
+                {
+                    "active": True,
+                    "required_sources": list(required_sources),
+                    "activation_reason": reason,
+                    "activated_at": float(getattr(sim_state, "time", getattr(self, "current_time", 0.0))),
+                    "completed_at": None,
+                }
+            )
+            self._emit_event(
+                sim_state,
+                "fallback_bootstrap_mode_activated",
+                {"reason": reason, "required_sources": list(required_sources), "left_spawn": bool(self.startup_state.get("left_spawn"))},
+            )
+        elif required_sources:
+            merged = []
+            seen = set()
+            for source_id in list(self.fallback_bootstrap.get("required_sources", [])) + list(required_sources):
+                if source_id in seen:
+                    continue
+                seen.add(source_id)
+                merged.append(source_id)
+            self.fallback_bootstrap["required_sources"] = merged
+
+    def _fallback_bootstrap_complete(self, sim_state=None):
+        required_sources = list(self.fallback_bootstrap.get("required_sources", []))
+        inspected_all = all(self.source_inspection_state.get(source_id) == "inspected" for source_id in required_sources)
+        return bool(self.startup_state.get("left_spawn")) and inspected_all
+
+    def _next_bootstrap_source(self, environment):
+        required_sources = list(self.fallback_bootstrap.get("required_sources", []))
+        for source_id in required_sources:
+            if not self._has_packet_access(source_id):
+                continue
+            status = self.source_inspection_state.get(source_id)
+            if status == "inspected":
+                continue
+            if status == "in_progress" and int(self.inspect_stall_counts.get(source_id, 0)) >= 2:
+                continue
+            if (
+                source_id == self.source_access_state.get("source_id")
+                and int(self.source_access_state.get("blocked_attempts", 0)) >= 3
+            ):
+                continue
+            if source_id in environment.knowledge_packets:
+                return source_id
+        candidates = self._candidate_information_sources(environment)
+        if candidates:
+            return candidates[0][1]
+        return None
+
+    def _bootstrap_override_decision(self, environment, sim_state=None):
+        if not self.fallback_bootstrap.get("active"):
+            return None
+        if self._fallback_bootstrap_complete(sim_state=sim_state):
+            self.fallback_bootstrap["active"] = False
+            self.fallback_bootstrap["completed_at"] = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+            self._emit_event(
+                sim_state,
+                "fallback_bootstrap_mode_completed",
+                {"required_sources": list(self.fallback_bootstrap.get("required_sources", []))},
+            )
+            return None
+        source_id = self._next_bootstrap_source(environment)
+        if source_id:
+            self.fallback_bootstrap["last_forced_action"] = "inspect_information_source"
+            return BrainDecision(
+                selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                target_id=source_id,
+                reason_summary="forced mission bootstrap for fallback continuity",
+                confidence=0.95,
+            )
+        self.fallback_bootstrap["last_forced_action"] = "observe_environment"
+        return BrainDecision(
+            selected_action=ExecutableActionType.OBSERVE_ENVIRONMENT,
+            reason_summary="bootstrap mode awaiting source accessibility",
+            confidence=0.7,
+        )
 
     def _trait_value(self, name, default=0.5):
         value = getattr(self, name, default)
@@ -718,33 +821,46 @@ class Agent:
         if not usable:
             self.source_access_state["blocked_attempts"] = int(self.source_access_state.get("blocked_attempts", 0)) + 1
             blocked_attempts = int(self.source_access_state.get("blocked_attempts", 0))
-            self._set_status(f"Inspect pending: usable source access not obtained for {source_id} ({access_reason})")
-            self.inspect_session["last_updated_at"] = now_ts
-            self.inspect_session["state"] = "target_reached" if self.inspect_session.get("state") == "target_reached" else "target_selected"
-            self._emit_event(sim_state, "inspect_progressed", {"source_id": source_id, "stage": self.inspect_session.get("state"), "target": target_pos, "goal": self.goal})
-            self._emit_event(sim_state, "source_access_blocked_by_occupancy", {"source_id": source_id, "slot_id": slot_id, "reason": access_reason, "blocked_attempts": blocked_attempts})
-            if access_reason in {"slot_reserved_by_other", "not_at_interaction_slot"}:
-                alt = self._select_source_access_target(environment, source_id, sim_state=sim_state)
-                if alt is not None and alt.get("slot_id") != slot_id:
-                    self.target = alt.get("position")
-                    self._emit_event(sim_state, "source_access_retargeted_alternate_slot", {"source_id": source_id, "previous_slot_id": slot_id, "next_slot_id": alt.get("slot_id")})
-            if blocked_attempts >= 4:
-                self._emit_event(sim_state, "source_access_unstuck_backoff", {"source_id": source_id, "slot_id": slot_id, "blocked_attempts": blocked_attempts})
-                self._release_source_slot(environment, source_id=source_id, emit=True, sim_state=sim_state, reason="unstuck_backoff")
-                self.source_access_state["blocked_attempts"] = 0
-                self.target = self.spawn_position
-            if shared_source:
+            if (
+                self.fallback_bootstrap.get("active")
+                and source_id == "Team_Info"
+                and blocked_attempts >= 3
+            ):
+                usable = True
+                access_reason = "fallback_bootstrap_shared_access_override"
                 self._emit_event(
                     sim_state,
-                    "shared_source_access_blocked",
-                    {
-                        "source_id": source_id,
-                        "reason": "too_far_or_role_mismatch",
-                        "source_meta": source_meta,
-                        "source_access_classification": source_access_classification.get("classification"),
-                    },
+                    "fallback_bootstrap_source_access_override",
+                    {"source_id": source_id, "blocked_attempts": blocked_attempts},
                 )
-            return False
+            if not usable:
+                self._set_status(f"Inspect pending: usable source access not obtained for {source_id} ({access_reason})")
+                self.inspect_session["last_updated_at"] = now_ts
+                self.inspect_session["state"] = "target_reached" if self.inspect_session.get("state") == "target_reached" else "target_selected"
+                self._emit_event(sim_state, "inspect_progressed", {"source_id": source_id, "stage": self.inspect_session.get("state"), "target": target_pos, "goal": self.goal})
+                self._emit_event(sim_state, "source_access_blocked_by_occupancy", {"source_id": source_id, "slot_id": slot_id, "reason": access_reason, "blocked_attempts": blocked_attempts})
+                if access_reason in {"slot_reserved_by_other", "not_at_interaction_slot"}:
+                    alt = self._select_source_access_target(environment, source_id, sim_state=sim_state)
+                    if alt is not None and alt.get("slot_id") != slot_id:
+                        self.target = alt.get("position")
+                        self._emit_event(sim_state, "source_access_retargeted_alternate_slot", {"source_id": source_id, "previous_slot_id": slot_id, "next_slot_id": alt.get("slot_id")})
+                if blocked_attempts >= 4:
+                    self._emit_event(sim_state, "source_access_unstuck_backoff", {"source_id": source_id, "slot_id": slot_id, "blocked_attempts": blocked_attempts})
+                    self._release_source_slot(environment, source_id=source_id, emit=True, sim_state=sim_state, reason="unstuck_backoff")
+                    self.source_access_state["blocked_attempts"] = 0
+                    self.target = self.spawn_position
+                if shared_source:
+                    self._emit_event(
+                        sim_state,
+                        "shared_source_access_blocked",
+                        {
+                            "source_id": source_id,
+                            "reason": "too_far_or_role_mismatch",
+                            "source_meta": source_meta,
+                            "source_access_classification": source_access_classification.get("classification"),
+                        },
+                    )
+                return False
 
         self.source_access_state["blocked_attempts"] = 0
 
@@ -2159,6 +2275,14 @@ class Agent:
             self._emit_event(sim_state, "llm_response_invalid", {"request_id": request_id, "trace_id": result.get("trace_id")})
         if result.get("fallback_used"):
             self._emit_event(sim_state, "fallback_result_generated", {"request_id": request_id, "trace_id": result.get("trace_id"), "fallback_source": result.get("fallback_source"), "result_source": result.get("result_source")})
+            self.fallback_bootstrap["runtime_fallback_triggers"] = int(self.fallback_bootstrap.get("runtime_fallback_triggers", 0)) + 1
+            early_window_steps = max(4, int(self.planner_cadence.planner_interval_steps) * 12)
+            if (
+                self.sim_step_count <= early_window_steps
+                and self.fallback_bootstrap["runtime_fallback_triggers"] >= 2
+                and not self._fallback_bootstrap_complete(sim_state=sim_state)
+            ):
+                self.activate_fallback_bootstrap(sim_state=sim_state, reason="runtime_fallback_repeated")
 
         self._emit_event(sim_state, "planner_invocation_completed", {"trigger_reason": trigger_reason, "decision_status": status, "selected_action": decision.selected_action.value, "request_explanation": result["request_explanation"], "request_id": request_id, "trace_id": result.get("trace_id"), "result_source": result.get("result_source"), "fallback_used": bool(result.get("fallback_used"))})
 
@@ -2208,6 +2332,7 @@ class Agent:
 
         if result.get("llm_response_validated"):
             self.planner_state["llm_success_count"] += 1
+            self.fallback_bootstrap["runtime_fallback_triggers"] = 0
         if result.get("timeout_occurred"):
             self.planner_state["llm_timeout_count"] += 1
         if result.get("llm_response_received") and not result.get("llm_response_validated"):
@@ -3384,6 +3509,18 @@ class Agent:
                     runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend}
                     self._emit_event(sim_state, "ui_safe_fallback_used", {"reason": planner_reason, "request_state": self.planner_state.get("status"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
                     sim_state.logger.log_event(sim_state.time, "planner_skipped_without_plan", {"agent": self.name, "reason": planner_reason})
+                bootstrap_decision = self._bootstrap_override_decision(environment, sim_state=sim_state)
+                if bootstrap_decision is not None:
+                    self.current_action = self._translate_brain_decision_to_legacy_action(bootstrap_decision, environment, sim_state=sim_state)
+                    self._emit_event(
+                        sim_state,
+                        "fallback_bootstrap_action_forced",
+                        {
+                            "action_type": bootstrap_decision.selected_action.value,
+                            "target_id": bootstrap_decision.target_id,
+                            "activation_reason": self.fallback_bootstrap.get("activation_reason"),
+                        },
+                    )
                 self._advance_active_actions(dt, sim_state=sim_state)
 
             self._apply_externalization_and_construction_effects(environment, sim_state, dt)

@@ -432,6 +432,17 @@ class SimulationState:
         try:
             summary = run_startup_llm_sanity_check(self, config=self.startup_llm_sanity_config)
             self.startup_llm_sanity_summary.update(summary)
+            results_by_agent = {
+                str(item.get("agent_id")): item
+                for item in (summary.get("startup_llm_sanity_results") or [])
+                if isinstance(item, dict) and item.get("agent_id")
+            }
+            for agent in self.agents:
+                row = results_by_agent.get(str(agent.agent_id), {})
+                validation_success = bool(row.get("validation_success"))
+                agent.fallback_bootstrap["startup_sanity_status"] = "success" if validation_success else "failed"
+                if not validation_success:
+                    agent.activate_fallback_bootstrap(sim_state=self, reason="startup_sanity_failed")
             self.logger.update_session_manifest(extra_metadata=self._backend_settings_for_manifest())
             return dict(self.startup_llm_sanity_summary)
         except Exception as exc:  # noqa: BLE001
@@ -443,6 +454,9 @@ class SimulationState:
                     "startup_llm_sanity_error": f"{type(exc).__name__}: {exc}",
                 }
             )
+            for agent in self.agents:
+                agent.fallback_bootstrap["startup_sanity_status"] = "failed"
+                agent.activate_fallback_bootstrap(sim_state=self, reason="startup_sanity_exception")
             self.logger.log_event(
                 self.time,
                 "startup_llm_sanity_failed",
