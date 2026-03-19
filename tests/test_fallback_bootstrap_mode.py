@@ -73,6 +73,31 @@ class TestFallbackBootstrapMode(unittest.TestCase):
             self.assertTrue(any(a.fallback_bootstrap.get("last_forced_action") == "inspect_information_source" for a in sim.agents))
             sim.stop()
 
+    def test_bootstrap_stages_shared_then_role_source(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            agent = next(a for a in sim.agents if a.role == "Architect")
+            agent.activate_fallback_bootstrap(sim_state=sim, reason="test_stage_transition")
+            agent._ensure_source_state(sim.environment)
+            agent.startup_state["left_spawn"] = True
+
+            # Shared packet has been consumed already and is exhausted for this agent.
+            agent.source_inspection_state["Team_Info"] = "revisitable_due_to_gap"
+            agent.source_exhaustion_state["Team_Info"]["exhausted"] = True
+
+            forced = agent._bootstrap_override_decision(sim.environment, sim_state=sim)
+            self.assertIsNotNone(forced)
+            self.assertEqual(forced.target_id, "Architect_Info")
+            self.assertEqual(agent.fallback_bootstrap.get("stage"), "role")
+
+            # Once role packet is completed/exhausted, bootstrap can complete.
+            agent.source_inspection_state["Architect_Info"] = "inspected"
+            agent.source_exhaustion_state["Architect_Info"]["exhausted"] = True
+            followup = agent._bootstrap_override_decision(sim.environment, sim_state=sim)
+            self.assertIsNone(followup)
+            self.assertFalse(agent.fallback_bootstrap.get("active"))
+            sim.stop()
+
 
 if __name__ == "__main__":
     unittest.main()
