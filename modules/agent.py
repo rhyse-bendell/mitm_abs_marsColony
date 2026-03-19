@@ -3745,6 +3745,19 @@ class Agent:
                         sim_state.logger.log_event(sim_state.time, "construction_waiting_for_logistics", {"agent": self.name, "project_id": project_id})
                         continue
 
+                    if not environment.is_interaction_target_unlocked(project_id):
+                        self._emit_event(
+                            sim_state,
+                            "construction_transport_blocked",
+                            {
+                                "agent": self.name,
+                                "project_id": project_id,
+                                "failure_category": "bridge_access_locked",
+                                "decision_action": decision_action,
+                            },
+                        )
+                        continue
+
                     if not legacy_direct:
                         self.inventory_resources["bricks"] = max(0, self.inventory_resources.get("bricks", 0) - 1)
                     environment.construction.assign_builder(project_id, self.name)
@@ -3890,6 +3903,19 @@ class Agent:
                             "agent": self.name,
                             "project_id": project_id,
                             "failure_category": "project_already_complete",
+                            "decision_action": action.get("decision_action"),
+                        },
+                    )
+                    continue
+
+                if not environment.is_interaction_target_unlocked(project_id):
+                    self._emit_event(
+                        sim_state,
+                        "construction_transport_blocked",
+                        {
+                            "agent": self.name,
+                            "project_id": project_id,
+                            "failure_category": "bridge_access_locked",
                             "decision_action": action.get("decision_action"),
                         },
                     )
