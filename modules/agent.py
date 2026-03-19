@@ -234,6 +234,7 @@ class Agent:
             "total_timed_out": 0,
             "total_failed": 0,
             "total_skipped_inflight": 0,
+            "consecutive_inflight_skips": 0,
             "total_skipped_cooldown": 0,
             "total_stale_discarded": 0,
             "stale_plan_reuse_count": 0,
@@ -437,6 +438,30 @@ class Agent:
         completed_all = all(self._is_source_bootstrap_satisfied(source_id) for source_id in required_sources)
         return bool(self.startup_state.get("left_spawn")) and completed_all
 
+    def clear_planner_inflight_state(self, sim_state=None, reason="manual_reset"):
+        with self._planner_future_lock:
+            fut = self._planner_future
+            self._planner_future = None
+        if fut is not None and not fut.done():
+            fut.cancel()
+        if self.planner_state.get("status") == "in_flight":
+            self._emit_event(
+                sim_state,
+                "planner_inflight_cleared",
+                {"agent": self.name, "request_id": self.planner_state.get("request_id"), "reason": reason},
+            )
+        self.planner_state["status"] = "idle"
+        self.planner_state["request_id"] = None
+        self.planner_state["requested_wallclock_at"] = None
+        self.planner_state["requested_at"] = None
+        self.planner_state["request_tick"] = None
+        self.planner_state["consecutive_inflight_skips"] = 0
+
+    def _maybe_hard_demote_backend(self, sim_state, reason, activate_bootstrap=True):
+        if sim_state is None or not hasattr(sim_state, "hard_demote_agent_backend"):
+            return False
+        return bool(sim_state.hard_demote_agent_backend(self, reason=reason, activate_bootstrap=activate_bootstrap))
+
     def _next_bootstrap_source(self, environment):
         stage = str(self.fallback_bootstrap.get("stage") or "shared")
         required_sources = list(self.fallback_bootstrap.get("required_sources", []))
@@ -492,6 +517,10 @@ class Agent:
         if self._fallback_bootstrap_complete(sim_state=sim_state):
             self.fallback_bootstrap["active"] = False
             self.fallback_bootstrap["completed_at"] = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+            self.clear_planner_inflight_state(sim_state=sim_state, reason="bootstrap_completed")
+            self.current_plan = None
+            self.last_planner_step = -1
+            self.last_planner_time = -1.0
             self._emit_event(
                 sim_state,
                 "fallback_bootstrap_mode_completed",
@@ -2289,6 +2318,7 @@ class Agent:
                 return False
 
         self.planner_call_count += 1
+        self.planner_state["consecutive_inflight_skips"] = 0
         self.last_planner_step = self.sim_step_count
         self.last_planner_time = sim_state.time
         self.planner_state["completed_at"] = sim_state.time
@@ -2322,6 +2352,7 @@ class Agent:
                 and self.fallback_bootstrap["runtime_fallback_triggers"] >= 2
                 and not self._fallback_bootstrap_complete(sim_state=sim_state)
             ):
+                self._maybe_hard_demote_backend(sim_state, reason="runtime_fallback_repeated", activate_bootstrap=False)
                 self.activate_fallback_bootstrap(sim_state=sim_state, reason="runtime_fallback_repeated")
 
         self._emit_event(sim_state, "planner_invocation_completed", {"trigger_reason": trigger_reason, "decision_status": status, "selected_action": decision.selected_action.value, "request_explanation": result["request_explanation"], "request_id": request_id, "trace_id": result.get("trace_id"), "result_source": result.get("result_source"), "fallback_used": bool(result.get("fallback_used"))})
@@ -3523,8 +3554,23 @@ class Agent:
                         self._emit_event(sim_state, "planner_request_skipped_cooldown", {"reason": planner_reason, "cooldown_remaining": cooldown_remaining, "consecutive_failures": self.planner_state["consecutive_failures"], "backend": runtime.get("configured_backend", sim_state.configured_brain_backend), "model": runtime["config"].local_model})
                     elif self.planner_state.get("status") == "in_flight":
                         self.planner_state["total_skipped_inflight"] += 1
+                        self.planner_state["consecutive_inflight_skips"] = int(self.planner_state.get("consecutive_inflight_skips", 0)) + 1
                         runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend, "effective_backend": sim_state.effective_brain_backend, "provider": sim_state.brain_provider}
                         self._emit_event(sim_state, "planner_request_skipped_inflight", {"reason": planner_reason, "request_id": self.planner_state.get("request_id"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
+                        stall_threshold = max(3, int(self.planner_cadence.planner_interval_steps) * 3)
+                        early_window_steps = max(4, int(self.planner_cadence.planner_interval_steps) * 12)
+                        if (
+                            self.sim_step_count <= early_window_steps
+                            and int(self.planner_state.get("consecutive_inflight_skips", 0)) >= stall_threshold
+                            and int(self.planner_state.get("total_completed", 0)) == 0
+                        ):
+                            demoted = self._maybe_hard_demote_backend(
+                                sim_state,
+                                reason="early_inflight_stall",
+                                activate_bootstrap=True,
+                            )
+                            if demoted:
+                                self.clear_planner_inflight_state(sim_state=sim_state, reason="early_inflight_stall")
                         if self.current_plan is None and not self.active_actions and not self.current_action:
                             if self.planner_cadence.unrestricted_local_qwen_mode:
                                 self._emit_event(sim_state, "planner_waiting_on_inflight_unrestricted", {"reason": "inflight_without_plan", "request_state": self.planner_state.get("status"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
