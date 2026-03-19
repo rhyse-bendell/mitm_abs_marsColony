@@ -1,0 +1,131 @@
+{
+  "benchmark_spec": {
+    "condition": "high_task_high_team",
+    "seed": 20260319,
+    "steps": 120,
+    "dt": 0.5,
+    "brain": "rule_brain"
+  },
+  "session": "tmp_bench_run/Outputs/post_readiness_pivot_fix_v3_20260319_031625",
+  "first_ready_for_build_true": 14.5,
+  "first_actions_after_readiness_unlock": [
+    [
+      14.5,
+      "Architect",
+      "inspect_information_source"
+    ],
+    [
+      15.0,
+      "Engineer",
+      "request_assistance"
+    ],
+    [
+      15.0,
+      "Botanist",
+      "request_assistance"
+    ],
+    [
+      15.5,
+      "Engineer",
+      "request_assistance"
+    ],
+    [
+      15.5,
+      "Botanist",
+      "request_assistance"
+    ],
+    [
+      16.5,
+      "Architect",
+      "request_assistance"
+    ],
+    [
+      16.5,
+      "Architect",
+      "request_assistance"
+    ],
+    [
+      17.0,
+      "Engineer",
+      "request_assistance"
+    ],
+    [
+      17.0,
+      "Engineer",
+      "start_construction"
+    ],
+    [
+      17.0,
+      "Botanist",
+      "request_assistance"
+    ],
+    [
+      17.0,
+      "Botanist",
+      "request_assistance"
+    ],
+    [
+      17.5,
+      "Architect",
+      "request_assistance"
+    ],
+    [
+      18.0,
+      "Engineer",
+      "start_construction"
+    ],
+    [
+      18.0,
+      "Botanist",
+      "request_assistance"
+    ],
+    [
+      18.5,
+      "Architect",
+      "request_assistance"
+    ],
+    [
+      19.0,
+      "Engineer",
+      "start_construction"
+    ],
+    [
+      19.0,
+      "Botanist",
+      "request_assistance"
+    ],
+    [
+      19.5,
+      "Architect",
+      "request_assistance"
+    ],
+    [
+      20.0,
+      "Engineer",
+      "start_construction"
+    ],
+    [
+      20.0,
+      "Botanist",
+      "request_assistance"
+    ]
+  ],
+  "top_actions_after_readiness_unlock": [
+    [
+      "request_assistance",
+      100
+    ],
+    [
+      "start_construction",
+      42
+    ],
+    [
+      "inspect_information_source",
+      1
+    ]
+  ],
+  "construction_resource_delivered": 0,
+  "construction_progress_updated": 0,
+  "any_progress": false,
+  "post_readiness_productive_pivot": 4
+}

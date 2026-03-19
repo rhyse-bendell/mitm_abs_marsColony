@@ -2624,6 +2624,60 @@ class Agent:
             sim_state.logger.log_event(sim_state.time, "plan_invalidated", {"agent": self.name, "plan_id": self.current_plan.plan_id, "reason": self.current_plan.invalidation_reason, "trace_id": self.planner_state.get("trace_id")})
             return False
 
+        if self.current_plan.decision.selected_action in {
+            ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+            ExecutableActionType.REQUEST_ASSISTANCE,
+        }:
+            context = sim_state.brain_context_builder.build(sim_state, self)
+            readiness = context.individual_cognitive_state.get("build_readiness", {})
+            built_state = context.world_snapshot.get("built_state", [])
+            active_incomplete_projects = [
+                item
+                for item in built_state
+                if item.get("state") in {"absent", "in_progress"} and float(item.get("progress", 0.0)) < 1.0
+            ]
+            mismatch_signals = context.history_bands.get("semantic_plan_evolution", {}).get("unresolved_contradictions", [])
+            seconds_since_dik_change = context.individual_cognitive_state.get("seconds_since_dik_change")
+            recent_meaningful_epistemic_change = (
+                seconds_since_dik_change is not None
+                and float(seconds_since_dik_change) <= 2.0
+                and bool(mismatch_signals)
+            )
+            if readiness.get("ready_for_build") and active_incomplete_projects and not recent_meaningful_epistemic_change:
+                sorted_affordances = sorted(
+                    context.action_affordances,
+                    key=lambda a: float(a.get("utility", 0.0)),
+                    reverse=True,
+                )
+                previous_action = self.current_plan.decision.selected_action.value
+                for candidate in sorted_affordances:
+                    if candidate.get("action_type") not in {
+                        ExecutableActionType.TRANSPORT_RESOURCES.value,
+                        ExecutableActionType.START_CONSTRUCTION.value,
+                        ExecutableActionType.CONTINUE_CONSTRUCTION.value,
+                    }:
+                        continue
+                    self.current_plan.decision = BrainDecision(
+                        selected_action=ExecutableActionType(candidate["action_type"]),
+                        target_id=candidate.get("target_id"),
+                        target_zone=candidate.get("target_zone"),
+                        goal_update="satisfy_build_logistics"
+                        if candidate.get("action_type") == ExecutableActionType.TRANSPORT_RESOURCES.value
+                        else "execute_build",
+                        reason_summary="Post-readiness pivot: demote repeated epistemic action in favor of productive build/logistics action.",
+                        confidence=max(0.8, float(self.current_plan.decision.confidence or 0.0)),
+                    )
+                    self._emit_event(
+                        sim_state,
+                        "post_readiness_productive_pivot",
+                        {
+                            "plan_id": self.current_plan.plan_id,
+                            "pivoted_to": candidate.get("action_type"),
+                            "previous_action": previous_action,
+                        },
+                    )
+                    break
+
         self.current_action = self._translate_brain_decision_to_legacy_action(self.current_plan.decision, environment, sim_state=sim_state)
         self.current_plan.remaining_executions -= 1
         self.current_plan.last_reviewed_at = sim_state.time
