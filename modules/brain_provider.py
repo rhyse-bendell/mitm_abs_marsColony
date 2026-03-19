@@ -210,6 +210,10 @@ class RuleBrain(BrainProvider):
             ExecutableActionType.START_CONSTRUCTION.value,
             ExecutableActionType.CONTINUE_CONSTRUCTION.value,
         }
+        loop_counters = context_packet.individual_cognitive_state.get("loop_counters", {})
+        repeated_action_count = int(loop_counters.get("action_repeats", 0) or 0)
+        repeated_selected_action_count = int(loop_counters.get("selected_action_repeats", 0) or 0)
+        seconds_since_dik_change = context_packet.individual_cognitive_state.get("seconds_since_dik_change")
         productive_build_affordance = None
         if ready_for_build and active_incomplete_projects:
             if needs_resource_delivery:
@@ -218,6 +222,11 @@ class RuleBrain(BrainProvider):
                 )
             if productive_build_affordance is None:
                 productive_build_affordance = self._best_affordance(sorted_affordances, productive_build_types)
+
+        assistance_stalled = (
+            max(repeated_action_count, repeated_selected_action_count) >= 3
+            and (seconds_since_dik_change is None or float(seconds_since_dik_change) > 8.0)
+        )
 
         if (
             stage in {"early", "execution"}
@@ -257,6 +266,7 @@ class RuleBrain(BrainProvider):
                 or not active_incomplete_projects
                 or productive_build_affordance is None
             )
+            and not assistance_stalled
         ):
             return BrainDecision(
                 selected_action=ExecutableActionType.REQUEST_ASSISTANCE,
@@ -266,6 +276,29 @@ class RuleBrain(BrainProvider):
                 reason_summary="Help tendency and known gaps prompt assistance-seeking.",
                 confidence=0.76,
             )
+
+        if assistance_stalled:
+            anti_loop_affordance = self._best_affordance(
+                sorted_affordances,
+                {
+                    ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
+                    ExecutableActionType.CONSULT_TEAM_ARTIFACT.value,
+                    ExecutableActionType.TRANSPORT_RESOURCES.value,
+                    ExecutableActionType.START_CONSTRUCTION.value,
+                    ExecutableActionType.CONTINUE_CONSTRUCTION.value,
+                },
+            )
+            if anti_loop_affordance is not None:
+                selected = ExecutableActionType(anti_loop_affordance["action_type"])
+                return BrainDecision(
+                    selected_action=selected,
+                    target_id=anti_loop_affordance.get("target_id"),
+                    target_zone=anti_loop_affordance.get("target_zone"),
+                    goal_update="break_assistance_loop",
+                    plan_steps=["de-prioritize repeated assistance", "execute next productive affordance"],
+                    reason_summary="Repeated assistance without recent DIK/team-state change; force productive anti-loop action.",
+                    confidence=0.78,
+                )
 
         if productive_build_affordance is not None:
             selected = ExecutableActionType(productive_build_affordance["action_type"])

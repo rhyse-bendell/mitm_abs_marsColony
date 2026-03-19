@@ -1,0 +1,25 @@
+{
+  "benchmark_spec": {
+    "condition": "high_task_high_team",
+    "seed": 20260319,
+    "steps": 120,
+    "dt": 0.5,
+    "brain": "rule_brain"
+  },
+  "selected_action_counts": {
+    "request_assistance": 15
+  },
+  "top_selected_actions": [
+    [
+      "request_assistance",
+      15
+    ]
+  ],
+  "request_assistance_no_change_max_consecutive": 15,
+  "request_assistance_no_change_segments": [
+    15
+  ],
+  "construction_resource_delivered": 0,
+  "construction_progress_updated": 0,
+  "any_progress": false
+}

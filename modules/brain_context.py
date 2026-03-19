@@ -423,6 +423,16 @@ class BrainContextBuilder:
                 "validation_notes": list(getattr(active_plan, "validation_notes", []) or []),
                 "associated_goal_ids": list(getattr(active_plan, "associated_goal_ids", []) or []),
             },
+            "loop_counters": {
+                "action_repeats": int(getattr(agent, "loop_counters", {}).get("action_repeats", 0) or 0),
+                "plan_repeats": int(getattr(agent, "loop_counters", {}).get("plan_repeats", 0) or 0),
+                "selected_action_repeats": int(getattr(agent, "selection_loop_guard", {}).get("consecutive_count", 0) or 0),
+            },
+            "seconds_since_dik_change": (
+                None
+                if float(getattr(agent, "last_dik_change_time", -1.0) or -1.0) < 0.0
+                else max(0.0, float(sim_state.time) - float(getattr(agent, "last_dik_change_time", 0.0)))
+            ),
         }
 
         history_bands["semantic_plan_evolution"] = {
