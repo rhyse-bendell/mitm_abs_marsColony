@@ -3564,8 +3564,6 @@ class Agent:
                         self._set_status(f"Legacy sweep ingested packet from {packet_name}")
                 # Deliberately suppress per-tick access-failure spam from legacy sweep.
 
-        elif self.current_inspect_target_id:
-            self._inspect_source(environment, self.current_inspect_target_id, sim_state=sim_state)
 
         if "mismatch with construction" in " ".join(self.activity_log[-6:]).lower() and self.current_inspect_target_id:
             self.mark_source_revisitable(self.current_inspect_target_id, reason="construction_mismatch")
@@ -3685,6 +3683,10 @@ class Agent:
 
         if self.target:
             self.move_toward(self.target, dt, environment, sim_state=sim_state)
+
+        if self.current_inspect_target_id:
+            self._inspect_source(environment, self.current_inspect_target_id, sim_state=sim_state)
+
         if sim_state is not None and not self.startup_state.get("left_spawn"):
             moved = math.hypot(self.position[0] - self.spawn_position[0], self.position[1] - self.spawn_position[1])
             if moved > 0.2:
