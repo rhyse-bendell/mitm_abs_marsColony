@@ -11,15 +11,14 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   exit 1
 fi
 
-"$PYTHON_BIN" - <<'PY' >/dev/null 2>&1 || {
-import importlib
-for module in ("tkinter", "matplotlib"):
-    importlib.import_module(module)
-PY
-  echo "Error: required packages are missing (tkinter and/or matplotlib)."
-  echo "Install dependencies, for example: pip install matplotlib"
+if ! "$PYTHON_BIN" scripts/preflight_check.py; then
+  echo
+  echo "Preflight failed. Run repair with:"
+  echo "  $PYTHON_BIN scripts/preflight_check.py --repair"
   exit 1
-}
+fi
+
+export MPLBACKEND=TkAgg
 
 echo "Launching Mars Colony interface..."
 exec "$PYTHON_BIN" interface.py

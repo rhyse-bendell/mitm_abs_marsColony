@@ -1,9 +1,10 @@
 # File: interface.py
 
 import tkinter as tk
-from tkinter import ttk
-import matplotlib.pyplot as plt
+from tkinter import ttk, messagebox
+from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.patches import Circle, Rectangle
 from modules.simulation import SimulationState
 from tkinter import StringVar, BooleanVar, DoubleVar, IntVar
 from modules.construction import ConstructionManager
@@ -63,6 +64,13 @@ class MarsColonyInterface:
         {"role": "Agent 5", "display_name": "Agent 5", "label": "Agent 5", "template_id": None},
         {"role": "Agent 6", "display_name": "Agent 6", "label": "Agent 6", "template_id": None},
     ]
+    PLOTTING_INIT_ERROR = (
+        "Plot initialization failed.\n\n"
+        "This interface expects a Tk-compatible Matplotlib environment.\n"
+        "Mixed NumPy/Matplotlib/PySide installations can break plotting imports.\n\n"
+        "Run the repository preflight repair command before launching again:\n"
+        "  py -3 scripts\\preflight_check.py --repair"
+    )
 
     def __init__(self):
         self.root = tk.Tk()
@@ -106,10 +114,15 @@ class MarsColonyInterface:
         self.create_interaction_tab()
 
     def _build_environment_canvas(self, parent):
-        fig, ax = plt.subplots(figsize=(6, 6))
-        canvas = FigureCanvasTkAgg(fig, master=parent)
-        canvas.get_tk_widget().pack(fill="both", expand=True)
-        return fig, ax, canvas
+        try:
+            fig = Figure(figsize=(6, 6))
+            ax = fig.add_subplot(111)
+            canvas = FigureCanvasTkAgg(fig, master=parent)
+            canvas.get_tk_widget().pack(fill="both", expand=True)
+            return fig, ax, canvas
+        except Exception as exc:
+            messagebox.showerror("Plot Initialization Error", self.PLOTTING_INIT_ERROR)
+            raise RuntimeError(self.PLOTTING_INIT_ERROR) from exc
 
     def create_dashboard_tab(self):
         self.tab_dashboard = ttk.Frame(self.notebook)
@@ -654,12 +667,12 @@ class MarsColonyInterface:
             if obj["type"] == "circle":
                 x, y = obj["position"]
                 r = obj["radius"]
-                ax.add_patch(plt.Circle((x, y), r, edgecolor='black', facecolor='lightblue'))
+                ax.add_patch(Circle((x, y), r, edgecolor='black', facecolor='lightblue'))
                 ax.text(x, y, obj.get("label", ""), ha='center', va='center')
             elif obj["type"] == "rect":
                 x, y = obj["position"]
                 w, h = obj["size"]
-                ax.add_patch(plt.Rectangle((x, y), w, h, edgecolor='black', facecolor='lightgray'))
+                ax.add_patch(Rectangle((x, y), w, h, edgecolor='black', facecolor='lightgray'))
                 ax.text(x + w / 2, y + h / 2, obj.get("label", ""), ha='center', va='center')
             elif obj["type"] == "line":
                 sx, sy = obj["start"]
@@ -669,7 +682,7 @@ class MarsColonyInterface:
                 (x1, y1), (x2, y2) = obj["corners"]
                 x_min, x_max = min(x1, x2), max(x1, x2)
                 y_min, y_max = min(y1, y2), max(y1, y2)
-                ax.add_patch(plt.Rectangle((x_min, y_min), x_max - x_min, y_max - y_min, edgecolor='black', facecolor='darkgray'))
+                ax.add_patch(Rectangle((x_min, y_min), x_max - x_min, y_max - y_min, edgecolor='black', facecolor='darkgray'))
                 ax.text((x1 + x2) / 2, (y1 + y2) / 2, obj.get("label", ""), ha='center', va='center', fontsize=9)
 
         for project in self.sim.environment.construction.get_visual_data():
@@ -679,8 +692,8 @@ class MarsColonyInterface:
             fill = project["fill_color"]
             fill_pct = project["progress"]
 
-            ax.add_patch(plt.Circle((cx, cy), r, edgecolor=border, facecolor=fill, linewidth=2))
-            ax.add_patch(plt.Circle((cx, cy), r * fill_pct, color=border, alpha=0.3))
+            ax.add_patch(Circle((cx, cy), r, edgecolor=border, facecolor=fill, linewidth=2))
+            ax.add_patch(Circle((cx, cy), r * fill_pct, color=border, alpha=0.3))
             ax.text(cx, cy, project["label"], ha='center', va='center', fontsize=7)
 
         for agent in self.sim.agents:
