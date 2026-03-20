@@ -829,6 +829,16 @@ class Environment:
         obj = self.objects[object_key]
         access_radius = obj.get("access_radius", DEFAULT_INFO_ACCESS_RADIUS)
 
+        expected_role = self.expected_role_for_packet(object_key)
+        if expected_role is not None:
+            if str(role or "").strip().lower() != str(expected_role).strip().lower():
+                return False
+
+        # If packet has an explicit role restriction, ensure agent has the correct role
+        if "role" in self.objects[object_key]:
+            if role is None or self.objects[object_key]["role"] != role:
+                return False
+
         target_meta = self.interaction_targets.get(object_key, {})
         zone_name = target_meta.get("zone")
         if zone_name and self._nearest_distance_to_zone(position, zone_name) <= access_radius:
@@ -852,16 +862,6 @@ class Environment:
         if dist > access_radius:
             return False
 
-        expected_role = self.expected_role_for_packet(object_key)
-        if expected_role is not None:
-            if str(role or "").strip().lower() != str(expected_role).strip().lower():
-                return False
-
-        # If packet has an explicit role restriction, ensure agent has the correct role
-        if "role" in self.objects[object_key]:
-            if role is None or self.objects[object_key]["role"] != role:
-                return False
-
         return True
 
     def can_interact_with_table(self, agent_pos, table_name):
@@ -879,6 +879,10 @@ class Environment:
             return {"accessible": False, "reason": "locked_until_bridge_access"}
 
         if target.get("kind") == "information":
+            role_ok = self.can_access_info(position, target_name, role=role)
+            if not role_ok:
+                return {"accessible": False, "reason": "too_far_or_role_mismatch"}
+
             zone_name = target.get("zone")
             obj = self.objects.get(target_name)
             access_radius = (obj or {}).get("access_radius", DEFAULT_INFO_ACCESS_RADIUS)
@@ -886,8 +890,7 @@ class Environment:
                 return {"accessible": True, "reason": "in_zone"}
             if zone_name and self._nearest_distance_to_zone(position, zone_name) <= access_radius:
                 return {"accessible": True, "reason": "near_zone"}
-            role_ok = self.can_access_info(position, target_name, role=role)
-            return {"accessible": role_ok, "reason": "distance_threshold" if role_ok else "too_far_or_role_mismatch"}
+            return {"accessible": True, "reason": "distance_threshold"}
 
         if target.get("kind") == "build":
             table_name = target.get("object")

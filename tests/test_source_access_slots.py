@@ -89,6 +89,44 @@ class TestSourceAccessSlots(unittest.TestCase):
         self.assertNotIn("source_access_succeeded", event_types)
         self.assertIn("source_access_legality_checked", event_types)
 
+    def test_wrong_role_inside_private_source_zone_is_denied(self):
+        env = Environment(phases=[])
+        inside_zone = (6.40, 1.10)  # inside Zone_Architect_Info
+
+        self.assertFalse(env.can_access_info(inside_zone, "Architect_Info", role="Engineer"))
+        access = env.get_interaction_access(inside_zone, "Architect_Info", role="Engineer")
+        self.assertFalse(access["accessible"])
+        self.assertEqual(access["reason"], "too_far_or_role_mismatch")
+
+    def test_wrong_role_at_private_source_slot_is_denied(self):
+        env = Environment(phases=[])
+        slot = env.select_source_access_point("Architect_Info", agent_id="A1", from_position=(6.40, 1.10))
+        self.assertIsNotNone(slot)
+        slot_pos = slot["position"]
+
+        self.assertFalse(env.can_access_info(slot_pos, "Architect_Info", role="Engineer"))
+        usable, reason = env.can_agent_use_source_slot("Architect_Info", "A1", slot_pos, slot_id=slot["slot_id"], role="Engineer")
+        self.assertFalse(usable)
+        self.assertEqual(reason, "too_far_or_role_mismatch")
+
+    def test_correct_role_inside_private_source_zone_is_allowed(self):
+        env = Environment(phases=[])
+        inside_zone = (6.40, 1.10)  # inside Zone_Architect_Info
+
+        self.assertTrue(env.can_access_info(inside_zone, "Architect_Info", role="Architect"))
+        access = env.get_interaction_access(inside_zone, "Architect_Info", role="Architect")
+        self.assertTrue(access["accessible"])
+        self.assertEqual(access["reason"], "in_zone")
+
+    def test_team_info_access_still_allowed_when_position_valid(self):
+        env = Environment(phases=[])
+        inside_zone = (8.0, 6.5)  # inside Zone_Team_Info
+
+        self.assertTrue(env.can_access_info(inside_zone, "Team_Info", role="Engineer"))
+        access = env.get_interaction_access(inside_zone, "Team_Info", role="Engineer")
+        self.assertTrue(access["accessible"])
+        self.assertEqual(access["reason"], "in_zone")
+
     def test_role_private_source_requires_role_and_valid_slot(self):
         env = Environment(phases=[])
         wrong_role_agent = Agent(name="Engineer", role="Engineer", position=(3.45, 0.92), agent_id="A1")
