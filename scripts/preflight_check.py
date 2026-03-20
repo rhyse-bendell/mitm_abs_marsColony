@@ -77,16 +77,7 @@ def check_environment() -> PreflightReport:
 
     matplotlib_mod = loaded_modules.get("matplotlib")
     if matplotlib_mod is not None:
-        backend = str(matplotlib_mod.get_backend() or "").lower()
         forced_backend = (os.environ.get("MPLBACKEND") or "").strip().lower()
-        if "qt" in backend or "pyside" in backend or "pyqt" in backend:
-            messages.append(
-                CheckMessage(
-                    "warning",
-                    "Matplotlib backend resolved to a Qt backend; this Tk GUI should use TkAgg.",
-                    repairable=False,
-                )
-            )
         if forced_backend and ("qt" in forced_backend or "pyside" in forced_backend or "pyqt" in forced_backend):
             messages.append(
                 CheckMessage(
@@ -156,6 +147,14 @@ def run_repair(python_executable: str = sys.executable) -> int:
     return int(completed.returncode)
 
 
+def run_fresh_preflight_check(python_executable: str = sys.executable) -> int:
+    command = [python_executable, str(Path(__file__).resolve())]
+    print("Re-running preflight checks in a fresh Python process:")
+    print("  " + " ".join(command))
+    completed = subprocess.run(command, check=False)
+    return int(completed.returncode)
+
+
 def _print_report(report: PreflightReport) -> None:
     prefix_map = {"ok": "[OK]", "warning": "[WARN]", "error": "[ERROR]"}
     print("Mars Colony preflight report")
@@ -186,9 +185,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         rc = run_repair()
         if rc != 0:
             return rc
-        post_report = check_environment()
-        _print_report(post_report)
-        return 0 if not post_report.has_errors else 1
+        return run_fresh_preflight_check()
 
     return 1 if report.has_errors else 0
 
