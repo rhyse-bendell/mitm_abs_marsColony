@@ -1720,6 +1720,24 @@ class Agent:
             return None
         return self.task_model.goals.get(goal_id)
 
+    def _canonical_readiness_goal_id(self):
+        if not self.task_model:
+            return None
+
+        candidate_ids = []
+        if self.current_plan is not None:
+            candidate_ids.extend([gid for gid in (self.current_plan.associated_goal_ids or []) if gid])
+        candidate_ids.extend([g.get("goal_id") for g in self.goal_stack if g.get("goal_id")])
+
+        for level in ("mission", "phase", "role", "support"):
+            for goal_id in candidate_ids:
+                definition = self.task_model.goals.get(goal_id)
+                if not definition or not definition.enabled:
+                    continue
+                if str(definition.goal_level).strip().lower() == level:
+                    return goal_id
+        return None
+
     def _activate_support_goal(self, label, reason, sim_state=None, priority=0.7, source="derived_from_rule"):
         mission_goal = next((g for g in self.goal_registry.values() if g.goal_level == "mission"), None)
         goal = self._upsert_goal_record(
@@ -2925,7 +2943,15 @@ class Agent:
         if self.task_model is not None:
             enabled = set(self.task_model.enabled_actions_for_role(self.role))
             if decision.selected_action.value not in enabled:
-                self._emit_event(sim_state, "action_translation_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "illegal_action"})
+                self._emit_event(
+                    sim_state,
+                    "action_translation_failed",
+                    {
+                        "planner_action_type": decision.selected_action.value,
+                        "failure_category": "illegal_action",
+                        "target_id": decision.target_id,
+                    },
+                )
                 return [{"type": "idle", "duration": 1.0, "priority": 1, "decision_action": ExecutableActionType.WAIT.value}]
 
         mapping = {
@@ -2989,7 +3015,15 @@ class Agent:
                 if not self.startup_state.get("first_productive_action_started"):
                     self.planner_state["startup_target_resolution_failures"] = int(self.planner_state.get("startup_target_resolution_failures", 0)) + 1
                     self._emit_event(sim_state, "first_target_resolution_failed", {"target_type": "information_source", "requested_target_id": decision.target_id})
-                self._emit_event(sim_state, "action_translation_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "unresolved_target"})
+                self._emit_event(
+                    sim_state,
+                    "action_translation_failed",
+                    {
+                        "planner_action_type": decision.selected_action.value,
+                        "failure_category": "unresolved_target",
+                        "target_id": decision.target_id,
+                    },
+                )
                 if isinstance(getattr(self, "post_inspect_handoff", None), dict) and self.post_inspect_handoff.get("source_id"):
                     self._emit_event(sim_state, "post_inspect_action_translation_failed", {
                         "source_id": self.post_inspect_handoff.get("source_id"),
@@ -3105,7 +3139,11 @@ class Agent:
                 self._emit_event(sim_state, "execution_readiness_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "readiness_not_unlocked", "blockers": blockers, "project_id": project_id})
                 return [{"type": "idle", "duration": 1.0, "priority": 1, "decision_action": ExecutableActionType.WAIT.value}]
             else:
-                self._emit_event(sim_state, "execution_readiness_passed", {"planner_action_type": decision.selected_action.value, "goal_id": "G_MISSION_BUILD_COMPLETE", "project_id": project_id})
+                payload = {"planner_action_type": decision.selected_action.value, "project_id": project_id}
+                goal_id = self._canonical_readiness_goal_id()
+                if goal_id:
+                    payload["goal_id"] = goal_id
+                self._emit_event(sim_state, "execution_readiness_passed", payload)
 
         if decision.selected_action in {ExecutableActionType.EXTERNALIZE_PLAN, ExecutableActionType.CONSULT_TEAM_ARTIFACT}:
             action["artifact_action"] = decision.selected_action.value
