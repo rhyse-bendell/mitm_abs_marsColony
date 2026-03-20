@@ -30,6 +30,7 @@ UNRESTRICTED_QWEN_DEFAULTS = {
     "high_latency_stale_result_grace_s": 1800.0,
     "permissive_timeout_ceiling_s": 1800.0,
     "permissive_completion_ceiling_tokens": 32768,
+    "sticky_backend_demotion_enabled": False,
 }
 
 
@@ -442,7 +443,8 @@ class SimulationState:
                 validation_success = bool(row.get("validation_success"))
                 agent.fallback_bootstrap["startup_sanity_status"] = "success" if validation_success else "failed"
                 if not validation_success:
-                    self.hard_demote_agent_backend(agent, reason="startup_sanity_failed", activate_bootstrap=False)
+                    if self.sticky_backend_demotion_enabled(agent):
+                        self.hard_demote_agent_backend(agent, reason="startup_sanity_failed", activate_bootstrap=False)
                     agent.activate_fallback_bootstrap(sim_state=self, reason="startup_sanity_failed")
             self.logger.update_session_manifest(extra_metadata=self._backend_settings_for_manifest())
             return dict(self.startup_llm_sanity_summary)
@@ -457,7 +459,8 @@ class SimulationState:
             )
             for agent in self.agents:
                 agent.fallback_bootstrap["startup_sanity_status"] = "failed"
-                self.hard_demote_agent_backend(agent, reason="startup_sanity_exception", activate_bootstrap=False)
+                if self.sticky_backend_demotion_enabled(agent):
+                    self.hard_demote_agent_backend(agent, reason="startup_sanity_exception", activate_bootstrap=False)
                 agent.activate_fallback_bootstrap(sim_state=self, reason="startup_sanity_exception")
             self.logger.log_event(
                 self.time,
@@ -490,6 +493,7 @@ class SimulationState:
             "high_latency_local_llm_mode": bool(agent.planner_cadence.high_latency_local_llm_mode),
             "unrestricted_local_qwen_mode": bool(agent.planner_cadence.unrestricted_local_qwen_mode),
             "high_latency_stale_result_grace_s": float(agent.planner_cadence.high_latency_stale_result_grace_s),
+            "sticky_backend_demotion_enabled": bool(agent.planner_cadence.sticky_backend_demotion_enabled),
         }
 
     def _register_agent_brain_runtime(self, agent):
@@ -589,6 +593,16 @@ class SimulationState:
         runtime = self.get_agent_brain_runtime(agent)
         return bool(runtime.get("hard_demoted"))
 
+    def sticky_backend_demotion_enabled(self, agent=None):
+        if agent is not None and hasattr(agent, "planner_cadence"):
+            return bool(getattr(agent.planner_cadence, "sticky_backend_demotion_enabled", False))
+        return bool(
+            self.planner_defaults.get(
+                "sticky_backend_demotion_enabled",
+                self.planner_defaults.get("allow_persistent_backend_demotion", False),
+            )
+        )
+
     def hard_demote_agent_backend(self, agent, reason, activate_bootstrap=True):
         runtime = self.get_agent_brain_runtime(agent)
         if runtime.get("hard_demoted"):
@@ -643,6 +657,7 @@ class SimulationState:
             "effective_planner_completion_max_tokens": int(self.brain_backend_config.completion_max_tokens),
             "stale_result_relaxation_enabled": bool(self.planner_defaults.get("high_latency_local_llm_mode", False)) and float(self.planner_defaults.get("high_latency_stale_result_grace_s", 0.0) or 0.0) > 0.0,
             "high_latency_stale_result_grace_s": float(self.planner_defaults.get("high_latency_stale_result_grace_s", 0.0) or 0.0),
+            "sticky_backend_demotion_enabled": bool(self.sticky_backend_demotion_enabled()),
             "permissive_timeout_ceiling_s": float(self.brain_backend_config.permissive_timeout_ceiling_s or 0.0),
             "permissive_completion_ceiling_tokens": int(self.brain_backend_config.permissive_completion_ceiling_tokens or 0),
             "provider_class": self.brain_provider.__class__.__name__,

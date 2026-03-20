@@ -66,6 +66,7 @@ class PlannerCadenceConfig:
     high_latency_local_llm_mode: bool = False
     unrestricted_local_qwen_mode: bool = False
     high_latency_stale_result_grace_s: float = 0.0
+    sticky_backend_demotion_enabled: bool = False
 
     @classmethod
     def from_dict(cls, payload):
@@ -94,6 +95,12 @@ class PlannerCadenceConfig:
             high_latency_local_llm_mode=bool(payload.get("high_latency_local_llm_mode", False)),
             unrestricted_local_qwen_mode=bool(payload.get("unrestricted_local_qwen_mode", False)),
             high_latency_stale_result_grace_s=max(0.0, float(payload.get("high_latency_stale_result_grace_s", 0.0))),
+            sticky_backend_demotion_enabled=bool(
+                payload.get(
+                    "sticky_backend_demotion_enabled",
+                    payload.get("allow_persistent_backend_demotion", False),
+                )
+            ),
         )
 
 
@@ -459,6 +466,16 @@ class Agent:
 
     def _maybe_hard_demote_backend(self, sim_state, reason, activate_bootstrap=True):
         if sim_state is None or not hasattr(sim_state, "hard_demote_agent_backend"):
+            return False
+        allow_sticky = True
+        if hasattr(sim_state, "sticky_backend_demotion_enabled"):
+            allow_sticky = bool(sim_state.sticky_backend_demotion_enabled(self))
+        if not allow_sticky:
+            self._emit_event(
+                sim_state,
+                "backend_hard_demotion_skipped",
+                {"agent_id": self.agent_id, "reason": str(reason), "sticky_backend_demotion_enabled": False},
+            )
             return False
         return bool(sim_state.hard_demote_agent_backend(self, reason=reason, activate_bootstrap=activate_bootstrap))
 
@@ -3609,6 +3626,9 @@ class Agent:
                             )
                             if demoted:
                                 self.clear_planner_inflight_state(sim_state=sim_state, reason="early_inflight_stall")
+                            else:
+                                self.clear_planner_inflight_state(sim_state=sim_state, reason="early_inflight_stall_recover")
+                                self.activate_fallback_bootstrap(sim_state=sim_state, reason="early_inflight_stall")
                         if self.current_plan is None and not self.active_actions and not self.current_action:
                             if self.planner_cadence.unrestricted_local_qwen_mode:
                                 self._emit_event(sim_state, "planner_waiting_on_inflight_unrestricted", {"reason": "inflight_without_plan", "request_state": self.planner_state.get("status"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})

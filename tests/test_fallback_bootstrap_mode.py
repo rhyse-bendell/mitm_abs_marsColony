@@ -3,6 +3,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+from modules.brain_provider import OllamaLocalBrainProvider
 from modules.simulation import SimulationState
 
 
@@ -12,7 +13,7 @@ class TestFallbackBootstrapMode(unittest.TestCase):
             sim.update(dt)
             time.sleep(0.03)
 
-    def test_startup_sanity_failure_forces_bootstrap_sequence(self):
+    def test_startup_sanity_failure_forces_bootstrap_sequence_without_sticky_demotion_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("modules.llm_sanity._post_chat_completion", side_effect=TimeoutError("forced startup timeout")):
                 sim = SimulationState(
@@ -35,8 +36,8 @@ class TestFallbackBootstrapMode(unittest.TestCase):
                 self.assertEqual(agent.fallback_bootstrap.get("activation_reason"), "startup_sanity_failed")
                 self.assertEqual(agent.fallback_bootstrap.get("last_forced_action"), "inspect_information_source")
                 runtime = sim.get_agent_brain_runtime(agent)
-                self.assertTrue(runtime.get("hard_demoted"))
-                self.assertEqual(runtime.get("effective_backend"), "rule_brain")
+                self.assertFalse(runtime.get("hard_demoted"))
+                self.assertIsInstance(runtime.get("provider"), OllamaLocalBrainProvider)
             sim.stop()
 
     def test_repeated_runtime_fallback_activates_bootstrap(self):
@@ -74,6 +75,8 @@ class TestFallbackBootstrapMode(unittest.TestCase):
             self.assertTrue(any(int(a.fallback_bootstrap.get("runtime_fallback_triggers", 0)) >= 2 for a in sim.agents))
             self.assertTrue(any(a.fallback_bootstrap.get("activation_reason") == "runtime_fallback_repeated" for a in sim.agents))
             self.assertTrue(any(a.fallback_bootstrap.get("last_forced_action") == "inspect_information_source" for a in sim.agents))
+            self.assertTrue(all(not bool(sim.get_agent_brain_runtime(a).get("hard_demoted")) for a in sim.agents))
+            self.assertTrue(all(isinstance(sim.get_agent_brain_runtime(a).get("provider"), OllamaLocalBrainProvider) for a in sim.agents))
             sim.stop()
 
     def test_bootstrap_stages_shared_then_role_source(self):
@@ -101,7 +104,7 @@ class TestFallbackBootstrapMode(unittest.TestCase):
             self.assertFalse(agent.fallback_bootstrap.get("active"))
             sim.stop()
 
-    def test_forced_llm_failure_hard_demotion_keeps_run_productive(self):
+    def test_forced_llm_failure_opt_in_sticky_hard_demotion_keeps_run_productive(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("modules.llm_sanity._post_chat_completion", side_effect=TimeoutError("forced startup timeout")):
                 sim = SimulationState(
@@ -110,7 +113,12 @@ class TestFallbackBootstrapMode(unittest.TestCase):
                     flash_mode=True,
                     brain_backend="local_http",
                     brain_backend_options={"timeout_s": 0.1, "max_retries": 0, "fallback_backend": "rule_brain"},
-                    planner_config={"planner_interval_steps": 1, "planner_interval_time": 0.0, "planner_timeout_seconds": 0.2},
+                    planner_config={
+                        "planner_interval_steps": 1,
+                        "planner_interval_time": 0.0,
+                        "planner_timeout_seconds": 0.2,
+                        "sticky_backend_demotion_enabled": True,
+                    },
                 )
             with patch("modules.agent.random.random", return_value=0.0):
                 self._run_steps(sim, steps=110, dt=0.2)
