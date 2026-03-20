@@ -34,6 +34,7 @@
     "degraded_consecutive_failures_threshold": 24,
     "degraded_cooldown_seconds": 300.0,
     "degraded_step_interval_multiplier": 8.0,
+    "sticky_backend_demotion_enabled": false,
     "high_latency_local_llm_mode": true,
     "high_latency_stale_result_grace_s": 1800.0,
     "startup_llm_sanity_completion_max_tokens": 24576,
