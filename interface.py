@@ -5,6 +5,7 @@ from tkinter import ttk, messagebox
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.patches import Circle, Rectangle
+from matplotlib.lines import Line2D
 from modules.simulation import SimulationState
 from tkinter import StringVar, BooleanVar, DoubleVar, IntVar
 from modules.construction import ConstructionManager
@@ -224,8 +225,24 @@ class MarsColonyInterface:
         self.tab_construction = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_construction, text="Construction")
 
-        self.construction_text = tk.Text(self.tab_construction, wrap="word")
-        self.construction_text.pack(fill="both", expand=True)
+        panes = ttk.PanedWindow(self.tab_construction, orient="horizontal")
+        panes.pack(fill="both", expand=True, padx=6, pady=6)
+
+        visual_frame = ttk.LabelFrame(panes, text="Construction Sites", padding=6)
+        text_frame = ttk.LabelFrame(panes, text="Construction Summary", padding=6)
+        panes.add(visual_frame, weight=3)
+        panes.add(text_frame, weight=2)
+
+        self.construction_fig, self.construction_ax, self.construction_canvas = self._build_construction_canvas(visual_frame)
+
+        self.construction_text = tk.Text(text_frame, wrap="word")
+        self.construction_text.pack(side="left", fill="both", expand=True)
+        cons_scroll = ttk.Scrollbar(text_frame, orient="vertical", command=self.construction_text.yview)
+        cons_scroll.pack(side="right", fill="y")
+        self.construction_text.configure(yscrollcommand=cons_scroll.set)
+
+    def _build_construction_canvas(self, parent):
+        return self._build_environment_canvas(parent)
 
     def create_agents_tab(self):
         self.tab_agents = ttk.Frame(self.notebook)
@@ -757,6 +774,7 @@ class MarsColonyInterface:
             msg = "No active construction projects."
             self.construction_text.insert(tk.END, msg)
             self.dashboard_construction_text.insert(tk.END, msg)
+            self._render_construction_tab({"structures": [], "connectors": []})
             return
 
         for project in projects:
@@ -767,6 +785,68 @@ class MarsColonyInterface:
             line = f"{project.get('id', 'unknown')}: status={status}, bricks={delivered}/{req}, builders={', '.join(builders) or 'none'}\n"
             self.construction_text.insert(tk.END, line)
             self.dashboard_construction_text.insert(tk.END, line)
+
+        self._render_construction_tab(self.sim.environment.construction.get_construction_scene_data())
+
+    @staticmethod
+    def _draw_construction_scene(ax, scene_data):
+        ax.clear()
+        ax.set_xlim(2.0, 8.0)
+        ax.set_ylim(2.0, 6.0)
+        ax.set_aspect("equal")
+        ax.set_title("Construction Visual State")
+        ax.grid(True, alpha=0.15)
+
+        structures = scene_data.get("structures", [])
+        for structure in structures:
+            x, y = structure.get("position", (0.0, 0.0))
+            shape = structure.get("shape", "square")
+            color = structure.get("color", "gray")
+            progress = max(0.0, min(1.0, float(structure.get("progress", 0.0) or 0.0)))
+
+            width, height = (0.8, 0.8)
+            if shape == "rectangle":
+                width, height = (1.2, 0.7)
+
+            if shape == "circle":
+                radius = 0.42
+                outline = Circle((x, y), radius, edgecolor=color, facecolor="none", linewidth=2.0)
+                ax.add_patch(outline)
+                if progress > 0:
+                    fill = Circle((x, y), radius, edgecolor="none", facecolor=color, alpha=0.35)
+                    clip = Rectangle((x - radius, y - radius), 2 * radius * progress, 2 * radius, transform=ax.transData)
+                    fill.set_clip_path(clip)
+                    ax.add_patch(fill)
+            else:
+                left = x - width / 2
+                bottom = y - height / 2
+                outline = Rectangle((left, bottom), width, height, edgecolor=color, facecolor="none", linewidth=2.0)
+                ax.add_patch(outline)
+                if progress > 0:
+                    ax.add_patch(Rectangle((left, bottom), width * progress, height, edgecolor="none", facecolor=color, alpha=0.35))
+
+            if structure.get("resource_complete") and not structure.get("validated_complete"):
+                ax.text(x, y + 0.52, "awaiting validation", ha="center", va="bottom", fontsize=7, color="#6d4c1f")
+            if structure.get("validated_complete"):
+                ax.text(x, y + 0.52, "validated", ha="center", va="bottom", fontsize=7, color="#1a7f37")
+            if not structure.get("correct", True) or structure.get("status") == "needs_repair":
+                ax.add_line(Line2D([x - 0.35, x + 0.35], [y - 0.35, y + 0.35], color="black", linewidth=1.4))
+                ax.add_line(Line2D([x - 0.35, x + 0.35], [y + 0.35, y - 0.35], color="black", linewidth=1.4))
+
+            builders = structure.get("builders", [])
+            builder_suffix = f" ({len(builders)}b)" if builders else ""
+            ax.text(x, y - 0.56, f"{structure.get('project_id', 'unknown')}{builder_suffix}", ha="center", va="top", fontsize=7)
+
+        for connector in scene_data.get("connectors", []):
+            start = connector.get("start")
+            end = connector.get("end")
+            if not start or not end:
+                continue
+            ax.plot([start[0], end[0]], [start[1], end[1]], color="black", linewidth=1.5)
+
+    def _render_construction_tab(self, scene_data):
+        self._draw_construction_scene(self.construction_ax, scene_data)
+        self.construction_canvas.draw()
 
     def update_dashboard(self):
         self._render_environment_plot(self.dashboard_ax, self.dashboard_canvas)

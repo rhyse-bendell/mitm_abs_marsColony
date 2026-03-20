@@ -4,6 +4,12 @@ from modules.task_model import normalize_rule_token
 
 
 class ConstructionManager:
+    STRUCTURE_STYLE_MAP = {
+        "house": {"shape": "square", "color": "red"},
+        "greenhouse": {"shape": "rectangle", "color": "green"},
+        "water_generator": {"shape": "circle", "color": "blue"},
+    }
+
     def __init__(self, task_model=None):
         self.task_model = task_model
         self.resource_nodes = {}
@@ -161,9 +167,7 @@ class ConstructionManager:
     def get_visual_data(self):
         visuals = []
         for p in self.get_active_projects():
-            required = p["required_resources"].get("bricks", 0)
-            delivered = p["delivered_resources"].get("bricks", 0)
-            progress = min(1.0, delivered / required) if required > 0 else 0.0
+            progress = self._project_progress(p)
 
             border = {
                 "bridge": "blue",
@@ -183,3 +187,48 @@ class ConstructionManager:
                 "label": p["id"]
             })
         return visuals
+
+    def _project_progress(self, project):
+        required_resources = project.get("required_resources", {})
+        delivered_resources = project.get("delivered_resources", {})
+        if not required_resources:
+            return 0.0
+
+        total_required = sum(max(0.0, float(v or 0.0)) for v in required_resources.values())
+        if total_required <= 0:
+            return 0.0
+
+        total_delivered = 0.0
+        for resource_name, required in required_resources.items():
+            delivered = float(delivered_resources.get(resource_name, 0.0) or 0.0)
+            total_delivered += min(max(0.0, delivered), max(0.0, float(required or 0.0)))
+        return min(1.0, total_delivered / total_required)
+
+    def get_construction_scene_data(self):
+        structures = []
+        for project in self.projects.values():
+            structure_type = str(project.get("type") or "").strip().lower()
+            style = self.STRUCTURE_STYLE_MAP.get(structure_type, {"shape": "square", "color": "gray"})
+            builders = sorted(project.get("builders", []))
+            structures.append(
+                {
+                    "project_id": project.get("id"),
+                    "name": project.get("name"),
+                    "structure_type": structure_type,
+                    "position": tuple(project.get("location", (0.0, 0.0))),
+                    "progress": self._project_progress(project),
+                    "status": project.get("status", "unknown"),
+                    "correct": bool(project.get("correct", True)),
+                    "resource_complete": bool(project.get("resource_complete", False)),
+                    "validated_complete": bool(project.get("validated_complete", False)),
+                    "builders": builders,
+                    "shape": style["shape"],
+                    "color": style["color"],
+                    "label": project.get("id"),
+                }
+            )
+
+        return {
+            "structures": structures,
+            "connectors": [],
+        }
