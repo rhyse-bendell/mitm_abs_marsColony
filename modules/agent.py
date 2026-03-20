@@ -904,57 +904,62 @@ class Agent:
                 role=self.role,
             )
 
+        arrival_distance = math.hypot(self.position[0] - target_pos[0], self.position[1] - target_pos[1]) if target_pos is not None else None
+        self._emit_event(
+            sim_state,
+            "source_access_legality_checked",
+            {
+                "source_id": source_id,
+                "slot_id": slot_id,
+                "target_kind": self.source_access_state.get("target_kind"),
+                "target_position": target_pos,
+                "agent_position": self.position,
+                "arrival_distance": round(float(arrival_distance), 4) if arrival_distance is not None else None,
+                "access_legal": bool(usable),
+                "reason": access_reason,
+            },
+        )
+
         if not usable:
             self.source_access_state["blocked_attempts"] = int(self.source_access_state.get("blocked_attempts", 0)) + 1
             blocked_attempts = int(self.source_access_state.get("blocked_attempts", 0))
-            if (
-                self.fallback_bootstrap.get("active")
-                and source_id == "Team_Info"
-                and blocked_attempts >= 3
-            ):
-                usable = True
-                access_reason = "fallback_bootstrap_shared_access_override"
+            self._set_status(f"Inspect pending: usable source access not obtained for {source_id} ({access_reason})")
+            self.inspect_session["last_updated_at"] = now_ts
+            self.inspect_session["state"] = "target_reached" if self.inspect_session.get("state") == "target_reached" else "target_selected"
+            self._emit_event(sim_state, "inspect_progressed", {"source_id": source_id, "stage": self.inspect_session.get("state"), "target": target_pos, "goal": self.goal})
+            self._emit_event(sim_state, "source_access_blocked_by_occupancy", {"source_id": source_id, "slot_id": slot_id, "reason": access_reason, "blocked_attempts": blocked_attempts})
+            if access_reason in {"slot_reserved_by_other", "not_at_interaction_slot"}:
+                alt = self._select_source_access_target(environment, source_id, sim_state=sim_state)
+                if alt is not None and alt.get("slot_id") != slot_id:
+                    self.target = alt.get("position")
+                    self._emit_event(sim_state, "source_access_retargeted_alternate_slot", {"source_id": source_id, "previous_slot_id": slot_id, "next_slot_id": alt.get("slot_id")})
+            if blocked_attempts >= 4:
+                self._emit_event(sim_state, "source_access_unstuck_backoff", {"source_id": source_id, "slot_id": slot_id, "blocked_attempts": blocked_attempts})
+                self._release_source_slot(environment, source_id=source_id, emit=True, sim_state=sim_state, reason="unstuck_backoff")
+                self.source_access_state["blocked_attempts"] = 0
+                self.target = self.spawn_position
+            if shared_source:
                 self._emit_event(
                     sim_state,
-                    "fallback_bootstrap_source_access_override",
-                    {"source_id": source_id, "blocked_attempts": blocked_attempts},
+                    "shared_source_access_blocked",
+                    {
+                        "source_id": source_id,
+                        "reason": "too_far_or_role_mismatch",
+                        "source_meta": source_meta,
+                        "source_access_classification": source_access_classification.get("classification"),
+                    },
                 )
-            if not usable:
-                self._set_status(f"Inspect pending: usable source access not obtained for {source_id} ({access_reason})")
-                self.inspect_session["last_updated_at"] = now_ts
-                self.inspect_session["state"] = "target_reached" if self.inspect_session.get("state") == "target_reached" else "target_selected"
-                self._emit_event(sim_state, "inspect_progressed", {"source_id": source_id, "stage": self.inspect_session.get("state"), "target": target_pos, "goal": self.goal})
-                self._emit_event(sim_state, "source_access_blocked_by_occupancy", {"source_id": source_id, "slot_id": slot_id, "reason": access_reason, "blocked_attempts": blocked_attempts})
-                if access_reason in {"slot_reserved_by_other", "not_at_interaction_slot"}:
-                    alt = self._select_source_access_target(environment, source_id, sim_state=sim_state)
-                    if alt is not None and alt.get("slot_id") != slot_id:
-                        self.target = alt.get("position")
-                        self._emit_event(sim_state, "source_access_retargeted_alternate_slot", {"source_id": source_id, "previous_slot_id": slot_id, "next_slot_id": alt.get("slot_id")})
-                if blocked_attempts >= 4:
-                    self._emit_event(sim_state, "source_access_unstuck_backoff", {"source_id": source_id, "slot_id": slot_id, "blocked_attempts": blocked_attempts})
-                    self._release_source_slot(environment, source_id=source_id, emit=True, sim_state=sim_state, reason="unstuck_backoff")
-                    self.source_access_state["blocked_attempts"] = 0
-                    self.target = self.spawn_position
-                if shared_source:
-                    self._emit_event(
-                        sim_state,
-                        "shared_source_access_blocked",
-                        {
-                            "source_id": source_id,
-                            "reason": "too_far_or_role_mismatch",
-                            "source_meta": source_meta,
-                            "source_access_classification": source_access_classification.get("classification"),
-                        },
-                    )
-                return False
+            return False
 
         self.source_access_state["blocked_attempts"] = 0
 
         self.inspect_session["state"] = "target_reached"
         self.inspect_session["last_updated_at"] = now_ts
         self._emit_event(sim_state, "inspect_progressed", {"source_id": source_id, "stage": "target_reached", "target": target_pos, "goal": self.goal})
+        self._emit_event(sim_state, "source_access_arrival_confirmed", {"source_id": source_id, "slot_id": slot_id, "target": target_pos, "agent_position": self.position})
         self.inspect_session["state"] = "inspection_started"
         self.inspect_session["last_updated_at"] = now_ts
+        self._emit_event(sim_state, "inspect_started", {"source_id": source_id, "target": target_pos, "goal": self.goal, "slot_id": slot_id})
         self._emit_event(sim_state, "inspect_progressed", {"source_id": source_id, "stage": "inspection_started", "target": target_pos, "goal": self.goal})
         if shared_source:
             self._emit_event(sim_state, "shared_source_inspect_started", {"source_id": source_id, "target": target_pos, "source_meta": source_meta})
@@ -3099,7 +3104,11 @@ class Agent:
                     "last_updated_at": now_ts,
                     "restarts": 0,
                 }
-                self._emit_event(sim_state, "inspect_started", {"source_id": source_id, "target": interaction_target, "goal": self.goal})
+                self._emit_event(
+                    sim_state,
+                    "inspect_target_selected",
+                    {"source_id": source_id, "target": interaction_target, "goal": self.goal},
+                )
             if self.source_inspection_state.get(source_id) == "inspected":
                 self._set_status(f"Source skipped due to completion: {source_id}")
             self._emit_startup_once(sim_state, "first_productive_action_started", "first_productive_action_started", {"planner_action_type": decision.selected_action.value, "translated_action_type": action.get("type")})
