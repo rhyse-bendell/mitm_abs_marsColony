@@ -42,7 +42,9 @@ def test_preflight_reports_healthy_environment(monkeypatch, tmp_path):
     req_file = tmp_path / "requirements.txt"
     req_file.write_text("numpy<2\n", encoding="utf-8")
 
-    matplotlib_mod = types.SimpleNamespace(get_backend=lambda: "TkAgg")
+    matplotlib_mod = types.SimpleNamespace(
+        get_backend=lambda: (_ for _ in ()).throw(AssertionError("unsafe backend resolution path called"))
+    )
 
     def fake_import(name):
         mapping = {
@@ -62,6 +64,34 @@ def test_preflight_reports_healthy_environment(monkeypatch, tmp_path):
 
     assert not report.has_errors
     assert not any(msg.level == "warning" for msg in report.messages)
+
+
+def test_preflight_reports_conflicting_forced_qt_backend(monkeypatch, tmp_path):
+    preflight = _load_preflight_module()
+    req_file = tmp_path / "requirements.txt"
+    req_file.write_text("numpy<2\n", encoding="utf-8")
+
+    def fake_import(name):
+        mapping = {
+            "tkinter": types.SimpleNamespace(),
+            "numpy": types.SimpleNamespace(__version__="1.26.4"),
+            "matplotlib": types.SimpleNamespace(
+                get_backend=lambda: (_ for _ in ()).throw(AssertionError("unsafe backend resolution path called"))
+            ),
+            "pathfinding": types.SimpleNamespace(),
+        }
+        if name in mapping:
+            return mapping[name], None
+        return None, ImportError(name)
+
+    monkeypatch.setattr(preflight, "_safe_import", fake_import)
+    monkeypatch.setattr(preflight, "REQUIREMENTS_PATH", req_file)
+    monkeypatch.setenv("MPLBACKEND", "QtAgg")
+
+    report = preflight.check_environment()
+
+    assert report.has_errors
+    assert any("MPLBACKEND is forcing 'qtagg'" in msg.message for msg in report.messages)
 
 
 def test_run_repair_invokes_expected_pip_command(monkeypatch, tmp_path):
@@ -86,3 +116,21 @@ def test_run_repair_invokes_expected_pip_command(monkeypatch, tmp_path):
     assert captured["command"] == preflight.build_repair_command(
         python_executable="python3", requirements_path=req_file
     )
+
+
+def test_main_recheck_after_repair_uses_fresh_process(monkeypatch):
+    preflight = _load_preflight_module()
+    calls = []
+
+    def fake_run(command, check):
+        calls.append(command)
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(preflight, "run_repair", lambda: 0)
+    monkeypatch.setattr(preflight.subprocess, "run", fake_run)
+
+    rc = preflight.main(["--repair"])
+
+    assert rc == 0
+    assert len(calls) == 1
+    assert calls[0] == [sys.executable, str(Path(preflight.__file__).resolve())]
