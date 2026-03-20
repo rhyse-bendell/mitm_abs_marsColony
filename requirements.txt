@@ -1,0 +1,5 @@
+# Mars Colony runtime dependencies
+# Keep NumPy < 2 to avoid ABI mismatches with older binary wheels in mixed environments.
+numpy>=1.24,<2.0
+matplotlib>=3.7,<3.10
+pathfinding>=1.0.10,<2.0

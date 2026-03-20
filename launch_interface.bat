@@ -29,52 +29,45 @@ if not defined PYTHON_CMD (
 )
 
 echo Using Python command: %PYTHON_CMD%
-echo Checking required modules...
+echo Running preflight checks...
+%PYTHON_CMD% "%SCRIPT_DIR%scripts\preflight_check.py"
+set "PREFLIGHT_EXIT=%ERRORLEVEL%"
 
-set "TKINTER_OK=0"
-set "MATPLOTLIB_OK=0"
-call :check_module tkinter TKINTER_OK
-call :check_module matplotlib MATPLOTLIB_OK
-
-if not "%MATPLOTLIB_OK%"=="1" (
+if not "%PREFLIGHT_EXIT%"=="0" (
   echo.
-  echo matplotlib is missing. Attempting automatic installation...
+  echo Preflight reported issues.
+  choice /M "Attempt controlled dependency repair now"
+  if errorlevel 2 (
+    echo Repair skipped. Resolve issues manually, then rerun launcher.
+    pause
+    popd >nul
+    exit /b %PREFLIGHT_EXIT%
+  )
   call :ensure_pip
   if errorlevel 1 (
     echo.
-    echo Error: Could not prepare pip, so matplotlib could not be installed.
-    echo.
+    echo Error: pip is unavailable, so repair could not run.
     pause
     popd >nul
     exit /b 1
   )
-
-  %PYTHON_CMD% -m pip install matplotlib
+  %PYTHON_CMD% "%SCRIPT_DIR%scripts\preflight_check.py" --repair
   if errorlevel 1 (
     echo.
-    echo Error: matplotlib installation failed.
-    echo.
-    pause
-    popd >nul
-    exit /b 1
-  )
-
-  call :check_module matplotlib MATPLOTLIB_OK
-  if not "%MATPLOTLIB_OK%"=="1" (
-    echo.
-    echo Error: matplotlib is still unavailable after installation.
-    echo.
+    echo Error: repair did not resolve all required preflight checks.
     pause
     popd >nul
     exit /b 1
   )
 )
 
-if not "%TKINTER_OK%"=="1" (
+set "MPLBACKEND=TkAgg"
+echo MPLBACKEND set to %MPLBACKEND% for Tk-compatible launch.
+
+if not exist "%SCRIPT_DIR%interface.py" (
   echo.
-  echo Error: tkinter is missing.
-  echo tkinter is part of the standard Windows Python installation.
-  echo Repair or reinstall Python and include Tcl/Tk support, then run this launcher again.
+  echo Error: interface.py was not found at:
+  echo   %SCRIPT_DIR%interface.py
   echo.
   pause
   popd >nul
@@ -102,15 +95,6 @@ if defined PYTHON_CMD exit /b 0
 set "CANDIDATE=%~1"
 %CANDIDATE% -c "import sys; sys.exit(0)" >nul 2>&1
 if not errorlevel 1 set "PYTHON_CMD=%CANDIDATE%"
-exit /b 0
-
-:check_module
-%PYTHON_CMD% -c "import %~1" >nul 2>&1
-if errorlevel 1 (
-  set "%~2=0"
-) else (
-  set "%~2=1"
-)
 exit /b 0
 
 :ensure_pip

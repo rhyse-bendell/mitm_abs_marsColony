@@ -113,6 +113,12 @@ See `Documentation/construct_mapping.md` for additional details.
 
 ## Running the Simulator
 
+### Install dependencies (recommended first step)
+
+```bash
+python -m pip install -r requirements.txt
+```
+
 ### GUI launch
 
 - Directly:
@@ -122,8 +128,17 @@ See `Documentation/construct_mapping.md` for additional details.
   - Linux/macOS: `./launch_interface.sh`
 
 Launcher notes:
-- The Windows launcher probes `py -3`, `python`, then `python3`, and can attempt `matplotlib` installation if missing.
+- The GUI is Tk-based; it uses Tk-compatible Matplotlib rendering and does **not** require PySide/Qt.
+- The Windows launcher probes `py -3`, `python`, then `python3`, runs `scripts/preflight_check.py`, and offers a controlled `--repair` flow if checks fail.
+- The Linux/macOS launcher also runs preflight before launch.
 - `tkinter` is required for GUI display.
+
+### Preflight / repair commands
+
+- Preflight diagnostics only:
+  - `python scripts/preflight_check.py`
+- Attempt controlled dependency repair from `requirements.txt`:
+  - `python scripts/preflight_check.py --repair`
 
 ### Running tests
 
