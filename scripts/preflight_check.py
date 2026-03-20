@@ -17,7 +17,16 @@ REQUIRED_MODULES = ("tkinter", "numpy", "matplotlib", "pathfinding")
 OPTIONAL_QT_BINDINGS = ("PySide6", "PyQt6", "PyQt5", "PySide2")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REQUIREMENTS_PATH = REPO_ROOT / "requirements.txt"
+def _requirements_text() -> str:
+    try:
+        return REQUIREMENTS_PATH.read_text(encoding="utf-8")
+    except Exception:
+        return ""
 
+
+def _requirements_pin_numpy_lt2() -> bool:
+    text = _requirements_text().lower()
+    return "numpy<2" in text or "numpy <2" in text
 
 @dataclass
 class CheckMessage:
@@ -49,16 +58,28 @@ def _safe_import(name: str):
 def check_environment() -> PreflightReport:
     messages: List[CheckMessage] = []
 
+    version_text = sys.version.split()[0]
+    numpy_lt2_pinned = _requirements_pin_numpy_lt2()
+
     if sys.version_info < MIN_PYTHON:
         messages.append(
             CheckMessage(
                 "error",
-                f"Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ is required (found {sys.version.split()[0]}).",
+                f"Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ is required (found {version_text}).",
                 repairable=False,
             )
         )
     else:
-        messages.append(CheckMessage("ok", f"Python version is {sys.version.split()[0]}."))
+        messages.append(CheckMessage("ok", f"Python version is {version_text}."))
+        if numpy_lt2_pinned and sys.version_info >= (3, 14):
+            messages.append(
+                CheckMessage(
+                    "error",
+                    "Python 3.14+ is not supported by the current pinned dependency stack because requirements.txt pins numpy<2. "
+                    "Use Python 3.11 (preferred), or 3.12/3.13 with compatible wheels.",
+                    repairable=False,
+                )
+            )
 
     loaded_modules = {}
     for module_name in REQUIRED_MODULES:
@@ -139,6 +160,14 @@ def build_repair_command(python_executable: str = sys.executable, requirements_p
 def run_repair(python_executable: str = sys.executable) -> int:
     if not REQUIREMENTS_PATH.exists():
         print(f"Cannot repair: missing {REQUIREMENTS_PATH}")
+        return 2
+
+    if _requirements_pin_numpy_lt2() and sys.version_info >= (3, 14):
+        print(
+            "Cannot run repair on this interpreter: requirements.txt pins numpy<2, "
+            "and Python 3.14+ is not supported by that pinned stack. "
+            "Re-run the launcher with Python 3.11 (preferred), or 3.12/3.13."
+        )
         return 2
     command = build_repair_command(python_executable=python_executable, requirements_path=REQUIREMENTS_PATH)
     print("Running repair command:")

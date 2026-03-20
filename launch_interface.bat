@@ -12,21 +12,25 @@ if errorlevel 1 (
 )
 
 set "PYTHON_CMD="
-call :probe_python "py -3"
+call :probe_python "py -3.11"
+if not defined PYTHON_CMD call :probe_python "py -3.12"
+if not defined PYTHON_CMD call :probe_python "py -3.13"
+if not defined PYTHON_CMD call :probe_python "py -3"
 if not defined PYTHON_CMD call :probe_python "python"
 if not defined PYTHON_CMD call :probe_python "python3"
 
 if not defined PYTHON_CMD (
-  echo Error: Python 3 was not found.
-  echo Tried commands: py -3, python, python3
+  echo Error: A supported Python 3 interpreter was not found.
+  echo Tried commands: py -3.11, py -3.12, py -3.13, py -3, python, python3
   echo.
-  echo Install Python 3 and make sure one of these commands works in Command Prompt.
+  echo Install Python 3.11 if possible, or make sure one of the commands above works.
   echo Then run this launcher again.
   echo.
   pause
   popd >nul
   exit /b 1
 )
+
 
 echo Using Python command: %PYTHON_CMD%
 echo Running preflight checks...
