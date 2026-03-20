@@ -239,6 +239,13 @@ class Environment:
             "role_scope": [str(r).lower() for r in role_scope],
         }
 
+    @staticmethod
+    def expected_role_for_packet(packet_name: str) -> str | None:
+        packet = str(packet_name or "")
+        if packet.endswith("_Info") and packet != "Team_Info":
+            return packet.replace("_Info", "")
+        return None
+
     def is_shared_information_source(self, packet_name: str) -> bool:
         meta = self.source_metadata_for_packet(packet_name)
         access_scope = str(meta.get("access_scope") or "").strip().lower()
@@ -256,9 +263,7 @@ class Environment:
         kind = str(target_kind or target.get("kind") or "information").strip().lower()
         meta = self.source_metadata_for_packet(packet_name)
         is_shared = self.is_shared_information_source(packet_name)
-        expected_role = None
-        if packet_name.endswith("_Info") and packet_name != "Team_Info":
-            expected_role = packet_name.replace("_Info", "")
+        expected_role = self.expected_role_for_packet(packet_name)
 
         role_mismatch = bool(expected_role and role and str(expected_role).lower() != str(role).lower())
         movement_only = False
@@ -847,7 +852,12 @@ class Environment:
         if dist > access_radius:
             return False
 
-        # If packet has a role restriction, ensure agent has the correct role
+        expected_role = self.expected_role_for_packet(object_key)
+        if expected_role is not None:
+            if str(role or "").strip().lower() != str(expected_role).strip().lower():
+                return False
+
+        # If packet has an explicit role restriction, ensure agent has the correct role
         if "role" in self.objects[object_key]:
             if role is None or self.objects[object_key]["role"] != role:
                 return False

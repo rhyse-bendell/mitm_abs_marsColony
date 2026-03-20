@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from modules.agent import Agent
 from modules.environment import Environment
@@ -75,6 +76,64 @@ class TestSourceAccessSlots(unittest.TestCase):
         sim.update(0.2)
         self.assertGreater(sim.time, 0.0)
         sim.stop()
+
+    def test_shared_source_access_not_credited_before_valid_arrival(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Engineer", role="Engineer", position=(8.0, 6.5), agent_id="A1")
+        sim = _Sim()
+
+        success = agent._inspect_source(env, "Team_Info", sim_state=sim)
+        self.assertFalse(success)
+        event_types = [e[0] for e in sim.logger.events]
+        self.assertNotIn("inspect_started", event_types)
+        self.assertNotIn("source_access_succeeded", event_types)
+        self.assertIn("source_access_legality_checked", event_types)
+
+    def test_role_private_source_requires_role_and_valid_slot(self):
+        env = Environment(phases=[])
+        wrong_role_agent = Agent(name="Engineer", role="Engineer", position=(3.45, 0.92), agent_id="A1")
+        sim = _Sim()
+
+        success = wrong_role_agent._inspect_source(env, "Architect_Info", sim_state=sim)
+        self.assertFalse(success)
+        events = sim.logger.events
+        event_types = [e[0] for e in events]
+        self.assertNotIn("source_access_succeeded", event_types)
+        legality = [p for et, p in events if et == "source_access_legality_checked"]
+        self.assertTrue(legality)
+        self.assertFalse(legality[-1].get("access_legal"))
+
+    def test_bootstrap_cannot_bypass_physical_legality(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Architect", role="Architect", position=(8.0, 6.5), agent_id="A1")
+        agent.activate_fallback_bootstrap(reason="test")
+        sim = _Sim()
+
+        for i in range(5):
+            sim.time = float(i)
+            success = agent._inspect_source(env, "Team_Info", sim_state=sim)
+            self.assertFalse(success)
+        event_types = [e[0] for e in sim.logger.events]
+        self.assertNotIn("fallback_bootstrap_source_access_override", event_types)
+        self.assertNotIn("source_access_succeeded", event_types)
+
+    def test_successful_inspect_emits_reconstructable_handshake_sequence(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Engineer", role="Engineer", position=(0.0, 0.0), agent_id="A1")
+        sim = _Sim()
+        selected = agent._select_source_access_target(env, "Team_Info", sim_state=sim)
+        self.assertIsNotNone(selected)
+        agent.position = selected["position"]
+
+        with patch("modules.agent.random.random", return_value=0.0):
+            success = agent._inspect_source(env, "Team_Info", sim_state=sim)
+        self.assertTrue(success)
+        event_types = [e[0] for e in sim.logger.events]
+        self.assertIn("source_slot_selected", event_types)
+        self.assertIn("source_access_arrival_confirmed", event_types)
+        self.assertIn("source_access_legality_checked", event_types)
+        self.assertIn("inspect_started", event_types)
+        self.assertIn("source_access_succeeded", event_types)
 
 
 if __name__ == "__main__":
