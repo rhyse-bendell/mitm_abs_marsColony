@@ -105,6 +105,42 @@ class RuntimeWitnessAudit:
             if self._target_relevant_to_agent(tid, payload):
                 self._block_target(tid, failure_category, payload, step_hint=step_hint)
 
+    def _canonical_source_id(self, source_id: object) -> Optional[str]:
+        if source_id is None:
+            return None
+        source_text = str(source_id)
+        environment = getattr(self.simulation, "environment", None)
+        resolver = getattr(environment, "resolve_source_id", None)
+        if callable(resolver):
+            resolved = resolver(source_text)
+            if resolved:
+                return str(resolved)
+        return source_text
+
+    def _target_ids_for_source(self, source_id: object, payload: Dict[str, object]) -> List[str]:
+        canonical = self._canonical_source_id(source_id)
+        if not canonical:
+            return []
+        return [
+            tid
+            for tid, _ in self._raw_index.get(f"source_access:{canonical}", [])
+            if self._target_relevant_to_agent(tid, payload)
+        ]
+
+    def _target_ids_for_goal(self, goal_id: object, payload: Dict[str, object]) -> List[str]:
+        if goal_id is None:
+            return []
+        goal_text = str(goal_id)
+        return [
+            tid
+            for tid, _ in self._raw_index.get(f"ground_goal:{goal_text}", [])
+            if self._target_relevant_to_agent(tid, payload)
+        ]
+
+    def _block_target_ids(self, target_ids: List[str], payload: Dict[str, object], failure_category: str, step_hint: Optional[str] = None):
+        for tid in target_ids:
+            self._block_target(tid, failure_category, payload, step_hint=step_hint)
+
     def _build_critical_targets(self):
         critical_goals = {
             g.goal_id
@@ -412,7 +448,11 @@ class RuntimeWitnessAudit:
         elif event_type == "inspect_completion_failed":
             reason = str(payload.get("failure_category") or "inspect_not_completed")
             category = "inspect_completed_dik_not_acquired" if reason == "partial_packet_uptake" else "inspect_not_completed"
-            self._block_targets(payload, category, step_hint="source_access")
+            source_targets = self._target_ids_for_source(payload.get("source_id"), payload)
+            if source_targets:
+                self._block_target_ids(source_targets, payload, category, step_hint="source_access")
+            else:
+                self._block_targets(payload, category, step_hint="source_access")
 
         elif event_type == "shared_source_access_blocked":
             reason = str(payload.get("reason") or "blocked")
@@ -420,7 +460,11 @@ class RuntimeWitnessAudit:
             if classification and classification != "shared_team_source":
                 return
             category = "shared_source_access_blocked_by_legality" if reason in {"too_far_or_role_mismatch"} else "shared_source_access_blocked_by_mapping"
-            self._block_targets(payload, category, step_hint="source_access")
+            source_targets = self._target_ids_for_source(payload.get("source_id"), payload)
+            if source_targets:
+                self._block_target_ids(source_targets, payload, category, step_hint="source_access")
+            else:
+                self._block_targets(payload, category, step_hint="source_access")
 
         elif event_type == "shared_source_dik_acquired_team":
             for element_id in payload.get("added_ids", []):
@@ -435,8 +479,11 @@ class RuntimeWitnessAudit:
                 category = "dik_acquired_readiness_not_unlocked"
             elif reason in {"target_resolution_failed", "source_reached_inspect_not_started"}:
                 category = "inspect_not_started"
-            for tid in self.targets:
-                self._block_target(tid, category, payload, step_hint="source_access")
+            source_targets = self._target_ids_for_source(payload.get("source_id"), payload)
+            if source_targets:
+                self._block_target_ids(source_targets, payload, category, step_hint="source_access")
+            else:
+                self._block_targets(payload, category, step_hint="source_access")
 
         elif event_type == "inspect_post_handoff_classified":
             outcome = str(payload.get("post_inspect_outcome") or "")
@@ -486,9 +533,10 @@ class RuntimeWitnessAudit:
 
         elif event_type == "execution_readiness_passed":
             goal_id = payload.get("goal_id")
-            if goal_id:
-                for tid, idx in self._raw_index.get(f"ground_goal:{goal_id}", []):
-                    self._complete_step(tid, idx, payload)
+            for tid in self._target_ids_for_goal(goal_id, payload):
+                for candidate_tid, idx in self._raw_index.get(f"ground_goal:{goal_id}", []):
+                    if candidate_tid == tid:
+                        self._complete_step(tid, idx, payload)
 
         elif event_type == "executable_action_attempted":
             for tid, idx in self._step_type_index.get("executable_action_attempted", []):
@@ -499,11 +547,23 @@ class RuntimeWitnessAudit:
                 self._complete_step(tid, idx, payload)
 
         elif event_type == "source_inspection_blocked":
-            self._block_targets(payload, "inspect_not_completed", step_hint="source_access")
+            source_targets = self._target_ids_for_source(payload.get("source_id"), payload)
+            if source_targets:
+                self._block_target_ids(source_targets, payload, "inspect_not_completed", step_hint="source_access")
+            else:
+                self._block_targets(payload, "inspect_not_completed", step_hint="source_access")
         elif event_type == "action_translation_failed":
-            self._block_targets(payload, "action_translation_failed")
+            source_targets = self._target_ids_for_source(payload.get("source_id") or payload.get("target_id") or payload.get("requested_target_id"), payload)
+            if source_targets:
+                self._block_target_ids(source_targets, payload, "action_translation_failed")
+            else:
+                self._block_targets(payload, "action_translation_failed")
         elif event_type == "target_resolution_failed":
-            self._block_targets(payload, "target_resolution_failed")
+            source_targets = self._target_ids_for_source(payload.get("requested_target_id"), payload)
+            if source_targets:
+                self._block_target_ids(source_targets, payload, "target_resolution_failed")
+            else:
+                self._block_targets(payload, "target_resolution_failed")
         elif event_type == "movement_blocked":
             blocker = str(payload.get("blocker_category") or "movement_blocked")
             mapping = {
@@ -514,7 +574,11 @@ class RuntimeWitnessAudit:
                 "arrival_without_progress": "arrival_without_progress",
             }
             failure = mapping.get(blocker, "movement_blocked")
-            self._block_targets(payload, failure)
+            source_targets = self._target_ids_for_source(payload.get("source_id") or payload.get("target_id"), payload)
+            if source_targets:
+                self._block_target_ids(source_targets, payload, failure)
+            else:
+                self._block_targets(payload, failure)
         elif event_type == "plan_invalidated":
             self._block_targets(payload, "plan_invalidated", step_hint="plan_method_grounded")
         elif event_type == "execution_readiness_failed":

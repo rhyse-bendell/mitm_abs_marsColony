@@ -146,6 +146,72 @@ class TestRuntimeWitnessAudit(unittest.TestCase):
             self.assertIn("dik_acquired_readiness_not_unlocked", categories)
             sim.stop()
 
+    def test_execution_readiness_passed_emits_canonical_goal_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            agent = sim.agents[0]
+            agent.goal_stack = [{"goal_id": "G_MISSION_SURVIVAL", "status": "active"}]
+            decision = BrainDecision(
+                selected_action=ExecutableActionType.START_CONSTRUCTION,
+                target_id="Build_Table_B",
+                reason_summary="test",
+                confidence=0.9,
+            )
+            with patch.object(agent, "_construction_action_blockers", return_value=([], "Build_Table_B")):
+                actions = agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
+            self.assertTrue(actions)
+            readiness_events = [e for e in sim.logger.get_recent_events(120) if e["event_type"] == "execution_readiness_passed"]
+            self.assertTrue(readiness_events)
+            payload = readiness_events[-1]["payload_data"]
+            self.assertNotEqual(payload.get("goal_id"), "G_MISSION_BUILD_COMPLETE")
+            self.assertIn(payload.get("goal_id"), sim.task_model.goals)
+            sim.stop()
+
+    def test_execution_readiness_passed_completes_real_goal_witness_step(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            audit = sim.runtime_witness_audit
+            goal_target = audit.targets["goal:G_MISSION_SURVIVAL"]
+            readiness_step = next(s for s in goal_target["ordered_witness_steps"] if s.raw_step == "ground_goal:G_MISSION_SURVIVAL")
+            self.assertNotEqual(readiness_step.status, "completed")
+            sim.logger.log_event(
+                sim.time,
+                "execution_readiness_passed",
+                {"agent": sim.agents[0].name, "goal_id": "G_MISSION_SURVIVAL"},
+            )
+            self.assertEqual(readiness_step.status, "completed")
+            sim.stop()
+
+    def test_source_specific_inspect_failure_blocks_only_that_source_paths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            audit = sim.runtime_witness_audit
+            mission_target = audit.targets["goal:G_MISSION_SURVIVAL"]
+            phase1_target = audit.targets["goal:G_PHASE1_SUPPORT_50_CIV"]
+            sim.logger.log_event(
+                sim.time,
+                "inspect_completion_failed",
+                {"agent": sim.agents[0].name, "source_id": "Architect_Info", "failure_category": "partial_packet_uptake"},
+            )
+            self.assertEqual(mission_target["status"], "failed")
+            self.assertNotEqual(phase1_target["status"], "failed")
+            sim.stop()
+
+    def test_targeted_runtime_failures_do_not_over_block_unrelated_targets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            audit = sim.runtime_witness_audit
+            shared_target = audit.targets["goal:G_PHASE1_SUPPORT_50_CIV"]
+            unrelated_target = audit.targets["goal:G_PLANNING_REDUCE_UNCERTAINTY"]
+            sim.logger.log_event(
+                sim.time,
+                "movement_blocked",
+                {"agent": sim.agents[0].name, "source_id": "Team_Info", "blocker_category": "no_path_found"},
+            )
+            self.assertEqual(shared_target["status"], "failed")
+            self.assertNotEqual(unrelated_target["status"], "failed")
+            sim.stop()
+
     def test_successful_inspect_no_new_dik_has_distinct_classification(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
