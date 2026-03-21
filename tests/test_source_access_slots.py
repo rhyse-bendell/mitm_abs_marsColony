@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from modules.agent import Agent
+from modules.action_schema import ExecutableActionType
 from modules.environment import Environment
 from modules.simulation import SimulationState
 
@@ -57,18 +58,87 @@ class TestSourceAccessSlots(unittest.TestCase):
         self.assertFalse(usable)
         self.assertEqual(reason, "not_at_interaction_slot")
 
-    def test_unstuck_backoff_triggers_after_repeated_blocked_attempts(self):
+    def test_unstuck_backoff_triggers_without_spawn_bounce(self):
         env = Environment(phases=[])
         agent = Agent(name="Engineer", role="Engineer", position=(8.0, 6.5), agent_id="A1")
         sim = _Sim()
 
-        for i in range(5):
+        for i in range(9):
             sim.time = float(i)
             agent._inspect_source(env, "Team_Info", sim_state=sim)
 
         event_types = [e[0] for e in sim.logger.events]
         self.assertIn("source_access_unstuck_backoff", event_types)
         self.assertIn("source_slot_released", event_types)
+        self.assertNotEqual(agent.target, agent.spawn_position)
+
+    def test_repeated_same_source_inspect_reuses_pursuit_target(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Engineer", role="Engineer", position=env.get_spawn_point("Engineer"), agent_id="A1")
+        sim = _Sim()
+
+        class Decision:
+            selected_action = ExecutableActionType.INSPECT_INFORMATION_SOURCE
+            target_id = "Team_Info"
+            target_zone = None
+
+        first = agent._translate_brain_decision_to_legacy_action(Decision, env, sim_state=sim)[0]
+        sim.time = 1.0
+        second = agent._translate_brain_decision_to_legacy_action(Decision, env, sim_state=sim)[0]
+        self.assertEqual(first.get("source_target_id"), "Team_Info")
+        self.assertEqual(second.get("source_target_id"), "Team_Info")
+        self.assertEqual(first.get("target"), second.get("target"))
+        event_types = [e[0] for e in sim.logger.events]
+        self.assertIn("pursuit_reused", event_types)
+
+    def test_same_source_alternate_slot_reselection_allowed(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Engineer", role="Engineer", position=(8.0, 6.5), agent_id="A1")
+        sim = _Sim()
+        first_slot = env.get_source_access_slots("Team_Info")[0]
+        env.reserve_source_access_slot("Team_Info", first_slot["slot_id"], "OTHER")
+        agent.source_access_state.update(
+            {
+                "source_id": "Team_Info",
+                "slot_id": first_slot["slot_id"],
+                "slot_position": first_slot["position"],
+                "target_kind": "slot",
+                "blocked_attempts": 0,
+            }
+        )
+        agent._commit_inspect_pursuit("Team_Info", first_slot["position"], now_ts=0.0, slot_id=first_slot["slot_id"], sim_state=sim)
+        agent._inspect_source(env, "Team_Info", sim_state=sim)
+        event_types = [e[0] for e in sim.logger.events]
+        self.assertIn("same_source_slot_reselected", event_types)
+
+    def test_pursuit_expires_after_bounded_lease(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Engineer", role="Engineer", position=(8.0, 6.5), agent_id="A1")
+        sim = _Sim()
+        slot = agent._select_source_access_target(env, "Team_Info", sim_state=sim)
+        self.assertIsNotNone(slot)
+        agent._commit_inspect_pursuit("Team_Info", slot["position"], now_ts=0.0, slot_id=slot.get("slot_id"), sim_state=sim)
+
+        sim.time = 11.0
+        success = agent._inspect_source(env, "Team_Info", sim_state=sim)
+        self.assertFalse(success)
+        self.assertIsNone(agent.inspect_pursuit.get("source_id"))
+        event_types = [e[0] for e in sim.logger.events]
+        self.assertIn("pursuit_expired", event_types)
+
+    def test_successful_access_clears_pursuit(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Engineer", role="Engineer", position=(0.0, 0.0), agent_id="A1")
+        sim = _Sim()
+        selected = agent._select_source_access_target(env, "Team_Info", sim_state=sim)
+        self.assertIsNotNone(selected)
+        agent._commit_inspect_pursuit("Team_Info", selected["position"], now_ts=0.0, slot_id=selected.get("slot_id"), sim_state=sim)
+        agent.position = selected["position"]
+
+        with patch("modules.agent.random.random", return_value=0.0):
+            success = agent._inspect_source(env, "Team_Info", sim_state=sim)
+        self.assertTrue(success)
+        self.assertIsNone(agent.inspect_pursuit.get("source_id"))
 
     def test_smoke_simulation_still_runs(self):
         sim = SimulationState(phases=[])
