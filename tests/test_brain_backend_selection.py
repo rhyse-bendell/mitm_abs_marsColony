@@ -12,8 +12,8 @@ class TestBrainBackendSelection(unittest.TestCase):
 
     def test_local_backend_defaults_use_real_model_and_timeout(self):
         cfg = BrainBackendConfig()
-        self.assertEqual(cfg.local_model, "qwen3.5:9b")
-        self.assertEqual(cfg.timeout_s, 75.0)
+        self.assertEqual(cfg.local_model, "qwen2.5:3b")
+        self.assertEqual(cfg.timeout_s, 90.0)
         self.assertEqual(cfg.warmup_timeout_s, 45.0)
 
     def test_warmup_probe_uses_configured_warmup_timeout(self):
@@ -121,7 +121,7 @@ class TestBrainBackendSelection(unittest.TestCase):
                 phases=[],
                 project_root=tmpdir,
                 brain_backend="ollama",
-                brain_backend_options={"local_model": "qwen3.5:9b", "timeout_s": 75.0},
+                brain_backend_options={"local_model": "qwen2.5:3b", "timeout_s": 90.0},
                 planner_config={"unrestricted_local_qwen_mode": False, "high_latency_local_llm_mode": False},
             )
             sim.update(0.1)
@@ -129,8 +129,8 @@ class TestBrainBackendSelection(unittest.TestCase):
             session_dir = next((sim.logger.output_session.outputs_root).iterdir())
             manifest = json.loads((session_dir / "session_manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["configured_brain_backend"], "ollama")
-            self.assertEqual(manifest["local_model_name"], "qwen3.5:9b")
-            self.assertEqual(manifest["timeout_s"], 75.0)
+            self.assertEqual(manifest["local_model_name"], "qwen2.5:3b")
+            self.assertEqual(manifest["timeout_s"], 90.0)
 
 
     def test_manifest_records_high_latency_local_mode_metadata(self):
@@ -142,11 +142,11 @@ class TestBrainBackendSelection(unittest.TestCase):
             manifest = json.loads((session_dir / "session_manifest.json").read_text(encoding="utf-8"))
             self.assertTrue(manifest.get("high_latency_local_llm_mode"))
             self.assertTrue(manifest.get("unrestricted_local_qwen_mode"))
-            self.assertGreaterEqual(float(manifest.get("effective_planner_timeout_seconds", 0.0)), 180.0)
-            self.assertGreaterEqual(float(manifest.get("effective_startup_llm_sanity_timeout_seconds", 0.0)), 120.0)
-            self.assertGreaterEqual(float(manifest.get("effective_warmup_timeout_seconds", 0.0)), 90.0)
-            self.assertGreaterEqual(int(manifest.get("effective_startup_llm_sanity_completion_max_tokens", 0)), 768)
-            self.assertGreaterEqual(int(manifest.get("effective_planner_completion_max_tokens", 0)), 2048)
+            self.assertGreaterEqual(float(manifest.get("effective_planner_timeout_seconds", 0.0)), 90.0)
+            self.assertGreaterEqual(float(manifest.get("effective_startup_llm_sanity_timeout_seconds", 0.0)), 60.0)
+            self.assertGreaterEqual(float(manifest.get("effective_warmup_timeout_seconds", 0.0)), 45.0)
+            self.assertGreaterEqual(int(manifest.get("effective_startup_llm_sanity_completion_max_tokens", 0)), 512)
+            self.assertGreaterEqual(int(manifest.get("effective_planner_completion_max_tokens", 0)), 1024)
             self.assertTrue(manifest.get("stale_result_relaxation_enabled"))
             self.assertGreaterEqual(float(manifest.get("permissive_timeout_ceiling_s", 0.0)), 1800.0)
             self.assertGreaterEqual(int(manifest.get("permissive_completion_ceiling_tokens", 0)), 32768)
@@ -162,16 +162,16 @@ class TestBrainBackendSelection(unittest.TestCase):
                     "high_latency_local_llm_mode": False,
                     "planner_timeout_seconds": 90.0,
                     "startup_llm_sanity_timeout_seconds": 45.0,
-                    "startup_llm_sanity_completion_max_tokens": 1024,
-                    "planner_completion_max_tokens": 2048,
+                    "startup_llm_sanity_completion_max_tokens": 512,
+                    "planner_completion_max_tokens": 1024,
                     "warmup_timeout_seconds": 45.0,
                 },
             )
             self.assertFalse(sim.planner_defaults.get("unrestricted_local_qwen_mode"))
             self.assertEqual(sim.brain_backend_config.timeout_s, 90.0)
             self.assertEqual(sim.startup_llm_sanity_config.timeout_s, 45.0)
-            self.assertEqual(sim.startup_llm_sanity_config.completion_max_tokens, 1024)
-            self.assertEqual(sim.brain_backend_config.completion_max_tokens, 2048)
+            self.assertEqual(sim.startup_llm_sanity_config.completion_max_tokens, 512)
+            self.assertEqual(sim.brain_backend_config.completion_max_tokens, 1024)
             self.assertEqual(sim.brain_backend_config.warmup_timeout_s, 45.0)
             sim.stop()
 
@@ -249,7 +249,7 @@ class TestExperimentTabBackendControl(unittest.TestCase):
 
         try:
             app.root.withdraw()
-            self.assertEqual(app.local_model_var.get(), "qwen3.5:9b")
+            self.assertEqual(app.local_model_var.get(), "qwen2.5:3b")
             self.assertAlmostEqual(float(app.local_timeout_var.get()), 900.0)
             app.brain_backend_var.set("rule_brain")
             app.apply_experiment_settings()

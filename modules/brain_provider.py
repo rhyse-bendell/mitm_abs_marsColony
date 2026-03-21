@@ -112,11 +112,11 @@ class BrainBackendConfig:
     backend: str = "rule_brain"
     local_base_url: str = "http://127.0.0.1:11434"
     local_endpoint: str = "/v1/chat/completions"
-    local_model: str = "qwen3.5:9b"
-    timeout_s: float = 75.0
+    local_model: str = "qwen2.5:3b"
+    timeout_s: float = 90.0
     warmup_timeout_s: float = 45.0
-    completion_max_tokens: int = 2048
-    startup_completion_max_tokens: int = 1024
+    completion_max_tokens: int = 1024
+    startup_completion_max_tokens: int = 512
     permissive_timeout_ceiling_s: float = 1200.0
     permissive_completion_ceiling_tokens: int = 16384
     unrestricted_local_qwen_mode: bool = False

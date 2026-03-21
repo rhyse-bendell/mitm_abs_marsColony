@@ -27,27 +27,34 @@ class MarsColonyInterface:
     EXPERIMENT_PANEL_BORDER = "#586271"
     BACKEND_DEFAULTS = {
         "brain_backend": "ollama",
-        "local_model": "qwen3.5:9b",
+        "local_model": "qwen2.5:3b",
         "local_base_url": "http://127.0.0.1:11434",
-        "timeout_s": 180.0,
+        "timeout_s": 90.0,
         "fallback_backend": "rule_brain",
     }
+    LOCAL_MODEL_SHORTLIST = [
+        "qwen2.5:3b",
+        "qwen2.5:7b",
+        "gemma3:4b",
+        "mistral-small3.1",
+        "qwen3.5:9b",
+    ]
     PLANNER_DEFAULTS = {
         "planner_interval_steps": 16,
-        "planner_timeout_seconds": 180.0,
+        "planner_timeout_seconds": 90.0,
         "planner_max_retries": 0,
-        "backend_timeout_s": 180.0,
+        "backend_timeout_s": 90.0,
         "backend_max_retries": 0,
         "degraded_consecutive_failures_threshold": 24,
         "degraded_cooldown_seconds": 300.0,
         "degraded_step_interval_multiplier": 8.0,
         "enable_startup_llm_sanity": True,
-        "startup_llm_sanity_timeout_seconds": 120.0,
+        "startup_llm_sanity_timeout_seconds": 60.0,
         "startup_llm_sanity_max_sources": 1,
         "startup_llm_sanity_max_items_per_type": 2,
-        "startup_llm_sanity_completion_max_tokens": 768,
-        "planner_completion_max_tokens": 2048,
-        "warmup_timeout_seconds": 90.0,
+        "startup_llm_sanity_completion_max_tokens": 512,
+        "planner_completion_max_tokens": 1024,
+        "warmup_timeout_seconds": 45.0,
         "startup_llm_sanity_raw_response_max_chars": 4000,
         "enable_bootstrap_summary_reuse": True,
         "bootstrap_summary_max_chars": 280,
@@ -1183,7 +1190,7 @@ class MarsColonyInterface:
         self.fallback_backend_var.trace_add("write", lambda *_: self._refresh_all_agent_inheritance_display())
 
         ttk.Label(settings_frame, text="Local Model").grid(row=12, column=0, sticky="w", padx=(0, 8), pady=3)
-        local_model_entry = ttk.Entry(settings_frame, textvariable=self.local_model_var, width=34)
+        local_model_entry = ttk.Combobox(settings_frame, textvariable=self.local_model_var, values=self.LOCAL_MODEL_SHORTLIST, width=31)
         local_model_entry.grid(row=12, column=1, sticky="w", pady=3)
         self._add_help_text(settings_frame, 13, "Local model name to use for Ollama-backed agents.")
 

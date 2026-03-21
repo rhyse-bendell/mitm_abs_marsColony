@@ -20,7 +20,7 @@ class TestPerAgentBrainConfig(unittest.TestCase):
                 "traits": {},
                 "brain_config": {
                     "backend": "rule_brain",
-                    "local_model": "qwen3.5:9b",
+                    "local_model": "qwen2.5:3b",
                     "fallback_backend": "rule_brain",
                     "timeout_s": 0.8,
                     "max_retries": 1,
@@ -112,7 +112,7 @@ class TestPerAgentBrainConfig(unittest.TestCase):
                 project_root=tmpdir,
                 brain_backend="ollama",
                 brain_backend_options={
-                    "local_model": "qwen3.5:9b",
+                    "local_model": "qwen2.5:3b",
                     "fallback_backend": "rule_brain",
                     "timeout_s": 15.0,
                 },
@@ -129,7 +129,7 @@ class TestPerAgentBrainConfig(unittest.TestCase):
             try:
                 runtime = sim.get_agent_brain_runtime(sim.agents[0])
                 self.assertEqual(runtime["configured_backend"], "ollama")
-                self.assertEqual(runtime["config"].local_model, "qwen3.5:9b")
+                self.assertEqual(runtime["config"].local_model, "qwen2.5:3b")
                 self.assertEqual(runtime["config"].fallback_backend, "rule_brain")
             finally:
                 sim.stop()
@@ -252,9 +252,9 @@ class TestInterfacePerAgentDefaults(unittest.TestCase):
         try:
             app.root.withdraw()
             self.assertEqual(app.brain_backend_var.get(), "ollama")
-            self.assertEqual(app.local_model_var.get(), "qwen3.5:9b")
+            self.assertEqual(app.local_model_var.get(), "qwen2.5:3b")
             self.assertEqual(app.local_base_url_var.get(), "http://127.0.0.1:11434")
-            self.assertEqual(app.local_timeout_var.get(), 180.0)
+            self.assertEqual(app.local_timeout_var.get(), 90.0)
             self.assertEqual(app.fallback_backend_var.get(), "rule_brain")
             self.assertEqual(app.num_agents_var.get(), 3)
             self.assertEqual(app.agent_planner_settings["Architect"]["planner_interval_steps"].get(), 4)
@@ -264,16 +264,16 @@ class TestInterfacePerAgentDefaults(unittest.TestCase):
             self.assertEqual(app.agent_planner_settings["Botanist"]["degraded_consecutive_failures_threshold"].get(), 3)
             self.assertEqual(app.agent_planner_settings["Botanist"]["degraded_cooldown_seconds"].get(), 12.0)
             self.assertTrue(app.enable_startup_llm_sanity_var.get())
-            self.assertEqual(app.startup_llm_sanity_timeout_var.get(), 120.0)
+            self.assertEqual(app.startup_llm_sanity_timeout_var.get(), 60.0)
             self.assertEqual(app.startup_llm_sanity_max_sources_var.get(), 1)
             self.assertEqual(app.startup_llm_sanity_max_items_var.get(), 2)
             self.assertEqual(app.startup_llm_sanity_raw_max_chars_var.get(), 4000)
             self.assertTrue(app.bootstrap_reuse_enabled_var.get())
             self.assertEqual(app.bootstrap_summary_max_chars_var.get(), 280)
             self.assertTrue(app.unrestricted_local_qwen_mode_var.get())
-            self.assertEqual(app.warmup_timeout_var.get(), 90.0)
-            self.assertEqual(app.startup_llm_sanity_completion_tokens_var.get(), 768)
-            self.assertEqual(app.planner_completion_tokens_var.get(), 2048)
+            self.assertEqual(app.warmup_timeout_var.get(), 45.0)
+            self.assertEqual(app.startup_llm_sanity_completion_tokens_var.get(), 512)
+            self.assertEqual(app.planner_completion_tokens_var.get(), 1024)
         finally:
             app.stop_experiment()
             app.root.destroy()
@@ -302,10 +302,10 @@ class TestInterfacePerAgentDefaults(unittest.TestCase):
             app._update_agent_inheritance_display(role)
 
             self.assertIn("Inherited from global Backend: ollama", app.agent_inheritance_note_vars[role]["backend"].get())
-            self.assertIn("Inherited from global Model: qwen3.5:9b", app.agent_inheritance_note_vars[role]["local_model"].get())
+            self.assertIn("Inherited from global Model: qwen2.5:3b", app.agent_inheritance_note_vars[role]["local_model"].get())
             self.assertIn("Inherited from global Fallback: rule_brain", app.agent_inheritance_note_vars[role]["fallback_backend"].get())
             self.assertEqual(app.agent_effective_summary_vars[role]["backend"].get(), "Effective Backend: ollama")
-            self.assertEqual(app.agent_effective_summary_vars[role]["local_model"].get(), "Effective Model: qwen3.5:9b")
+            self.assertEqual(app.agent_effective_summary_vars[role]["local_model"].get(), "Effective Model: qwen2.5:3b")
             self.assertEqual(app.agent_effective_summary_vars[role]["fallback_backend"].get(), "Effective Fallback: rule_brain")
 
             app.agent_brain_settings[role]["backend"].set("rule_brain")
