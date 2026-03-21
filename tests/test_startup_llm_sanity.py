@@ -174,6 +174,7 @@ class TestStartupLLMSanity(unittest.TestCase):
             payload = json.loads(artifact.read_text(encoding="utf-8"))
             self.assertIn("results", payload)
             self.assertGreaterEqual(len(payload["results"]), 1)
+            self.assertNotIn("bootstrap_reuse_included_count", payload.get("summary", {}))
 
 
     def test_high_latency_local_defaults_raise_startup_sanity_timeout(self):
@@ -358,7 +359,7 @@ class TestStartupLLMSanity(unittest.TestCase):
                     req = agent._build_brain_request(sim, context, request_explanation=False, trigger_reason="test")
                 self.assertIsNotNone(req.bootstrap_summary)
                 self.assertLessEqual(len(req.bootstrap_summary.get("summary_text", "")), 120)
-                self.assertEqual(sim.startup_llm_sanity_summary["bootstrap_reuse_included_count"], 1)
+                self.assertEqual(sim.bootstrap_reuse_included_count, 1)
             finally:
                 sim.stop()
 
@@ -374,9 +375,45 @@ class TestStartupLLMSanity(unittest.TestCase):
                 context = sim.brain_context_builder.build(sim, agent)
                 req = agent._build_brain_request(sim, context, request_explanation=False, trigger_reason="test")
                 self.assertIsNone(req.bootstrap_summary)
-                self.assertEqual(sim.startup_llm_sanity_summary["bootstrap_reuse_included_count"], 0)
+                self.assertEqual(sim.bootstrap_reuse_included_count, 0)
             finally:
                 sim.stop()
+
+    def test_bootstrap_reuse_included_count_is_final_run_metric_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            content = {
+                field: ([] if "ids" in field else "ok") for field in SANITY_RESPONSE_FIELDS
+            }
+            content["agent_name"] = "Architect"
+            content["confidence"] = 0.7
+            llm_payload = json.dumps({
+                "choices": [{"message": {"content": json.dumps(content)}}]
+            })
+            with patch("modules.llm_sanity.request.urlopen", return_value=_FakeHTTPResponse(llm_payload)):
+                sim = SimulationState(
+                    phases=[],
+                    project_root=tmpdir,
+                    brain_backend="ollama",
+                    planner_config={"enable_startup_llm_sanity": True, "enable_bootstrap_summary_reuse": True},
+                )
+            try:
+                agent = sim.agents[0]
+                context = sim.brain_context_builder.build(sim, agent)
+                req = agent._build_brain_request(sim, context, request_explanation=False, trigger_reason="test")
+                self.assertIsNotNone(req.bootstrap_summary)
+                self.assertEqual(sim.bootstrap_reuse_included_count, 1)
+            finally:
+                sim.stop()
+
+            session_dir = sim.logger.output_session.session_folder
+            startup_artifact = session_dir / "logs" / "startup_llm_sanity.json"
+            startup_payload = json.loads(startup_artifact.read_text(encoding="utf-8"))
+            self.assertNotIn("bootstrap_reuse_included_count", startup_payload.get("summary", {}))
+
+            run_summary = json.loads((session_dir / "measures" / "run_summary.json").read_text(encoding="utf-8"))
+            manifest = json.loads((session_dir / "session_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_summary["run_metadata"]["bootstrap_reuse_included_count"], 1)
+            self.assertEqual(manifest["bootstrap_reuse_included_count"], 1)
 
     def test_wrapper_with_content_blocks_extracts_and_validates(self):
         with tempfile.TemporaryDirectory() as tmpdir:

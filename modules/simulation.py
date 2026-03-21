@@ -128,8 +128,8 @@ class SimulationState:
             "startup_llm_sanity_artifact": None,
             "bootstrap_reuse_enabled": bool(self.bootstrap_reuse_enabled),
             "bootstrap_reuse_agent_count": 0,
-            "bootstrap_reuse_included_count": 0,
         }
+        self.bootstrap_reuse_included_count = 0
         self.startup_progress_callback = startup_progress_callback
         planner_trace_enabled = bool(self.planner_defaults.get("enable_planner_trace", True))
         planner_trace_mode = str(self.planner_defaults.get("planner_trace_mode", "full") or "full").lower()
@@ -427,7 +427,6 @@ class SimulationState:
                     "startup_llm_sanity_enabled": False,
                     "bootstrap_reuse_enabled": bool(self.bootstrap_reuse_enabled),
                     "bootstrap_reuse_agent_count": len(self.agents) if self.bootstrap_reuse_enabled else 0,
-                    "bootstrap_reuse_included_count": 0,
                 }
             )
             self.logger.log_event(self.time, "startup_llm_sanity_disabled", {"enabled": False})
@@ -676,6 +675,7 @@ class SimulationState:
             "planner_trace_artifact": "logs/planner_trace.jsonl" if bool(self.planner_defaults.get("enable_planner_trace", True)) else None,
             "backend_warmup": self.provider_warmup_status,
             "bootstrap_summary_max_chars": self.bootstrap_summary_max_chars,
+            "bootstrap_reuse_included_count": int(getattr(self, "bootstrap_reuse_included_count", 0)),
             **dict(self.startup_llm_sanity_summary),
         }
 
