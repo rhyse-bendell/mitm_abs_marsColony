@@ -669,7 +669,6 @@ def run_startup_llm_sanity_check(
         "startup_llm_sanity_parse_failure_count": sum(1 for r in results if r.get("response_received") and not r.get("parsed_success")),
         "bootstrap_reuse_enabled": bootstrap_reuse_enabled,
         "bootstrap_reuse_agent_count": len(simulation.agents) if bootstrap_reuse_enabled else 0,
-        "bootstrap_reuse_included_count": 0,
     }
 
     artifact_payload = {

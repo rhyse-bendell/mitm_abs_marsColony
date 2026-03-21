@@ -1980,8 +1980,7 @@ class Agent:
                     "summary_structured": runtime_bootstrap.get("summary_structured"),
                 }
                 runtime_bootstrap["included_count"] = int(runtime_bootstrap.get("included_count", 0)) + 1
-                if hasattr(sim_state, "startup_llm_sanity_summary") and isinstance(sim_state.startup_llm_sanity_summary, dict):
-                    sim_state.startup_llm_sanity_summary["bootstrap_reuse_included_count"] = int(sim_state.startup_llm_sanity_summary.get("bootstrap_reuse_included_count", 0)) + 1
+                sim_state.bootstrap_reuse_included_count = int(getattr(sim_state, "bootstrap_reuse_included_count", 0)) + 1
         return AgentBrainRequest(
             request_id=f"{self.agent_id}-{uuid.uuid4().hex[:8]}",
             tick=self.sim_step_count,
