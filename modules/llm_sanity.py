@@ -5,7 +5,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 from urllib import error, request
 
 LOCAL_BACKEND_ALIASES = {"local_http", "openai_compatible_local", "ollama_local", "ollama"}
@@ -427,14 +427,53 @@ def _build_bootstrap_summary(parsed_payload: Dict[str, Any], *, max_chars: int) 
     return summary_text, summary_structured
 
 
-def run_startup_llm_sanity_check(simulation, *, config: StartupLLMSanityConfig) -> Dict[str, Any]:
+def _emit_progress(
+    progress_callback: Callable[[str, int, int, str | None, str | None], None] | None,
+    *,
+    stage: str,
+    current: int,
+    total: int,
+    agent_name: str | None = None,
+    detail: str | None = None,
+) -> None:
+    if not callable(progress_callback):
+        return
+    try:
+        progress_callback(stage, current, total, agent_name, detail)
+    except Exception:
+        # Keep startup semantics unchanged if callback consumer fails.
+        return
+
+
+def run_startup_llm_sanity_check(
+    simulation,
+    *,
+    config: StartupLLMSanityConfig,
+    progress_callback: Callable[[str, int, int, str | None, str | None], None] | None = None,
+) -> Dict[str, Any]:
     timestamp = int(time.time() * 1000)
     results: List[Dict[str, Any]] = []
+    total_agents = len(simulation.agents)
     bootstrap_reuse_enabled = bool(getattr(simulation, "bootstrap_reuse_enabled", True))
     bootstrap_summary_max_chars = int(getattr(simulation, "bootstrap_summary_max_chars", 280))
     simulation.logger.log_event(simulation.time, "startup_llm_sanity_started", {"agent_count": len(simulation.agents), "enabled": True, "bootstrap_reuse_enabled": bootstrap_reuse_enabled})
+    _emit_progress(
+        progress_callback,
+        stage="startup_begin",
+        current=0,
+        total=total_agents,
+        detail="Startup LLM sanity check started.",
+    )
 
-    for agent in simulation.agents:
+    for idx, agent in enumerate(simulation.agents, start=1):
+        _emit_progress(
+            progress_callback,
+            stage="agent_begin",
+            current=idx - 1,
+            total=total_agents,
+            agent_name=getattr(agent, "name", None),
+            detail=f"Running startup sanity for {getattr(agent, 'name', 'agent')}.",
+        )
         runtime = simulation.get_agent_brain_runtime(agent)
         runtime_config = runtime["config"]
         backend = str(runtime.get("configured_backend", runtime_config.backend)).lower()
@@ -611,6 +650,14 @@ def run_startup_llm_sanity_check(simulation, *, config: StartupLLMSanityConfig) 
             row["fallback_used"] = bool(provider.last_outcome.get("fallback", False))
 
         results.append(row)
+        _emit_progress(
+            progress_callback,
+            stage="agent_result",
+            current=idx,
+            total=total_agents,
+            agent_name=getattr(agent, "name", None),
+            detail="success" if row.get("validation_success") else (row.get("error") or row.get("failure_category") or "failed"),
+        )
 
     summary = {
         "startup_llm_sanity_enabled": True,
@@ -660,6 +707,13 @@ def run_startup_llm_sanity_check(simulation, *, config: StartupLLMSanityConfig) 
         simulation.time,
         "startup_llm_sanity_completed",
         {**summary, "artifact": str(artifact_path)},
+    )
+    _emit_progress(
+        progress_callback,
+        stage="startup_complete",
+        current=total_agents,
+        total=total_agents,
+        detail="Startup LLM sanity check complete.",
     )
 
     return {

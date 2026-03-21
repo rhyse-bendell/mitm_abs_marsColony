@@ -8,6 +8,7 @@ from modules.llm_sanity import (
     _extract_payload_from_wrapper,
     build_startup_sanity_prompt,
     normalize_sanity_response_payload,
+    run_startup_llm_sanity_check,
     validate_sanity_response_schema,
 )
 from modules.simulation import SimulationState
@@ -229,6 +230,53 @@ class TestStartupLLMSanity(unittest.TestCase):
             self.assertEqual(sim.startup_llm_sanity_summary["startup_llm_sanity_failure_count"], 0)
             self.assertEqual(sim.startup_llm_sanity_summary["startup_llm_sanity_success_count"], len(sim.agents))
             sim.stop()
+
+    def test_progress_callback_emits_expected_startup_stages(self):
+        events = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("modules.llm_sanity.request.urlopen") as mocked:
+                def _side_effect(req, timeout):
+                    req_payload = json.loads(req.data.decode("utf-8"))
+                    prompt_payload = json.loads(req_payload["messages"][1]["content"])
+                    target_name = prompt_payload["agent_name"]
+                    response_payload = {
+                        "agent_name": target_name,
+                        "role_or_focus": "role sanity",
+                        "understood_mission": "Support mission startup checks.",
+                        "relevant_data_ids": ["D001"],
+                        "relevant_information_ids": ["I001"],
+                        "relevant_knowledge_or_rule_ids": ["K001"],
+                        "first_information_priority": "Verify first bounded source.",
+                        "first_coordination_need": "Notify team lead.",
+                        "confidence": 0.8,
+                    }
+                    body = json.dumps({"choices": [{"message": {"content": json.dumps(response_payload)}}]})
+                    return _FakeHTTPResponse(body)
+
+                mocked.side_effect = _side_effect
+                sim = SimulationState(
+                    phases=[],
+                    project_root=tmpdir,
+                    brain_backend="ollama",
+                    planner_config={"enable_startup_llm_sanity": False},
+                )
+            try:
+                summary = run_startup_llm_sanity_check(
+                    sim,
+                    config=sim.startup_llm_sanity_config,
+                    progress_callback=lambda stage, current, total, agent_name, detail: events.append(
+                        (stage, current, total, agent_name, detail)
+                    ),
+                )
+                self.assertEqual(summary["startup_llm_sanity_agent_count"], len(sim.agents))
+                self.assertTrue(events)
+                stages = [e[0] for e in events]
+                self.assertEqual(stages[0], "startup_begin")
+                self.assertEqual(stages[-1], "startup_complete")
+                self.assertGreaterEqual(stages.count("agent_begin"), len(sim.agents))
+                self.assertGreaterEqual(stages.count("agent_result"), len(sim.agents))
+            finally:
+                sim.stop()
 
 
     def test_successful_startup_stores_explicit_per_agent_bootstrap_runtime_state(self):
