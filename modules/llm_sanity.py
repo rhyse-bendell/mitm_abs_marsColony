@@ -119,6 +119,23 @@ def _extract_payload_from_wrapper(response_json: Dict[str, Any]) -> Dict[str, An
     candidate_text = candidate_texts[0][1] if candidate_texts else ""
     json_found = bool(re.search(r"\{.*\}", candidate_text, flags=re.DOTALL)) if candidate_text else False
 
+    if not candidate_text and reasoning_text.strip():
+        try:
+            recovered_payload = _extract_json_object(reasoning_text)
+            return {
+                "payload": recovered_payload,
+                "candidate_text": reasoning_text,
+                "candidate_source": "choices[0].message.reasoning(recovered_json)",
+                "finish_reason": finish_reason,
+                "truncated": finish_reason == "length",
+                "wrapper_summary": wrapper_summary,
+                "reasoning_text": reasoning_text,
+                "json_found": True,
+                "recovered_from_reasoning": True,
+            }
+        except (json.JSONDecodeError, ValueError):
+            pass
+
     failure_category = None
     if not candidate_text:
         failure_category = "reasoning_only_response" if reasoning_text.strip() else "empty_content_wrapper"
@@ -308,34 +325,42 @@ def build_startup_sanity_prompt(agent, task_model, *, max_sources: int = 2, max_
         },
         "mission_context": {
             "task_id": task_model.task_id,
-            "mission_summary": mission,
-            "objective": "Startup sanity check only; do not provide a full execution plan or full construction solution.",
-        },
-        "dik_framing": {
-            "data": "raw factual units",
-            "information": "contextualized/combined data",
-            "knowledge": "structured understanding and actionable rules",
+            "mission_summary": mission[:220],
+            "objective": "Startup sanity probe only. Provide quick role-grounded comprehension.",
         },
         "bounded_context": {
-            "source_ids": source_ids,
-            "data_examples": data_items[:max_items_per_type],
-            "information_examples": info_items[:max_items_per_type],
-            "knowledge_examples": knowledge_items[:max_items_per_type],
-            "role_rule_examples": role_rules,
+            "source_ids": source_ids[: max(1, int(max_sources))],
+            "example_data_ids": [item["id"] for item in data_items[:max_items_per_type]],
+            "example_information_ids": [item["id"] for item in info_items[:max_items_per_type]],
+            "example_knowledge_or_rule_ids": (
+                [item["id"] for item in knowledge_items[:max_items_per_type]]
+                + [item["id"] for item in role_rules[:max_items_per_type]]
+            )[: max_items_per_type],
         },
         "response_schema": {field: "required" for field in SANITY_RESPONSE_FIELDS},
         "constraints": [
-            "Return only a single JSON object.",
-            "Do not include analysis, reasoning, chain-of-thought, or markdown.",
-            "Keep understood_mission to <= 24 words.",
-            "Keep first_information_priority and first_coordination_need concise.",
-            "Do not include a full construction solution.",
+            "Return exactly one JSON object with only the schema keys.",
+            "No markdown, no analysis, no chain-of-thought, no hidden/visible reasoning.",
+            "Use short strings; keep understood_mission <= 20 words.",
+            "Be action-oriented: set first_information_priority and first_coordination_need as immediate next focus.",
         ],
+    }
+
+    compact_prompt = {
+        "agent_name": prompt_contract["agent_identity"]["agent_name"],
+        "role": prompt_contract["agent_identity"]["role"],
+        "mission_summary": prompt_contract["mission_context"]["mission_summary"],
+        "source_ids": prompt_contract["bounded_context"]["source_ids"],
+        "example_data_ids": prompt_contract["bounded_context"]["example_data_ids"],
+        "example_information_ids": prompt_contract["bounded_context"]["example_information_ids"],
+        "example_knowledge_or_rule_ids": prompt_contract["bounded_context"]["example_knowledge_or_rule_ids"],
+        "required_response_keys": SANITY_RESPONSE_FIELDS,
+        "instructions": prompt_contract["constraints"],
     }
 
     return {
         "prompt_contract": prompt_contract,
-        "prompt_text": json.dumps(prompt_contract, indent=2),
+        "prompt_text": json.dumps(compact_prompt, separators=(",", ":")),
     }
 
 
@@ -363,6 +388,9 @@ def _post_chat_completion(
     }
     if json_only_mode:
         payload["response_format"] = {"type": "json_object"}
+    # Keep startup call standards-compliant for OpenAI-compatible local endpoints.
+    # We intentionally rely on strict prompt constraints for reasoning suppression,
+    # because cross-endpoint "disable thinking" controls are not reliably portable.
     started = time.perf_counter()
     req = request.Request(
         endpoint,
@@ -438,10 +466,10 @@ def run_startup_llm_sanity_check(simulation, *, config: StartupLLMSanityConfig) 
             "prompt_size_chars": len(prompt["prompt_text"]),
             "prompt_summary": {
                 "source_count": len(prompt["prompt_contract"]["bounded_context"]["source_ids"]),
-                "data_count": len(prompt["prompt_contract"]["bounded_context"]["data_examples"]),
-                "information_count": len(prompt["prompt_contract"]["bounded_context"]["information_examples"]),
-                "knowledge_count": len(prompt["prompt_contract"]["bounded_context"]["knowledge_examples"]),
-                "rule_count": len(prompt["prompt_contract"]["bounded_context"]["role_rule_examples"]),
+                "data_count": len(prompt["prompt_contract"]["bounded_context"]["example_data_ids"]),
+                "information_count": len(prompt["prompt_contract"]["bounded_context"]["example_information_ids"]),
+                "knowledge_count": len(prompt["prompt_contract"]["bounded_context"]["example_knowledge_or_rule_ids"]),
+                "rule_count": 0,
             },
             "startup_request_config": {
                 "timeout_s": float(config.timeout_s),

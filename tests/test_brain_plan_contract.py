@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -99,6 +100,93 @@ class BrainContractTests(unittest.TestCase):
         with patch("modules.brain_provider.request.urlopen", side_effect=_urlopen):
             provider.generate_plan(req)
         self.assertIn('"max_tokens": 7777', captured["payload"])
+
+    def test_provider_request_payload_is_compact_and_bounded(self):
+        provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", completion_max_tokens=7777, max_retries=0), fallback=RuleBrain())
+        req = AgentBrainRequest(
+            request_id="q3",
+            tick=1,
+            sim_time=1.0,
+            agent_id="a1",
+            display_name="A1",
+            agent_label="A",
+            task_id="mars_colony",
+            phase="p1",
+            local_context_summary="ctx " * 120,
+            local_observations=[f"obs-{i}" for i in range(20)],
+            working_memory_summary={"huge": "x" * 6000},
+            inbox_summary=[],
+            current_goal_stack=[{"goal_id": f"g{i}", "notes": "x" * 1000} for i in range(12)],
+            current_plan_summary={"notes": "x" * 5000},
+            allowed_actions=[{"action_type": "wait", "meta": "x" * 1000, "idx": i} for i in range(30)],
+            planning_horizon_config={"max_steps": 2},
+            request_explanation=False,
+            task_context={"very_large": "x" * 10000},
+            rule_context=["r" * 1000 for _ in range(20)],
+            derivation_context=["d" * 1000 for _ in range(20)],
+            artifact_context=[{"artifact_id": f"a{i}", "body": "x" * 1000} for i in range(20)],
+        )
+        payload = provider._build_request_payload(req)
+        user_contract = json.loads(payload["messages"][1]["content"])
+        self.assertNotIn("task_context", user_contract)
+        self.assertLessEqual(len(user_contract["allowed_actions"]), 14)
+        self.assertLessEqual(len(user_contract["local_observations"]), 6)
+        self.assertLessEqual(len(user_contract["current_goal_stack"]), 5)
+        self.assertLess(len(payload["messages"][1]["content"]), len(json.dumps(req.to_dict(), default=str)))
+
+    def test_parse_response_recovers_json_from_reasoning_when_content_empty(self):
+        provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", max_retries=0), fallback=RuleBrain())
+        wrapped = {
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "reasoning": json.dumps(
+                            {
+                                "response_id": "r",
+                                "agent_id": "a1",
+                                "plan": {
+                                    "plan_id": "p",
+                                    "plan_horizon": 1,
+                                    "ordered_goals": [],
+                                    "ordered_actions": [{"step_index": 0, "action_type": "wait", "expected_purpose": "ok"}],
+                                    "next_action": {"step_index": 0, "action_type": "wait", "expected_purpose": "ok"},
+                                    "confidence": 0.8,
+                                },
+                            }
+                        ),
+                    }
+                }
+            ]
+        }
+        result = provider._parse_response(wrapped)
+        self.assertEqual(result["parse_source"], "choices[0].message.reasoning")
+        self.assertEqual(result["payload"]["agent_id"], "a1")
+
+    def test_runtime_payload_enforces_json_only_contract(self):
+        provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", max_retries=0), fallback=RuleBrain())
+        req = AgentBrainRequest(
+            request_id="q4",
+            tick=1,
+            sim_time=1.0,
+            agent_id="a1",
+            display_name="A1",
+            agent_label="A",
+            task_id="mars_colony",
+            phase="p1",
+            local_context_summary="ctx",
+            local_observations=[],
+            working_memory_summary={},
+            inbox_summary=[],
+            current_goal_stack=[],
+            current_plan_summary={},
+            allowed_actions=[{"action_type": "wait"}],
+            planning_horizon_config={"max_steps": 2},
+            request_explanation=False,
+        )
+        payload = provider._build_request_payload(req)
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertIn("Return exactly one JSON object", payload["messages"][0]["content"])
 
 class OllamaProviderFallbackTests(unittest.TestCase):
     def test_ollama_provider_falls_back_on_malformed_payload(self):

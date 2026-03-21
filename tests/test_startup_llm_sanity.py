@@ -3,7 +3,13 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from modules.llm_sanity import SANITY_RESPONSE_FIELDS, _extract_payload_from_wrapper, build_startup_sanity_prompt, validate_sanity_response_schema
+from modules.llm_sanity import (
+    SANITY_RESPONSE_FIELDS,
+    _extract_payload_from_wrapper,
+    build_startup_sanity_prompt,
+    normalize_sanity_response_payload,
+    validate_sanity_response_schema,
+)
 from modules.simulation import SimulationState
 
 
@@ -31,11 +37,13 @@ class TestStartupLLMSanity(unittest.TestCase):
 
             self.assertEqual(prompt_contract["agent_identity"]["role"], agent.role)
             self.assertLessEqual(len(prompt_contract["bounded_context"]["source_ids"]), 1)
-            self.assertLessEqual(len(prompt_contract["bounded_context"]["data_examples"]), 2)
-            self.assertIn("raw factual units", prompt_contract["dik_framing"]["data"])
-            self.assertIn("do not provide a full execution plan", prompt_contract["mission_context"]["objective"].lower())
-            self.assertIn("do not include analysis", " ".join(prompt_contract["constraints"]).lower())
-            self.assertLess(len(payload["prompt_text"]), 2400)
+            self.assertLessEqual(len(prompt_contract["bounded_context"]["example_data_ids"]), 2)
+            self.assertIn("startup sanity probe only", prompt_contract["mission_context"]["objective"].lower())
+            self.assertIn("no analysis", " ".join(prompt_contract["constraints"]).lower())
+            self.assertLess(len(payload["prompt_text"]), 1200)
+            compact_prompt = json.loads(payload["prompt_text"])
+            self.assertIn("required_response_keys", compact_prompt)
+            self.assertNotIn("prompt_contract", compact_prompt)
             sim.stop()
 
     def test_startup_request_config_uses_larger_configurable_budget_and_records_metadata(self):
@@ -46,7 +54,7 @@ class TestStartupLLMSanity(unittest.TestCase):
                 req_payload = json.loads(req.data.decode("utf-8"))
                 requests.append(req_payload)
                 prompt_payload = json.loads(req_payload["messages"][1]["content"])
-                target_name = prompt_payload["agent_identity"]["agent_name"]
+                target_name = prompt_payload["agent_name"]
                 response_payload = {
                     "agent_name": target_name,
                     "role_or_focus": "role sanity",
@@ -75,6 +83,7 @@ class TestStartupLLMSanity(unittest.TestCase):
                 startup_request = next(r for r in requests if r.get("max_tokens") == 1400)
                 self.assertEqual(startup_request["response_format"], {"type": "json_object"})
                 self.assertIn("Do not include analysis", startup_request["messages"][0]["content"])
+                self.assertNotIn("```", startup_request["messages"][1]["content"])
 
                 artifact = sim.logger.output_session.session_folder / sim.startup_llm_sanity_summary["startup_llm_sanity_artifact"]
                 payload = json.loads(artifact.read_text(encoding="utf-8"))
@@ -104,8 +113,26 @@ class TestStartupLLMSanity(unittest.TestCase):
         invalid = {"agent_name": "Other", "confidence": 1.9}
         ok, errors = validate_sanity_response_schema(invalid, expected_agent_name="Architect")
         self.assertFalse(ok)
-        self.assertTrue(any("missing fields" in e for e in errors))
+        self.assertTrue(any("must be a non-empty string" in e for e in errors))
         self.assertTrue(any("confidence" in e for e in errors))
+
+    def test_normalization_tolerates_common_qwen_style_quirks(self):
+        payload = {
+            "agent_name": "",
+            "role_or_focus": 42,
+            "understood_mission": "Keep habitat safe",
+            "relevant_data_ids": "D1,D2",
+            "relevant_information_ids": "I1\nI2",
+            "relevant_knowledge_or_rule_ids": None,
+            "first_information_priority": "check source",
+            "first_coordination_need": "sync team",
+            "confidence": "80%",
+        }
+        normalized = normalize_sanity_response_payload(payload, expected_agent_name="Architect", fallback_role="Architect")
+        ok, errors = validate_sanity_response_schema(normalized, expected_agent_name="Architect")
+        self.assertTrue(ok, msg=f"unexpected errors: {errors}")
+        self.assertEqual(normalized["agent_name"], "Architect")
+        self.assertEqual(normalized["relevant_data_ids"], ["D1", "D2"])
 
     def test_artifact_and_metadata_written_when_enabled(self):
         content = {
@@ -177,7 +204,7 @@ class TestStartupLLMSanity(unittest.TestCase):
                 def _side_effect(req, timeout):
                     req_payload = json.loads(req.data.decode("utf-8"))
                     prompt_payload = json.loads(req_payload["messages"][1]["content"])
-                    target_name = prompt_payload["agent_identity"]["agent_name"]
+                    target_name = prompt_payload["agent_name"]
                     response_payload = {
                         "agent_name": target_name,
                         "role_or_focus": "role sanity",
@@ -210,7 +237,7 @@ class TestStartupLLMSanity(unittest.TestCase):
                 def _side_effect(req, timeout):
                     req_payload = json.loads(req.data.decode("utf-8"))
                     prompt_payload = json.loads(req_payload["messages"][1]["content"])
-                    target_name = prompt_payload["agent_identity"]["agent_name"]
+                    target_name = prompt_payload["agent_name"]
                     response_payload = {
                         "agent_name": target_name,
                         "role_or_focus": "role sanity",
@@ -250,7 +277,7 @@ class TestStartupLLMSanity(unittest.TestCase):
                 def _startup_side_effect(req, timeout):
                     req_payload = json.loads(req.data.decode("utf-8"))
                     prompt_payload = json.loads(req_payload["messages"][1]["content"])
-                    target_name = prompt_payload["agent_identity"]["agent_name"]
+                    target_name = prompt_payload["agent_name"]
                     response_payload = {
                         "agent_name": target_name,
                         "role_or_focus": "role sanity",
@@ -309,7 +336,7 @@ class TestStartupLLMSanity(unittest.TestCase):
                 def _side_effect(req, timeout):
                     req_payload = json.loads(req.data.decode("utf-8"))
                     prompt_payload = json.loads(req_payload["messages"][1]["content"])
-                    target_name = prompt_payload["agent_identity"]["agent_name"]
+                    target_name = prompt_payload["agent_name"]
                     response_payload = {
                         "agent_name": target_name,
                         "role_or_focus": "role sanity",
@@ -339,7 +366,7 @@ class TestStartupLLMSanity(unittest.TestCase):
                 def _side_effect(req, timeout):
                     req_payload = json.loads(req.data.decode("utf-8"))
                     prompt_payload = json.loads(req_payload["messages"][1]["content"])
-                    target_name = prompt_payload["agent_identity"]["agent_name"]
+                    target_name = prompt_payload["agent_name"]
                     response_payload = {
                         "agent_name": target_name,
                         "role_or_focus": "role sanity",
@@ -384,6 +411,35 @@ class TestStartupLLMSanity(unittest.TestCase):
             finally:
                 sim.stop()
 
+    def test_reasoning_channel_json_is_recovered(self):
+        payload = {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": "",
+                        "reasoning": json.dumps(
+                            {
+                                "agent_name": "Architect",
+                                "role_or_focus": "Design",
+                                "understood_mission": "Build safe habitat fast.",
+                                "relevant_data_ids": ["D1"],
+                                "relevant_information_ids": ["I1"],
+                                "relevant_knowledge_or_rule_ids": ["K1"],
+                                "first_information_priority": "Check constraints",
+                                "first_coordination_need": "Sync engineer",
+                                "confidence": 0.7,
+                            }
+                        ),
+                    },
+                }
+            ]
+        }
+        extraction = _extract_payload_from_wrapper(payload)
+        self.assertTrue(extraction.get("json_found"))
+        self.assertEqual(extraction.get("candidate_source"), "choices[0].message.reasoning(recovered_json)")
+        self.assertIsInstance(extraction.get("payload"), dict)
+
     def test_finish_reason_length_with_truncated_json_reports_truncation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("modules.llm_sanity.request.urlopen") as mocked:
@@ -407,7 +463,7 @@ class TestStartupLLMSanity(unittest.TestCase):
                 def _side_effect(req, timeout):
                     req_payload = json.loads(req.data.decode("utf-8"))
                     prompt_payload = json.loads(req_payload["messages"][1]["content"])
-                    target_name = prompt_payload["agent_identity"]["agent_name"]
+                    target_name = prompt_payload["agent_name"]
                     response_payload = {
                         "agent_name": target_name,
                         "role_or_focus": "role sanity",
@@ -434,10 +490,10 @@ class TestStartupLLMSanity(unittest.TestCase):
             sim = SimulationState(phases=[], project_root=tmpdir, brain_backend="ollama")
             try:
                 self.assertTrue(sim.planner_defaults.get("unrestricted_local_qwen_mode"))
-                self.assertGreaterEqual(sim.startup_llm_sanity_config.timeout_s, 900.0)
-                self.assertGreaterEqual(sim.startup_llm_sanity_config.completion_max_tokens, 24576)
-                self.assertGreaterEqual(sim.brain_backend_config.completion_max_tokens, 24576)
-                self.assertGreaterEqual(sim.brain_backend_config.warmup_timeout_s, 600.0)
+                self.assertGreaterEqual(sim.startup_llm_sanity_config.timeout_s, 120.0)
+                self.assertGreaterEqual(sim.startup_llm_sanity_config.completion_max_tokens, 768)
+                self.assertGreaterEqual(sim.brain_backend_config.completion_max_tokens, 2048)
+                self.assertGreaterEqual(sim.brain_backend_config.warmup_timeout_s, 90.0)
             finally:
                 sim.stop()
 
