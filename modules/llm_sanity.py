@@ -137,38 +137,136 @@ def _extract_payload_from_wrapper(response_json: Dict[str, Any]) -> Dict[str, An
         "failure_category": failure_category,
     }
 
+def _coerce_string_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        out: List[str] = []
+        for item in value:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if text:
+                out.append(text)
+        return out
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        # tolerate comma/newline/semicolon separated responses
+        parts = re.split(r"[,;\n]+", text)
+        return [p.strip() for p in parts if p and p.strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _coerce_confidence(value: Any) -> float:
+    if value is None:
+        return 0.5
+    if isinstance(value, (int, float)):
+        conf = float(value)
+        if conf > 1.0 and conf <= 100.0:
+            conf = conf / 100.0
+        return min(1.0, max(0.0, conf))
+
+    text = str(value).strip().lower()
+    if not text:
+        return 0.5
+
+    aliases = {
+        "high": 0.85,
+        "medium": 0.55,
+        "med": 0.55,
+        "moderate": 0.55,
+        "low": 0.25,
+        "very high": 0.95,
+        "very low": 0.10,
+    }
+    if text in aliases:
+        return aliases[text]
+
+    if text.endswith("%"):
+        try:
+            pct = float(text[:-1].strip())
+            return min(1.0, max(0.0, pct / 100.0))
+        except ValueError:
+            return 0.5
+
+    try:
+        conf = float(text)
+        if conf > 1.0 and conf <= 100.0:
+            conf = conf / 100.0
+        return min(1.0, max(0.0, conf))
+    except ValueError:
+        return 0.5
+
+
+def normalize_sanity_response_payload(
+    payload: Dict[str, Any],
+    *,
+    expected_agent_name: str | None = None,
+    fallback_role: str | None = None,
+) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+
+    normalized = dict(payload)
+
+    if not isinstance(normalized.get("agent_name"), str) or not normalized.get("agent_name", "").strip():
+        normalized["agent_name"] = expected_agent_name or ""
+
+    if not isinstance(normalized.get("role_or_focus"), str):
+        normalized["role_or_focus"] = str(normalized.get("role_or_focus", "") or "")
+    normalized["role_or_focus"] = normalized["role_or_focus"].strip() or (fallback_role or "")
+
+    for key in ["understood_mission", "first_information_priority", "first_coordination_need"]:
+        if not isinstance(normalized.get(key), str):
+            normalized[key] = str(normalized.get(key, "") or "")
+        normalized[key] = normalized[key].strip()
+
+    normalized["relevant_data_ids"] = _coerce_string_list(normalized.get("relevant_data_ids"))
+    normalized["relevant_information_ids"] = _coerce_string_list(normalized.get("relevant_information_ids"))
+    normalized["relevant_knowledge_or_rule_ids"] = _coerce_string_list(normalized.get("relevant_knowledge_or_rule_ids"))
+    normalized["confidence"] = _coerce_confidence(normalized.get("confidence"))
+
+    return normalized
 
 def validate_sanity_response_schema(payload: Dict[str, Any], *, expected_agent_name: str | None = None) -> Tuple[bool, List[str]]:
     errors: List[str] = []
     if not isinstance(payload, dict):
         return False, ["response is not a JSON object"]
 
-    missing = [k for k in SANITY_RESPONSE_FIELDS if k not in payload]
-    if missing:
-        errors.append(f"missing fields: {missing}")
+    # After normalization, these should all exist. We only fail on fields that
+    # are still unusable for a basic startup sanity pass.
+    required_string_fields = [
+        "role_or_focus",
+        "understood_mission",
+        "first_information_priority",
+        "first_coordination_need",
+    ]
+    for key in required_string_fields:
+        value = payload.get(key)
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"{key} must be a non-empty string")
 
     for key in ["relevant_data_ids", "relevant_information_ids", "relevant_knowledge_or_rule_ids"]:
         value = payload.get(key)
         if value is not None and not isinstance(value, list):
             errors.append(f"{key} must be a list")
 
-    for key in ["agent_name", "role_or_focus", "understood_mission", "first_information_priority", "first_coordination_need"]:
-        value = payload.get(key)
-        if value is not None and not isinstance(value, str):
-            errors.append(f"{key} must be a string")
-
     confidence = payload.get("confidence")
-    if confidence is not None:
-        try:
-            conf = float(confidence)
-            if conf < 0.0 or conf > 1.0:
-                errors.append("confidence must be in [0.0, 1.0]")
-        except (TypeError, ValueError):
-            errors.append("confidence must be numeric")
+    if not isinstance(confidence, (int, float)):
+        errors.append("confidence must be numeric")
+    else:
+        conf = float(confidence)
+        if conf < 0.0 or conf > 1.0:
+            errors.append("confidence must be in [0.0, 1.0]")
 
-    if expected_agent_name and isinstance(payload.get("agent_name"), str):
-        if payload.get("agent_name").strip().lower() != expected_agent_name.strip().lower():
-            errors.append("agent_name does not match probe target")
+    # Do not fail startup sanity just because the model omitted or slightly altered
+    # agent_name. That field is useful metadata, not mission-critical comprehension.
+    agent_name = payload.get("agent_name")
+    if agent_name is not None and not isinstance(agent_name, str):
+        errors.append("agent_name must be a string if present")
 
     return len(errors) == 0, errors
 
@@ -410,22 +508,35 @@ def run_startup_llm_sanity_check(simulation, *, config: StartupLLMSanityConfig) 
                     row["failure_category"] = "truncated_response" if row["truncated"] else "json_parse_failure"
                     raise ValueError(row["failure_category"]) from exc
 
+            normalized_payload = normalize_sanity_response_payload(
+                parsed_payload,
+                expected_agent_name=agent.name,
+                fallback_role=agent.role,
+            )
+
             row["parsed_success"] = True
             row["json_parsed"] = True
-            row["parsed_response"] = parsed_payload
+            row["parsed_response"] = normalized_payload
 
-            valid, errors = validate_sanity_response_schema(parsed_payload, expected_agent_name=agent.name)
+            valid, errors = validate_sanity_response_schema(
+                normalized_payload,
+                expected_agent_name=agent.name,
+            )
             row["validation_success"] = valid
             row["schema_validated"] = valid
             row["validation_errors"] = errors
+
             if isinstance(runtime_bootstrap, dict):
                 if valid:
-                    summary_text, summary_structured = _build_bootstrap_summary(parsed_payload, max_chars=bootstrap_summary_max_chars)
+                    summary_text, summary_structured = _build_bootstrap_summary(
+                        normalized_payload,
+                        max_chars=bootstrap_summary_max_chars,
+                    )
                     runtime_bootstrap.update(
                         {
                             "status": "success",
                             "latency_ms": latency_ms,
-                            "validated_response": parsed_payload,
+                            "validated_response": normalized_payload,
                             "summary_text": summary_text,
                             "summary_structured": summary_structured,
                         }
