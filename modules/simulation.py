@@ -77,6 +77,7 @@ class SimulationState:
         brain_backend_options=None,
         planner_config=None,
         task_id="mars_colony",
+        startup_progress_callback=None,
     ):
         self.task_model = load_task_model(task_id=task_id)
         if phases is None and self.task_model.phases:
@@ -129,6 +130,7 @@ class SimulationState:
             "bootstrap_reuse_agent_count": 0,
             "bootstrap_reuse_included_count": 0,
         }
+        self.startup_progress_callback = startup_progress_callback
         planner_trace_enabled = bool(self.planner_defaults.get("enable_planner_trace", True))
         planner_trace_mode = str(self.planner_defaults.get("planner_trace_mode", "full") or "full").lower()
         planner_trace_max_chars = int(self.planner_defaults.get("planner_trace_max_chars", 12000) or 12000)
@@ -431,7 +433,11 @@ class SimulationState:
             self.logger.log_event(self.time, "startup_llm_sanity_disabled", {"enabled": False})
             return dict(self.startup_llm_sanity_summary)
         try:
-            summary = run_startup_llm_sanity_check(self, config=self.startup_llm_sanity_config)
+            summary = run_startup_llm_sanity_check(
+                self,
+                config=self.startup_llm_sanity_config,
+                progress_callback=self.startup_progress_callback,
+            )
             self.startup_llm_sanity_summary.update(summary)
             results_by_agent = {
                 str(item.get("agent_id")): item

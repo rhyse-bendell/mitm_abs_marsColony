@@ -1,6 +1,9 @@
 # File: interface.py
 
 import tkinter as tk
+import queue
+import threading
+import traceback
 from tkinter import ttk, messagebox
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -16,6 +19,7 @@ from modules.interaction_graph import CANONICAL_NODES
 
 class MarsColonyInterface:
     STATE_IDLE = "idle"
+    STATE_STARTING = "starting"
     STATE_RUNNING = "running"
     STATE_PAUSED = "paused"
     STATE_STOPPED = "stopped"
@@ -84,6 +88,13 @@ class MarsColonyInterface:
         self.construction = ConstructionManager()
         self.run_state = self.STATE_IDLE
         self._run_loop_job = None
+        self._startup_poll_job = None
+        self._startup_worker = None
+        self._startup_queue = None
+        self._startup_dialog = None
+        self._startup_status_var = None
+        self._startup_progress = None
+        self._startup_progressbar = None
         self.run_loop_interval_ms = 100
         self.base_dt = 0.1
 
@@ -579,6 +590,10 @@ class MarsColonyInterface:
         self.backend_status_var.set(f"Backend (configured/effective): {configured} / {effective}{suffix}")
 
     def apply_experiment_settings(self):
+        sim = self._build_simulation_from_settings()
+        self._finalize_simulation_install(sim)
+
+    def _build_simulation_from_settings(self, startup_progress_callback=None):
         print("=== Experiment Settings ===")
         print("Speed Multiplier:", self.speed_multiplier.get())
         print("Flash Mode:", self.flash_mode.get())
@@ -599,7 +614,7 @@ class MarsColonyInterface:
 
         # Create new simulation with selected parameters
         from modules.simulation import SimulationState
-        self.sim = SimulationState(
+        return SimulationState(
             agent_configs=agent_configs,
             num_runs=self.num_runs.get(),
             speed=self.speed_multiplier.get(),
@@ -609,8 +624,11 @@ class MarsColonyInterface:
             brain_backend=selected_backend,
             brain_backend_options=backend_options,
             planner_config=planner_config,
+            startup_progress_callback=startup_progress_callback,
         )
 
+    def _finalize_simulation_install(self, sim):
+        self.sim = sim
         self.run_state = self.STATE_IDLE
         self._cancel_run_loop()
         self._update_control_states()
@@ -620,6 +638,168 @@ class MarsColonyInterface:
         self._update_system_log()
         self._update_backend_status_display()
         self.update_interaction_tab()
+
+    def _create_startup_dialog(self):
+        self._close_startup_dialog()
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Initializing Simulation")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        frame = ttk.Frame(dialog, padding=12)
+        frame.pack(fill="both", expand=True)
+        self._startup_status_var = StringVar(value="Preparing startup…")
+        ttk.Label(frame, textvariable=self._startup_status_var).pack(fill="x", pady=(0, 8))
+        self._startup_progress = DoubleVar(value=0.0)
+        self._startup_progressbar = ttk.Progressbar(frame, mode="indeterminate", length=280)
+        self._startup_progressbar.pack(fill="x")
+        self._startup_progressbar.start(12)
+        self._startup_dialog = dialog
+
+    def _close_startup_dialog(self):
+        if self._startup_progressbar is not None:
+            try:
+                self._startup_progressbar.stop()
+            except Exception:
+                pass
+        if self._startup_dialog is not None:
+            try:
+                self._startup_dialog.grab_release()
+            except Exception:
+                pass
+            try:
+                self._startup_dialog.destroy()
+            except Exception:
+                pass
+        self._startup_dialog = None
+        self._startup_status_var = None
+        self._startup_progress = None
+        self._startup_progressbar = None
+
+    def _startup_progress_callback_factory(self):
+        def _callback(stage, current, total, agent_name, detail):
+            if not self._startup_queue:
+                return
+            self._startup_queue.put(
+                {
+                    "type": "progress",
+                    "stage": stage,
+                    "current": int(current or 0),
+                    "total": max(0, int(total or 0)),
+                    "agent_name": agent_name,
+                    "detail": detail,
+                }
+            )
+
+        return _callback
+
+    def _startup_worker_main(self):
+        try:
+            if self._startup_queue:
+                self._startup_queue.put({"type": "startup_begin"})
+            sim = self._build_simulation_from_settings(
+                startup_progress_callback=self._startup_progress_callback_factory(),
+            )
+            if self._startup_queue:
+                self._startup_queue.put({"type": "startup_success", "sim": sim})
+        except Exception as exc:  # noqa: BLE001
+            if self._startup_queue:
+                self._startup_queue.put(
+                    {
+                        "type": "startup_failure",
+                        "error_message": f"{type(exc).__name__}: {exc}",
+                        "traceback": traceback.format_exc(),
+                    }
+                )
+
+    def _begin_async_startup(self):
+        self.run_state = self.STATE_STARTING
+        self._cancel_run_loop()
+        self._update_control_states()
+        self._create_startup_dialog()
+        self._startup_queue = queue.Queue()
+        self._startup_worker = threading.Thread(target=self._startup_worker_main, daemon=True)
+        self._startup_worker.start()
+        self._schedule_startup_poll()
+
+    def _schedule_startup_poll(self):
+        if self.run_state == self.STATE_STARTING:
+            self._startup_poll_job = self.root.after(75, self._poll_startup_queue)
+
+    def _poll_startup_queue(self):
+        self._startup_poll_job = None
+        if self._startup_queue is None:
+            return
+        should_reschedule = self.run_state == self.STATE_STARTING
+        while True:
+            try:
+                event = self._startup_queue.get_nowait()
+            except queue.Empty:
+                break
+            should_reschedule = self._handle_startup_event(event)
+            if not should_reschedule:
+                break
+        if should_reschedule and self.run_state == self.STATE_STARTING:
+            self._schedule_startup_poll()
+
+    def _handle_startup_event(self, event):
+        event_type = event.get("type")
+        if event_type in {"startup_begin", "progress"}:
+            self._update_startup_progress(event)
+            return True
+        if event_type == "startup_success":
+            self._finalize_startup_success(event.get("sim"))
+            return False
+        if event_type == "startup_failure":
+            self._finalize_startup_failure(event.get("error_message"), event.get("traceback"))
+            return False
+        return True
+
+    def _update_startup_progress(self, event):
+        stage = event.get("stage") or event.get("type") or "startup"
+        current = max(0, int(event.get("current", 0) or 0))
+        total = max(0, int(event.get("total", 0) or 0))
+        agent_name = event.get("agent_name")
+        detail = event.get("detail")
+
+        if self._startup_status_var is not None:
+            label = detail or stage.replace("_", " ").title()
+            if agent_name:
+                label = f"{label} ({agent_name})"
+            self._startup_status_var.set(label)
+
+        if self._startup_progressbar is None:
+            return
+        if total > 0:
+            if str(self._startup_progressbar.cget("mode")) != "determinate":
+                self._startup_progressbar.stop()
+                self._startup_progressbar.configure(mode="determinate", maximum=total, variable=self._startup_progress)
+            if self._startup_progress is not None:
+                self._startup_progress.set(min(current, total))
+        elif str(self._startup_progressbar.cget("mode")) != "indeterminate":
+            self._startup_progressbar.configure(mode="indeterminate", variable="")
+            self._startup_progressbar.start(12)
+
+    def _finalize_startup_success(self, sim):
+        self._close_startup_dialog()
+        self._startup_queue = None
+        self._startup_worker = None
+        self._finalize_simulation_install(sim)
+        self.run_state = self.STATE_RUNNING
+        self._update_control_states()
+        self._schedule_next_tick()
+
+    def _finalize_startup_failure(self, error_message, tb_text=None):
+        if tb_text:
+            print(tb_text)
+        self._close_startup_dialog()
+        self._startup_queue = None
+        self._startup_worker = None
+        self.sim = None
+        self.run_state = self.STATE_IDLE
+        self._cancel_run_loop()
+        self._update_control_states()
+        messagebox.showerror("Startup Failed", error_message or "Simulation initialization failed.")
 
     def _cancel_run_loop(self):
         if self._run_loop_job is not None:
@@ -655,11 +835,12 @@ class MarsColonyInterface:
         self.lifecycle_label.config(text=f"State: {self.run_state}")
 
     def start_experiment(self):
-        if self.run_state == self.STATE_RUNNING:
+        if self.run_state in {self.STATE_RUNNING, self.STATE_STARTING}:
             return
 
         if self.run_state in {self.STATE_IDLE, self.STATE_STOPPED} or self.sim is None:
-            self.apply_experiment_settings()
+            self._begin_async_startup()
+            return
 
         self.run_state = self.STATE_RUNNING
         self._update_control_states()
@@ -1392,6 +1573,8 @@ class MarsColonyInterface:
 
 
     def stop_experiment(self):
+        if self.run_state == self.STATE_STARTING:
+            return
         self._cancel_run_loop()
         if self.sim:
             self.sim.stop()
