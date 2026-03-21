@@ -15,6 +15,40 @@ from modules.brain_contract import AgentBrainRequest, AgentBrainResponse, Planne
 LOGGER = logging.getLogger(__name__)
 
 
+def _truncate_text(value: Any, *, max_chars: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= max_chars:
+        return text
+    return f"{text[: max_chars - 3].rstrip()}..."
+
+
+def _bounded_json_value(value: Any, *, max_chars: int) -> Any:
+    try:
+        serialized = json.dumps(value, default=str)
+    except TypeError:
+        serialized = json.dumps(str(value))
+    if len(serialized) <= max_chars:
+        return value
+    return {"_truncated_json": _truncate_text(serialized, max_chars=max_chars)}
+
+
+def _content_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            text = _content_text(item)
+            if text:
+                parts.append(text)
+        return "\n".join(parts).strip()
+    if isinstance(value, dict):
+        for key in ("text", "content", "output_text"):
+            if isinstance(value.get(key), str):
+                return str(value.get(key)).strip()
+    return ""
+
+
 def select_productive_fallback_action(allowed_actions: list[dict[str, Any]]) -> PlannedActionStep:
     """Pick a deterministic safe fallback action with conservative progress bias."""
     if not allowed_actions:
@@ -557,17 +591,54 @@ class OllamaLocalBrainProvider(BrainProvider):
             LOGGER.info("%s %s", message, payload)
 
     def _build_request_payload(self, request_packet: AgentBrainRequest) -> Dict[str, Any]:
-        contract = request_packet.to_dict()
+        max_actions = 14
+        max_observations = 6
+        max_goal_stack = 5
+        max_rules = 8
+        max_derivations = 6
+        max_artifacts = 4
+        max_steps = max(1, int(request_packet.planning_horizon_config.get("max_steps", 3) or 3))
+
+        compact_contract = {
+            "request_id": request_packet.request_id,
+            "agent": {
+                "agent_id": request_packet.agent_id,
+                "display_name": request_packet.display_name,
+                "agent_label": request_packet.agent_label,
+                "phase": request_packet.phase,
+            },
+            "sim": {
+                "tick": int(request_packet.tick),
+                "sim_time": float(request_packet.sim_time),
+                "task_id": request_packet.task_id,
+            },
+            "planning_horizon_config": {"max_steps": max_steps},
+            "local_context_summary": _truncate_text(request_packet.local_context_summary, max_chars=220),
+            "local_observations": [_truncate_text(item, max_chars=140) for item in request_packet.local_observations[:max_observations]],
+            "working_memory_summary": _bounded_json_value(request_packet.working_memory_summary, max_chars=1200),
+            "current_goal_stack": [_bounded_json_value(item, max_chars=320) for item in request_packet.current_goal_stack[:max_goal_stack]],
+            "current_plan_summary": _bounded_json_value(request_packet.current_plan_summary, max_chars=700),
+            "allowed_actions": [_bounded_json_value(item, max_chars=320) for item in request_packet.allowed_actions[:max_actions]],
+            "rule_context": [_truncate_text(item, max_chars=120) for item in request_packet.rule_context[:max_rules]],
+            "derivation_context": [_truncate_text(item, max_chars=120) for item in request_packet.derivation_context[:max_derivations]],
+            "artifact_context": [_bounded_json_value(item, max_chars=300) for item in request_packet.artifact_context[:max_artifacts]],
+            "bootstrap_summary": _bounded_json_value(request_packet.bootstrap_summary, max_chars=500) if request_packet.bootstrap_summary else None,
+        }
         return {
             "model": self.config.local_model,
             "messages": [
                 {
                     "role": "system",
-                    "content": "Return only JSON object matching AgentBrainResponse with plan/next_action."
+                    "content": (
+                        "Return exactly one JSON object that matches AgentBrainResponse. "
+                        "Output JSON only. No markdown. No analysis or chain-of-thought in visible output. "
+                        "Include plan.next_action and non-empty plan.ordered_actions. "
+                        "Keep plan concise, action-oriented, and bounded to immediate horizon."
+                    ),
                 },
                 {
                     "role": "user",
-                    "content": json.dumps(contract, default=str),
+                    "content": json.dumps(compact_contract, separators=(",", ":"), default=str),
                 },
             ],
             "temperature": 0,
@@ -579,18 +650,39 @@ class OllamaLocalBrainProvider(BrainProvider):
         choices = response_json.get("choices") or []
         if not choices:
             raise ValueError("local backend response missing choices")
-        message = choices[0].get("message", {})
+        choice0 = choices[0] if isinstance(choices[0], dict) else {}
+        message = choice0.get("message", {}) if isinstance(choice0.get("message"), dict) else {}
         content = message.get("content")
         if isinstance(content, dict):
-            return content
-        if not isinstance(content, str):
-            raise ValueError("local backend response content is not JSON string")
-        cleaned = content.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.strip("`")
-            if cleaned.startswith("json"):
-                cleaned = cleaned[4:].strip()
-        return json.loads(cleaned)
+            return {"payload": content, "parse_source": "choices[0].message.content(dict)"}
+
+        candidate_texts: list[tuple[str, str]] = []
+        for source, value in [
+            ("choices[0].message.content", content),
+            ("choices[0].message.output_text", message.get("output_text")),
+            ("choices[0].text", choice0.get("text")),
+            ("response", response_json.get("response")),
+            ("choices[0].message.reasoning", message.get("reasoning")),
+            ("choices[0].message.thinking", message.get("thinking")),
+            ("choices[0].reasoning", choice0.get("reasoning")),
+        ]:
+            extracted = _content_text(value)
+            if extracted:
+                candidate_texts.append((source, extracted))
+        if not candidate_texts:
+            raise ValueError("local backend response content is empty")
+
+        for source, candidate in candidate_texts:
+            cleaned = candidate.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.strip("`")
+                if cleaned.startswith("json"):
+                    cleaned = cleaned[4:].strip()
+            try:
+                return {"payload": json.loads(cleaned), "parse_source": source}
+            except json.JSONDecodeError:
+                continue
+        raise ValueError("local backend response did not contain parseable JSON")
 
     def generate_plan(self, request_packet: AgentBrainRequest) -> AgentBrainResponse:
         started_at = time.perf_counter()
@@ -611,6 +703,8 @@ class OllamaLocalBrainProvider(BrainProvider):
             "agent_brain_request_size_chars": len(json.dumps(request_packet.to_dict(), default=str)),
             "provider_request_payload": None,
             "provider_request_payload_size_chars": 0,
+            "provider_response_parse_source": None,
+            "reasoning_suppression_requested": False,
             "attempts": [],
             "llm_response_received": False,
             "llm_response_parsed": False,
@@ -627,6 +721,7 @@ class OllamaLocalBrainProvider(BrainProvider):
                 payload = self._build_request_payload(request_packet)
                 trace["provider_request_payload"] = payload
                 trace["provider_request_payload_size_chars"] = len(json.dumps(payload, default=str))
+                trace["reasoning_suppression_requested"] = False
                 attempt_trace: Dict[str, Any] = {"attempt": attempt}
                 req = request.Request(
                     endpoint,
@@ -642,7 +737,10 @@ class OllamaLocalBrainProvider(BrainProvider):
                 parsed = json.loads(raw)
                 attempt_trace["parsed_response_json"] = parsed
                 trace["llm_response_parsed"] = True
-                response_payload = self._parse_response(parsed)
+                parse_result = self._parse_response(parsed)
+                response_payload = parse_result["payload"]
+                attempt_trace["response_parse_source"] = parse_result.get("parse_source")
+                trace["provider_response_parse_source"] = parse_result.get("parse_source")
                 attempt_trace["extracted_response_payload"] = response_payload
                 if not isinstance(response_payload, dict) or "plan" not in response_payload:
                     raise ValueError("provider payload missing plan")
