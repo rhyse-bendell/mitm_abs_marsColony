@@ -160,6 +160,20 @@ class Agent:
             "last_updated_at": None,
             "restarts": 0,
         }
+        self.inspect_pursuit = {
+            "action_type": None,
+            "source_id": None,
+            "slot_id": None,
+            "target_position": None,
+            "started_at": None,
+            "expires_at": None,
+            "blocked_attempts": 0,
+            "no_progress_ticks": 0,
+            "last_distance_to_target": None,
+        }
+        self.inspect_pursuit_lease_seconds = 10.0
+        self.inspect_pursuit_no_progress_limit = 6
+        self.inspect_pursuit_blocked_attempt_limit = 8
         self.source_access_state = {
             "source_id": None,
             "slot_id": None,
@@ -680,6 +694,103 @@ class Agent:
             "blocked_attempts": 0,
         }
 
+    def _clear_inspect_pursuit(self, reason=None, sim_state=None, release_slot=False, environment=None):
+        source_id = self.inspect_pursuit.get("source_id")
+        if release_slot and source_id and environment is not None:
+            self._release_source_slot(environment, source_id=source_id, emit=True, sim_state=sim_state, reason=reason or "pursuit_cleared")
+        self.inspect_pursuit = {
+            "action_type": None,
+            "source_id": None,
+            "slot_id": None,
+            "target_position": None,
+            "started_at": None,
+            "expires_at": None,
+            "blocked_attempts": 0,
+            "no_progress_ticks": 0,
+            "last_distance_to_target": None,
+        }
+        if source_id and sim_state is not None:
+            self._emit_event(sim_state, "pursuit_abandoned", {"source_id": source_id, "reason": reason or "cleared"})
+
+    def _inspect_pursuit_active_for(self, source_id, now_ts):
+        if self.inspect_pursuit.get("action_type") != ExecutableActionType.INSPECT_INFORMATION_SOURCE.value:
+            return False
+        if self.inspect_pursuit.get("source_id") != source_id:
+            return False
+        expires_at = self.inspect_pursuit.get("expires_at")
+        return expires_at is not None and float(expires_at) >= float(now_ts)
+
+    def _commit_inspect_pursuit(self, source_id, target_position, now_ts, slot_id=None, sim_state=None):
+        self.inspect_pursuit.update(
+            {
+                "action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
+                "source_id": source_id,
+                "slot_id": slot_id,
+                "target_position": target_position,
+                "started_at": float(now_ts),
+                "expires_at": float(now_ts) + float(self.inspect_pursuit_lease_seconds),
+                "blocked_attempts": 0,
+                "no_progress_ticks": 0,
+                "last_distance_to_target": None,
+            }
+        )
+        if sim_state is not None:
+            self._emit_event(
+                sim_state,
+                "pursuit_committed",
+                {
+                    "source_id": source_id,
+                    "target": target_position,
+                    "slot_id": slot_id,
+                    "lease_seconds": self.inspect_pursuit_lease_seconds,
+                    "expires_at": self.inspect_pursuit.get("expires_at"),
+                },
+            )
+
+    def _mark_inspect_pursuit_progress(self, source_id, distance, sim_state=None):
+        if self.inspect_pursuit.get("source_id") != source_id:
+            return
+        previous = self.inspect_pursuit.get("last_distance_to_target")
+        if previous is not None and distance <= (float(previous) - 0.05):
+            self.inspect_pursuit["no_progress_ticks"] = 0
+            if sim_state is not None:
+                self._emit_event(
+                    sim_state,
+                    "pursuit_progressed",
+                    {"source_id": source_id, "last_distance": round(float(previous), 4), "distance": round(float(distance), 4)},
+                )
+        elif previous is not None:
+            self.inspect_pursuit["no_progress_ticks"] = int(self.inspect_pursuit.get("no_progress_ticks", 0)) + 1
+        self.inspect_pursuit["last_distance_to_target"] = float(distance)
+
+    def _expire_or_stall_inspect_pursuit(self, source_id, now_ts, sim_state=None, environment=None, reason_hint=None):
+        if self.inspect_pursuit.get("source_id") != source_id:
+            return False
+        expires_at = float(self.inspect_pursuit.get("expires_at") or 0.0)
+        if expires_at and float(now_ts) > expires_at:
+            self._emit_event(sim_state, "pursuit_expired", {"source_id": source_id, "expires_at": expires_at, "now": float(now_ts)})
+            self.inspect_stall_counts[source_id] = self.inspect_stall_counts.get(source_id, 0) + 1
+            self._clear_inspect_pursuit(reason="lease_expired", sim_state=sim_state, release_slot=True, environment=environment)
+            return True
+        blocked_attempts = int(self.inspect_pursuit.get("blocked_attempts", 0))
+        no_progress = int(self.inspect_pursuit.get("no_progress_ticks", 0))
+        if blocked_attempts >= int(self.inspect_pursuit_blocked_attempt_limit) or no_progress >= int(self.inspect_pursuit_no_progress_limit):
+            reason = reason_hint or ("blocked_threshold" if blocked_attempts >= int(self.inspect_pursuit_blocked_attempt_limit) else "no_progress_threshold")
+            self._emit_event(
+                sim_state,
+                "pursuit_stalled",
+                {
+                    "source_id": source_id,
+                    "blocked_attempts": blocked_attempts,
+                    "no_progress_ticks": no_progress,
+                    "reason": reason,
+                },
+            )
+            self.inspect_stall_counts[source_id] = self.inspect_stall_counts.get(source_id, 0) + 1
+            self._clear_inspect_pursuit(reason=reason, sim_state=sim_state, release_slot=True, environment=environment)
+            return True
+        return False
+
     def _select_source_access_target(self, environment, source_id, sim_state=None):
         if not hasattr(environment, "select_source_access_point"):
             point = environment.get_interaction_target_position(source_id, from_position=self.position)
@@ -871,6 +982,8 @@ class Agent:
             return False
 
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        if self._expire_or_stall_inspect_pursuit(source_id, now_ts, sim_state=sim_state, environment=environment):
+            return False
         if self.inspect_session.get("source_id") != source_id:
             self.inspect_session = {
                 "source_id": source_id,
@@ -881,13 +994,29 @@ class Agent:
                 "restarts": 0,
             }
         self.source_inspection_state[source_id] = "in_progress"
-        selection = self._select_source_access_target(environment, source_id, sim_state=sim_state)
+        if self._inspect_pursuit_active_for(source_id, now_ts) and self.inspect_pursuit.get("target_position") is not None:
+            selection = {
+                "position": self.inspect_pursuit.get("target_position"),
+                "slot_id": self.inspect_pursuit.get("slot_id"),
+                "kind": self.source_access_state.get("target_kind"),
+            }
+        else:
+            selection = self._select_source_access_target(environment, source_id, sim_state=sim_state)
+            if selection is not None and selection.get("position") is not None:
+                self._commit_inspect_pursuit(
+                    source_id,
+                    selection.get("position"),
+                    now_ts,
+                    slot_id=selection.get("slot_id"),
+                    sim_state=sim_state,
+                )
         target_pos = (selection or {}).get("position")
         self.inspect_session["target"] = target_pos
         if target_pos is None:
             self._set_status(f"Inspect failed: no navigable target for {source_id}")
             self._emit_event(sim_state, "inspect_completion_blocked", {"source_id": source_id, "failure_category": "target_resolution_failed"})
             return False
+        self.target = target_pos
 
         # Distinguish source vicinity from legal slot-based interaction access.
         slot_id = self.source_access_state.get("slot_id")
@@ -919,10 +1048,14 @@ class Agent:
                 "reason": access_reason,
             },
         )
+        if arrival_distance is not None:
+            self._mark_inspect_pursuit_progress(source_id, arrival_distance, sim_state=sim_state)
 
         if not usable:
             self.source_access_state["blocked_attempts"] = int(self.source_access_state.get("blocked_attempts", 0)) + 1
             blocked_attempts = int(self.source_access_state.get("blocked_attempts", 0))
+            if self.inspect_pursuit.get("source_id") == source_id:
+                self.inspect_pursuit["blocked_attempts"] = blocked_attempts
             self._set_status(f"Inspect pending: usable source access not obtained for {source_id} ({access_reason})")
             self.inspect_session["last_updated_at"] = now_ts
             self.inspect_session["state"] = "target_reached" if self.inspect_session.get("state") == "target_reached" else "target_selected"
@@ -932,12 +1065,24 @@ class Agent:
                 alt = self._select_source_access_target(environment, source_id, sim_state=sim_state)
                 if alt is not None and alt.get("slot_id") != slot_id:
                     self.target = alt.get("position")
+                    if self.inspect_pursuit.get("source_id") == source_id:
+                        self.inspect_pursuit["target_position"] = alt.get("position")
+                        self.inspect_pursuit["slot_id"] = alt.get("slot_id")
                     self._emit_event(sim_state, "source_access_retargeted_alternate_slot", {"source_id": source_id, "previous_slot_id": slot_id, "next_slot_id": alt.get("slot_id")})
-            if blocked_attempts >= 4:
-                self._emit_event(sim_state, "source_access_unstuck_backoff", {"source_id": source_id, "slot_id": slot_id, "blocked_attempts": blocked_attempts})
-                self._release_source_slot(environment, source_id=source_id, emit=True, sim_state=sim_state, reason="unstuck_backoff")
-                self.source_access_state["blocked_attempts"] = 0
-                self.target = self.spawn_position
+                    self._emit_event(sim_state, "same_source_slot_reselected", {"source_id": source_id, "previous_slot_id": slot_id, "next_slot_id": alt.get("slot_id")})
+            stalled = self._expire_or_stall_inspect_pursuit(
+                source_id,
+                now_ts,
+                sim_state=sim_state,
+                environment=environment,
+                reason_hint=f"blocked:{access_reason}",
+            )
+            if stalled:
+                self._emit_event(
+                    sim_state,
+                    "source_access_unstuck_backoff",
+                    {"source_id": source_id, "slot_id": slot_id, "blocked_attempts": blocked_attempts, "backoff_target": "same_source"},
+                )
             if shared_source:
                 self._emit_event(
                     sim_state,
@@ -952,6 +1097,9 @@ class Agent:
             return False
 
         self.source_access_state["blocked_attempts"] = 0
+        if self.inspect_pursuit.get("source_id") == source_id:
+            self.inspect_pursuit["blocked_attempts"] = 0
+            self.inspect_pursuit["no_progress_ticks"] = 0
 
         self.inspect_session["state"] = "target_reached"
         self.inspect_session["last_updated_at"] = now_ts
@@ -1198,6 +1346,7 @@ class Agent:
         self.inspect_session["state"] = "post_inspect_derivation_attempted"
         self.inspect_session["last_updated_at"] = now_ts
         self._release_source_slot(environment, source_id=source_id, emit=True, sim_state=sim_state, reason="inspection_completed")
+        self._clear_inspect_pursuit(reason="inspection_succeeded", sim_state=sim_state, release_slot=False, environment=environment)
         return bool(net_dik_changed)
 
     @staticmethod
@@ -3031,7 +3180,21 @@ class Agent:
                     },
                 )
                 self.post_inspect_handoff["pending"] = False
-            source_id, interaction_target = self._resolve_inspect_target(decision, environment, sim_state=sim_state)
+            committed_source = self.inspect_pursuit.get("source_id")
+            if committed_source and self._inspect_pursuit_active_for(committed_source, now_ts):
+                source_id = committed_source
+                interaction_target = self.inspect_pursuit.get("target_position")
+                self._emit_event(
+                    sim_state,
+                    "pursuit_reused",
+                    {
+                        "source_id": source_id,
+                        "target": interaction_target,
+                        "expires_at": self.inspect_pursuit.get("expires_at"),
+                    },
+                )
+            else:
+                source_id, interaction_target = self._resolve_inspect_target(decision, environment, sim_state=sim_state)
             if source_id is None or interaction_target is None:
                 if not self.startup_state.get("first_productive_action_started"):
                     self.planner_state["startup_target_resolution_failures"] = int(self.planner_state.get("startup_target_resolution_failures", 0)) + 1
@@ -3108,6 +3271,14 @@ class Agent:
                     "inspect_target_selected",
                     {"source_id": source_id, "target": interaction_target, "goal": self.goal},
                 )
+            if not self._inspect_pursuit_active_for(source_id, now_ts):
+                self._commit_inspect_pursuit(
+                    source_id,
+                    interaction_target,
+                    now_ts,
+                    slot_id=self.source_access_state.get("slot_id"),
+                    sim_state=sim_state,
+                )
             if self.source_inspection_state.get(source_id) == "inspected":
                 self._set_status(f"Source skipped due to completion: {source_id}")
             self._emit_startup_once(sim_state, "first_productive_action_started", "first_productive_action_started", {"planner_action_type": decision.selected_action.value, "translated_action_type": action.get("type")})
@@ -3179,6 +3350,16 @@ class Agent:
         self._emit_event(sim_state, "action_translation_succeeded", {"planner_action_type": decision.selected_action.value, "translated_action_type": action.get("type"), "target_id": decision.target_id, "target_zone": decision.target_zone})
         if decision.selected_action != ExecutableActionType.INSPECT_INFORMATION_SOURCE and isinstance(getattr(self, "post_inspect_handoff", None), dict):
             self.post_inspect_handoff["pending"] = False
+        if (
+            decision.selected_action != ExecutableActionType.INSPECT_INFORMATION_SOURCE
+            and self.inspect_pursuit.get("source_id")
+        ):
+            self._clear_inspect_pursuit(
+                reason="non_inspect_action_selected",
+                sim_state=sim_state,
+                release_slot=True,
+                environment=environment,
+            )
         if action.get("type") in {"move_to", "communicate", "construct", "transport_resources"}:
             self._emit_startup_once(sim_state, "first_productive_action_started", "first_productive_action_started", {"planner_action_type": decision.selected_action.value, "translated_action_type": action.get("type")})
         return [action]
