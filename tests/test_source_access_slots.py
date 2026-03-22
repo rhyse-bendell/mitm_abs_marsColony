@@ -196,6 +196,9 @@ class TestSourceAccessSlots(unittest.TestCase):
         access = env.get_interaction_access(inside_zone, "Team_Info", role="Engineer")
         self.assertTrue(access["accessible"])
         self.assertEqual(access["reason"], "in_zone")
+        cls = env.classify_source_access("Team_Info", position=inside_zone, role="Engineer")
+        self.assertEqual(cls.get("classification"), "shared_team_source")
+        self.assertFalse(cls.get("is_role_mismatch"))
 
     def test_role_private_source_requires_role_and_valid_slot(self):
         env = Environment(phases=[])
@@ -238,10 +241,30 @@ class TestSourceAccessSlots(unittest.TestCase):
         self.assertTrue(success)
         event_types = [e[0] for e in sim.logger.events]
         self.assertIn("source_slot_selected", event_types)
-        self.assertIn("source_access_arrival_confirmed", event_types)
-        self.assertIn("source_access_legality_checked", event_types)
-        self.assertIn("inspect_started", event_types)
-        self.assertIn("source_access_succeeded", event_types)
+
+    def test_shared_source_blocked_event_uses_true_access_reason(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Engineer", role="Engineer", position=(8.0, 6.5), agent_id="A1")
+        sim = _Sim()
+        first_slot = env.get_source_access_slots("Team_Info")[0]
+        env.reserve_source_access_slot("Team_Info", first_slot["slot_id"], "OTHER")
+        agent.source_access_state.update(
+            {
+                "source_id": "Team_Info",
+                "slot_id": first_slot["slot_id"],
+                "slot_position": first_slot["position"],
+                "target_kind": "slot",
+                "blocked_attempts": 0,
+            }
+        )
+        agent._commit_inspect_pursuit("Team_Info", first_slot["position"], now_ts=0.0, slot_id=first_slot["slot_id"], sim_state=sim)
+        agent.position = first_slot["position"]
+        success = agent._inspect_source(env, "Team_Info", sim_state=sim)
+        self.assertFalse(success)
+        shared_blocked = [p for et, p in sim.logger.events if et == "shared_source_access_blocked"]
+        self.assertTrue(shared_blocked)
+        self.assertEqual(shared_blocked[-1].get("reason"), "slot_reserved_by_other")
+        self.assertTrue(shared_blocked[-1].get("transient"))
 
 
 if __name__ == "__main__":

@@ -263,7 +263,7 @@ class Environment:
         kind = str(target_kind or target.get("kind") or "information").strip().lower()
         meta = self.source_metadata_for_packet(packet_name)
         is_shared = self.is_shared_information_source(packet_name)
-        expected_role = self.expected_role_for_packet(packet_name)
+        expected_role = None if is_shared else self.expected_role_for_packet(packet_name)
 
         role_mismatch = bool(expected_role and role and str(expected_role).lower() != str(role).lower())
         movement_only = False
@@ -830,6 +830,8 @@ class Environment:
         access_radius = obj.get("access_radius", DEFAULT_INFO_ACCESS_RADIUS)
 
         expected_role = self.expected_role_for_packet(object_key)
+        if self.is_shared_information_source(object_key):
+            expected_role = None
         if expected_role is not None:
             if str(role or "").strip().lower() != str(expected_role).strip().lower():
                 return False

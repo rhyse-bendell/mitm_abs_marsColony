@@ -459,7 +459,18 @@ class RuntimeWitnessAudit:
             classification = str(payload.get("source_access_classification") or "")
             if classification and classification != "shared_team_source":
                 return
-            category = "shared_source_access_blocked_by_legality" if reason in {"too_far_or_role_mismatch"} else "shared_source_access_blocked_by_mapping"
+            transient_reasons = {"too_far_or_role_mismatch", "not_at_interaction_slot", "slot_reserved_by_other"}
+            terminal_legality_reasons = {"no_slots"}
+            mapping_reasons = {"mapping_missing"}
+            if bool(payload.get("transient")) or reason in transient_reasons:
+                return
+            if reason in mapping_reasons:
+                category = "shared_source_access_blocked_by_mapping"
+            elif reason in terminal_legality_reasons:
+                category = "shared_source_access_blocked_by_legality"
+            else:
+                # Be conservative: unknown blocked reasons remain explicit hard failures.
+                category = "shared_source_access_blocked_by_legality"
             source_targets = self._target_ids_for_source(payload.get("source_id"), payload)
             if source_targets:
                 self._block_target_ids(source_targets, payload, category, step_hint="source_access")
