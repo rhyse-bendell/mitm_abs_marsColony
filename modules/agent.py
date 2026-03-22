@@ -1084,12 +1084,15 @@ class Agent:
                     {"source_id": source_id, "slot_id": slot_id, "blocked_attempts": blocked_attempts, "backoff_target": "same_source"},
                 )
             if shared_source:
+                transient_block = access_reason in {"not_at_interaction_slot", "slot_reserved_by_other", "too_far_or_role_mismatch"}
                 self._emit_event(
                     sim_state,
                     "shared_source_access_blocked",
                     {
                         "source_id": source_id,
-                        "reason": "too_far_or_role_mismatch",
+                        "reason": access_reason,
+                        "transient": bool(transient_block),
+                        "terminal": bool(not transient_block),
                         "source_meta": source_meta,
                         "source_access_classification": source_access_classification.get("classification"),
                     },
@@ -1913,6 +1916,7 @@ class Agent:
         mission_goal = next((g for g in self.goal_registry.values() if g.goal_level == "mission"), None)
         goal = self._upsert_goal_record(
             label=label,
+            goal_id=f"SUPPORT_{str(label).strip().upper()}",
             source=source,
             status="active",
             priority=priority,
@@ -1926,6 +1930,26 @@ class Agent:
             reason="support_goal_activated",
         )
         self.activity_log.append(f"Support goal active: {goal.label} ({reason})")
+
+    def _baseline_epistemic_sources_completed(self):
+        team_done = self.source_inspection_state.get("Team_Info") == "inspected"
+        role_source = f"{self.role}_Info"
+        role_done = self.source_inspection_state.get(role_source) == "inspected"
+        return bool(team_done and role_done)
+
+    def _has_meaningful_consultable_artifact(self, sim_state):
+        if sim_state is None or not hasattr(sim_state, "team_knowledge_manager"):
+            return False
+        manager = sim_state.team_knowledge_manager
+        if not getattr(manager, "artifacts", {}):
+            return False
+        meaningful_events = {
+            "externalized_artifact",
+            "construction_externalized",
+            "construction_artifact_updated",
+            "artifact_uptake",
+        }
+        return any(str(update.get("event") or "") in meaningful_events for update in list(manager.recent_updates or [])[-8:])
 
     def _update_goal_states_from_runtime(self, sim_state, environment):
         if not self.task_model:
@@ -2003,8 +2027,18 @@ class Agent:
             last = self.derivation_events[-1]
             self._activate_support_goal("integrate_new_derivation", f"derivation:{last.get('derivation_id')}", sim_state=sim_state, priority=0.65, source="derived_from_rule")
 
-        if sim_state is not None and sim_state.team_knowledge_manager.recent_updates:
+        if (
+            sim_state is not None
+            and self._baseline_epistemic_sources_completed()
+            and self._has_meaningful_consultable_artifact(sim_state)
+        ):
             self._activate_support_goal("consult_artifact", "teammate/shared-artifact influenced", sim_state=sim_state, priority=0.6, source="teammate_or_artifact_influenced")
+        else:
+            for goal in self.goal_registry.values():
+                if goal.goal_id == "SUPPORT_CONSULT_ARTIFACT" and goal.status in {"active", "queued", "candidate"}:
+                    goal.status = "inactive"
+                    goal.last_transition_reason = "consult_artifact_deferred_until_baseline_epistemic_ready"
+                    self._log_goal_transition(sim_state, goal, "consult_artifact_deferred_until_baseline_epistemic_ready")
 
         repeated_stall = any(v >= 3 for v in self.inspect_stall_counts.values())
         if repeated_stall:

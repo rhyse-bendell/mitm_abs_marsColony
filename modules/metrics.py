@@ -705,6 +705,39 @@ class MetricsCollector:
     def _top_reasons(counter, n=5):
         return [{"reason": k, "count": v} for k, v in counter.most_common(n)]
 
+    def _shared_source_access_final_truth(self):
+        """Derive final shared-source blocked truth from canonical event history."""
+        blocked_reasons_final = Counter()
+        final_state_by_source = {}
+        events = self.simulation.logger.get_recent_events(50000)
+        for event in events:
+            event_type = event.get("event_type")
+            payload = dict(event.get("payload_data") or {})
+            source_id = payload.get("source_id")
+            if not source_id:
+                continue
+            classification = str(payload.get("source_access_classification") or "")
+            is_shared = classification == "shared_team_source" or str(source_id).strip().lower().startswith("team_")
+            if not is_shared:
+                continue
+            if event_type == "shared_source_access_success":
+                final_state_by_source[source_id] = ("success", None)
+            elif event_type == "shared_source_access_blocked":
+                if bool(payload.get("transient")):
+                    continue
+                reason = str(payload.get("reason") or "blocked")
+                if reason in {"too_far_or_role_mismatch", "not_at_interaction_slot", "slot_reserved_by_other"}:
+                    continue
+                final_state_by_source[source_id] = ("blocked", reason)
+
+        for _source_id, (state, reason) in final_state_by_source.items():
+            if state == "blocked":
+                blocked_reasons_final[str(reason or "blocked")] += 1
+        return {
+            "shared_source_access_blocked_final_count": int(sum(blocked_reasons_final.values())),
+            "shared_source_failure_distribution_final": {k: int(v) for k, v in blocked_reasons_final.items()},
+        }
+
     def _run_metadata(self):
         env = self.simulation.environment
         phase_config = [
@@ -856,6 +889,7 @@ class MetricsCollector:
             "startup_movement_blockers": int(sum(int(s.get("startup_movement_blockers", 0) or 0) for s in planner_states)),
             "startup_plan_invalidations": int(sum(int(s.get("startup_plan_invalidations", 0) or 0) for s in planner_states)),
         }
+        shared_source_final = self._shared_source_access_final_truth()
 
         run_summary = {
             "run_metadata": self._run_metadata(),
@@ -947,7 +981,8 @@ class MetricsCollector:
                     "shared_source_inspect_completed_count": int(self.events_by_type.get("shared_source_inspect_completed", 0)),
                     "shared_source_access_success_count": int(self.breakdown_counts.get("shared_source_access_success_strict", {}).get("shared_team_source", 0)),
                     "shared_source_access_success_raw_event_count": int(self.events_by_type.get("shared_source_access_success", 0)),
-                    "shared_source_access_blocked_count": int(self.events_by_type.get("shared_source_access_blocked", 0)),
+                    "shared_source_access_blocked_count": int(shared_source_final.get("shared_source_access_blocked_final_count", 0)),
+                    "shared_source_access_blocked_raw_event_count": int(self.events_by_type.get("shared_source_access_blocked", 0)),
                     "shared_source_dik_agent_count": int(self.events_by_type.get("shared_source_dik_acquired_agent", 0)),
                     "shared_source_dik_team_count": int(self.events_by_type.get("shared_source_dik_acquired_team", 0)),
                     "shared_source_adoption_count": int(self.events_by_type.get("shared_source_dik_adopted", 0)),
@@ -970,6 +1005,7 @@ class MetricsCollector:
                         reason: int(count)
                         for reason, count in self.reason_distributions.get("shared_source_access_blocked", {}).items()
                     },
+                    "shared_source_failure_distribution_final": dict(shared_source_final.get("shared_source_failure_distribution_final", {})),
                     "source_slot_selected_count": int(self.events_by_type.get("source_slot_selected", 0)),
                     "source_slot_reserved_count": int(self.events_by_type.get("source_slot_reserved", 0)),
                     "source_slot_released_count": int(self.events_by_type.get("source_slot_released", 0)),

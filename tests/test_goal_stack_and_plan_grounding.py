@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 from modules.agent import Agent
 from modules.brain_contract import AgentBrainRequest, AgentBrainResponse
 from modules.brain_context import BrainContextBuilder
@@ -38,7 +39,8 @@ class GoalStackAndPlanGroundingTests(unittest.TestCase):
         for d in team_packet["data"]:
             if d.id in wanted:
                 agent.mental_model["data"].add(d)
-        agent._apply_task_derivations(sim_state=None)
+        with patch("modules.agent.random.random", return_value=0.0):
+            agent._apply_task_derivations(sim_state=None)
         agent._update_goal_states_from_runtime(sim_state=None, environment=env)
 
         self.assertTrue(any("integrate_new_derivation" in g.label for g in agent.goal_registry.values()))
@@ -52,7 +54,49 @@ class GoalStackAndPlanGroundingTests(unittest.TestCase):
         labels = {g.label for g in agent.goal_registry.values()}
         self.assertIn("repair_detected_mismatch", labels)
         self.assertIn("validate_externalization", labels)
+        self.assertNotIn("consult_artifact", labels)
+        sim.stop()
+
+    def test_consult_artifact_requires_baseline_epistemic_sources_completed(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        sim.team_knowledge_manager.externalize_artifact(
+            artifact_id="whiteboard:test",
+            artifact_type="whiteboard_plan",
+            summary="s",
+            content={"x": 1},
+            author="teammate",
+            sim_time=sim.time,
+        )
+        agent.source_inspection_state["Team_Info"] = "inspected"
+        agent.source_inspection_state[f"{agent.role}_Info"] = "in_progress"
+        agent._update_goal_states_from_runtime(sim, sim.environment)
+        labels = {g.label for g in agent.goal_registry.values() if g.status in {"active", "queued", "candidate"}}
+        self.assertNotIn("consult_artifact", labels)
+
+        agent.source_inspection_state[f"{agent.role}_Info"] = "inspected"
+        agent._update_goal_states_from_runtime(sim, sim.environment)
+        labels = {g.label for g in agent.goal_registry.values() if g.status in {"active", "queued", "candidate"}}
         self.assertIn("consult_artifact", labels)
+        sim.stop()
+
+    def test_support_goal_activation_is_deduplicated(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        sim.team_knowledge_manager.externalize_artifact(
+            artifact_id="whiteboard:test2",
+            artifact_type="whiteboard_plan",
+            summary="s2",
+            content={"y": 2},
+            author="teammate",
+            sim_time=sim.time,
+        )
+        agent.source_inspection_state["Team_Info"] = "inspected"
+        agent.source_inspection_state[f"{agent.role}_Info"] = "inspected"
+        agent._update_goal_states_from_runtime(sim, sim.environment)
+        agent._update_goal_states_from_runtime(sim, sim.environment)
+        support_consult = [g for g in agent.goal_registry.values() if g.goal_id == "SUPPORT_CONSULT_ARTIFACT"]
+        self.assertEqual(len(support_consult), 1)
         sim.stop()
 
     def test_unknown_plan_method_is_mapped_safely(self):

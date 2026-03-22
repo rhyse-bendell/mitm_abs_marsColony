@@ -473,7 +473,7 @@ class TestRuntimeWitnessAudit(unittest.TestCase):
                     break
             if step_ref is None:
                 self.skipTest("No shared source witness step found")
-            sim.logger.log_event(sim.time, "shared_source_access_blocked", {"agent": sim.agents[0].name, "source_id": "SRC_TEAM_SHARED", "reason": "too_far_or_role_mismatch", "source_access_classification": "shared_team_source"})
+            sim.logger.log_event(sim.time, "shared_source_access_blocked", {"agent": sim.agents[0].name, "source_id": "SRC_TEAM_SHARED", "reason": "no_slots", "source_access_classification": "shared_team_source"})
             self.assertEqual(step_ref.status, "blocked")
             sim.logger.log_event(sim.time, "shared_source_access_success", {"agent": sim.agents[0].name, "source_id": "SRC_TEAM_SHARED", "source_access_classification": "shared_team_source"})
             self.assertEqual(step_ref.status, "completed")
@@ -483,6 +483,37 @@ class TestRuntimeWitnessAudit(unittest.TestCase):
             self.assertIn("shared_source_step_recovered_after_late_success", event_types)
             self.assertIn("source_access_recovered", event_types)
             self.assertIn("witness_step_recovered_after_late_success", event_types)
+            sim.stop()
+
+    def test_transient_shared_source_block_does_not_create_terminal_witness_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            audit = sim.runtime_witness_audit
+            step_ref = None
+            for target in audit.targets.values():
+                for step in target["ordered_witness_steps"]:
+                    if step.raw_step == "source_access:SRC_TEAM_SHARED":
+                        step_ref = step
+                        break
+                if step_ref is not None:
+                    break
+            if step_ref is None:
+                self.skipTest("No shared source witness step found")
+            sim.logger.log_event(
+                sim.time,
+                "shared_source_access_blocked",
+                {
+                    "agent": sim.agents[0].name,
+                    "source_id": "SRC_TEAM_SHARED",
+                    "reason": "not_at_interaction_slot",
+                    "transient": True,
+                    "source_access_classification": "shared_team_source",
+                },
+            )
+            self.assertNotEqual(step_ref.status, "blocked")
+            result = sim.runtime_witness_audit.finalize()
+            categories = result["summary"]["witness_step_failures_by_category"]
+            self.assertNotIn("shared_source_access_blocked_by_legality", categories)
             sim.stop()
 
     def test_role_private_source_witness_step_recovers_after_late_success(self):
@@ -553,7 +584,8 @@ class TestRuntimeWitnessAudit(unittest.TestCase):
                 elif el and el.element_type == "knowledge":
                     agent.mental_model["knowledge"].add_rule(el.element_id, [], inferred_by_agents=[agent.name])
             agent.mental_model["data"].add(agent._create_dik_object_from_element(data_el, source_id="held"))
-            agent._apply_task_derivations(sim_state=sim, trigger_source="Team_Info")
+            with patch("modules.agent.random.random", return_value=0.0):
+                agent._apply_task_derivations(sim_state=sim, trigger_source="Team_Info")
             event_types = [e["event_type"] for e in sim.logger.get_recent_events(400)]
             self.assertIn("derivation_prerequisites_satisfied", event_types)
             self.assertIn("derivation_attempted", event_types)
@@ -614,6 +646,30 @@ class TestRuntimeWitnessAudit(unittest.TestCase):
             self.assertIn("externalization_target_selection_count", diagnostics)
             self.assertIn("mismatch_detection_suppressed_not_ready_count", diagnostics)
             self.assertIn("repair_trigger_suppressed_not_ready_count", diagnostics)
+
+    def test_summary_shared_source_blocked_uses_final_truth_after_recovery(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
+            sim.logger.log_event(
+                sim.time,
+                "shared_source_access_blocked",
+                {"agent": sim.agents[0].name, "source_id": "Team_Info", "reason": "not_at_interaction_slot", "source_access_classification": "shared_team_source"},
+            )
+            sim.logger.log_event(
+                sim.time,
+                "shared_source_access_success",
+                {"agent": sim.agents[0].name, "source_id": "Team_Info", "source_access_classification": "shared_team_source"},
+            )
+            sim.stop()
+            session_dir = next((Path(tmpdir) / "Outputs").iterdir())
+            run_summary = json.loads((session_dir / "measures" / "run_summary.json").read_text(encoding="utf-8"))
+            team_summary = json.loads((session_dir / "measures" / "team_summary.json").read_text(encoding="utf-8"))
+            diagnostics = run_summary["process"]["inspect_readiness_diagnostics"]
+            self.assertEqual(diagnostics["shared_source_access_blocked_count"], 0)
+            self.assertEqual(diagnostics["shared_source_access_blocked_raw_event_count"], 1)
+            self.assertIn("shared_source_failure_distribution_final", diagnostics)
+            self.assertIn("inspect_readiness_diagnostics", run_summary["process"])
+            self.assertIn("events", team_summary)
 
 
 if __name__ == "__main__":
