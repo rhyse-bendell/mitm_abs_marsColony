@@ -1016,7 +1016,7 @@ class MarsColonyInterface:
     @staticmethod
     def _site_local_offsets(count, spacing=0.44):
         if count <= 1:
-            return [(0.0, 0.0)]
+            return [(0.0, spacing)]
         if count == 2:
             return [(-spacing, 0.0), (spacing, 0.0)]
         offsets = []
@@ -1055,9 +1055,9 @@ class MarsColonyInterface:
 
         for site, site_structures in grouped_by_site.items():
             sx, sy = site
-            ax.add_patch(Circle((sx, sy), 0.07, edgecolor="black", facecolor="black", linewidth=1.0, zorder=2))
+            ax.add_patch(Circle((sx, sy), 0.06, edgecolor="black", facecolor="black", linewidth=0.8, zorder=2))
             site_name = str(site_structures[0].get("project_id") or site_structures[0].get("name") or "site")
-            ax.text(sx + 0.08, sy + 0.08, site_name, ha="left", va="bottom", fontsize=6, color="#424242")
+            ax.text(sx + 0.06, sy - 0.08, site_name, ha="left", va="top", fontsize=5.5, color="#616161")
 
             for structure, (dx, dy) in zip(site_structures, MarsColonyInterface._site_local_offsets(len(site_structures))):
                 x, y = sx + dx, sy + dy
@@ -1079,11 +1079,6 @@ class MarsColonyInterface:
                         fill.set_clip_path(Rectangle((clip_l, clip_b), clip_w, clip_h, transform=ax.transData))
                         ax.add_patch(fill)
                 elif shape == "line":
-                    for connector in scene_data.get("connectors", []):
-                        start = connector.get("start")
-                        end = connector.get("end")
-                        if start and end:
-                            ax.plot([start[0], end[0]], [start[1], end[1]], color="black", linewidth=1.5, zorder=3)
                     continue
                 else:
                     left = x - width / 2.0
