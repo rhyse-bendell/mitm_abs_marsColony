@@ -1016,7 +1016,7 @@ class MarsColonyInterface:
     @staticmethod
     def _site_local_offsets(count, spacing=0.44):
         if count <= 1:
-            return [(0.0, spacing)]
+            return [(0.0, 0.0)]
         if count == 2:
             return [(-spacing, 0.0), (spacing, 0.0)]
         offsets = []
@@ -1024,6 +1024,24 @@ class MarsColonyInterface:
             theta = (2.0 * math.pi * idx) / count
             offsets.append((spacing * math.cos(theta), spacing * math.sin(theta)))
         return offsets
+
+    @staticmethod
+    def _site_container_style():
+        return {
+            "radius": 0.90,
+            "edgecolor": "#b8b8b8",
+            "facecolor": "#f4f4f4",
+            "linewidth": 1.0,
+            "linestyle": (0, (3, 3)),
+        }
+
+    @staticmethod
+    def _site_label_text(site_structures):
+        return str(site_structures[0].get("project_id") or site_structures[0].get("name") or "site")
+
+    @staticmethod
+    def _structure_label_text(_structure):
+        return ""
 
     @staticmethod
     def _rect_fill_geometry(x, y, width, height, progress):
@@ -1055,9 +1073,28 @@ class MarsColonyInterface:
 
         for site, site_structures in grouped_by_site.items():
             sx, sy = site
-            ax.add_patch(Circle((sx, sy), 0.06, edgecolor="black", facecolor="black", linewidth=0.8, zorder=2))
-            site_name = str(site_structures[0].get("project_id") or site_structures[0].get("name") or "site")
-            ax.text(sx + 0.06, sy - 0.08, site_name, ha="left", va="top", fontsize=5.5, color="#616161")
+            site_style = MarsColonyInterface._site_container_style()
+            ax.add_patch(
+                Circle(
+                    (sx, sy),
+                    site_style["radius"],
+                    edgecolor=site_style["edgecolor"],
+                    facecolor=site_style["facecolor"],
+                    linewidth=site_style["linewidth"],
+                    linestyle=site_style["linestyle"],
+                    zorder=0,
+                )
+            )
+            site_name = MarsColonyInterface._site_label_text(site_structures)
+            ax.text(
+                sx,
+                sy - (site_style["radius"] + 0.10),
+                site_name,
+                ha="center",
+                va="top",
+                fontsize=5.5,
+                color="#8a8a8a",
+            )
 
             for structure, (dx, dy) in zip(site_structures, MarsColonyInterface._site_local_offsets(len(site_structures))):
                 x, y = sx + dx, sy + dy
@@ -1079,7 +1116,27 @@ class MarsColonyInterface:
                         fill.set_clip_path(Rectangle((clip_l, clip_b), clip_w, clip_h, transform=ax.transData))
                         ax.add_patch(fill)
                 elif shape == "line":
-                    continue
+                    line_half = 0.35
+                    ax.add_line(
+                        Line2D(
+                            [x - line_half, x + line_half],
+                            [y, y],
+                            color="#8a8a8a",
+                            linewidth=1.2,
+                            zorder=3,
+                        )
+                    )
+                    if progress > 0:
+                        x_end = (x - line_half) + ((2.0 * line_half) * progress)
+                        ax.add_line(
+                            Line2D(
+                                [x - line_half, x_end],
+                                [y, y],
+                                color=color,
+                                linewidth=2.0,
+                                zorder=4,
+                            )
+                        )
                 else:
                     left = x - width / 2.0
                     bottom = y - height / 2.0
@@ -1096,7 +1153,9 @@ class MarsColonyInterface:
                     ax.add_line(Line2D([x - 0.30, x + 0.30], [y + 0.30, y - 0.30], color="black", linewidth=1.3, zorder=4))
 
                 builder_suffix = f" ({len(builders)}b)" if builders else ""
-                ax.text(x, y - 0.50, f"{structure.get('project_id', 'unknown')}{builder_suffix}", ha="center", va="top", fontsize=6.5)
+                label_text = MarsColonyInterface._structure_label_text(structure)
+                if label_text:
+                    ax.text(x, y - 0.50, f"{label_text}{builder_suffix}", ha="center", va="top", fontsize=6.5)
 
         for connector in scene_data.get("connectors", []):
             start = connector.get("start")
