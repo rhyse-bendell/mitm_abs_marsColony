@@ -51,7 +51,7 @@ class ConstructionVisualizationTests(unittest.TestCase):
     def test_site_local_offsets_support_single_pair_and_ring(self):
         if MarsColonyInterface is None:
             self.skipTest("interface module unavailable")
-        self.assertEqual(MarsColonyInterface._site_local_offsets(1), [(0.0, 0.0)])
+        self.assertEqual(MarsColonyInterface._site_local_offsets(1), [(0.0, 0.44)])
         self.assertEqual(
             MarsColonyInterface._site_local_offsets(2),
             [(-0.44, 0.0), (0.44, 0.0)],
@@ -127,7 +127,7 @@ class ConstructionVisualizationTests(unittest.TestCase):
 
         site_markers = [
             p for p in ax.patches
-            if hasattr(p, "radius") and abs(p.radius - 0.07) < 1e-9 and tuple(p.get_facecolor()[:3]) == (0.0, 0.0, 0.0)
+            if hasattr(p, "radius") and abs(p.radius - 0.06) < 1e-9 and tuple(p.get_facecolor()[:3]) == (0.0, 0.0, 0.0)
         ]
         self.assertEqual(len(site_markers), 1)
 
@@ -135,6 +135,94 @@ class ConstructionVisualizationTests(unittest.TestCase):
         self.assertIn("A", project_label_positions)
         self.assertIn("B", project_label_positions)
         self.assertNotAlmostEqual(project_label_positions["A"][0], project_label_positions["B"][0], places=3)
+
+    def test_single_site_layout_keeps_anchor_separate_from_structure(self):
+        if MarsColonyInterface is None or Figure is None:
+            self.skipTest("interface module unavailable")
+        scene = {
+            "structures": [
+                {"project_id": "H", "name": "House H", "structure_type": "house", "position": (5.0, 4.0), "progress": 0.5, "status": "in_progress", "correct": True},
+            ],
+            "connectors": [],
+        }
+        fig = Figure(figsize=(4, 4))
+        ax = fig.add_subplot(111)
+        MarsColonyInterface._draw_construction_scene(ax, scene)
+
+        site_marker = next(
+            p for p in ax.patches
+            if hasattr(p, "radius") and abs(p.radius - 0.06) < 1e-9 and tuple(p.get_facecolor()[:3]) == (0.0, 0.0, 0.0)
+        )
+        house_outline = next(
+            p for p in ax.patches
+            if p.__class__.__name__ == "Rectangle"
+            and abs(p.get_width() - 0.68) < 1e-9
+            and abs(p.get_height() - 0.68) < 1e-9
+            and tuple(p.get_facecolor()[:3]) == (0.0, 0.0, 0.0)
+            and abs(p.get_linewidth() - 2.0) < 1e-9
+        )
+        structure_center = (
+            house_outline.get_x() + house_outline.get_width() / 2.0,
+            house_outline.get_y() + house_outline.get_height() / 2.0,
+        )
+        self.assertNotAlmostEqual(site_marker.center[1], structure_center[1], places=3)
+
+    def test_progress_fill_applies_to_structure_glyph(self):
+        if MarsColonyInterface is None or Figure is None:
+            self.skipTest("interface module unavailable")
+        scene = {
+            "structures": [
+                {"project_id": "G", "name": "Greenhouse G", "structure_type": "greenhouse", "position": (5.0, 4.0), "progress": 0.25, "status": "in_progress", "correct": True},
+            ],
+            "connectors": [],
+        }
+        fig = Figure(figsize=(4, 4))
+        ax = fig.add_subplot(111)
+        MarsColonyInterface._draw_construction_scene(ax, scene)
+        fill_rects = [
+            p for p in ax.patches
+            if p.__class__.__name__ == "Rectangle"
+            and tuple(p.get_facecolor()[:3]) == (0.0, 0.5019607843137255, 0.0)
+            and abs(p.get_width() - 0.94) < 1e-9
+        ]
+        self.assertTrue(any(abs(rect.get_height() - (0.58 * 0.25)) < 1e-9 for rect in fill_rects))
+
+    def test_validation_and_invalid_overlays_render_when_present(self):
+        if MarsColonyInterface is None or Figure is None:
+            self.skipTest("interface module unavailable")
+        scene = {
+            "structures": [
+                {
+                    "project_id": "V",
+                    "name": "House V",
+                    "structure_type": "house",
+                    "position": (4.0, 4.0),
+                    "progress": 1.0,
+                    "resource_complete": True,
+                    "validated_complete": False,
+                    "correct": True,
+                },
+                {
+                    "project_id": "X",
+                    "name": "House X",
+                    "structure_type": "house",
+                    "position": (6.0, 4.0),
+                    "progress": 0.6,
+                    "resource_complete": False,
+                    "validated_complete": False,
+                    "correct": False,
+                    "status": "needs_repair",
+                },
+            ],
+            "connectors": [],
+        }
+        fig = Figure(figsize=(4, 4))
+        ax = fig.add_subplot(111)
+        MarsColonyInterface._draw_construction_scene(ax, scene)
+
+        overlay_texts = [t.get_text() for t in ax.texts]
+        self.assertIn("awaiting validation", overlay_texts)
+        self.assertGreaterEqual(len(ax.lines), 2)
 
     def test_construction_tab_render_path_draws_visual_elements(self):
         if MarsColonyInterface is None or Figure is None:
