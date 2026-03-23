@@ -8,7 +8,7 @@ import math
 from tkinter import ttk, messagebox
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.patches import Circle, Rectangle
+from matplotlib.patches import Circle, Polygon, Rectangle
 from matplotlib.lines import Line2D
 from modules.simulation import SimulationState
 from tkinter import StringVar, BooleanVar, DoubleVar, IntVar
@@ -981,19 +981,19 @@ class MarsColonyInterface:
     def _map_structure_visual(structure):
         structure_type = str(structure.get("structure_type") or structure.get("type") or "").lower()
         name_blob = " ".join(
-            str(structure.get(field, "") or "").lower() for field in ("project_id", "name", "label", "artifact_type")
+            str(structure.get(field, "") or "").lower() for field in ("project_id", "name", "label", "artifact_type", "symbol")
         )
         token_blob = f"{structure_type} {name_blob}"
         if any(token in token_blob for token in ("connector", "pipeline", "resource line", "resource_link", "resource-link")):
-            return {"shape": "line", "color": "black"}
+            return {"symbol": "connector", "color": "black"}
         if any(token in token_blob for token in ("water", "generator")):
-            return {"shape": "circle", "color": "blue"}
+            return {"symbol": "water_generator", "color": "#2f6fbf"}
         if any(token in token_blob for token in ("greenhouse", "food")):
-            return {"shape": "rectangle", "color": "green"}
+            return {"symbol": "greenhouse", "color": "#2f8f46"}
         if any(token in token_blob for token in ("house", "housing", "shelter")):
-            return {"shape": "square", "color": "red"}
-        shape = str(structure.get("shape") or "square").lower()
-        return {"shape": shape, "color": str(structure.get("color") or "gray")}
+            return {"symbol": "house", "color": "#b6423a"}
+        symbol = str(structure.get("symbol") or "generic").lower()
+        return {"symbol": symbol, "color": str(structure.get("color") or "#666666")}
 
     @staticmethod
     def _progress_fill_fraction(structure):
@@ -1028,11 +1028,11 @@ class MarsColonyInterface:
     @staticmethod
     def _site_container_style():
         return {
-            "radius": 0.90,
-            "edgecolor": "#b8b8b8",
-            "facecolor": "#f4f4f4",
+            "radius": 0.95,
+            "edgecolor": "#c9ced6",
+            "facecolor": "#f6f8fa",
             "linewidth": 1.0,
-            "linestyle": (0, (3, 3)),
+            "linestyle": (0, (2, 3)),
         }
 
     @staticmethod
@@ -1042,6 +1042,86 @@ class MarsColonyInterface:
     @staticmethod
     def _structure_label_text(_structure):
         return ""
+
+    @staticmethod
+    def _house_body_geometry(x, y):
+        width, height = 0.62, 0.45
+        return x - width / 2.0, y - 0.22, width, height
+
+    @staticmethod
+    def _greenhouse_body_geometry(x, y):
+        width, height = 0.74, 0.42
+        return x - width / 2.0, y - 0.20, width, height
+
+    @staticmethod
+    def _water_core_geometry(x, y):
+        return x, y, 0.30
+
+    @staticmethod
+    def _draw_house_structure(ax, x, y, progress, color):
+        left, bottom, width, height = MarsColonyInterface._house_body_geometry(x, y)
+        outline = Rectangle((left, bottom), width, height, edgecolor=color, facecolor="none", linewidth=1.9, zorder=3)
+        ax.add_patch(outline)
+        if progress > 0:
+            fill_left, fill_bottom, fill_width, fill_height = MarsColonyInterface._rect_fill_geometry(x, bottom + height / 2.0, width, height, progress)
+            ax.add_patch(Rectangle((fill_left, fill_bottom), fill_width, fill_height, edgecolor="none", facecolor=color, zorder=2.8))
+        roof = Polygon(
+            [(x - 0.36, bottom + height), (x, bottom + height + 0.30), (x + 0.36, bottom + height)],
+            closed=True,
+            edgecolor=color,
+            facecolor="none",
+            linewidth=1.9,
+            zorder=3.1,
+        )
+        ax.add_patch(roof)
+
+    @staticmethod
+    def _draw_greenhouse_structure(ax, x, y, progress, color):
+        left, bottom, width, height = MarsColonyInterface._greenhouse_body_geometry(x, y)
+        outline = Rectangle((left, bottom), width, height, edgecolor=color, facecolor="none", linewidth=1.9, zorder=3)
+        ax.add_patch(outline)
+        if progress > 0:
+            fill_left, fill_bottom, fill_width, fill_height = MarsColonyInterface._rect_fill_geometry(x, bottom + height / 2.0, width, height, progress)
+            ax.add_patch(Rectangle((fill_left, fill_bottom), fill_width, fill_height, edgecolor="none", facecolor=color, zorder=2.8))
+        ax.add_line(Line2D([x - width / 2.0, x], [bottom + height, bottom + height + 0.17], color=color, linewidth=1.5, zorder=3.1))
+        ax.add_line(Line2D([x + width / 2.0, x], [bottom + height, bottom + height + 0.17], color=color, linewidth=1.5, zorder=3.1))
+        ax.add_line(Line2D([x, x], [bottom, bottom + height], color=color, linewidth=1.1, zorder=3.1))
+        ax.add_line(Line2D([x - width / 4.0, x - width / 4.0], [bottom, bottom + height], color=color, linewidth=1.0, zorder=3.1))
+        ax.add_line(Line2D([x + width / 4.0, x + width / 4.0], [bottom, bottom + height], color=color, linewidth=1.0, zorder=3.1))
+
+    @staticmethod
+    def _draw_water_generator_structure(ax, x, y, progress, color):
+        cx, cy, radius = MarsColonyInterface._water_core_geometry(x, y)
+        core_outline = Circle((cx, cy), radius, edgecolor=color, facecolor="none", linewidth=1.9, zorder=3)
+        ax.add_patch(core_outline)
+        if progress > 0:
+            fill = Circle((cx, cy), radius, edgecolor="none", facecolor=color, zorder=2.8)
+            clip_l, clip_b, clip_w, clip_h = MarsColonyInterface._circle_fill_clip_geometry(cx, cy, radius, progress)
+            fill.set_clip_path(Rectangle((clip_l, clip_b), clip_w, clip_h, transform=ax.transData))
+            ax.add_patch(fill)
+        ax.add_patch(Rectangle((cx - 0.18, cy - radius - 0.12), 0.36, 0.08, edgecolor=color, facecolor="none", linewidth=1.4, zorder=3.1))
+        ax.add_line(Line2D([cx - 0.11, cx + 0.11], [cy + 0.02, cy + 0.02], color=color, linewidth=1.2, zorder=3.2))
+        ax.add_line(Line2D([cx - 0.07, cx], [cy - 0.08, cy + 0.05], color=color, linewidth=1.2, zorder=3.2))
+        ax.add_line(Line2D([cx + 0.07, cx], [cy - 0.08, cy + 0.05], color=color, linewidth=1.2, zorder=3.2))
+
+    @staticmethod
+    def _draw_structure_symbol(ax, structure, x, y):
+        visual = MarsColonyInterface._map_structure_visual(structure)
+        symbol = visual["symbol"]
+        color = visual["color"]
+        progress = MarsColonyInterface._progress_fill_fraction(structure)
+
+        if symbol == "house":
+            MarsColonyInterface._draw_house_structure(ax, x, y, progress, color)
+        elif symbol == "greenhouse":
+            MarsColonyInterface._draw_greenhouse_structure(ax, x, y, progress, color)
+        elif symbol == "water_generator":
+            MarsColonyInterface._draw_water_generator_structure(ax, x, y, progress, color)
+        else:
+            outline = Rectangle((x - 0.30, y - 0.22), 0.60, 0.44, edgecolor=color, facecolor="none", linewidth=1.7, zorder=3)
+            ax.add_patch(outline)
+            if progress > 0:
+                ax.add_patch(Rectangle((x - 0.30, y - 0.22), 0.60, 0.44 * progress, edgecolor="none", facecolor=color, zorder=2.8))
 
     @staticmethod
     def _rect_fill_geometry(x, y, width, height, progress):
@@ -1127,52 +1207,11 @@ class MarsColonyInterface:
             for structure, (dx, dy) in zip(site_structures, MarsColonyInterface._site_local_offsets(len(site_structures))):
                 x, y = sx + dx, sy + dy
                 visual = MarsColonyInterface._map_structure_visual(structure)
-                shape = visual["shape"]
-                color = visual["color"]
-                progress = MarsColonyInterface._progress_fill_fraction(structure)
+                symbol = visual["symbol"]
                 overlay_state = MarsColonyInterface._project_overlay_state(structure)
                 builders = structure.get("builders", [])
 
-                width, height = (0.68, 0.68) if shape == "square" else (0.94, 0.58)
-                if shape == "circle":
-                    radius = 0.36
-                    outline = Circle((x, y), radius, edgecolor=color, facecolor="none", linewidth=2.0, zorder=3)
-                    ax.add_patch(outline)
-                    if progress > 0:
-                        fill = Circle((x, y), radius, edgecolor="none", facecolor=color, zorder=3)
-                        clip_l, clip_b, clip_w, clip_h = MarsColonyInterface._circle_fill_clip_geometry(x, y, radius, progress)
-                        fill.set_clip_path(Rectangle((clip_l, clip_b), clip_w, clip_h, transform=ax.transData))
-                        ax.add_patch(fill)
-                elif shape == "line":
-                    line_half = 0.35
-                    ax.add_line(
-                        Line2D(
-                            [x - line_half, x + line_half],
-                            [y, y],
-                            color="#8a8a8a",
-                            linewidth=1.2,
-                            zorder=3,
-                        )
-                    )
-                    if progress > 0:
-                        x_end = (x - line_half) + ((2.0 * line_half) * progress)
-                        ax.add_line(
-                            Line2D(
-                                [x - line_half, x_end],
-                                [y, y],
-                                color=color,
-                                linewidth=2.0,
-                                zorder=4,
-                            )
-                        )
-                else:
-                    left = x - width / 2.0
-                    bottom = y - height / 2.0
-                    outline = Rectangle((left, bottom), width, height, edgecolor=color, facecolor="none", linewidth=2.0, zorder=3)
-                    ax.add_patch(outline)
-                    if progress > 0:
-                        fill_l, fill_b, fill_w, fill_h = MarsColonyInterface._rect_fill_geometry(x, y, width, height, progress)
-                        ax.add_patch(Rectangle((fill_l, fill_b), fill_w, fill_h, edgecolor="none", facecolor=color, zorder=3))
+                MarsColonyInterface._draw_structure_symbol(ax, structure, x, y)
 
                 if overlay_state == "ready_for_validation":
                     ax.text(x, y + 0.48, "awaiting validation", ha="center", va="bottom", fontsize=6.5, color="#6d4c1f")
