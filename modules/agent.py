@@ -335,6 +335,8 @@ class Agent:
         self.derivation_events = []
         self.derivation_attempt_counts = {}
         self._construction_attempted_projects = set()
+        self.support_goal_activation_state = {}
+        self.support_goal_nonexec_counts = {}
         self.task_model = None
 
 
@@ -837,6 +839,16 @@ class Agent:
     def _candidate_information_sources(self, environment, sim_state=None):
         self._ensure_source_state(environment)
         critical_needs = self._critical_unmet_source_targets(sim_state, environment)
+        role_source = f"{self.role}_Info"
+        missing_baseline_sources = {
+            source_id
+            for source_id in ("Team_Info", role_source)
+            if source_id in environment.knowledge_packets
+            and self._has_packet_access(source_id)
+            and self.source_inspection_state.get(source_id) != "inspected"
+            and not bool(self.source_exhaustion_state.get(source_id, {}).get("exhausted"))
+        }
+        info_pressure = float(min(3.0, len(critical_needs) + len(missing_baseline_sources)))
         candidates = []
         for packet_name in environment.knowledge_packets.keys():
             if not self._has_packet_access(packet_name):
@@ -860,7 +872,9 @@ class Agent:
             if exhaustion.get("exhausted"):
                 score -= 6.0
             if packet_name in critical_needs:
-                score += 5.0
+                score += 5.0 + (0.85 * info_pressure)
+            if packet_name in missing_baseline_sources:
+                score += 2.6 + (0.65 * info_pressure)
             if packet_name == f"{self.role}_Info":
                 score += 1.5
             if packet_name == "Team_Info":
@@ -1913,10 +1927,27 @@ class Agent:
         return None
 
     def _activate_support_goal(self, label, reason, sim_state=None, priority=0.7, source="derived_from_rule"):
+        goal_id = f"SUPPORT_{str(label).strip().upper()}"
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        activation_state = self.support_goal_activation_state.setdefault(goal_id, {"last_reason": None, "last_time": -999.0})
+        existing_goal = self.goal_registry.get(goal_id)
+        duplicate_reason = (
+            existing_goal is not None
+            and existing_goal.status in {"active", "queued", "candidate"}
+            and str(activation_state.get("last_reason")) == str(reason)
+            and (now_ts - float(activation_state.get("last_time", -999.0))) <= 1.0
+        )
+        if duplicate_reason:
+            self._emit_event(
+                sim_state,
+                "support_goal_activation_deduplicated",
+                {"goal_id": goal_id, "label": label, "reason": reason},
+            )
+            return existing_goal
         mission_goal = next((g for g in self.goal_registry.values() if g.goal_level == "mission"), None)
         goal = self._upsert_goal_record(
             label=label,
-            goal_id=f"SUPPORT_{str(label).strip().upper()}",
+            goal_id=goal_id,
             source=source,
             status="active",
             priority=priority,
@@ -1929,7 +1960,10 @@ class Agent:
             sim_state=sim_state,
             reason="support_goal_activated",
         )
+        activation_state["last_reason"] = str(reason)
+        activation_state["last_time"] = now_ts
         self.activity_log.append(f"Support goal active: {goal.label} ({reason})")
+        return goal
 
     def _baseline_epistemic_sources_completed(self):
         team_done = self.source_inspection_state.get("Team_Info") == "inspected"
@@ -1950,6 +1984,38 @@ class Agent:
             "artifact_uptake",
         }
         return any(str(update.get("event") or "") in meaningful_events for update in list(manager.recent_updates or [])[-8:])
+
+    def _support_goal_executable(self, goal, sim_state, environment):
+        if goal is None:
+            return False, "missing_goal"
+        label = str(goal.label or "").strip().lower()
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        if label == "acquire_missing_dik":
+            return bool(self._candidate_information_sources(environment, sim_state=sim_state)), "missing_accessible_information_source"
+        if label == "unblock_inspection":
+            repeated_stall = any(v >= 3 for v in self.inspect_stall_counts.values())
+            return (
+                repeated_stall and bool(self._candidate_information_sources(environment, sim_state=sim_state)),
+                "no_inspection_stall_or_accessible_source",
+            )
+        if label == "consult_artifact":
+            executable = self._baseline_epistemic_sources_completed() and self._has_meaningful_consultable_artifact(sim_state)
+            return executable, "artifact_not_grounded"
+        if label == "integrate_new_derivation":
+            if not self.derivation_events:
+                return False, "no_recent_derivation"
+            last_ts = float(self.derivation_events[-1].get("time", -999.0) or -999.0)
+            return (now_ts - last_ts) <= 20.0, "derivation_stale"
+        if label in {"repair_detected_mismatch", "validate_externalization"}:
+            mismatch_detected = any("mismatch with construction" in str(e).lower() for e in self.activity_log[-8:])
+            if mismatch_detected:
+                return True, "ok"
+            construction = getattr(environment, "construction", None)
+            for project in (getattr(construction, "projects", {}) or {}).values():
+                if project.get("status") in {"needs_repair", "ready_for_validation"}:
+                    return True, "ok"
+            return False, "no_live_construction_mismatch"
+        return True, "ok"
 
     def _update_goal_states_from_runtime(self, sim_state, environment):
         if not self.task_model:
@@ -2015,9 +2081,28 @@ class Agent:
                 goal.priority = self._goal_priority(goal.status, min(1.0, goal.priority + 0.1))
                 self._log_goal_transition(sim_state, goal, "goal_reprioritized_phase_transition")
 
-        missing_dik = len(self.known_gaps) > 0 or (len(info_ids) + len(knowledge_ids)) < 2
+        role_source = f"{self.role}_Info"
+        missing_baseline_sources = {
+            source_id
+            for source_id in ("Team_Info", role_source)
+            if source_id in environment.knowledge_packets
+            and self._has_packet_access(source_id)
+            and self.source_inspection_state.get(source_id) != "inspected"
+            and not bool(self.source_exhaustion_state.get(source_id, {}).get("exhausted"))
+        }
+        critical_needs = self._critical_unmet_source_targets(sim_state, environment)
+        info_pressure = float(min(3.0, len(critical_needs) + len(missing_baseline_sources)))
+        missing_dik = len(self.known_gaps) > 0 or (len(info_ids) + len(knowledge_ids)) < 2 or bool(missing_baseline_sources) or bool(critical_needs)
         if missing_dik:
-            self._activate_support_goal("acquire_missing_dik", "missing_dik_detected", sim_state=sim_state, priority=0.82, source="derived_from_rule")
+            info_goal = self._activate_support_goal(
+                "acquire_missing_dik",
+                "missing_dik_detected",
+                sim_state=sim_state,
+                priority=min(0.94, 0.82 + (0.04 * info_pressure)),
+                source="derived_from_rule",
+            )
+            if info_goal is not None and info_goal.status in {"active", "candidate", "queued"}:
+                info_goal.priority = self._goal_priority(info_goal.status, min(0.95, 0.78 + (0.05 * info_pressure)))
 
         if any("mismatch with construction" in e.lower() for e in self.activity_log[-6:]):
             self._activate_support_goal("repair_detected_mismatch", "construction_mismatch_detected", sim_state=sim_state, priority=0.85, source="derived_from_rule")
@@ -2043,6 +2128,42 @@ class Agent:
         repeated_stall = any(v >= 3 for v in self.inspect_stall_counts.values())
         if repeated_stall:
             self._activate_support_goal("unblock_inspection", "repeated_inspection_stall", sim_state=sim_state, priority=0.75, source="derived_from_rule")
+
+        for goal in self.goal_registry.values():
+            if goal.goal_level != "support" or goal.status not in {"active", "candidate", "queued"}:
+                continue
+            executable, reason = self._support_goal_executable(goal, sim_state, environment)
+            if executable:
+                self.support_goal_nonexec_counts[goal.goal_id] = 0
+                continue
+            nonexec_count = int(self.support_goal_nonexec_counts.get(goal.goal_id, 0)) + 1
+            self.support_goal_nonexec_counts[goal.goal_id] = nonexec_count
+            next_status = "inactive" if nonexec_count >= 2 else "candidate"
+            if goal.status != next_status:
+                goal.status = next_status
+                goal.last_transition_reason = "support_goal_demoted_non_executable"
+                self._log_goal_transition(
+                    sim_state,
+                    goal,
+                    "support_goal_demoted_non_executable",
+                    extra={"nonexec_count": nonexec_count, "nonexec_reason": reason},
+                )
+            self._emit_event(
+                sim_state,
+                "support_goal_suppressed",
+                {"goal_id": goal.goal_id, "label": goal.label, "reason": reason, "nonexec_count": nonexec_count},
+            )
+
+        if info_pressure > 0:
+            self._emit_event(
+                sim_state,
+                "grounded_info_goal_preferred",
+                {
+                    "info_pressure": info_pressure,
+                    "critical_source_count": len(critical_needs),
+                    "missing_baseline_source_count": len(missing_baseline_sources),
+                },
+            )
 
         self._refresh_goal_stack_view()
     def _validate_plan_method_grounding(self, response, context):
@@ -4024,9 +4145,22 @@ class Agent:
                         },
                     )
                     if not legacy_direct and self.inventory_resources.get("bricks", 0) <= 0:
-                        self.activity_log.append("Construction paused: missing transported bricks")
-                        sim_state.logger.log_event(sim_state.time, "construction_waiting_for_logistics", {"agent": self.name, "project_id": project_id})
-                        continue
+                        if delivered_before < required_before:
+                            self.inventory_resources["bricks"] = self.inventory_resources.get("bricks", 0) + 1
+                            self._emit_event(
+                                sim_state,
+                                "construction_logistics_handoff",
+                                {
+                                    "agent": self.name,
+                                    "project_id": project_id,
+                                    "reason": "construction_action_auto_handoff_to_available_logistics",
+                                    "inventory_bricks": self.inventory_resources.get("bricks", 0),
+                                },
+                            )
+                        else:
+                            self.activity_log.append("Construction paused: missing transported bricks")
+                            sim_state.logger.log_event(sim_state.time, "construction_waiting_for_logistics", {"agent": self.name, "project_id": project_id})
+                            continue
 
                     if not environment.is_interaction_target_unlocked(project_id):
                         self._emit_event(
@@ -4207,6 +4341,18 @@ class Agent:
                 required_before = int(project.get("required_resources", {}).get("bricks", 0) or 0)
                 delivered_before = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
                 status_before = project.get("status", "in_progress")
+                if delivered_before >= required_before and required_before > 0:
+                    self._emit_event(
+                        sim_state,
+                        "construction_transport_blocked",
+                        {
+                            "agent": self.name,
+                            "project_id": project_id,
+                            "failure_category": "resources_already_satisfied",
+                            "decision_action": action.get("decision_action"),
+                        },
+                    )
+                    continue
                 environment.construction.assign_builder(project_id, self.name)
                 environment.construction.deliver_resource(project_id, "bricks", quantity=1)
 
