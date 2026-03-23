@@ -99,6 +99,58 @@ class GoalStackAndPlanGroundingTests(unittest.TestCase):
         self.assertEqual(len(support_consult), 1)
         sim.stop()
 
+    def test_all_roles_remain_eligible_for_grounded_information_acquisition(self):
+        sim = SimulationState(phases=[])
+        for agent in sim.agents:
+            agent.source_inspection_state.clear()
+            agent.source_exhaustion_state.clear()
+            agent.known_gaps.clear()
+            agent._update_goal_states_from_runtime(sim, sim.environment)
+            top_sources = [c[1] for c in agent._candidate_information_sources(sim.environment, sim_state=sim)[:2]]
+            self.assertTrue(top_sources, msg=f"Expected inspect candidates for {agent.role}")
+            support_goal = agent.goal_registry.get("SUPPORT_ACQUIRE_MISSING_DIK")
+            self.assertIsNotNone(support_goal, msg=f"Missing support goal for {agent.role}")
+            self.assertIn(support_goal.status, {"active", "candidate", "queued"}, msg=f"Unexpected status for {agent.role}")
+        sim.stop()
+
+    def test_non_executable_support_goal_demoted_instead_of_stalling(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        agent.derivation_events = [{"time": -999.0, "derivation_id": "old"}]
+        agent._activate_support_goal("integrate_new_derivation", "derivation:old", sim_state=sim, priority=0.7)
+        agent._update_goal_states_from_runtime(sim, sim.environment)
+        agent._update_goal_states_from_runtime(sim, sim.environment)
+        goal = agent.goal_registry.get("SUPPORT_INTEGRATE_NEW_DERIVATION")
+        self.assertIsNotNone(goal)
+        self.assertEqual(goal.status, "inactive")
+        self.assertGreaterEqual(agent.support_goal_nonexec_counts.get("SUPPORT_INTEGRATE_NEW_DERIVATION", 0), 2)
+        sim.stop()
+
+    def test_support_goal_activation_duplicate_reason_is_throttled(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        before = len(agent.goal_status_history)
+        agent._activate_support_goal("acquire_missing_dik", "missing_dik_detected", sim_state=sim, priority=0.8)
+        agent._activate_support_goal("acquire_missing_dik", "missing_dik_detected", sim_state=sim, priority=0.8)
+        after = len(agent.goal_status_history)
+        self.assertEqual(after - before, 1)
+        sim.stop()
+
+    def test_information_source_selection_is_comparative_not_fixed_order(self):
+        agent = Agent(name="Engineer", role="Engineer", position=(0.0, 0.0))
+
+        class Env:
+            knowledge_packets = {"Team_Info": {}, "Engineer_Info": {}}
+
+            @staticmethod
+            def get_interaction_target_position(packet_name, from_position=None):
+                return {"Team_Info": (100.0, 100.0), "Engineer_Info": (0.0, 1.0)}.get(packet_name)
+
+        env = Env()
+        candidates = agent._candidate_information_sources(env, sim_state=None)
+        self.assertTrue(candidates)
+        self.assertEqual(candidates[0][1], "Engineer_Info")
+
     def test_unknown_plan_method_is_mapped_safely(self):
         sim = SimulationState(phases=[])
         agent = sim.agents[0]

@@ -97,6 +97,49 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         self.assertEqual(project["status"], "complete")
         sim.stop()
 
+    def test_start_construction_auto_handoffs_to_logistics_when_resources_missing(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        self._prime_build_readiness(sim, agent)
+        project = sim.environment.construction.projects["Build_Table_B"]
+        before = int(project["delivered_resources"]["bricks"])
+
+        decision = BrainDecision(
+            selected_action=ExecutableActionType.START_CONSTRUCTION,
+            target_id="Build_Table_B",
+            confidence=0.9,
+        )
+        action = agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)[0]
+        agent.inventory_resources["bricks"] = 0
+        agent.active_actions = [{**action, "progress": 0.0}]
+        agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.1)
+
+        after = int(project["delivered_resources"]["bricks"])
+        self.assertGreater(after, before)
+        sim.stop()
+
+    def test_transport_does_not_false_progress_when_resources_already_satisfied(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        project = sim.environment.construction.projects["Build_Table_B"]
+        required = int(project["required_resources"]["bricks"])
+        project["delivered_resources"]["bricks"] = required
+        sim.environment.construction.update()
+        before = int(project["delivered_resources"]["bricks"])
+
+        decision = BrainDecision(
+            selected_action=ExecutableActionType.TRANSPORT_RESOURCES,
+            target_id="Build_Table_B",
+            confidence=0.9,
+        )
+        action = agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)[0]
+        agent.active_actions = [{**action, "progress": 0.0}]
+        agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.1)
+        after = int(project["delivered_resources"]["bricks"])
+
+        self.assertEqual(after, before)
+        sim.stop()
+
     def test_construction_expected_rules_normalized_to_canonical_ids(self):
         model = load_task_model("mars_colony")
         for template in model.construction_templates.values():
