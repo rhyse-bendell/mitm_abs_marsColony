@@ -4,6 +4,7 @@ import tkinter as tk
 import queue
 import threading
 import traceback
+import math
 from tkinter import ttk, messagebox
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -977,6 +978,67 @@ class MarsColonyInterface:
         self._render_construction_tab(self.sim.environment.construction.get_construction_scene_data())
 
     @staticmethod
+    def _map_structure_visual(structure):
+        structure_type = str(structure.get("structure_type") or structure.get("type") or "").lower()
+        name_blob = " ".join(
+            str(structure.get(field, "") or "").lower() for field in ("project_id", "name", "label", "artifact_type")
+        )
+        token_blob = f"{structure_type} {name_blob}"
+        if any(token in token_blob for token in ("connector", "pipeline", "resource line", "resource_link", "resource-link")):
+            return {"shape": "line", "color": "black"}
+        if any(token in token_blob for token in ("water", "generator")):
+            return {"shape": "circle", "color": "blue"}
+        if any(token in token_blob for token in ("greenhouse", "food")):
+            return {"shape": "rectangle", "color": "green"}
+        if any(token in token_blob for token in ("house", "housing", "shelter")):
+            return {"shape": "square", "color": "red"}
+        shape = str(structure.get("shape") or "square").lower()
+        return {"shape": shape, "color": str(structure.get("color") or "gray")}
+
+    @staticmethod
+    def _progress_fill_fraction(structure):
+        raw = structure.get("progress", 0.0)
+        try:
+            return max(0.0, min(1.0, float(raw or 0.0)))
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _project_overlay_state(structure):
+        if not structure.get("correct", True) or structure.get("status") == "needs_repair":
+            return "invalid"
+        if structure.get("validated_complete"):
+            return "validated"
+        if structure.get("resource_complete") and not structure.get("validated_complete"):
+            return "ready_for_validation"
+        return "in_progress"
+
+    @staticmethod
+    def _site_local_offsets(count, spacing=0.44):
+        if count <= 1:
+            return [(0.0, 0.0)]
+        if count == 2:
+            return [(-spacing, 0.0), (spacing, 0.0)]
+        offsets = []
+        for idx in range(count):
+            theta = (2.0 * math.pi * idx) / count
+            offsets.append((spacing * math.cos(theta), spacing * math.sin(theta)))
+        return offsets
+
+    @staticmethod
+    def _rect_fill_geometry(x, y, width, height, progress):
+        fill_h = height * progress
+        left = x - width / 2.0
+        bottom = y - height / 2.0
+        return left, bottom, width, fill_h
+
+    @staticmethod
+    def _circle_fill_clip_geometry(x, y, radius, progress):
+        clip_height = 2.0 * radius * progress
+        clip_bottom = y - radius
+        return x - radius, clip_bottom, 2.0 * radius, clip_height
+
+    @staticmethod
     def _draw_construction_scene(ax, scene_data):
         ax.clear()
         ax.set_xlim(2.0, 8.0)
@@ -986,51 +1048,67 @@ class MarsColonyInterface:
         ax.grid(True, alpha=0.15)
 
         structures = scene_data.get("structures", [])
+        grouped_by_site = {}
         for structure in structures:
-            x, y = structure.get("position", (0.0, 0.0))
-            shape = structure.get("shape", "square")
-            color = structure.get("color", "gray")
-            progress = max(0.0, min(1.0, float(structure.get("progress", 0.0) or 0.0)))
+            site = tuple(structure.get("position", (0.0, 0.0)))
+            grouped_by_site.setdefault(site, []).append(structure)
 
-            width, height = (0.8, 0.8)
-            if shape == "rectangle":
-                width, height = (1.2, 0.7)
+        for site, site_structures in grouped_by_site.items():
+            sx, sy = site
+            ax.add_patch(Circle((sx, sy), 0.07, edgecolor="black", facecolor="black", linewidth=1.0, zorder=2))
+            site_name = str(site_structures[0].get("project_id") or site_structures[0].get("name") or "site")
+            ax.text(sx + 0.08, sy + 0.08, site_name, ha="left", va="bottom", fontsize=6, color="#424242")
 
-            if shape == "circle":
-                radius = 0.42
-                outline = Circle((x, y), radius, edgecolor=color, facecolor="none", linewidth=2.0)
-                ax.add_patch(outline)
-                if progress > 0:
-                    fill = Circle((x, y), radius, edgecolor="none", facecolor=color, alpha=0.35)
-                    clip = Rectangle((x - radius, y - radius), 2 * radius * progress, 2 * radius, transform=ax.transData)
-                    fill.set_clip_path(clip)
-                    ax.add_patch(fill)
-            else:
-                left = x - width / 2
-                bottom = y - height / 2
-                outline = Rectangle((left, bottom), width, height, edgecolor=color, facecolor="none", linewidth=2.0)
-                ax.add_patch(outline)
-                if progress > 0:
-                    ax.add_patch(Rectangle((left, bottom), width * progress, height, edgecolor="none", facecolor=color, alpha=0.35))
+            for structure, (dx, dy) in zip(site_structures, MarsColonyInterface._site_local_offsets(len(site_structures))):
+                x, y = sx + dx, sy + dy
+                visual = MarsColonyInterface._map_structure_visual(structure)
+                shape = visual["shape"]
+                color = visual["color"]
+                progress = MarsColonyInterface._progress_fill_fraction(structure)
+                overlay_state = MarsColonyInterface._project_overlay_state(structure)
+                builders = structure.get("builders", [])
 
-            if structure.get("resource_complete") and not structure.get("validated_complete"):
-                ax.text(x, y + 0.52, "awaiting validation", ha="center", va="bottom", fontsize=7, color="#6d4c1f")
-            if structure.get("validated_complete"):
-                ax.text(x, y + 0.52, "validated", ha="center", va="bottom", fontsize=7, color="#1a7f37")
-            if not structure.get("correct", True) or structure.get("status") == "needs_repair":
-                ax.add_line(Line2D([x - 0.35, x + 0.35], [y - 0.35, y + 0.35], color="black", linewidth=1.4))
-                ax.add_line(Line2D([x - 0.35, x + 0.35], [y + 0.35, y - 0.35], color="black", linewidth=1.4))
+                width, height = (0.68, 0.68) if shape == "square" else (0.94, 0.58)
+                if shape == "circle":
+                    radius = 0.36
+                    outline = Circle((x, y), radius, edgecolor=color, facecolor="none", linewidth=2.0, zorder=3)
+                    ax.add_patch(outline)
+                    if progress > 0:
+                        fill = Circle((x, y), radius, edgecolor="none", facecolor=color, zorder=3)
+                        clip_l, clip_b, clip_w, clip_h = MarsColonyInterface._circle_fill_clip_geometry(x, y, radius, progress)
+                        fill.set_clip_path(Rectangle((clip_l, clip_b), clip_w, clip_h, transform=ax.transData))
+                        ax.add_patch(fill)
+                elif shape == "line":
+                    for connector in scene_data.get("connectors", []):
+                        start = connector.get("start")
+                        end = connector.get("end")
+                        if start and end:
+                            ax.plot([start[0], end[0]], [start[1], end[1]], color="black", linewidth=1.5, zorder=3)
+                    continue
+                else:
+                    left = x - width / 2.0
+                    bottom = y - height / 2.0
+                    outline = Rectangle((left, bottom), width, height, edgecolor=color, facecolor="none", linewidth=2.0, zorder=3)
+                    ax.add_patch(outline)
+                    if progress > 0:
+                        fill_l, fill_b, fill_w, fill_h = MarsColonyInterface._rect_fill_geometry(x, y, width, height, progress)
+                        ax.add_patch(Rectangle((fill_l, fill_b), fill_w, fill_h, edgecolor="none", facecolor=color, zorder=3))
 
-            builders = structure.get("builders", [])
-            builder_suffix = f" ({len(builders)}b)" if builders else ""
-            ax.text(x, y - 0.56, f"{structure.get('project_id', 'unknown')}{builder_suffix}", ha="center", va="top", fontsize=7)
+                if overlay_state == "ready_for_validation":
+                    ax.text(x, y + 0.48, "awaiting validation", ha="center", va="bottom", fontsize=6.5, color="#6d4c1f")
+                elif overlay_state == "invalid":
+                    ax.add_line(Line2D([x - 0.30, x + 0.30], [y - 0.30, y + 0.30], color="black", linewidth=1.3, zorder=4))
+                    ax.add_line(Line2D([x - 0.30, x + 0.30], [y + 0.30, y - 0.30], color="black", linewidth=1.3, zorder=4))
+
+                builder_suffix = f" ({len(builders)}b)" if builders else ""
+                ax.text(x, y - 0.50, f"{structure.get('project_id', 'unknown')}{builder_suffix}", ha="center", va="top", fontsize=6.5)
 
         for connector in scene_data.get("connectors", []):
             start = connector.get("start")
             end = connector.get("end")
             if not start or not end:
                 continue
-            ax.plot([start[0], end[0]], [start[1], end[1]], color="black", linewidth=1.5)
+            ax.plot([start[0], end[0]], [start[1], end[1]], color="black", linewidth=1.5, zorder=1)
 
     def _render_construction_tab(self, scene_data):
         self._draw_construction_scene(self.construction_ax, scene_data)

@@ -1,4 +1,5 @@
 import unittest
+import math
 
 from modules.construction import ConstructionManager
 
@@ -46,6 +47,94 @@ class ConstructionVisualizationTests(unittest.TestCase):
         manager = ConstructionManager()
         scene = manager.get_construction_scene_data()
         self.assertEqual(scene.get("connectors"), [])
+
+    def test_site_local_offsets_support_single_pair_and_ring(self):
+        if MarsColonyInterface is None:
+            self.skipTest("interface module unavailable")
+        self.assertEqual(MarsColonyInterface._site_local_offsets(1), [(0.0, 0.0)])
+        self.assertEqual(
+            MarsColonyInterface._site_local_offsets(2),
+            [(-0.44, 0.0), (0.44, 0.0)],
+        )
+        offsets = MarsColonyInterface._site_local_offsets(3)
+        self.assertEqual(len(offsets), 3)
+        radii = [math.hypot(x, y) for x, y in offsets]
+        for radius in radii:
+            self.assertAlmostEqual(radius, 0.44, places=6)
+
+    def test_structure_visual_mapping_prefers_semantic_tokens(self):
+        if MarsColonyInterface is None:
+            self.skipTest("interface module unavailable")
+        self.assertEqual(
+            MarsColonyInterface._map_structure_visual({"structure_type": "housing"}),
+            {"shape": "square", "color": "red"},
+        )
+        self.assertEqual(
+            MarsColonyInterface._map_structure_visual({"name": "Food Dome Project"}),
+            {"shape": "rectangle", "color": "green"},
+        )
+        self.assertEqual(
+            MarsColonyInterface._map_structure_visual({"project_id": "Water_Module_A"}),
+            {"shape": "circle", "color": "blue"},
+        )
+
+    def test_progress_fraction_and_fill_geometry(self):
+        if MarsColonyInterface is None:
+            self.skipTest("interface module unavailable")
+        self.assertEqual(MarsColonyInterface._progress_fill_fraction({"progress": None}), 0.0)
+        self.assertEqual(MarsColonyInterface._progress_fill_fraction({"progress": 1.7}), 1.0)
+        self.assertAlmostEqual(MarsColonyInterface._progress_fill_fraction({"progress": 0.25}), 0.25)
+
+        left, bottom, width, fill_h = MarsColonyInterface._rect_fill_geometry(5.0, 4.0, 1.0, 2.0, 0.25)
+        self.assertEqual((left, bottom, width), (4.5, 3.0, 1.0))
+        self.assertAlmostEqual(fill_h, 0.5)
+
+        clip_left, clip_bottom, clip_width, clip_height = MarsColonyInterface._circle_fill_clip_geometry(6.0, 3.0, 0.4, 0.5)
+        self.assertAlmostEqual(clip_left, 5.6)
+        self.assertAlmostEqual(clip_bottom, 2.6)
+        self.assertAlmostEqual(clip_width, 0.8)
+        self.assertAlmostEqual(clip_height, 0.4)
+
+    def test_overlay_state_selection(self):
+        if MarsColonyInterface is None:
+            self.skipTest("interface module unavailable")
+        self.assertEqual(
+            MarsColonyInterface._project_overlay_state({"resource_complete": True, "validated_complete": False, "correct": True}),
+            "ready_for_validation",
+        )
+        self.assertEqual(
+            MarsColonyInterface._project_overlay_state({"resource_complete": True, "validated_complete": True, "correct": True}),
+            "validated",
+        )
+        self.assertEqual(
+            MarsColonyInterface._project_overlay_state({"status": "needs_repair", "correct": False}),
+            "invalid",
+        )
+
+    def test_render_uses_neutral_site_markers_and_offsets_for_shared_site(self):
+        if MarsColonyInterface is None or Figure is None:
+            self.skipTest("interface module unavailable")
+        scene = {
+            "structures": [
+                {"project_id": "A", "name": "House A", "structure_type": "house", "position": (4.0, 4.0), "progress": 0.4, "status": "in_progress", "correct": True},
+                {"project_id": "B", "name": "Greenhouse B", "structure_type": "greenhouse", "position": (4.0, 4.0), "progress": 0.7, "status": "in_progress", "correct": True},
+            ],
+            "connectors": [],
+        }
+        fig = Figure(figsize=(4, 4))
+        ax = fig.add_subplot(111)
+        MarsColonyInterface._draw_construction_scene(ax, scene)
+
+        site_markers = [
+            p for p in ax.patches
+            if hasattr(p, "radius") and abs(p.radius - 0.07) < 1e-9 and tuple(p.get_facecolor()[:3]) == (0.0, 0.0, 0.0)
+        ]
+        self.assertEqual(len(site_markers), 1)
+
+        project_label_positions = {t.get_text(): t.get_position() for t in ax.texts if t.get_text() in {"A", "B"}}
+        self.assertIn("A", project_label_positions)
+        self.assertIn("B", project_label_positions)
+        self.assertNotAlmostEqual(project_label_positions["A"][0], project_label_positions["B"][0], places=3)
 
     def test_construction_tab_render_path_draws_visual_elements(self):
         if MarsColonyInterface is None or Figure is None:
