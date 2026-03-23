@@ -1036,8 +1036,8 @@ class MarsColonyInterface:
         }
 
     @staticmethod
-    def _site_label_text(site_structures):
-        return str(site_structures[0].get("project_id") or site_structures[0].get("name") or "site")
+    def _site_label_text(site):
+        return str(site.get("label") or site.get("site_id") or "site")
 
     @staticmethod
     def _structure_label_text(_structure):
@@ -1066,13 +1066,41 @@ class MarsColonyInterface:
         ax.grid(True, alpha=0.15)
 
         structures = scene_data.get("structures", [])
-        grouped_by_site = {}
-        for structure in structures:
-            site = tuple(structure.get("position", (0.0, 0.0)))
-            grouped_by_site.setdefault(site, []).append(structure)
+        sites = scene_data.get("sites", [])
+        site_lookup = {}
+        if sites:
+            for site in sites:
+                site_id = site.get("site_id")
+                if not site_id:
+                    continue
+                site_lookup[site_id] = {
+                    "site_id": site_id,
+                    "position": tuple(site.get("position", (0.0, 0.0))),
+                    "label": site.get("label"),
+                }
+        else:
+            for structure in structures:
+                position = tuple(structure.get("position", (0.0, 0.0)))
+                site_id = structure.get("site_id") or f"site:{position[0]:.3f},{position[1]:.3f}"
+                site_lookup.setdefault(
+                    site_id,
+                    {"site_id": site_id, "position": position, "label": None},
+                )
 
-        for site, site_structures in grouped_by_site.items():
-            sx, sy = site
+        grouped_by_site = {site_id: [] for site_id in site_lookup}
+        for structure in structures:
+            site_id = structure.get("site_id")
+            if not site_id:
+                position = tuple(structure.get("position", (0.0, 0.0)))
+                site_id = f"site:{position[0]:.3f},{position[1]:.3f}"
+            if site_id not in site_lookup:
+                site_lookup[site_id] = {"site_id": site_id, "position": tuple(structure.get("position", (0.0, 0.0))), "label": None}
+                grouped_by_site[site_id] = []
+            grouped_by_site[site_id].append(structure)
+
+        for site_id, site_structures in grouped_by_site.items():
+            site = site_lookup[site_id]
+            sx, sy = site["position"]
             site_style = MarsColonyInterface._site_container_style()
             ax.add_patch(
                 Circle(
@@ -1085,7 +1113,7 @@ class MarsColonyInterface:
                     zorder=0,
                 )
             )
-            site_name = MarsColonyInterface._site_label_text(site_structures)
+            site_name = MarsColonyInterface._site_label_text(site)
             ax.text(
                 sx,
                 sy - (site_style["radius"] + 0.10),
