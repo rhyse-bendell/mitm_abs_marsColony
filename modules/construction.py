@@ -5,9 +5,9 @@ from modules.task_model import normalize_rule_token
 
 class ConstructionManager:
     STRUCTURE_STYLE_MAP = {
-        "house": {"shape": "square", "color": "red"},
-        "greenhouse": {"shape": "rectangle", "color": "green"},
-        "water_generator": {"shape": "circle", "color": "blue"},
+        "house": {"symbol": "house", "color": "#b6423a"},
+        "greenhouse": {"symbol": "greenhouse", "color": "#2f8f46"},
+        "water_generator": {"symbol": "water_generator", "color": "#2f6fbf"},
     }
 
     def __init__(self, task_model=None):
@@ -210,7 +210,7 @@ class ConstructionManager:
         structures = []
         for project in self.projects.values():
             structure_type = str(project.get("type") or "").strip().lower()
-            style = self.STRUCTURE_STYLE_MAP.get(structure_type, {"shape": "square", "color": "gray"})
+            style = self.STRUCTURE_STYLE_MAP.get(structure_type, {"symbol": "generic", "color": "#666666"})
             builders = sorted(project.get("builders", []))
             location = tuple(project.get("location", (0.0, 0.0)))
             site_id = sites_by_location.get(location)
@@ -235,7 +235,6 @@ class ConstructionManager:
                     "project_id": project.get("id"),
                     "name": project.get("name"),
                     "structure_type": structure_type,
-                    "position": location,
                     "site_id": site_id,
                     "progress": self._project_progress(project),
                     "status": project.get("status", "unknown"),
@@ -243,9 +242,9 @@ class ConstructionManager:
                     "resource_complete": bool(project.get("resource_complete", False)),
                     "validated_complete": bool(project.get("validated_complete", False)),
                     "builders": builders,
-                    "shape": style["shape"],
+                    "symbol": style["symbol"],
                     "color": style["color"],
-                    "label": project.get("id"),
+                    "label": project.get("name"),
                 }
             )
 
