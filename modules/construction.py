@@ -205,17 +205,38 @@ class ConstructionManager:
         return min(1.0, total_delivered / total_required)
 
     def get_construction_scene_data(self):
+        sites = []
+        sites_by_location = {}
         structures = []
         for project in self.projects.values():
             structure_type = str(project.get("type") or "").strip().lower()
             style = self.STRUCTURE_STYLE_MAP.get(structure_type, {"shape": "square", "color": "gray"})
             builders = sorted(project.get("builders", []))
+            location = tuple(project.get("location", (0.0, 0.0)))
+            site_id = sites_by_location.get(location)
+            if site_id is None:
+                site_id = f"site:{location[0]:.3f},{location[1]:.3f}"
+                sites_by_location[location] = site_id
+                sites.append(
+                    {
+                        "site_id": site_id,
+                        "position": location,
+                        "label": self._site_label(project),
+                        "project_ids": [project.get("id")],
+                    }
+                )
+            else:
+                for site in sites:
+                    if site.get("site_id") == site_id:
+                        site.setdefault("project_ids", []).append(project.get("id"))
+                        break
             structures.append(
                 {
                     "project_id": project.get("id"),
                     "name": project.get("name"),
                     "structure_type": structure_type,
-                    "position": tuple(project.get("location", (0.0, 0.0))),
+                    "position": location,
+                    "site_id": site_id,
                     "progress": self._project_progress(project),
                     "status": project.get("status", "unknown"),
                     "correct": bool(project.get("correct", True)),
@@ -229,6 +250,15 @@ class ConstructionManager:
             )
 
         return {
+            "sites": sites,
             "structures": structures,
             "connectors": [],
         }
+
+    @staticmethod
+    def _site_label(project):
+        project_id = str(project.get("id") or "").strip()
+        if project_id.startswith("Build_Table_"):
+            suffix = project_id.split("Build_Table_", 1)[1]
+            return f"Site {suffix}"
+        return f"Site {project_id}" if project_id else "Site"

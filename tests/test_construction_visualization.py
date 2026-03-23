@@ -23,13 +23,31 @@ class ConstructionVisualizationTests(unittest.TestCase):
 
         scene = manager.get_construction_scene_data()
         by_id = {row["project_id"]: row for row in scene["structures"]}
+        sites = scene.get("sites", [])
 
         self.assertIn("Build_Table_A", by_id)
         self.assertIn("Build_Table_B", by_id)
+        self.assertTrue(all(row.get("site_id") for row in by_id.values()))
+        self.assertGreaterEqual(len(sites), 1)
         self.assertTrue(by_id["Build_Table_A"]["validated_complete"])
         self.assertEqual(by_id["Build_Table_A"]["status"], "complete")
         self.assertGreater(by_id["Build_Table_B"]["progress"], 0.0)
         self.assertLess(by_id["Build_Table_B"]["progress"], 1.0)
+
+    def test_scene_data_includes_explicit_sites_layer(self):
+        manager = ConstructionManager()
+        scene = manager.get_construction_scene_data()
+
+        self.assertIn("sites", scene)
+        self.assertIn("structures", scene)
+        self.assertIn("connectors", scene)
+        self.assertGreaterEqual(len(scene["sites"]), 1)
+
+        site = scene["sites"][0]
+        self.assertIn("site_id", site)
+        self.assertIn("position", site)
+        self.assertIn("label", site)
+        self.assertIn("project_ids", site)
 
     def test_scene_data_contains_type_specific_shape_and_color(self):
         manager = ConstructionManager()
@@ -115,9 +133,12 @@ class ConstructionVisualizationTests(unittest.TestCase):
         if MarsColonyInterface is None or Figure is None:
             self.skipTest("interface module unavailable")
         scene = {
+            "sites": [
+                {"site_id": "site_a", "position": (4.0, 4.0), "label": "Site A"},
+            ],
             "structures": [
-                {"project_id": "A", "name": "House A", "structure_type": "house", "position": (4.0, 4.0), "progress": 0.4, "status": "in_progress", "correct": True},
-                {"project_id": "B", "name": "Greenhouse B", "structure_type": "greenhouse", "position": (4.0, 4.0), "progress": 0.7, "status": "in_progress", "correct": True},
+                {"project_id": "A", "site_id": "site_a", "name": "House A", "structure_type": "house", "position": (1.0, 1.0), "progress": 0.4, "status": "in_progress", "correct": True},
+                {"project_id": "B", "site_id": "site_a", "name": "Greenhouse B", "structure_type": "greenhouse", "position": (1.0, 1.0), "progress": 0.7, "status": "in_progress", "correct": True},
             ],
             "connectors": [],
         }
@@ -144,8 +165,11 @@ class ConstructionVisualizationTests(unittest.TestCase):
         if MarsColonyInterface is None or Figure is None:
             self.skipTest("interface module unavailable")
         scene = {
+            "sites": [
+                {"site_id": "site_h", "position": (5.0, 4.0), "label": "Site H"},
+            ],
             "structures": [
-                {"project_id": "H", "name": "House H", "structure_type": "house", "position": (5.0, 4.0), "progress": 0.5, "status": "in_progress", "correct": True},
+                {"project_id": "H", "site_id": "site_h", "name": "House H", "structure_type": "house", "position": (1.0, 1.0), "progress": 0.5, "status": "in_progress", "correct": True},
             ],
             "connectors": [],
         }
@@ -176,8 +200,11 @@ class ConstructionVisualizationTests(unittest.TestCase):
         if MarsColonyInterface is None or Figure is None:
             self.skipTest("interface module unavailable")
         scene = {
+            "sites": [
+                {"site_id": "site_g", "position": (5.0, 4.0), "label": "Site G"},
+            ],
             "structures": [
-                {"project_id": "G", "name": "Greenhouse G", "structure_type": "greenhouse", "position": (5.0, 4.0), "progress": 0.25, "status": "in_progress", "correct": True},
+                {"project_id": "G", "site_id": "site_g", "name": "Greenhouse G", "structure_type": "greenhouse", "position": (1.0, 1.0), "progress": 0.25, "status": "in_progress", "correct": True},
             ],
             "connectors": [],
         }
@@ -196,9 +223,14 @@ class ConstructionVisualizationTests(unittest.TestCase):
         if MarsColonyInterface is None or Figure is None:
             self.skipTest("interface module unavailable")
         scene = {
+            "sites": [
+                {"site_id": "site_v", "position": (4.0, 4.0), "label": "Site V"},
+                {"site_id": "site_x", "position": (6.0, 4.0), "label": "Site X"},
+            ],
             "structures": [
                 {
                     "project_id": "V",
+                    "site_id": "site_v",
                     "name": "House V",
                     "structure_type": "house",
                     "position": (4.0, 4.0),
@@ -209,6 +241,7 @@ class ConstructionVisualizationTests(unittest.TestCase):
                 },
                 {
                     "project_id": "X",
+                    "site_id": "site_x",
                     "name": "House X",
                     "structure_type": "house",
                     "position": (6.0, 4.0),
@@ -233,9 +266,12 @@ class ConstructionVisualizationTests(unittest.TestCase):
         if MarsColonyInterface is None or Figure is None:
             self.skipTest("interface module unavailable")
         scene = {
+            "sites": [
+                {"site_id": "site_a", "position": (4.0, 4.0), "label": "Site A"},
+            ],
             "structures": [
-                {"project_id": "Build_Table_A", "name": "House A", "structure_type": "house", "position": (4.0, 4.0), "progress": 0.4, "status": "in_progress", "correct": True},
-                {"project_id": "Build_Table_B", "name": "Greenhouse B", "structure_type": "greenhouse", "position": (4.0, 4.0), "progress": 0.7, "status": "in_progress", "correct": True},
+                {"project_id": "Build_Table_A", "site_id": "site_a", "name": "House A", "structure_type": "house", "position": (4.0, 4.0), "progress": 0.4, "status": "in_progress", "correct": True},
+                {"project_id": "Build_Table_B", "site_id": "site_a", "name": "Greenhouse B", "structure_type": "greenhouse", "position": (4.0, 4.0), "progress": 0.7, "status": "in_progress", "correct": True},
             ],
             "connectors": [],
         }
@@ -244,16 +280,21 @@ class ConstructionVisualizationTests(unittest.TestCase):
         MarsColonyInterface._draw_construction_scene(ax, scene)
 
         texts = [t.get_text() for t in ax.texts]
-        self.assertEqual(texts.count("Build_Table_A"), 1)
+        self.assertIn("Site A", texts)
+        self.assertNotIn("Build_Table_A", texts)
         self.assertNotIn("Build_Table_B", texts)
 
     def test_structure_line_progress_renders_when_line_structure_present(self):
         if MarsColonyInterface is None or Figure is None:
             self.skipTest("interface module unavailable")
         scene = {
+            "sites": [
+                {"site_id": "site_pipe", "position": (4.0, 4.0), "label": "Site Pipe"},
+            ],
             "structures": [
                 {
                     "project_id": "Pipe_A",
+                    "site_id": "site_pipe",
                     "name": "resource_link_pipe",
                     "structure_type": "connector",
                     "position": (4.0, 4.0),
