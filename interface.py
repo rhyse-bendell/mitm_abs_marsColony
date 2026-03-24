@@ -5,6 +5,7 @@ import queue
 import threading
 import traceback
 import json
+import math
 from pathlib import Path
 from tkinter import ttk, messagebox
 from matplotlib.figure import Figure
@@ -19,6 +20,10 @@ from modules.interaction_graph import CANONICAL_NODES
 
 
 class MarsColonyInterface:
+    _PILE_DRAW_SIZE = 0.24
+    _PILE_OUTSIDE_PADDING = 0.06
+    _BRIDGE_SITE_INSET = 0.14
+
     STATE_IDLE = "idle"
     STATE_STARTING = "starting"
     STATE_RUNNING = "running"
@@ -1143,11 +1148,40 @@ class MarsColonyInterface:
                 color="#8c95a3",
             )
 
+        site_radius = MarsColonyInterface._site_circle_style()["radius"]
+
         # 2) Resource piles as black squares with proportional fill
         for pile in resource_piles:
             x, y = tuple(pile.get("position", (0.0, 0.0)))
+            site_id = pile.get("site_id")
+            if site_id in site_lookup:
+                sx, sy = site_lookup[site_id]["position"]
+                pile_id = str(pile.get("pile_id") or "")
+                corner_by_pile = {
+                    "pile_a": (1.0, -1.0),   # lower-right of site_a
+                    "pile_c": (-1.0, -1.0),  # lower-left of site_c
+                }
+                dx, dy = corner_by_pile.get(pile_id, (0.0, 0.0))
+                mag = math.hypot(dx, dy)
+                if mag > 0:
+                    ux, uy = dx / mag, dy / mag
+                    # Keep the pile square fully outside the site circle while still nearby.
+                    center_offset = (
+                        site_radius
+                        + (MarsColonyInterface._PILE_DRAW_SIZE * math.sqrt(2.0) / 2.0)
+                        + MarsColonyInterface._PILE_OUTSIDE_PADDING
+                    )
+                    x, y = sx + ux * center_offset, sy + uy * center_offset
             fill = max(0.0, min(1.0, float(pile.get("fill_fraction", 0.0) or 0.0)))
-            MarsColonyInterface._draw_progress_square(ax, x, y, size=0.24, progress=fill, color="black", zorder=2)
+            MarsColonyInterface._draw_progress_square(
+                ax,
+                x,
+                y,
+                size=MarsColonyInterface._PILE_DRAW_SIZE,
+                progress=fill,
+                color="black",
+                zorder=2,
+            )
 
         # 3) Bridges
         for bridge in bridges:
@@ -1155,6 +1189,18 @@ class MarsColonyInterface:
             end = bridge.get("end")
             if not start or not end:
                 continue
+            start_site = site_lookup.get(bridge.get("start_site_id"))
+            end_site = site_lookup.get(bridge.get("end_site_id"))
+            if start_site and end_site:
+                sx, sy = start_site["position"]
+                ex, ey = end_site["position"]
+                vx, vy = ex - sx, ey - sy
+                dist = math.hypot(vx, vy)
+                if dist > 0:
+                    ux, uy = vx / dist, vy / dist
+                    trim = max(0.0, site_radius - MarsColonyInterface._BRIDGE_SITE_INSET)
+                    start = (sx + ux * trim, sy + uy * trim)
+                    end = (ex - ux * trim, ey - uy * trim)
             status = str(bridge.get("status") or "complete")
             width = 2.0 if status == "complete" else 1.3
             alpha = 1.0 if status == "complete" else 0.6
