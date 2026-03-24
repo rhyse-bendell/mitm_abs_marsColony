@@ -350,6 +350,34 @@ class MarsColonyInterface:
         return rows
 
     @staticmethod
+    def _brain_trace_rows_filtered(traces, *, agent_filter="All", disposition_filter="All", source_filter="All", search_text=""):
+        rows = MarsColonyInterface._brain_trace_rows_for_agent(traces, agent_filter)
+        needle = str(search_text or "").strip().lower()
+        filtered = []
+        for row in rows:
+            disposition = str(row.get("runtime_disposition") or row.get("planner_result") or "").strip()
+            source = str(row.get("result_source") or "").strip()
+            if disposition_filter and disposition_filter != "All" and disposition != disposition_filter:
+                continue
+            if source_filter and source_filter != "All" and source != source_filter:
+                continue
+            if needle:
+                blob = " ".join(
+                    [
+                        str(row.get("request_id") or ""),
+                        str(row.get("trace_id") or ""),
+                        str(row.get("runtime_disposition") or ""),
+                        str(row.get("trace_outcome_category") or ""),
+                        str((row.get("next_action_summary") or {}).get("action_type") or ""),
+                        str(row.get("raw_http_response_text") or ""),
+                    ]
+                ).lower()
+                if needle not in blob:
+                    continue
+            filtered.append(row)
+        return filtered
+
+    @staticmethod
     def _brain_trace_summary_line(row):
         sim_time = row.get("sim_time")
         tick = row.get("tick")
@@ -363,7 +391,15 @@ class MarsColonyInterface:
             or row.get("runtime_disposition")
             or "-")
         )
-        return f"t={sim_time} tick={tick} {agent} [{disposition}] src={source} action={action}"
+        markers = []
+        if row.get("repair_retry_attempted") or ((row.get("provider_trace") or {}).get("repair_retry_attempted")):
+            markers.append("retry")
+        if row.get("minimal_action_salvage_used") or ((row.get("provider_trace") or {}).get("minimal_action_salvage_used")):
+            markers.append("salvage")
+        if row.get("timeout_occurred"):
+            markers.append("timeout")
+        marker_text = f" {'/'.join(markers)}" if markers else ""
+        return f"t={sim_time} tick={tick} {agent} [{disposition}] src={source} action={action}{marker_text}"
 
     @staticmethod
     def _brain_visible_signature(rows):
@@ -391,6 +427,17 @@ class MarsColonyInterface:
             "effective_backend": row.get("effective_backend"),
             "model": row.get("model"),
             "trigger_reason": row.get("trigger_reason"),
+            "status_badges": [
+                badge
+                for badge, present in [
+                    ("fallback", bool(row.get("fallback_used"))),
+                    ("timeout", bool(row.get("timeout_occurred"))),
+                    ("repair_retry", bool(provider_trace.get("repair_retry_attempted"))),
+                    ("minimal_salvage", bool(provider_trace.get("minimal_action_salvage_used"))),
+                    ("late_accepted", bool(row.get("late_result_accepted"))),
+                ]
+                if present
+            ],
         }
         interpretation = {
             "runtime_disposition": row.get("runtime_disposition"),
@@ -405,11 +452,18 @@ class MarsColonyInterface:
             "fallback_source": row.get("fallback_source"),
             "fallback_reason": row.get("fallback_reason"),
             "adopted_action": (row.get("next_action_summary") or {}).get("action_type"),
+            "late_result_arrived": row.get("late_result_arrived"),
+            "late_result_accepted": row.get("late_result_accepted"),
+            "stale_discard_reason": row.get("stale_discard_reason"),
         }
         errors_notes = {
             "exception": row.get("exception") or provider_trace.get("exception"),
             "provider_parse_source": provider_trace.get("provider_response_parse_source"),
             "normalization_steps": last_attempt.get("normalization_steps") or provider_trace.get("normalization_steps"),
+            "minimal_salvage_steps": last_attempt.get("minimal_salvage_steps"),
+            "repair_retry_attempted": provider_trace.get("repair_retry_attempted"),
+            "repair_retry_count": provider_trace.get("repair_retry_count"),
+            "minimal_action_salvage_used": provider_trace.get("minimal_action_salvage_used"),
             "grounding_notes": row.get("plan_grounding_notes"),
         }
         return {
@@ -433,6 +487,21 @@ class MarsColonyInterface:
         self.brain_agent_combo = ttk.Combobox(controls, textvariable=self.brain_agent_filter, values=["All"], width=20, state="readonly")
         self.brain_agent_combo.pack(side="left", padx=(4, 10))
         self.brain_agent_combo.bind("<<ComboboxSelected>>", lambda *_: self.update_brain_tab())
+        ttk.Label(controls, text="Disposition").pack(side="left")
+        self.brain_disposition_filter = StringVar(value="All")
+        self.brain_disposition_combo = ttk.Combobox(controls, textvariable=self.brain_disposition_filter, values=["All"], width=20, state="readonly")
+        self.brain_disposition_combo.pack(side="left", padx=(4, 10))
+        self.brain_disposition_combo.bind("<<ComboboxSelected>>", lambda *_: self.update_brain_tab())
+        ttk.Label(controls, text="Source").pack(side="left")
+        self.brain_source_filter = StringVar(value="All")
+        self.brain_source_combo = ttk.Combobox(controls, textvariable=self.brain_source_filter, values=["All"], width=16, state="readonly")
+        self.brain_source_combo.pack(side="left", padx=(4, 10))
+        self.brain_source_combo.bind("<<ComboboxSelected>>", lambda *_: self.update_brain_tab())
+        ttk.Label(controls, text="Search").pack(side="left")
+        self.brain_search_var = StringVar(value="")
+        search_entry = ttk.Entry(controls, textvariable=self.brain_search_var, width=18)
+        search_entry.pack(side="left", padx=(4, 8))
+        search_entry.bind("<KeyRelease>", lambda *_: self.update_brain_tab())
         ttk.Button(controls, text="Refresh", command=lambda: self.update_brain_tab(force=True)).pack(side="left", padx=(2, 4))
         self.brain_auto_refresh_var = BooleanVar(value=True)
         ttk.Checkbutton(controls, text="Auto-refresh", variable=self.brain_auto_refresh_var).pack(side="left", padx=4)
@@ -440,6 +509,10 @@ class MarsColonyInterface:
         ttk.Checkbutton(controls, text="Follow latest", variable=self.brain_follow_latest_var).pack(side="left", padx=4)
         ttk.Button(controls, text="Copy detail", command=self._copy_brain_detail_text).pack(side="left", padx=(8, 4))
         ttk.Button(controls, text="Copy selected JSON", command=self._copy_brain_selected_json).pack(side="left", padx=4)
+        ttk.Button(controls, text="Copy raw", command=self._copy_brain_raw_response).pack(side="left", padx=4)
+        ttk.Button(controls, text="Copy normalized", command=self._copy_brain_normalized_response).pack(side="left", padx=4)
+        ttk.Button(controls, text="Copy attempts", command=self._copy_brain_provider_attempts).pack(side="left", padx=4)
+        ttk.Button(controls, text="Copy trace bundle", command=self._copy_brain_trace_bundle).pack(side="left", padx=4)
         self.brain_copy_status_var = StringVar(value="")
         ttk.Label(controls, textvariable=self.brain_copy_status_var, foreground="#3f556e").pack(side="right")
 
@@ -548,6 +621,34 @@ class MarsColonyInterface:
         bundle = self._brain_detail_bundle_for_row(row)
         self._copy_to_clipboard(json.dumps(bundle, indent=2, sort_keys=True, default=str), status_message="Selected JSON copied.")
 
+    def _brain_selected_row(self):
+        if not hasattr(self, "brain_request_list"):
+            return None
+        selected = self.brain_request_list.curselection()
+        return self._brain_visible_rows[selected[0]] if selected and selected[0] < len(self._brain_visible_rows) else None
+
+    def _copy_brain_raw_response(self):
+        row = self._brain_selected_row()
+        attempts = ((row or {}).get("provider_trace") or {}).get("attempts") or (row or {}).get("provider_attempts") or []
+        last_attempt = attempts[-1] if attempts else {}
+        self._copy_to_clipboard(last_attempt.get("raw_http_response_text") or (row or {}).get("raw_http_response_text"), status_message="Raw response copied.")
+
+    def _copy_brain_normalized_response(self):
+        row = self._brain_selected_row()
+        attempts = ((row or {}).get("provider_trace") or {}).get("attempts") or (row or {}).get("provider_attempts") or []
+        last_attempt = attempts[-1] if attempts else {}
+        normalized = last_attempt.get("normalized_response_payload") or (row or {}).get("normalized_agent_brain_response")
+        self._copy_to_clipboard(self._safe_pretty_json(normalized), status_message="Normalized response copied.")
+
+    def _copy_brain_provider_attempts(self):
+        row = self._brain_selected_row()
+        attempts = ((row or {}).get("provider_trace") or {}).get("attempts") or (row or {}).get("provider_attempts") or []
+        self._copy_to_clipboard(self._safe_pretty_json(attempts), status_message="Provider attempts copied.")
+
+    def _copy_brain_trace_bundle(self):
+        row = self._brain_selected_row()
+        self._copy_to_clipboard(self._safe_pretty_json(row), status_message="Trace bundle copied.")
+
     def update_brain_tab(self, *, force=False):
         if not hasattr(self, "brain_request_list"):
             return
@@ -574,7 +675,21 @@ class MarsColonyInterface:
         if selected_index and selected_index[0] < len(self._brain_visible_rows):
             selected_id = self._brain_visible_rows[selected_index[0]].get("trace_id")
 
-        rows = self._brain_trace_rows_for_agent(traces, self.brain_agent_filter.get())
+        disposition_values = sorted({str(r.get("runtime_disposition") or r.get("planner_result") or "") for r in traces if r.get("runtime_disposition") or r.get("planner_result")})
+        source_values = sorted({str(r.get("result_source") or "") for r in traces if r.get("result_source")})
+        self.brain_disposition_combo.configure(values=["All"] + disposition_values)
+        if self.brain_disposition_filter.get() not in (["All"] + disposition_values):
+            self.brain_disposition_filter.set("All")
+        self.brain_source_combo.configure(values=["All"] + source_values)
+        if self.brain_source_filter.get() not in (["All"] + source_values):
+            self.brain_source_filter.set("All")
+        rows = self._brain_trace_rows_filtered(
+            traces,
+            agent_filter=self.brain_agent_filter.get(),
+            disposition_filter=self.brain_disposition_filter.get(),
+            source_filter=self.brain_source_filter.get(),
+            search_text=self.brain_search_var.get() if hasattr(self, "brain_search_var") else "",
+        )
         new_signature = self._brain_visible_signature(rows)
         list_scroll = self.brain_request_list.yview()
         rows_changed = force or new_signature != self._brain_visible_signature_cache

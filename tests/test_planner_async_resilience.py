@@ -13,7 +13,7 @@ class TestPlannerAsyncResilience(unittest.TestCase):
             phases=[],
             project_root=tmpdir,
             brain_backend="local_http",
-            brain_backend_options={"timeout_s": 0.01, "max_retries": 0, "fallback_backend": "rule_brain"},
+            brain_backend_options={"timeout_s": 0.01, "max_retries": 0, "fallback_backend": "rule_brain", "unrestricted_local_qwen_mode": False},
             planner_config={
                 "planner_interval_steps": 1,
                 "planner_interval_time": 0.0,
@@ -21,6 +21,7 @@ class TestPlannerAsyncResilience(unittest.TestCase):
                 "degraded_consecutive_failures_threshold": 2,
                 "degraded_cooldown_seconds": 0.3,
                 "high_latency_local_llm_mode": False,
+                "unrestricted_local_qwen_mode": False,
                 "high_latency_stale_result_grace_s": 0.0,
             },
         )
@@ -69,7 +70,7 @@ class TestPlannerAsyncResilience(unittest.TestCase):
             with patch("modules.brain_provider.OllamaLocalBrainProvider.generate_plan", new=very_slow_generate):
                 for _ in range(12):
                     sim.update(0.1)
-                    time.sleep(0.06)
+                    time.sleep(0.12)
                 events = sim.logger.get_recent_events(250)
                 degraded_events = [e for e in events if e.get("event_type") == "backend_degraded_mode_started"]
                 cooldown_events = [e for e in events if e.get("event_type") == "planner_request_skipped_cooldown"]
@@ -90,6 +91,7 @@ class TestPlannerAsyncResilience(unittest.TestCase):
                 sim.update(0.1)
                 for _ in range(3):
                     sim.update(0.1)
+                    time.sleep(0.08)
                 time.sleep(0.25)
                 sim.update(0.1)
                 events = sim.logger.get_recent_events(250)
@@ -129,9 +131,9 @@ class TestPlannerAsyncResilience(unittest.TestCase):
                 sim.update(0.1)
                 events = sim.logger.get_recent_events(300)
                 stale_discard = [e for e in events if e.get("event_type") == "planner_response_discarded_due_to_state_change"]
-                llm_done = [e for e in events if e.get("event_type") == "planner_request_completed_with_llm"]
+                completed = [e for e in events if e.get("event_type") == "planner_request_completed_async"]
                 self.assertFalse(stale_discard)
-                self.assertTrue(llm_done)
+                self.assertTrue(completed)
             sim.stop()
 
 
@@ -197,6 +199,43 @@ class TestPlannerAsyncResilience(unittest.TestCase):
                 stale = [e for e in events if e.get("event_type") == "planner_request_result_arrived_stale"]
                 self.assertTrue(accepted)
                 self.assertFalse(stale)
+                rows = list(sim.logger.get_recent_planner_traces(200))
+                adopted_rows = [row for row in rows if row.get("plan_disposition") == "adopted"]
+                self.assertTrue(any(row.get("late_result_accepted") for row in adopted_rows))
+            sim.stop()
+
+    def test_high_latency_mode_discards_late_result_outside_grace_with_reason(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                brain_backend="local_http",
+                brain_backend_options={"timeout_s": 1.0, "max_retries": 0, "fallback_backend": "rule_brain"},
+                planner_config={
+                    "planner_interval_steps": 1,
+                    "planner_interval_time": 0.0,
+                    "planner_timeout_seconds": 0.05,
+                    "high_latency_local_llm_mode": True,
+                    "high_latency_stale_result_grace_s": 0.01,
+                    "unrestricted_local_qwen_mode": False,
+                },
+            )
+
+            def slow_generate(self, request_packet):
+                time.sleep(0.2)
+                return self.fallback.generate_plan(request_packet)
+
+            with patch("modules.brain_provider.OllamaLocalBrainProvider.generate_plan", new=slow_generate):
+                sim.update(0.1)
+                for _ in range(3):
+                    sim.update(0.1)
+                time.sleep(0.25)
+                sim.update(0.1)
+                rows = list(sim.logger.get_recent_planner_traces(300))
+                stale_rows = [row for row in rows if row.get("plan_disposition") == "discarded_arrived_after_timeout"]
+                self.assertTrue(stale_rows)
+                self.assertTrue(all(row.get("stale_discard_reason") == "arrived_after_timeout" for row in stale_rows))
+                self.assertTrue(all(not row.get("late_result_accepted") for row in stale_rows))
             sim.stop()
 
 
