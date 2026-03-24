@@ -736,6 +736,135 @@ class OllamaLocalBrainProvider(BrainProvider):
                 return key, value
         return None, None
 
+    def _find_nested_planner_candidate(self, payload: dict[str, Any], steps: list[dict[str, Any]]) -> dict[str, Any] | None:
+        queue: list[tuple[str, Any]] = [("top", payload)]
+        seen: set[int] = set()
+        while queue:
+            path, node = queue.pop(0)
+            if not isinstance(node, dict):
+                continue
+            node_id = id(node)
+            if node_id in seen:
+                continue
+            seen.add(node_id)
+            if path != "top" and (
+                isinstance(node.get("plan"), dict)
+                or isinstance(node.get("next_action"), (dict, str))
+                or isinstance(node.get("ordered_actions"), list)
+            ):
+                steps.append({"step": "found_nested_planner_candidate", "candidate_path": path})
+                return node
+            for key, value in node.items():
+                if isinstance(value, dict):
+                    queue.append((f"{path}.{key}" if path != "top" else key, value))
+        return None
+
+    def _extract_minimal_action_payload(
+        self,
+        payload: Any,
+        *,
+        steps: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        if not isinstance(payload, dict):
+            return None, None
+        plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else payload
+        next_action = plan.get("next_action")
+        if isinstance(next_action, str):
+            canonical = self._normalize_action_type(next_action, steps, field="salvage.next_action")
+            if canonical is not None:
+                steps.append({"step": "minimal_salvage_from_next_action_string", "normalized_action": canonical})
+                return {"step_index": 0, "action_type": canonical}, "next_action"
+        if isinstance(next_action, dict):
+            key, action_value = self._extract_action_type_from_entry(next_action)
+            if action_value is not None:
+                canonical = self._normalize_action_type(action_value, steps, field="salvage.next_action")
+                if canonical is not None:
+                    action = dict(next_action)
+                    action["action_type"] = canonical
+                    action.setdefault("step_index", 0)
+                    if key and key != "action_type":
+                        steps.append(
+                            {
+                                "step": "minimal_salvage_promoted_next_action_alias",
+                                "source_field": key,
+                                "normalized_action": canonical,
+                            }
+                        )
+                    steps.append({"step": "minimal_salvage_from_next_action_object", "normalized_action": canonical})
+                    return action, "next_action"
+        ordered = plan.get("ordered_actions")
+        if isinstance(ordered, list):
+            for idx, entry in enumerate(ordered):
+                if isinstance(entry, str):
+                    canonical = self._normalize_action_type(entry, steps, field=f"salvage.ordered_actions[{idx}]")
+                    if canonical is None:
+                        continue
+                    steps.append(
+                        {
+                            "step": "minimal_salvage_from_ordered_action_string",
+                            "index": idx,
+                            "normalized_action": canonical,
+                        }
+                    )
+                    return {"step_index": idx, "action_type": canonical}, "ordered_actions_first_usable"
+                if isinstance(entry, dict):
+                    key, action_value = self._extract_action_type_from_entry(entry)
+                    if action_value is None:
+                        continue
+                    canonical = self._normalize_action_type(action_value, steps, field=f"salvage.ordered_actions[{idx}]")
+                    if canonical is None:
+                        continue
+                    action = dict(entry)
+                    action["action_type"] = canonical
+                    action.setdefault("step_index", idx)
+                    if key and key != "action_type":
+                        steps.append(
+                            {
+                                "step": "minimal_salvage_promoted_ordered_action_alias",
+                                "index": idx,
+                                "source_field": key,
+                                "normalized_action": canonical,
+                            }
+                        )
+                    steps.append({"step": "minimal_salvage_from_ordered_action_object", "index": idx, "normalized_action": canonical})
+                    return action, "ordered_actions_first_usable"
+        return None, None
+
+    def _build_minimal_salvage_response(
+        self,
+        request_packet: AgentBrainRequest,
+        *,
+        source_payload: Any,
+        failure_reason: str,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], str | None]:
+        steps: list[dict[str, Any]] = []
+        action, salvage_source = self._extract_minimal_action_payload(source_payload, steps=steps)
+        if action is None:
+            return None, steps, None
+        plan_horizon = max(1, int(request_packet.planning_horizon_config.get("max_steps", 3) or 3))
+        payload = {
+            "response_id": f"salvaged-{request_packet.request_id}",
+            "agent_id": request_packet.agent_id,
+            "plan": {
+                "plan_id": f"salvaged-plan-{request_packet.request_id}",
+                "plan_horizon": plan_horizon,
+                "ordered_goals": [],
+                "ordered_actions": [dict(action)],
+                "next_action": dict(action),
+                "confidence": 0.35,
+                "notes": [f"minimal_action_salvage:{failure_reason}"],
+            },
+            "confidence": 0.35,
+        }
+        steps.append(
+            {
+                "step": "constructed_minimal_salvage_response",
+                "salvage_source": salvage_source,
+                "failure_reason": failure_reason,
+            }
+        )
+        return payload, steps, "accepted_via_minimal_action_salvage"
+
     def _normalize_payload(self, payload: Any) -> tuple[dict[str, Any] | None, list[dict[str, Any]], str]:
         steps: list[dict[str, Any]] = []
         if not isinstance(payload, dict):
@@ -752,6 +881,19 @@ class OllamaLocalBrainProvider(BrainProvider):
                     wrapper_source = f"{wrapper}.plan"
                     steps.append({"step": "unwrapped_payload", "wrapper_source": wrapper_source})
                     break
+        if "plan" not in working:
+            nested_candidate = self._find_nested_planner_candidate(working, steps)
+            if isinstance(nested_candidate, dict):
+                merged = dict(working)
+                if isinstance(nested_candidate.get("plan"), dict):
+                    merged["plan"] = deepcopy(nested_candidate.get("plan"))
+                for field in ("next_action", "ordered_actions"):
+                    if field in nested_candidate and field not in merged:
+                        merged[field] = deepcopy(nested_candidate.get(field))
+                working = merged
+                wrapper_payload = nested_candidate
+                wrapper_source = "nested_candidate"
+                steps.append({"step": "unwrapped_nested_planner_candidate"})
         if "plan" not in working or not isinstance(working.get("plan"), dict):
             return None, steps, "rejected_missing_plan"
 
@@ -857,6 +999,13 @@ class OllamaLocalBrainProvider(BrainProvider):
             if key and key != "action_type":
                 steps.append({"step": "next_action_alias_field_promoted", "original_field": key, "normalized_action": canonical})
             plan["next_action"] = next_action
+        elif isinstance(plan.get("ordered_actions"), list):
+            recovered_next = next((item for item in plan.get("ordered_actions", []) if isinstance(item, dict)), None)
+            if recovered_next is not None:
+                plan["next_action"] = dict(recovered_next)
+                steps.append({"step": "promoted_first_ordered_action_to_next_action"})
+            else:
+                return None, steps, "rejected_unusable_next_action"
         else:
             return None, steps, "rejected_unusable_next_action"
 
@@ -949,6 +1098,10 @@ class OllamaLocalBrainProvider(BrainProvider):
             "repair_retry_requested": False,
             "repair_retry_reason": None,
             "repair_retry_attempted": False,
+            "repair_retry_count": 0,
+            "minimal_action_salvage_attempted": False,
+            "minimal_action_salvage_used": False,
+            "minimal_action_salvage_reason": None,
         }
         attempts = max(1, int(self.config.max_retries) + 1)
         for attempt in range(1, attempts + 1):
@@ -1014,8 +1167,51 @@ class OllamaLocalBrainProvider(BrainProvider):
                         if can_repair:
                             trace["repair_retry_requested"] = True
                             trace["repair_retry_attempted"] = True
+                            trace["repair_retry_count"] = int(trace.get("repair_retry_count", 0)) + 1
                             attempted_kinds.append("schema_repair")
                             continue
+                        trace["minimal_action_salvage_attempted"] = True
+                        trace["minimal_action_salvage_reason"] = failure_reason
+                        salvage_payload, salvage_steps, salvage_disposition = self._build_minimal_salvage_response(
+                            request_packet,
+                            source_payload=response_payload,
+                            failure_reason=failure_reason,
+                        )
+                        if salvage_payload is not None and salvage_disposition:
+                            attempt_trace["minimal_salvage_steps"] = salvage_steps
+                            attempt_trace["normalized_response_payload"] = salvage_payload
+                            trace["minimal_action_salvage_used"] = True
+                            trace["runtime_disposition"] = salvage_disposition
+                            response_obj = AgentBrainResponse.from_dict(salvage_payload)
+                            latency_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
+                            trace.update(
+                                {
+                                    "fallback": False,
+                                    "fallback_used": False,
+                                    "fallback_reason": None,
+                                    "fallback_hint": None,
+                                    "latency_ms": latency_ms,
+                                    "latency_until_outcome_ms": latency_ms,
+                                    "response_payload_valid": True,
+                                    "llm_response_validated": True,
+                                    "result_source": "ollama",
+                                    "trace_outcome_category": "llm_success_via_minimal_action_salvage",
+                                    "exception": None,
+                                    "normalization_steps": list(normalization_steps) + list(salvage_steps),
+                                    "normalized_response_payload": salvage_payload,
+                                    "extracted_response_payload": response_payload,
+                                    "runtime_disposition": salvage_disposition,
+                                }
+                            )
+                            self.last_outcome = {
+                                "fallback": False,
+                                "reason": None,
+                                "latency_ms": latency_ms,
+                                "outcome_category": "llm_success_via_minimal_action_salvage",
+                                "result_source": "ollama",
+                            }
+                            self.last_trace = trace
+                            return response_obj
                         raise ValueError(failure_reason)
 
                     response_obj = AgentBrainResponse.from_dict(normalized_payload)

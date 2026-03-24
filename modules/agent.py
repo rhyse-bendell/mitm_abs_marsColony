@@ -2663,13 +2663,16 @@ class Agent:
         if result.get("request_id") != request_id:
             self.planner_state["total_stale_discarded"] += 1
             self._emit_event(sim_state, "planner_request_result_arrived_stale", {"request_id": result.get("request_id"), "expected_request_id": request_id, "trace_id": result.get("trace_id")})
-            self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": result.get("request_id"), "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": "stale_discarded", "plan_disposition": "discarded_stale_request_id_mismatch", "runtime_disposition": "stale_discarded", "fallback": True, "fallback_used": True, "fallback_source": "stale_response_guard", "result_source": "fallback_safe_policy", "fallback_reason": "request_id_mismatch", "trace_outcome_category": "stale_response_discarded"})
+            self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": result.get("request_id"), "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": "stale_discarded", "plan_disposition": "discarded_stale_request_id_mismatch", "runtime_disposition": "stale_discarded_request_id_mismatch", "fallback": True, "fallback_used": True, "fallback_source": "stale_response_guard", "result_source": "fallback_safe_policy", "fallback_reason": "request_id_mismatch", "trace_outcome_category": "stale_response_discarded", "late_result_arrived": bool(result.get("request_id") in self._timed_out_request_ids), "late_result_accepted": False, "stale_discard_reason": "request_id_mismatch"})
             return False
+        late_result_accepted = False
+        late_result_elapsed_s = None
         if result.get("request_id") in self._timed_out_request_ids:
             request_wallclock_started = self.planner_state.get("requested_wallclock_at")
             elapsed_since_request_s = None
             if request_wallclock_started is not None:
                 elapsed_since_request_s = max(0.0, time.perf_counter() - float(request_wallclock_started))
+                late_result_elapsed_s = elapsed_since_request_s
             stale_grace_s = float(self.planner_cadence.high_latency_stale_result_grace_s)
             if (
                 self.planner_cadence.high_latency_local_llm_mode
@@ -2677,12 +2680,13 @@ class Agent:
                 and elapsed_since_request_s <= float(self.planner_cadence.planner_timeout_seconds) + stale_grace_s
             ):
                 self._timed_out_request_ids.discard(result.get("request_id"))
+                late_result_accepted = True
                 self._emit_event(sim_state, "planner_request_result_arrived_after_timeout_accepted", {"request_id": result.get("request_id"), "trace_id": result.get("trace_id"), "elapsed_since_request_s": elapsed_since_request_s, "timeout_s": float(self.planner_cadence.planner_timeout_seconds), "stale_grace_s": stale_grace_s})
             else:
                 self._timed_out_request_ids.discard(result.get("request_id"))
                 self.planner_state["total_stale_discarded"] += 1
                 self._emit_event(sim_state, "planner_request_result_arrived_stale", {"request_id": result.get("request_id"), "reason": "arrived_after_timeout", "trace_id": result.get("trace_id")})
-                self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": result.get("request_id"), "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": "stale_discarded", "plan_disposition": "discarded_arrived_after_timeout", "runtime_disposition": "stale_discarded", "fallback": True, "fallback_used": True, "fallback_source": "stale_response_guard", "result_source": "fallback_safe_policy", "fallback_reason": "arrived_after_timeout", "trace_outcome_category": "stale_response_discarded", "trace": result.get("trace")})
+                self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": result.get("request_id"), "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": "stale_discarded", "plan_disposition": "discarded_arrived_after_timeout", "runtime_disposition": "stale_discarded_arrived_after_timeout", "fallback": True, "fallback_used": True, "fallback_source": "stale_response_guard", "result_source": "fallback_safe_policy", "fallback_reason": "arrived_after_timeout", "trace_outcome_category": "stale_response_discarded", "trace": result.get("trace"), "late_result_arrived": True, "late_result_accepted": False, "late_result_elapsed_s": late_result_elapsed_s, "stale_discard_reason": "arrived_after_timeout"})
                 return False
 
         self.planner_call_count += 1
@@ -2747,7 +2751,7 @@ class Agent:
             self._emit_event(sim_state, "planner_response_discarded_due_to_state_change", {"request_id": request_id, "trace_id": result.get("trace_id"), "request_tick": self.planner_state["request_tick"], "current_tick": self.sim_step_count, "current_plan_id": getattr(self.current_plan, "plan_id", None)})
             if result.get("fallback_used"):
                 self._emit_event(sim_state, "fallback_result_rejected", {"request_id": request_id, "trace_id": result.get("trace_id"), "reason": "state_changed_before_adoption"})
-            self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": request_id, "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": status, "plan_disposition": "discarded_due_to_state_change", "runtime_disposition": "stale_discarded", "fallback": bool(result.get("fallback_used")), "fallback_used": bool(result.get("fallback_used")), "fallback_source": result.get("fallback_source"), "result_source": result.get("result_source"), "fallback_reason": "state_changed_before_adoption", "trace_outcome_category": "stale_response_discarded", "trace": result.get("trace")})
+            self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": request_id, "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": status, "plan_disposition": "discarded_due_to_state_change", "runtime_disposition": "stale_discarded_state_changed", "fallback": bool(result.get("fallback_used")), "fallback_used": bool(result.get("fallback_used")), "fallback_source": result.get("fallback_source"), "result_source": result.get("result_source"), "fallback_reason": "state_changed_before_adoption", "trace_outcome_category": "stale_response_discarded", "trace": result.get("trace"), "late_result_arrived": late_result_accepted, "late_result_accepted": False, "late_result_elapsed_s": late_result_elapsed_s, "stale_discard_reason": "state_changed_before_adoption"})
             return False
 
         self._adopt_new_plan(decision, trigger_reason, sim_state, response=response, trace_id=result.get("trace_id"), result_source=result.get("result_source"), fallback_used=bool(result.get("fallback_used")) )
@@ -2814,6 +2818,10 @@ class Agent:
             "timeout_occurred": bool(result.get("timeout_occurred")),
             "trace_outcome_category": result.get("trace_outcome_category") or ("llm_success" if not result.get("fallback_used") else "llm_error_with_fallback"),
             "runtime_disposition": result.get("runtime_disposition") or ("fallback_adopted" if result.get("fallback_used") else "accepted_as_is"),
+            "late_result_arrived": late_result_accepted,
+            "late_result_accepted": late_result_accepted,
+            "late_result_elapsed_s": late_result_elapsed_s,
+            "stale_discard_reason": None,
             "agent_brain_request_payload": self.planner_state.get("request_payload"),
             "planner_result": status,
             "schema_validation_succeeded": not bool(result.get("trace", {}).get("schema_validation_errors")),

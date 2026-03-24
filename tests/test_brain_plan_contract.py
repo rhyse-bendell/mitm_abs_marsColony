@@ -310,6 +310,42 @@ class BrainContractTests(unittest.TestCase):
         self.assertEqual(normalized["plan"]["next_action"]["action_type"], "inspect_information_source")
         self.assertTrue(any(step.get("step") == "resolved_string_next_action_from_ordered_actions" for step in steps))
 
+    def test_normalize_payload_recovers_nested_split_planner_fields(self):
+        provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", max_retries=0), fallback=RuleBrain())
+        payload = {
+            "outer": {
+                "response": {
+                    "plan": {"plan_id": "p", "plan_horizon": 1, "ordered_goals": [], "confidence": 0.8},
+                    "next_action": {"action_type": "wait"},
+                    "ordered_actions": [{"action_type": "wait"}],
+                }
+            }
+        }
+        normalized, steps, disposition = provider._normalize_payload(payload)
+        self.assertIsNotNone(normalized)
+        self.assertEqual(disposition, "accepted_after_repair")
+        self.assertEqual(normalized["plan"]["next_action"]["action_type"], "wait")
+        self.assertTrue(any(step.get("step") == "found_nested_planner_candidate" for step in steps))
+
+    def test_normalize_payload_promotes_first_ordered_action_when_next_action_missing(self):
+        provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", max_retries=0), fallback=RuleBrain())
+        payload = {
+            "response_id": "r",
+            "agent_id": "a1",
+            "plan": {
+                "plan_id": "p",
+                "plan_horizon": 1,
+                "ordered_goals": [],
+                "ordered_actions": [{"step_index": 0, "action_type": "wait"}],
+                "confidence": 0.8,
+            },
+        }
+        normalized, steps, disposition = provider._normalize_payload(payload)
+        self.assertIsNotNone(normalized)
+        self.assertEqual(disposition, "accepted_after_repair")
+        self.assertEqual(normalized["plan"]["next_action"]["action_type"], "wait")
+        self.assertTrue(any(step.get("step") == "promoted_first_ordered_action_to_next_action" for step in steps))
+
     def test_generate_plan_records_normalization_steps_in_trace(self):
         provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", max_retries=0), fallback=RuleBrain())
         req = AgentBrainRequest(
@@ -499,6 +535,80 @@ class OllamaProviderFallbackTests(unittest.TestCase):
         attempt_kinds = [item.get("attempt_kind") for item in provider.last_trace.get("attempts", []) if item.get("attempt_kind")]
         self.assertIn("primary", attempt_kinds)
         self.assertIn("schema_repair", attempt_kinds)
+
+    def test_ollama_provider_uses_minimal_action_salvage_after_invalid_normalization(self):
+        provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", max_retries=0), fallback=RuleBrain())
+        req = AgentBrainRequest(
+            request_id="q8",
+            tick=1,
+            sim_time=1.0,
+            agent_id="a1",
+            display_name="A1",
+            agent_label="A",
+            task_id="mars_colony",
+            phase="p1",
+            local_context_summary="ctx",
+            local_observations=[],
+            working_memory_summary={},
+            inbox_summary=[],
+            current_goal_stack=[],
+            current_plan_summary={},
+            allowed_actions=[{"action_type": "wait"}],
+            planning_horizon_config={"max_steps": 2},
+            request_explanation=False,
+        )
+
+        class _FakeResponse:
+            def read(self):
+                payload = {"choices": [{"message": {"content": json.dumps({"response_id": "r", "agent_id": "a1", "next_action": {"action": "wait"}})}}]}
+                return json.dumps(payload).encode("utf-8")
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return False
+
+        with patch("modules.brain_provider.request.urlopen", return_value=_FakeResponse()):
+            response = provider.generate_plan(req)
+        self.assertEqual(response.plan.next_action.action_type.value, "wait")
+        self.assertEqual(provider.last_trace.get("runtime_disposition"), "accepted_via_minimal_action_salvage")
+        self.assertTrue(provider.last_trace.get("minimal_action_salvage_used"))
+        self.assertEqual(provider.last_trace.get("trace_outcome_category"), "llm_success_via_minimal_action_salvage")
+
+    def test_ollama_provider_records_fallback_after_schema_retry_exhausted(self):
+        provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", max_retries=1), fallback=RuleBrain())
+        req = AgentBrainRequest(
+            request_id="q9",
+            tick=1,
+            sim_time=1.0,
+            agent_id="a1",
+            display_name="A1",
+            agent_label="A",
+            task_id="mars_colony",
+            phase="p1",
+            local_context_summary="ctx",
+            local_observations=[],
+            working_memory_summary={},
+            inbox_summary=[],
+            current_goal_stack=[],
+            current_plan_summary={},
+            allowed_actions=[{"action_type": "wait"}],
+            planning_horizon_config={"max_steps": 2},
+            request_explanation=False,
+        )
+
+        class _FakeResponse:
+            def read(self):
+                return json.dumps({"choices": [{"message": {"content": json.dumps({"response": {"x": 1}})}}]}).encode("utf-8")
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return False
+
+        with patch("modules.brain_provider.request.urlopen", return_value=_FakeResponse()):
+            provider.generate_plan(req)
+        self.assertTrue(provider.last_trace.get("fallback_used"))
+        self.assertTrue(provider.last_trace.get("repair_retry_attempted"))
+        self.assertEqual(provider.last_trace.get("trace_outcome_category"), "llm_invalid_after_schema_retry_with_fallback")
 
 
 if __name__ == "__main__":

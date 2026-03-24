@@ -29,6 +29,22 @@ class BrainTabHelperTests(unittest.TestCase):
         self.assertIn("ollama", summary)
         self.assertIn("inspect_information_source", summary)
 
+    def test_brain_trace_summary_includes_retry_and_salvage_markers(self):
+        row = {
+            "sim_time": 5.1,
+            "tick": 12,
+            "display_name": "Engineer",
+            "runtime_disposition": "accepted_via_minimal_action_salvage",
+            "result_source": "ollama",
+            "timeout_occurred": True,
+            "provider_trace": {"repair_retry_attempted": True, "minimal_action_salvage_used": True},
+            "next_action_summary": {"action_type": "wait"},
+        }
+        summary = MarsColonyInterface._brain_trace_summary_line(row)
+        self.assertIn("retry", summary)
+        self.assertIn("salvage", summary)
+        self.assertIn("timeout", summary)
+
     def test_brain_trace_summary_falls_back_to_better_action_label(self):
         row = {
             "sim_time": 4.2,
@@ -48,6 +64,21 @@ class BrainTabHelperTests(unittest.TestCase):
         rows_a = [{"trace_id": "t1", "runtime_disposition": "accepted_as_is", "result_source": "ollama", "next_action_summary": {"action_type": "wait"}}]
         rows_b = [{"trace_id": "t1", "runtime_disposition": "accepted_as_is", "result_source": "ollama", "next_action_summary": {"action_type": "wait"}, "extra": "ignored"}]
         self.assertEqual(MarsColonyInterface._brain_visible_signature(rows_a), MarsColonyInterface._brain_visible_signature(rows_b))
+
+    def test_brain_trace_rows_filtered_supports_disposition_source_and_search(self):
+        rows = [
+            {"trace_id": "t1", "agent_id": "Architect", "runtime_disposition": "accepted_after_repair", "result_source": "ollama", "request_id": "req-alpha"},
+            {"trace_id": "t2", "agent_id": "Engineer", "runtime_disposition": "timed_out", "result_source": "fallback_safe_policy", "request_id": "req-beta"},
+        ]
+        filtered = MarsColonyInterface._brain_trace_rows_filtered(
+            rows,
+            agent_filter="All",
+            disposition_filter="accepted_after_repair",
+            source_filter="ollama",
+            search_text="alpha",
+        )
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["trace_id"], "t1")
 
     def test_brain_trace_detail_includes_request_raw_normalized_and_disposition(self):
         row = {
@@ -84,6 +115,7 @@ class BrainTabHelperTests(unittest.TestCase):
         self.assertEqual(details["system_interpretation"]["runtime_disposition"], "rejected_missing_plan")
         self.assertTrue(details["system_interpretation"]["fallback_used"])
         self.assertTrue(details["errors_notes"]["normalization_steps"])
+        self.assertIn("status_badges", details["request_summary"])
 
     def test_brain_detail_bundle_for_copy_contains_expected_sections(self):
         row = {
