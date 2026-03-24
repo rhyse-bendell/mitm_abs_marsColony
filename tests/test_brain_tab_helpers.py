@@ -198,6 +198,15 @@ class _FakeLoggerWithPlannerAlso(_FakeLoggerLifecycleOnly):
         return [{"request_id": "planner-only"}]
 
 
+class _FakeLoggerPlannerOnly:
+    def __init__(self):
+        self.planner_calls = 0
+
+    def get_recent_planner_traces(self, _limit):
+        self.planner_calls += 1
+        return [{"request_id": "planner-only"}]
+
+
 class BrainTabWiringTests(unittest.TestCase):
     def _build_app(self, rows, *, logger_cls=_FakeLoggerWithPlannerAlso):
         app = MarsColonyInterface.__new__(MarsColonyInterface)
@@ -229,6 +238,12 @@ class BrainTabWiringTests(unittest.TestCase):
         self.assertEqual(app.sim.logger.planner_calls, 0)
         self.assertEqual(MarsColonyInterface._brain_aligned_request_ids(app._brain_visible_rows), ["req-live"])
 
+    def test_update_brain_tab_can_fallback_to_planner_trace_when_lifecycle_missing(self):
+        app = self._build_app([], logger_cls=lambda _rows: _FakeLoggerPlannerOnly())
+        app.update_brain_tab(force=True)
+        self.assertEqual(app.sim.logger.planner_calls, 1)
+        self.assertEqual(MarsColonyInterface._brain_aligned_request_ids(app._brain_visible_rows), ["planner-only"])
+
     def test_three_panes_stay_aligned_and_selection_syncs(self):
         rows = [BrainTabHelperTests()._row("req-1"), BrainTabHelperTests()._row("req-2")]
         app = self._build_app(rows)
@@ -244,6 +259,20 @@ class BrainTabWiringTests(unittest.TestCase):
         app._on_brain_list_selection_changed("interpretation")
         self.assertEqual(app.brain_request_list.curselection(), (1,))
         self.assertEqual(app.brain_response_list.curselection(), (1,))
+        self.assertIn("req-2", app.brain_detail_text.get("1.0", "end-1c"))
+
+    def test_startup_sanity_is_visible_in_all_three_lifecycle_panes(self):
+        startup = BrainTabHelperTests()._row("req-startup")
+        startup["request_kind"] = "startup_sanity"
+        startup["response"]["status"] = "timeout"
+        startup["interpretation"]["status"] = "unusable_no_plan"
+        startup["interpretation"]["failure_mode"] = "startup_sanity_unusable"
+        app = self._build_app([startup], logger_cls=_FakeLoggerLifecycleOnly)
+        app.update_brain_tab(force=True)
+        self.assertEqual(len(app.brain_request_list.items), 1)
+        self.assertIn("kind=startup_sanity", app.brain_request_list.items[0])
+        self.assertIn("timeout", app.brain_response_list.items[0])
+        self.assertIn("startup_sanity_unusable", app.brain_interpretation_list.items[0])
 
     def test_detail_and_copy_bundle_are_lifecycle_based(self):
         row = BrainTabHelperTests()._row("req-copy")
@@ -260,6 +289,17 @@ class BrainTabWiringTests(unittest.TestCase):
         self.assertIn("request_summary", copied["value"])
         self.assertIn("system_interpretation", copied["value"])
 
+    def test_detail_bundle_tracks_selected_request_across_any_pane(self):
+        rows = [BrainTabHelperTests()._row("req-a"), BrainTabHelperTests()._row("req-b")]
+        rows[1]["interpretation"]["adopted_action"] = "build"
+        app = self._build_app(rows, logger_cls=_FakeLoggerLifecycleOnly)
+        app.update_brain_tab(force=True)
+        app.brain_interpretation_list.selection_set(1)
+        app._on_brain_list_selection_changed("interpretation")
+        detail_text = app.brain_detail_text.get("1.0", "end-1c")
+        self.assertIn("req-b", detail_text)
+        self.assertIn("build", detail_text)
+
     def test_refresh_stability_keeps_selection_when_signature_unchanged(self):
         row = BrainTabHelperTests()._row("req-stable")
         app = self._build_app([row], logger_cls=_FakeLoggerLifecycleOnly)
@@ -272,6 +312,16 @@ class BrainTabWiringTests(unittest.TestCase):
         self.assertEqual(app.brain_request_list.curselection(), (0,))
         self.assertAlmostEqual(app.brain_request_list.yview()[0], 0.4)
         self.assertEqual(app.brain_request_list.delete_calls, 1)
+
+    def test_refresh_signature_detects_row_content_change_without_status_change(self):
+        row = BrainTabHelperTests()._row("req-change")
+        logger = _FakeLoggerLifecycleOnly([row])
+        app = self._build_app([], logger_cls=lambda _rows: logger)
+        app.update_brain_tab(force=True)
+        self.assertEqual(app.brain_request_list.delete_calls, 1)
+        logger.rows[0]["request"]["model"] = "qwen2.5:7b"
+        app.update_brain_tab(force=False)
+        self.assertEqual(app.brain_request_list.delete_calls, 2)
 
     def test_summary_lines_include_three_pane_lifecycle_fields(self):
         row = BrainTabHelperTests()._row("req-rich")
