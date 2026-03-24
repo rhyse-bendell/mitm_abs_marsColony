@@ -206,30 +206,21 @@ class ConstructionManager:
 
     def get_construction_scene_data(self):
         sites = []
-        sites_by_location = {}
         structures = []
         for project in self.projects.values():
             structure_type = str(project.get("type") or "").strip().lower()
             style = self.STRUCTURE_STYLE_MAP.get(structure_type, {"symbol": "generic", "color": "#666666"})
             builders = sorted(project.get("builders", []))
             location = tuple(project.get("location", (0.0, 0.0)))
-            site_id = sites_by_location.get(location)
-            if site_id is None:
-                site_id = f"site:{location[0]:.3f},{location[1]:.3f}"
-                sites_by_location[location] = site_id
-                sites.append(
-                    {
-                        "site_id": site_id,
-                        "position": location,
-                        "label": self._site_label(project),
-                        "project_ids": [project.get("id")],
-                    }
-                )
-            else:
-                for site in sites:
-                    if site.get("site_id") == site_id:
-                        site.setdefault("project_ids", []).append(project.get("id"))
-                        break
+            site_id = self._site_id(project)
+            sites.append(
+                {
+                    "site_id": site_id,
+                    "position": location,
+                    "label": self._site_label(project),
+                    "project_ids": [project.get("id")],
+                }
+            )
             structures.append(
                 {
                     "project_id": project.get("id"),
@@ -253,6 +244,14 @@ class ConstructionManager:
             "structures": structures,
             "connectors": [],
         }
+
+    @staticmethod
+    def _site_id(project):
+        project_id = str(project.get("id") or "").strip()
+        if project_id.startswith("Build_Table_"):
+            suffix = project_id.split("Build_Table_", 1)[1].lower()
+            return f"site_{suffix}"
+        return f"site_{project_id.lower()}" if project_id else "site"
 
     @staticmethod
     def _site_label(project):

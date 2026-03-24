@@ -4,7 +4,6 @@ import tkinter as tk
 import queue
 import threading
 import traceback
-import math
 from tkinter import ttk, messagebox
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -1014,25 +1013,13 @@ class MarsColonyInterface:
         return "in_progress"
 
     @staticmethod
-    def _site_local_offsets(count, spacing=0.44):
-        if count <= 1:
-            return [(0.0, 0.0)]
-        if count == 2:
-            return [(-spacing, 0.0), (spacing, 0.0)]
-        offsets = []
-        for idx in range(count):
-            theta = (2.0 * math.pi * idx) / count
-            offsets.append((spacing * math.cos(theta), spacing * math.sin(theta)))
-        return offsets
-
-    @staticmethod
-    def _site_container_style():
+    def _site_circle_style():
         return {
-            "radius": 0.95,
-            "edgecolor": "#c9ced6",
-            "facecolor": "#f6f8fa",
-            "linewidth": 1.0,
-            "linestyle": (0, (2, 3)),
+            "radius": 0.86,
+            "edgecolor": "#b8c1cd",
+            "facecolor": "none",
+            "linewidth": 1.2,
+            "linestyle": "solid",
         }
 
     @staticmethod
@@ -1044,65 +1031,88 @@ class MarsColonyInterface:
         return ""
 
     @staticmethod
-    def _house_body_geometry(x, y):
-        width, height = 0.62, 0.45
-        return x - width / 2.0, y - 0.22, width, height
-
-    @staticmethod
-    def _greenhouse_body_geometry(x, y):
-        width, height = 0.74, 0.42
-        return x - width / 2.0, y - 0.20, width, height
-
-    @staticmethod
-    def _water_core_geometry(x, y):
-        return x, y, 0.30
-
-    @staticmethod
     def _draw_house_structure(ax, x, y, progress, color):
-        left, bottom, width, height = MarsColonyInterface._house_body_geometry(x, y)
-        outline = Rectangle((left, bottom), width, height, edgecolor=color, facecolor="none", linewidth=1.9, zorder=3)
-        ax.add_patch(outline)
-        if progress > 0:
-            fill_left, fill_bottom, fill_width, fill_height = MarsColonyInterface._rect_fill_geometry(x, bottom + height / 2.0, width, height, progress)
-            ax.add_patch(Rectangle((fill_left, fill_bottom), fill_width, fill_height, edgecolor="none", facecolor=color, zorder=2.8))
+        width, height = 0.56, 0.34
+        left, bottom = x - width / 2.0, y - 0.30
         roof = Polygon(
-            [(x - 0.36, bottom + height), (x, bottom + height + 0.30), (x + 0.36, bottom + height)],
+            [(x - 0.34, bottom + height), (x, y + 0.34), (x + 0.34, bottom + height)],
             closed=True,
             edgecolor=color,
             facecolor="none",
             linewidth=1.9,
             zorder=3.1,
         )
+        outline = Rectangle((left, bottom), width, height, edgecolor=color, facecolor="none", linewidth=1.9, zorder=3)
+        ax.add_patch(outline)
         ax.add_patch(roof)
+        if progress > 0:
+            fill_bounds = (x - 0.36, y - 0.32, 0.72, 0.68)
+            fill_clip = MarsColonyInterface._progress_clip_rect(*fill_bounds, progress)
+            house_fill = Rectangle((left, bottom), width, height, edgecolor="none", facecolor=color, zorder=2.8)
+            roof_fill = Polygon([(x - 0.34, bottom + height), (x, y + 0.34), (x + 0.34, bottom + height)], closed=True, edgecolor="none", facecolor=color, zorder=2.8)
+            house_fill.set_clip_path(fill_clip.get_path(), transform=ax.transData)
+            roof_fill.set_clip_path(fill_clip.get_path(), transform=ax.transData)
+            ax.add_patch(house_fill)
+            ax.add_patch(roof_fill)
+        ax.add_patch(Rectangle((x - 0.07, bottom), 0.14, 0.18, edgecolor=color, facecolor="none", linewidth=1.1, zorder=3.2))
 
     @staticmethod
     def _draw_greenhouse_structure(ax, x, y, progress, color):
-        left, bottom, width, height = MarsColonyInterface._greenhouse_body_geometry(x, y)
+        width, height = 0.64, 0.38
+        left, bottom = x - width / 2.0, y - 0.28
+        roof = Polygon(
+            [(left, bottom + height), (x, y + 0.26), (left + width, bottom + height)],
+            closed=False,
+            edgecolor=color,
+            facecolor="none",
+            linewidth=1.4,
+            zorder=3.1,
+        )
         outline = Rectangle((left, bottom), width, height, edgecolor=color, facecolor="none", linewidth=1.9, zorder=3)
         ax.add_patch(outline)
+        ax.add_patch(roof)
         if progress > 0:
-            fill_left, fill_bottom, fill_width, fill_height = MarsColonyInterface._rect_fill_geometry(x, bottom + height / 2.0, width, height, progress)
-            ax.add_patch(Rectangle((fill_left, fill_bottom), fill_width, fill_height, edgecolor="none", facecolor=color, zorder=2.8))
-        ax.add_line(Line2D([x - width / 2.0, x], [bottom + height, bottom + height + 0.17], color=color, linewidth=1.5, zorder=3.1))
-        ax.add_line(Line2D([x + width / 2.0, x], [bottom + height, bottom + height + 0.17], color=color, linewidth=1.5, zorder=3.1))
-        ax.add_line(Line2D([x, x], [bottom, bottom + height], color=color, linewidth=1.1, zorder=3.1))
-        ax.add_line(Line2D([x - width / 4.0, x - width / 4.0], [bottom, bottom + height], color=color, linewidth=1.0, zorder=3.1))
-        ax.add_line(Line2D([x + width / 4.0, x + width / 4.0], [bottom, bottom + height], color=color, linewidth=1.0, zorder=3.1))
+            fill_clip = MarsColonyInterface._progress_clip_rect(x - 0.34, y - 0.30, 0.68, 0.58, progress)
+            body_fill = Rectangle((left, bottom), width, height, edgecolor="none", facecolor=color, zorder=2.8)
+            roof_fill = Polygon([(left, bottom + height), (x, y + 0.26), (left + width, bottom + height)], closed=True, edgecolor="none", facecolor=color, zorder=2.8)
+            body_fill.set_clip_path(fill_clip.get_path(), transform=ax.transData)
+            roof_fill.set_clip_path(fill_clip.get_path(), transform=ax.transData)
+            ax.add_patch(body_fill)
+            ax.add_patch(roof_fill)
+        ax.add_line(Line2D([x, x], [bottom, bottom + height], color=color, linewidth=1.1, zorder=3.2))
+        ax.add_line(Line2D([x - width / 4.0, x - width / 4.0], [bottom, bottom + height], color=color, linewidth=1.0, zorder=3.2))
+        ax.add_line(Line2D([x + width / 4.0, x + width / 4.0], [bottom, bottom + height], color=color, linewidth=1.0, zorder=3.2))
+        ax.add_line(Line2D([left, left + width], [bottom + height / 2.0, bottom + height / 2.0], color=color, linewidth=0.9, zorder=3.2))
 
     @staticmethod
     def _draw_water_generator_structure(ax, x, y, progress, color):
-        cx, cy, radius = MarsColonyInterface._water_core_geometry(x, y)
+        cx, cy, radius = x, y + 0.04, 0.22
+        tank = Rectangle((x - 0.30, y - 0.30), 0.60, 0.12, edgecolor=color, facecolor="none", linewidth=1.6, zorder=3)
         core_outline = Circle((cx, cy), radius, edgecolor=color, facecolor="none", linewidth=1.9, zorder=3)
+        droplet = Polygon(
+            [(x, y + 0.30), (x - 0.08, y + 0.14), (x, y + 0.06), (x + 0.08, y + 0.14)],
+            closed=True,
+            edgecolor=color,
+            facecolor="none",
+            linewidth=1.3,
+            zorder=3.2,
+        )
+        ax.add_patch(tank)
         ax.add_patch(core_outline)
+        ax.add_patch(droplet)
         if progress > 0:
-            fill = Circle((cx, cy), radius, edgecolor="none", facecolor=color, zorder=2.8)
-            clip_l, clip_b, clip_w, clip_h = MarsColonyInterface._circle_fill_clip_geometry(cx, cy, radius, progress)
-            fill.set_clip_path(Rectangle((clip_l, clip_b), clip_w, clip_h, transform=ax.transData))
-            ax.add_patch(fill)
-        ax.add_patch(Rectangle((cx - 0.18, cy - radius - 0.12), 0.36, 0.08, edgecolor=color, facecolor="none", linewidth=1.4, zorder=3.1))
-        ax.add_line(Line2D([cx - 0.11, cx + 0.11], [cy + 0.02, cy + 0.02], color=color, linewidth=1.2, zorder=3.2))
-        ax.add_line(Line2D([cx - 0.07, cx], [cy - 0.08, cy + 0.05], color=color, linewidth=1.2, zorder=3.2))
-        ax.add_line(Line2D([cx + 0.07, cx], [cy - 0.08, cy + 0.05], color=color, linewidth=1.2, zorder=3.2))
+            fill_clip = MarsColonyInterface._progress_clip_rect(x - 0.32, y - 0.32, 0.64, 0.66, progress)
+            core_fill = Circle((cx, cy), radius, edgecolor="none", facecolor=color, zorder=2.8)
+            tank_fill = Rectangle((x - 0.30, y - 0.30), 0.60, 0.12, edgecolor="none", facecolor=color, zorder=2.8)
+            droplet_fill = Polygon([(x, y + 0.30), (x - 0.08, y + 0.14), (x, y + 0.06), (x + 0.08, y + 0.14)], closed=True, edgecolor="none", facecolor=color, zorder=2.8)
+            core_fill.set_clip_path(fill_clip.get_path(), transform=ax.transData)
+            tank_fill.set_clip_path(fill_clip.get_path(), transform=ax.transData)
+            droplet_fill.set_clip_path(fill_clip.get_path(), transform=ax.transData)
+            ax.add_patch(core_fill)
+            ax.add_patch(tank_fill)
+            ax.add_patch(droplet_fill)
+        ax.add_line(Line2D([x - 0.08, x + 0.08], [y + 0.03, y + 0.03], color=color, linewidth=1.1, zorder=3.3))
+        ax.add_line(Line2D([x, x], [y - 0.05, y + 0.11], color=color, linewidth=1.0, zorder=3.3))
 
     @staticmethod
     def _draw_structure_symbol(ax, structure, x, y):
@@ -1124,17 +1134,9 @@ class MarsColonyInterface:
                 ax.add_patch(Rectangle((x - 0.30, y - 0.22), 0.60, 0.44 * progress, edgecolor="none", facecolor=color, zorder=2.8))
 
     @staticmethod
-    def _rect_fill_geometry(x, y, width, height, progress):
-        fill_h = height * progress
-        left = x - width / 2.0
-        bottom = y - height / 2.0
-        return left, bottom, width, fill_h
-
-    @staticmethod
-    def _circle_fill_clip_geometry(x, y, radius, progress):
-        clip_height = 2.0 * radius * progress
-        clip_bottom = y - radius
-        return x - radius, clip_bottom, 2.0 * radius, clip_height
+    def _progress_clip_rect(left, bottom, width, height, progress):
+        fill_height = max(0.0, min(1.0, float(progress))) * height
+        return Rectangle((left, bottom), width, fill_height)
 
     @staticmethod
     def _draw_construction_scene(ax, scene_data):
@@ -1147,52 +1149,36 @@ class MarsColonyInterface:
 
         structures = scene_data.get("structures", [])
         sites = scene_data.get("sites", [])
-        site_lookup = {}
-        if sites:
-            for site in sites:
-                site_id = site.get("site_id")
-                if not site_id:
-                    continue
-                site_lookup[site_id] = {
-                    "site_id": site_id,
-                    "position": tuple(site.get("position", (0.0, 0.0))),
-                    "label": site.get("label"),
-                }
-        else:
-            for structure in structures:
-                position = tuple(structure.get("position", (0.0, 0.0)))
-                site_id = structure.get("site_id") or f"site:{position[0]:.3f},{position[1]:.3f}"
-                site_lookup.setdefault(
-                    site_id,
-                    {"site_id": site_id, "position": position, "label": None},
-                )
+        site_lookup = {
+            site.get("site_id"): {
+                "site_id": site.get("site_id"),
+                "position": tuple(site.get("position", (0.0, 0.0))),
+                "label": site.get("label"),
+            }
+            for site in sites
+            if site.get("site_id")
+        }
 
         grouped_by_site = {site_id: [] for site_id in site_lookup}
         for structure in structures:
             site_id = structure.get("site_id")
-            if not site_id:
-                position = tuple(structure.get("position", (0.0, 0.0)))
-                site_id = f"site:{position[0]:.3f},{position[1]:.3f}"
-            if site_id not in site_lookup:
-                site_lookup[site_id] = {"site_id": site_id, "position": tuple(structure.get("position", (0.0, 0.0))), "label": None}
-                grouped_by_site[site_id] = []
-            grouped_by_site[site_id].append(structure)
+            if site_id in grouped_by_site:
+                grouped_by_site[site_id].append(structure)
 
-        for site_id, site_structures in grouped_by_site.items():
-            site = site_lookup[site_id]
+        for site_id, site in site_lookup.items():
             sx, sy = site["position"]
-            site_style = MarsColonyInterface._site_container_style()
-            ax.add_patch(
-                Circle(
-                    (sx, sy),
-                    site_style["radius"],
-                    edgecolor=site_style["edgecolor"],
-                    facecolor=site_style["facecolor"],
-                    linewidth=site_style["linewidth"],
-                    linestyle=site_style["linestyle"],
-                    zorder=0,
-                )
+            site_style = MarsColonyInterface._site_circle_style()
+            site_circle = Circle(
+                (sx, sy),
+                site_style["radius"],
+                edgecolor=site_style["edgecolor"],
+                facecolor=site_style["facecolor"],
+                linewidth=site_style["linewidth"],
+                linestyle=site_style["linestyle"],
+                zorder=0,
             )
+            ax.add_patch(site_circle)
+
             site_name = MarsColonyInterface._site_label_text(site)
             ax.text(
                 sx,
@@ -1200,29 +1186,25 @@ class MarsColonyInterface:
                 site_name,
                 ha="center",
                 va="top",
-                fontsize=5.5,
-                color="#8a8a8a",
+                fontsize=6.0,
+                color="#8c95a3",
             )
 
-            for structure, (dx, dy) in zip(site_structures, MarsColonyInterface._site_local_offsets(len(site_structures))):
-                x, y = sx + dx, sy + dy
-                visual = MarsColonyInterface._map_structure_visual(structure)
-                symbol = visual["symbol"]
-                overlay_state = MarsColonyInterface._project_overlay_state(structure)
-                builders = structure.get("builders", [])
-
-                MarsColonyInterface._draw_structure_symbol(ax, structure, x, y)
-
-                if overlay_state == "ready_for_validation":
-                    ax.text(x, y + 0.48, "awaiting validation", ha="center", va="bottom", fontsize=6.5, color="#6d4c1f")
-                elif overlay_state == "invalid":
-                    ax.add_line(Line2D([x - 0.30, x + 0.30], [y - 0.30, y + 0.30], color="black", linewidth=1.3, zorder=4))
-                    ax.add_line(Line2D([x - 0.30, x + 0.30], [y + 0.30, y - 0.30], color="black", linewidth=1.3, zorder=4))
-
-                builder_suffix = f" ({len(builders)}b)" if builders else ""
-                label_text = MarsColonyInterface._structure_label_text(structure)
-                if label_text:
-                    ax.text(x, y - 0.50, f"{label_text}{builder_suffix}", ha="center", va="top", fontsize=6.5)
+            site_structures = grouped_by_site.get(site_id, [])
+            if not site_structures:
+                continue
+            structure = site_structures[0]
+            x, y = sx, sy
+            MarsColonyInterface._draw_structure_symbol(ax, structure, x, y)
+            overlay_state = MarsColonyInterface._project_overlay_state(structure)
+            if overlay_state == "ready_for_validation":
+                ax.text(x, y + 0.52, "ready", ha="center", va="bottom", fontsize=6.0, color="#7c5a2e")
+            elif overlay_state == "invalid":
+                ax.add_line(Line2D([x - 0.24, x + 0.24], [y - 0.24, y + 0.24], color="#4a4a4a", linewidth=1.2, zorder=4))
+                ax.add_line(Line2D([x - 0.24, x + 0.24], [y + 0.24, y - 0.24], color="#4a4a4a", linewidth=1.2, zorder=4))
+            label_text = MarsColonyInterface._structure_label_text(structure)
+            if label_text:
+                ax.text(x, y - 0.50, label_text, ha="center", va="top", fontsize=6.0, color="#6f7785")
 
         for connector in scene_data.get("connectors", []):
             start = connector.get("start")

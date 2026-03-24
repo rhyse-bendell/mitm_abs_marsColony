@@ -81,27 +81,25 @@ class ConstructionVisualizationTests(unittest.TestCase):
 
         scene = {
             "sites": [{"site_id": "site_a", "position": (4.0, 4.0), "label": "Site A"}],
-            "structures": [
-                {"project_id": "H", "site_id": "site_a", "structure_type": "house", "progress": 0.3, "status": "in_progress", "correct": True},
-                {"project_id": "G", "site_id": "site_a", "structure_type": "greenhouse", "progress": 0.6, "status": "in_progress", "correct": True},
-            ],
+            "structures": [{"project_id": "H", "site_id": "site_a", "structure_type": "house", "progress": 0.3, "status": "in_progress", "correct": True}],
             "connectors": [],
         }
         fig = Figure(figsize=(4, 4))
         ax = fig.add_subplot(111)
         MarsColonyInterface._draw_construction_scene(ax, scene)
 
-        site_circles = [p for p in ax.patches if isinstance(p, Circle) and abs(p.radius - 0.95) < 1e-9]
+        site_circles = [p for p in ax.patches if isinstance(p, Circle) and abs(p.radius - 0.86) < 1e-9]
         self.assertEqual(len(site_circles), 1)
+        self.assertAlmostEqual(site_circles[0].get_facecolor()[3], 0.0)
 
-        # Structure centers should be inside the same site footprint, not detached anchor pairs.
+        # Structure centers should be inside the site circle center, not detached from the site marker.
         structure_rects = [p for p in ax.patches if isinstance(p, Rectangle) and p.get_linewidth() >= 1.7]
-        self.assertGreaterEqual(len(structure_rects), 2)
+        self.assertGreaterEqual(len(structure_rects), 1)
         sx, sy = site_circles[0].center
-        for rect in structure_rects[:2]:
-            cx = rect.get_x() + rect.get_width() / 2.0
-            cy = rect.get_y() + rect.get_height() / 2.0
-            self.assertLessEqual(((cx - sx) ** 2 + (cy - sy) ** 2) ** 0.5, 0.95)
+        rect = structure_rects[0]
+        cx = rect.get_x() + rect.get_width() / 2.0
+        cy = rect.get_y() + rect.get_height() / 2.0
+        self.assertLessEqual(((cx - sx) ** 2 + (cy - sy) ** 2) ** 0.5, 0.86)
 
     def test_symbolic_paths_are_distinct_for_house_greenhouse_water(self):
         if MarsColonyInterface is None or Figure is None:
@@ -126,7 +124,7 @@ class ConstructionVisualizationTests(unittest.TestCase):
         MarsColonyInterface._draw_construction_scene(ax, scene)
 
         self.assertGreaterEqual(len([p for p in ax.patches if isinstance(p, Polygon)]), 1)  # house roof
-        self.assertGreaterEqual(len([p for p in ax.patches if isinstance(p, Circle) and abs(p.radius - 0.30) < 1e-9]), 1)  # water core
+        self.assertGreaterEqual(len([p for p in ax.patches if isinstance(p, Circle) and abs(p.radius - 0.22) < 1e-9]), 1)  # water core
         self.assertGreaterEqual(len(ax.lines), 3)  # greenhouse frame + water cue lines
 
     def test_progress_fill_is_geometry_based_not_alpha_only(self):
@@ -142,14 +140,18 @@ class ConstructionVisualizationTests(unittest.TestCase):
         ax = fig.add_subplot(111)
         MarsColonyInterface._draw_construction_scene(ax, scene)
 
-        fill_rects = [
+        structure_fill_rects = [
             p
             for p in ax.patches
             if isinstance(p, Rectangle)
-            and abs(p.get_width() - 0.74) < 1e-9
+            and abs(p.get_width() - 0.64) < 1e-9
             and p.get_facecolor()[3] > 0
         ]
-        self.assertTrue(any(abs(rect.get_height() - (0.42 * 0.25)) < 1e-9 for rect in fill_rects))
+        self.assertTrue(any(abs(rect.get_height() - 0.38) < 1e-9 for rect in structure_fill_rects))
+        self.assertTrue(any(rect.get_clip_path() is not None for rect in structure_fill_rects))
+        site_circles = [p for p in ax.patches if isinstance(p, Circle) and abs(p.radius - 0.86) < 1e-9]
+        self.assertTrue(site_circles)
+        self.assertTrue(all(c.get_facecolor()[3] == 0.0 for c in site_circles))
 
     def test_state_overlays_and_secondary_labels(self):
         if MarsColonyInterface is None or Figure is None:
@@ -172,7 +174,7 @@ class ConstructionVisualizationTests(unittest.TestCase):
         MarsColonyInterface._draw_construction_scene(ax, scene)
 
         texts = [t.get_text() for t in ax.texts]
-        self.assertIn("awaiting validation", texts)
+        self.assertIn("ready", texts)
         self.assertIn("Site V", texts)
         self.assertNotIn("Build_Table_A", texts)
         self.assertGreaterEqual(len(ax.lines), 2)  # invalid X overlay
