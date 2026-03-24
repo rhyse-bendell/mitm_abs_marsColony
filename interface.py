@@ -17,6 +17,7 @@ from modules.construction import ConstructionManager
 from modules.phase_definitions import MISSION_PHASES
 from modules.task_model import load_task_model
 from modules.interaction_graph import CANONICAL_NODES
+from modules.headless_runner import run_batch_experiment
 
 
 class MarsColonyInterface:
@@ -110,6 +111,9 @@ class MarsColonyInterface:
         self._startup_status_var = None
         self._startup_progress = None
         self._startup_progressbar = None
+        self._batch_worker = None
+        self._batch_queue = None
+        self._batch_poll_job = None
         self.run_loop_interval_ms = 100
         self.base_dt = 0.1
 
@@ -121,11 +125,13 @@ class MarsColonyInterface:
         self.control_frame = ttk.Frame(self.root, padding=(8, 6))
         self.control_frame.pack(fill="x")
         self.start_button = ttk.Button(self.control_frame, text="Start", command=self.start_experiment)
+        self.run_batch_button = ttk.Button(self.control_frame, text="Run Batch", command=self.run_batch_experiment)
         self.pause_button = ttk.Button(self.control_frame, text="Pause", command=self.pause_experiment)
         self.stop_button = ttk.Button(self.control_frame, text="Stop", command=self.stop_experiment)
         self.lifecycle_label = ttk.Label(self.control_frame, text="State: idle")
 
         self.start_button.pack(side="left", padx=(0, 6))
+        self.run_batch_button.pack(side="left", padx=6)
         self.pause_button.pack(side="left", padx=6)
         self.stop_button.pack(side="left", padx=6)
         self.lifecycle_label.pack(side="right")
@@ -743,6 +749,37 @@ class MarsColonyInterface:
             "carry_capacity": max(1, int(self.construction_param_vars["carry_capacity"].get())),
         }
 
+    def _collect_experiment_settings(self):
+        selected_backend, backend_options = self._collect_brain_backend_config()
+        planner_config = self._collect_global_planner_config()
+        construction_parameters = self._collect_construction_parameters()
+        return {
+            "agent_configs": self.build_agent_configs(),
+            "num_runs": max(1, int(self.num_runs.get())),
+            "timesteps_per_run": max(1, int(self.timesteps_per_run_var.get())),
+            "speed": self.speed_multiplier.get(),
+            "experiment_name": self.experiment_name_var.get(),
+            "phases": MISSION_PHASES,
+            "flash_mode": self.flash_mode.get(),
+            "brain_backend": selected_backend,
+            "brain_backend_options": backend_options,
+            "planner_config": planner_config,
+            "construction_parameters": construction_parameters,
+            "base_dt": 1.0,
+        }
+
+    @staticmethod
+    def _resolve_default_packet_access(default_packet_access):
+        if default_packet_access:
+            return {str(packet_name) for packet_name in default_packet_access}
+        return {"Team_Packet"}
+
+    @staticmethod
+    def _build_batch_run_experiment_name(experiment_name, run_index, num_runs):
+        base_name = (experiment_name or "experiment").strip() or "experiment"
+        suffix = f"_run{run_index:03d}"
+        return f"{base_name}{suffix}" if num_runs > 1 else base_name
+
     def _add_help_text(self, parent, row, text):
         ttk.Label(parent, text=text, foreground="#5f6b7a", wraplength=620, justify="left").grid(
             row=row,
@@ -827,39 +864,35 @@ class MarsColonyInterface:
         self._finalize_simulation_install(sim)
 
     def _build_simulation_from_settings(self, startup_progress_callback=None):
+        settings = self._collect_experiment_settings()
         print("=== Experiment Settings ===")
-        print("Speed Multiplier:", self.speed_multiplier.get())
-        print("Flash Mode:", self.flash_mode.get())
+        print("Speed Multiplier:", settings["speed"])
+        print("Flash Mode:", settings["flash_mode"])
+        print("Number of Runs:", settings["num_runs"])
+        print("Timesteps per Run:", settings["timesteps_per_run"])
+        print("Brain Backend:", settings["brain_backend"])
+        print("Brain Backend Options:", settings["brain_backend_options"])
+        print("Planner Config:", settings["planner_config"])
+        print("Construction Parameters:", settings["construction_parameters"])
 
-        print("Number of Runs:", self.num_runs.get())
-        selected_backend, backend_options = self._collect_brain_backend_config()
-        planner_config = self._collect_global_planner_config()
-        construction_parameters = self._collect_construction_parameters()
-        print("Brain Backend:", selected_backend)
-        print("Brain Backend Options:", backend_options)
-        print("Planner Config:", planner_config)
-        print("Construction Parameters:", construction_parameters)
-
-        agent_configs = self.build_agent_configs()
-        for agent in agent_configs:
+        agent_configs = settings["agent_configs"]
+        for agent in settings["agent_configs"]:
             print(f"\n{agent['name']} ({agent['role']})")
             for k, v in agent["traits"].items():
                 print(f"  {k}: {v}")
             print(f"  Packet Access: {agent['packet_access']}")
 
-        # Create new simulation with selected parameters
-        from modules.simulation import SimulationState
         return SimulationState(
             agent_configs=agent_configs,
-            num_runs=self.num_runs.get(),
-            speed=self.speed_multiplier.get(),
-            experiment_name=self.experiment_name_var.get(),
-            phases=MISSION_PHASES,
-            flash_mode=self.flash_mode.get(),
-            brain_backend=selected_backend,
-            brain_backend_options=backend_options,
-            planner_config=planner_config,
-            construction_parameters=construction_parameters,
+            num_runs=settings["num_runs"],
+            speed=settings["speed"],
+            experiment_name=settings["experiment_name"],
+            phases=settings["phases"],
+            flash_mode=settings["flash_mode"],
+            brain_backend=settings["brain_backend"],
+            brain_backend_options=settings["brain_backend_options"],
+            planner_config=settings["planner_config"],
+            construction_parameters=settings["construction_parameters"],
             startup_progress_callback=startup_progress_callback,
         )
 
@@ -1067,7 +1100,9 @@ class MarsColonyInterface:
         start_enabled = self.run_state in {self.STATE_IDLE, self.STATE_PAUSED, self.STATE_STOPPED}
         pause_enabled = self.run_state == self.STATE_RUNNING
         stop_enabled = self.run_state in {self.STATE_RUNNING, self.STATE_PAUSED}
+        batch_enabled = self.run_state in {self.STATE_IDLE, self.STATE_STOPPED}
         self.start_button.config(state="normal" if start_enabled else "disabled")
+        self.run_batch_button.config(state="normal" if batch_enabled else "disabled")
         self.pause_button.config(state="normal" if pause_enabled else "disabled")
         self.stop_button.config(state="normal" if stop_enabled else "disabled")
         self.lifecycle_label.config(text=f"State: {self.run_state}")
@@ -1090,6 +1125,95 @@ class MarsColonyInterface:
         self.run_state = self.STATE_PAUSED
         self._cancel_run_loop()
         self._update_control_states()
+
+    def _batch_progress_callback(self, event):
+        if self._batch_queue is not None:
+            self._batch_queue.put(dict(event))
+
+    def _batch_worker_main(self, settings):
+        try:
+            run_batch_experiment(
+                settings=settings,
+                progress_callback=self._batch_progress_callback,
+                run_name_builder=self._build_batch_run_experiment_name,
+            )
+            if self._batch_queue is not None:
+                self._batch_queue.put({"type": "batch_complete"})
+        except Exception as exc:  # noqa: BLE001
+            if self._batch_queue is not None:
+                self._batch_queue.put(
+                    {
+                        "type": "batch_error",
+                        "error_message": f"{type(exc).__name__}: {exc}",
+                        "traceback": traceback.format_exc(),
+                    }
+                )
+
+    def _schedule_batch_poll(self):
+        if self._batch_queue is not None:
+            self._batch_poll_job = self.root.after(75, self._poll_batch_queue)
+
+    def _poll_batch_queue(self):
+        self._batch_poll_job = None
+        if self._batch_queue is None:
+            return
+        while True:
+            try:
+                event = self._batch_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._handle_batch_event(event)
+            if self._batch_queue is None:
+                return
+        self._schedule_batch_poll()
+
+    def _handle_batch_event(self, event):
+        event_type = event.get("type")
+        if event_type == "batch_error":
+            if event.get("traceback"):
+                print(event["traceback"])
+            self.batch_status_var.set(f"Batch failed: {event.get('error_message')}")
+            self._batch_queue = None
+            self._batch_worker = None
+            self.run_state = self.STATE_IDLE
+            self._update_control_states()
+            messagebox.showerror("Batch Run Failed", event.get("error_message") or "Batch execution failed.")
+            return
+        if event_type == "batch_complete":
+            self.batch_status_var.set("Batch run complete.")
+            self._batch_queue = None
+            self._batch_worker = None
+            self.run_state = self.STATE_IDLE
+            self._update_control_states()
+            return
+
+        run_idx = max(0, int(event.get("run_index", 0)))
+        num_runs = max(1, int(event.get("num_runs", 1)))
+        step_idx = max(0, int(event.get("timestep", 0)))
+        total_steps = max(1, int(event.get("timesteps_per_run", 1)))
+        if event_type == "batch_timestep":
+            self.batch_status_var.set(
+                f"Batch running: run {run_idx}/{num_runs}, timestep {step_idx}/{total_steps}"
+            )
+        elif event_type == "batch_run_start":
+            self.batch_status_var.set(f"Starting run {run_idx}/{num_runs}")
+        elif event_type == "batch_run_complete":
+            self.batch_status_var.set(f"Completed run {run_idx}/{num_runs}")
+
+    def run_batch_experiment(self):
+        if self.run_state not in {self.STATE_IDLE, self.STATE_STOPPED}:
+            return
+        settings = self._collect_experiment_settings()
+        self.batch_status_var.set(
+            f"Batch queued: {settings['num_runs']} run(s), {settings['timesteps_per_run']} timesteps each."
+        )
+        self.run_state = self.STATE_STARTING
+        self._cancel_run_loop()
+        self._update_control_states()
+        self._batch_queue = queue.Queue()
+        self._batch_worker = threading.Thread(target=self._batch_worker_main, args=(settings,), daemon=True)
+        self._batch_worker.start()
+        self._schedule_batch_poll()
 
     def _render_environment_plot(self, ax, canvas):
         ax.clear()
@@ -1625,13 +1749,18 @@ class MarsColonyInterface:
         ttk.Entry(settings_frame, textvariable=self.num_runs, width=10).grid(row=8, column=1, sticky="w", pady=(6, 3))
         self._add_help_text(settings_frame, 9, "How many repeated runs to execute with the same setup.")
 
-        ttk.Label(settings_frame, text="Brain Backend").grid(row=10, column=0, sticky="w", padx=(0, 8), pady=(6, 3))
+        ttk.Label(settings_frame, text="Timesteps per Run").grid(row=10, column=0, sticky="w", padx=(0, 8), pady=(6, 3))
+        self.timesteps_per_run_var = IntVar(value=300)
+        ttk.Entry(settings_frame, textvariable=self.timesteps_per_run_var, width=10).grid(row=10, column=1, sticky="w", pady=(6, 3))
+        self._add_help_text(settings_frame, 11, "Exact number of simulation updates per run in batch mode.")
+
+        ttk.Label(settings_frame, text="Brain Backend").grid(row=12, column=0, sticky="w", padx=(0, 8), pady=(6, 3))
         self.brain_backend_var = StringVar(value=self.BACKEND_DEFAULTS["brain_backend"])
         self.brain_backend_var.trace_add("write", lambda *_: self._refresh_all_agent_inheritance_display())
         backend_combo = ttk.Combobox(settings_frame, textvariable=self.brain_backend_var, values=["rule_brain", "local_http", "ollama"], state="readonly", width=22)
-        backend_combo.grid(row=10, column=1, sticky="w", pady=(6, 3))
+        backend_combo.grid(row=12, column=1, sticky="w", pady=(6, 3))
         backend_combo.bind("<<ComboboxSelected>>", lambda _e: self._update_backend_field_states())
-        self._add_help_text(settings_frame, 11, "Select which decision system agents use by default.")
+        self._add_help_text(settings_frame, 13, "Select which decision system agents use by default.")
 
         self.local_model_var = StringVar(value=self.BACKEND_DEFAULTS["local_model"])
         self.local_model_var.trace_add("write", lambda *_: self._refresh_all_agent_inheritance_display())
@@ -1640,25 +1769,25 @@ class MarsColonyInterface:
         self.fallback_backend_var = StringVar(value=self.BACKEND_DEFAULTS["fallback_backend"])
         self.fallback_backend_var.trace_add("write", lambda *_: self._refresh_all_agent_inheritance_display())
 
-        ttk.Label(settings_frame, text="Local Model").grid(row=12, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Label(settings_frame, text="Local Model").grid(row=14, column=0, sticky="w", padx=(0, 8), pady=3)
         local_model_entry = ttk.Combobox(settings_frame, textvariable=self.local_model_var, values=self.LOCAL_MODEL_SHORTLIST, width=31)
-        local_model_entry.grid(row=12, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 13, "Local model name to use for Ollama-backed agents.")
+        local_model_entry.grid(row=14, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 15, "Local model name to use for Ollama-backed agents.")
 
-        ttk.Label(settings_frame, text="Local Base URL").grid(row=14, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Label(settings_frame, text="Local Base URL").grid(row=16, column=0, sticky="w", padx=(0, 8), pady=3)
         local_base_url_entry = ttk.Entry(settings_frame, textvariable=self.local_base_url_var, width=34)
-        local_base_url_entry.grid(row=14, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 15, "Base URL for the local backend endpoint.")
+        local_base_url_entry.grid(row=16, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 17, "Base URL for the local backend endpoint.")
 
-        ttk.Label(settings_frame, text="Local Timeout (s)").grid(row=16, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Label(settings_frame, text="Local Timeout (s)").grid(row=18, column=0, sticky="w", padx=(0, 8), pady=3)
         local_timeout_entry = ttk.Entry(settings_frame, textvariable=self.local_timeout_var, width=10)
-        local_timeout_entry.grid(row=16, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 17, "Maximum request time for the selected default backend.")
+        local_timeout_entry.grid(row=18, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 19, "Maximum request time for the selected default backend.")
 
-        ttk.Label(settings_frame, text="Fallback Backend").grid(row=18, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Label(settings_frame, text="Fallback Backend").grid(row=20, column=0, sticky="w", padx=(0, 8), pady=3)
         fallback_combo = ttk.Combobox(settings_frame, textvariable=self.fallback_backend_var, values=["rule_brain"], state="readonly", width=22)
-        fallback_combo.grid(row=18, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 19, "Used if the selected backend fails or times out.")
+        fallback_combo.grid(row=20, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 21, "Used if the selected backend fails or times out.")
 
         self.enable_startup_llm_sanity_var = BooleanVar(value=bool(self.PLANNER_DEFAULTS["enable_startup_llm_sanity"]))
         self.startup_llm_sanity_timeout_var = DoubleVar(value=float(self.PLANNER_DEFAULTS["startup_llm_sanity_timeout_seconds"]))
@@ -1675,61 +1804,61 @@ class MarsColonyInterface:
         self.planner_completion_tokens_var = IntVar(value=int(self.PLANNER_DEFAULTS["planner_completion_max_tokens"]))
         self.high_latency_stale_result_grace_var = DoubleVar(value=float(self.PLANNER_DEFAULTS["high_latency_stale_result_grace_s"]))
 
-        ttk.Label(settings_frame, text="Startup LLM Sanity / Bootstrap").grid(row=20, column=0, sticky="w", padx=(0, 8), pady=(8, 3))
-        ttk.Checkbutton(settings_frame, text="Enable Startup LLM Sanity / Bootstrap", variable=self.enable_startup_llm_sanity_var).grid(row=20, column=1, sticky="w", pady=(8, 3))
-        self._add_help_text(settings_frame, 21, "Runs once per agent at startup with bounded role/task/DIK context. It validates local model responsiveness and seeds explicit simulator-side bootstrap context for reuse.")
+        ttk.Label(settings_frame, text="Startup LLM Sanity / Bootstrap").grid(row=22, column=0, sticky="w", padx=(0, 8), pady=(8, 3))
+        ttk.Checkbutton(settings_frame, text="Enable Startup LLM Sanity / Bootstrap", variable=self.enable_startup_llm_sanity_var).grid(row=22, column=1, sticky="w", pady=(8, 3))
+        self._add_help_text(settings_frame, 23, "Runs once per agent at startup with bounded role/task/DIK context. It validates local model responsiveness and seeds explicit simulator-side bootstrap context for reuse.")
 
-        ttk.Label(settings_frame, text="Startup Sanity Timeout (s)").grid(row=22, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(settings_frame, textvariable=self.startup_llm_sanity_timeout_var, width=10).grid(row=22, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 23, "Per-agent timeout for startup sanity/bootstrap requests.")
+        ttk.Label(settings_frame, text="Startup Sanity Timeout (s)").grid(row=24, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.startup_llm_sanity_timeout_var, width=10).grid(row=24, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 25, "Per-agent timeout for startup sanity/bootstrap requests.")
 
-        ttk.Label(settings_frame, text="Max Sources in Startup Prompt").grid(row=24, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(settings_frame, textvariable=self.startup_llm_sanity_max_sources_var, width=10).grid(row=24, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 25, "Bound the number of role-relevant sources included in startup context.")
+        ttk.Label(settings_frame, text="Max Sources in Startup Prompt").grid(row=26, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.startup_llm_sanity_max_sources_var, width=10).grid(row=26, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 27, "Bound the number of role-relevant sources included in startup context.")
 
-        ttk.Label(settings_frame, text="Max Items Per Type in Startup Prompt").grid(row=26, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(settings_frame, textvariable=self.startup_llm_sanity_max_items_var, width=10).grid(row=26, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 27, "Bound data/information/knowledge/rule examples included per type.")
+        ttk.Label(settings_frame, text="Max Items Per Type in Startup Prompt").grid(row=28, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.startup_llm_sanity_max_items_var, width=10).grid(row=28, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 29, "Bound data/information/knowledge/rule examples included per type.")
 
-        ttk.Label(settings_frame, text="Startup Completion Budget (tokens)").grid(row=28, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(settings_frame, textvariable=self.startup_llm_sanity_completion_tokens_var, width=10).grid(row=28, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 29, "Maximum tokens allowed for startup sanity completions.")
+        ttk.Label(settings_frame, text="Startup Completion Budget (tokens)").grid(row=30, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.startup_llm_sanity_completion_tokens_var, width=10).grid(row=30, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 31, "Maximum tokens allowed for startup sanity completions.")
 
-        ttk.Label(settings_frame, text="Planner Completion Budget (tokens)").grid(row=30, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(settings_frame, textvariable=self.planner_completion_tokens_var, width=10).grid(row=30, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 31, "Maximum tokens allowed for planner completions.")
+        ttk.Label(settings_frame, text="Planner Completion Budget (tokens)").grid(row=32, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.planner_completion_tokens_var, width=10).grid(row=32, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 33, "Maximum tokens allowed for planner completions.")
 
-        ttk.Label(settings_frame, text="Planner Timeout (s)").grid(row=32, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(settings_frame, textvariable=self.planner_timeout_seconds_var, width=10).grid(row=32, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 33, "Per-request planner timeout budget for local LLM calls.")
+        ttk.Label(settings_frame, text="Planner Timeout (s)").grid(row=34, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.planner_timeout_seconds_var, width=10).grid(row=34, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 35, "Per-request planner timeout budget for local LLM calls.")
 
-        ttk.Label(settings_frame, text="Warmup Timeout (s)").grid(row=34, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(settings_frame, textvariable=self.warmup_timeout_var, width=10).grid(row=34, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 35, "Startup backend warmup timeout budget.")
+        ttk.Label(settings_frame, text="Warmup Timeout (s)").grid(row=36, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.warmup_timeout_var, width=10).grid(row=36, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 37, "Startup backend warmup timeout budget.")
 
-        ttk.Label(settings_frame, text="Raw Response Max Chars").grid(row=36, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(settings_frame, textvariable=self.startup_llm_sanity_raw_max_chars_var, width=10).grid(row=36, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 37, "Truncate captured raw startup responses to keep artifacts bounded.")
+        ttk.Label(settings_frame, text="Raw Response Max Chars").grid(row=38, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.startup_llm_sanity_raw_max_chars_var, width=10).grid(row=38, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 39, "Truncate captured raw startup responses to keep artifacts bounded.")
 
-        ttk.Label(settings_frame, text="Reuse Bootstrap Summary in Planner Requests").grid(row=38, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Checkbutton(settings_frame, text="Include compact bootstrap summary on future planner requests", variable=self.bootstrap_reuse_enabled_var).grid(row=38, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 39, "Agents remain persistent simulator entities for the session, but model calls stay explicit stateless requests. Reuse adds a compact inspectable summary field; no hidden model-side memory is assumed.")
+        ttk.Label(settings_frame, text="Reuse Bootstrap Summary in Planner Requests").grid(row=40, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Checkbutton(settings_frame, text="Include compact bootstrap summary on future planner requests", variable=self.bootstrap_reuse_enabled_var).grid(row=40, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 41, "Agents remain persistent simulator entities for the session, but model calls stay explicit stateless requests. Reuse adds a compact inspectable summary field; no hidden model-side memory is assumed.")
 
-        ttk.Label(settings_frame, text="Bootstrap Summary Max Chars").grid(row=40, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(settings_frame, textvariable=self.bootstrap_summary_max_chars_var, width=10).grid(row=40, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 41, "Upper bound for compact bootstrap summaries attached to planner requests.")
+        ttk.Label(settings_frame, text="Bootstrap Summary Max Chars").grid(row=42, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.bootstrap_summary_max_chars_var, width=10).grid(row=42, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 43, "Upper bound for compact bootstrap summaries attached to planner requests.")
 
-        ttk.Label(settings_frame, text="High-Latency Local LLM Mode").grid(row=42, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Checkbutton(settings_frame, text="Let local LLM requests run with relaxed timing and stale-result tolerance", variable=self.high_latency_local_llm_mode_var).grid(row=42, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 43, "Diagnostic mode for slow local inference: relaxed timeouts, reduced planner pressure, and less eager stale-result discards.")
+        ttk.Label(settings_frame, text="High-Latency Local LLM Mode").grid(row=44, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Checkbutton(settings_frame, text="Let local LLM requests run with relaxed timing and stale-result tolerance", variable=self.high_latency_local_llm_mode_var).grid(row=44, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 45, "Diagnostic mode for slow local inference: relaxed timeouts, reduced planner pressure, and less eager stale-result discards.")
 
-        ttk.Label(settings_frame, text="Unrestricted Local Qwen Mode").grid(row=44, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Checkbutton(settings_frame, text="Very permissive mode: multi-minute waits + very large completion budgets (with safety ceilings)", variable=self.unrestricted_local_qwen_mode_var).grid(row=44, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 45, "Intentionally patient diagnostics mode for slow local Qwen runs.")
+        ttk.Label(settings_frame, text="Unrestricted Local Qwen Mode").grid(row=46, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Checkbutton(settings_frame, text="Very permissive mode: multi-minute waits + very large completion budgets (with safety ceilings)", variable=self.unrestricted_local_qwen_mode_var).grid(row=46, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 47, "Intentionally patient diagnostics mode for slow local Qwen runs.")
 
-        ttk.Label(settings_frame, text="Stale Result Grace (s)").grid(row=46, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(settings_frame, textvariable=self.high_latency_stale_result_grace_var, width=10).grid(row=46, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 47, "Additional grace window to accept late but still relevant planner responses in high-latency mode.")
+        ttk.Label(settings_frame, text="Stale Result Grace (s)").grid(row=48, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.high_latency_stale_result_grace_var, width=10).grid(row=48, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 49, "Additional grace window to accept late but still relevant planner responses in high-latency mode.")
 
         self.construction_param_vars = {
             "pile_a_quantity": IntVar(value=int(self.construction_defaults["pile_a_quantity"])),
@@ -1744,7 +1873,7 @@ class MarsColonyInterface:
             "move_time_per_unit": IntVar(value=int(self.construction_defaults["move_time_per_unit"])),
             "carry_capacity": IntVar(value=int(self.construction_defaults["carry_capacity"])),
         }
-        row = 48
+        row = 50
         ttk.Label(settings_frame, text="Construction Parameters").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=(8, 3))
         self._add_help_text(settings_frame, row + 1, "Site/resource/bridge settings loaded from task defaults and overridable before run start.")
         row += 2
@@ -1853,9 +1982,10 @@ class MarsColonyInterface:
         packet_frame.columnconfigure(0, weight=1)
 
         packet_names = ["Team_Packet", "Architect_Packet", "Engineer_Packet", "Botanist_Packet"]
+        default_packet_access = self._resolve_default_packet_access(agent_row.get("default_packet_access"))
         self.packet_access[role] = {}
         for idx, pkt in enumerate(packet_names):
-            pkt_enabled = BooleanVar(value=(idx == 0))
+            pkt_enabled = BooleanVar(value=pkt in default_packet_access)
             self.packet_access[role][pkt] = pkt_enabled
             ttk.Checkbutton(packet_frame, text=pkt, variable=pkt_enabled).grid(row=idx, column=0, sticky="w", pady=1)
 
@@ -2003,6 +2133,7 @@ class MarsColonyInterface:
                     "template_id": d.template_id,
                     "brain_config": dict(d.brain_config or {}),
                     "planner_config": dict(d.planner_config or {}),
+                    "default_packet_access": list(d.source_access_override or []),
                 }
             )
         by_role = {row["role"]: row for row in default_rows}
@@ -2016,6 +2147,7 @@ class MarsColonyInterface:
             row.setdefault("template_id", fallback["template_id"])
             row.setdefault("brain_config", {})
             row.setdefault("planner_config", {})
+            row.setdefault("default_packet_access", [])
             default_rows.append(row)
 
         # Trait labels
@@ -2057,11 +2189,19 @@ class MarsColonyInterface:
 
         self._refresh_all_agent_inheritance_display()
         self._update_visible_agent_cards()
+        self.batch_status_var = StringVar(value="Batch idle.")
+        ttk.Label(
+            self.tab_experiment,
+            textvariable=self.batch_status_var,
+            foreground="#35506b",
+            wraplength=900,
+            justify="left",
+        ).grid(row=2, column=0, sticky="w", padx=10, pady=(4, 2))
 
         ttk.Label(
             self.tab_experiment,
             text="Use the shared Start / Pause / Stop controls at the top to run the simulation.",
-        ).grid(row=2, column=0, sticky="w", padx=10, pady=(4, 10))
+        ).grid(row=3, column=0, sticky="w", padx=10, pady=(2, 10))
 
 
 

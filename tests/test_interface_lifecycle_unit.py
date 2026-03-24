@@ -57,6 +57,7 @@ class TestInterfaceLifecycleUnit(unittest.TestCase):
         self.app.base_dt = 0.1
         self.app._run_loop_job = None
         self.app.start_button = _FakeButton()
+        self.app.run_batch_button = _FakeButton()
         self.app.pause_button = _FakeButton()
         self.app.stop_button = _FakeButton()
         self.app.lifecycle_label = _FakeLabel()
