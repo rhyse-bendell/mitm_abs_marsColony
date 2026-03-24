@@ -151,6 +151,66 @@ class TestBrainBackendSelection(unittest.TestCase):
             self.assertGreaterEqual(float(manifest.get("permissive_timeout_ceiling_s", 0.0)), 1800.0)
             self.assertGreaterEqual(int(manifest.get("permissive_completion_ceiling_tokens", 0)), 32768)
 
+    def test_unrestricted_mode_raises_small_values_to_floors(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                brain_backend="ollama",
+                brain_backend_options={"timeout_s": 30.0, "warmup_timeout_s": 20.0, "completion_max_tokens": 256},
+                planner_config={
+                    "unrestricted_local_qwen_mode": True,
+                    "high_latency_local_llm_mode": True,
+                    "planner_timeout_seconds": 30.0,
+                    "startup_llm_sanity_timeout_seconds": 20.0,
+                    "startup_llm_sanity_completion_max_tokens": 256,
+                    "planner_completion_max_tokens": 256,
+                    "warmup_timeout_seconds": 20.0,
+                    "degraded_consecutive_failures_threshold": 2,
+                    "degraded_cooldown_seconds": 30.0,
+                    "degraded_step_interval_multiplier": 2.0,
+                },
+            )
+            self.assertGreaterEqual(sim.brain_backend_config.timeout_s, 900.0)
+            self.assertGreaterEqual(sim.brain_backend_config.warmup_timeout_s, 600.0)
+            self.assertGreaterEqual(sim.startup_llm_sanity_config.timeout_s, 900.0)
+            self.assertGreaterEqual(sim.brain_backend_config.completion_max_tokens, 24576)
+            self.assertGreaterEqual(sim.startup_llm_sanity_config.completion_max_tokens, 24576)
+            self.assertGreaterEqual(int(sim.planner_defaults.get("degraded_consecutive_failures_threshold", 0)), 24)
+            self.assertGreaterEqual(float(sim.planner_defaults.get("degraded_cooldown_seconds", 0.0)), 300.0)
+            self.assertGreaterEqual(float(sim.planner_defaults.get("degraded_step_interval_multiplier", 0.0)), 8.0)
+            sim.stop()
+
+    def test_unrestricted_mode_preserves_larger_values_and_applies_ceilings(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                brain_backend="ollama",
+                brain_backend_options={
+                    "timeout_s": 1600.0,
+                    "warmup_timeout_s": 1700.0,
+                    "completion_max_tokens": 45000,
+                    "permissive_timeout_ceiling_s": 1500.0,
+                    "permissive_completion_ceiling_tokens": 20000,
+                },
+                planner_config={
+                    "unrestricted_local_qwen_mode": True,
+                    "high_latency_local_llm_mode": True,
+                    "planner_timeout_seconds": 1600.0,
+                    "startup_llm_sanity_timeout_seconds": 1700.0,
+                    "startup_llm_sanity_completion_max_tokens": 41000,
+                    "planner_completion_max_tokens": 42000,
+                    "warmup_timeout_seconds": 1700.0,
+                },
+            )
+            self.assertEqual(sim.brain_backend_config.timeout_s, 1500.0)
+            self.assertEqual(sim.brain_backend_config.warmup_timeout_s, 1500.0)
+            self.assertEqual(sim.startup_llm_sanity_config.timeout_s, 1500.0)
+            self.assertEqual(sim.brain_backend_config.completion_max_tokens, 20000)
+            self.assertEqual(sim.startup_llm_sanity_config.completion_max_tokens, 20000)
+            sim.stop()
+
     def test_disabling_unrestricted_mode_preserves_explicit_normal_budgets(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = SimulationState(

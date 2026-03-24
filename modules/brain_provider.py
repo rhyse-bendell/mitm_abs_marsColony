@@ -742,11 +742,13 @@ class OllamaLocalBrainProvider(BrainProvider):
             return None, steps, "rejected_schema_invalid"
         working = deepcopy(payload)
         wrapper_source = "top_level_plan"
+        wrapper_payload: dict[str, Any] | None = None
         if "plan" not in working:
             for wrapper in ("response", "result", "data"):
                 wrapped = working.get(wrapper)
                 if isinstance(wrapped, dict) and isinstance(wrapped.get("plan"), dict):
                     working = {**working, **wrapped}
+                    wrapper_payload = wrapped
                     wrapper_source = f"{wrapper}.plan"
                     steps.append({"step": "unwrapped_payload", "wrapper_source": wrapper_source})
                     break
@@ -754,6 +756,30 @@ class OllamaLocalBrainProvider(BrainProvider):
             return None, steps, "rejected_missing_plan"
 
         plan = working.get("plan") or {}
+        sibling_sources = [working]
+        if isinstance(wrapper_payload, dict):
+            sibling_sources.insert(0, wrapper_payload)
+        for source in sibling_sources:
+            if not isinstance(source, dict):
+                continue
+            if "next_action" not in plan and isinstance(source.get("next_action"), (dict, str)):
+                plan["next_action"] = deepcopy(source.get("next_action"))
+                steps.append(
+                    {
+                        "step": "promoted_sibling_next_action_to_plan",
+                        "from": "wrapper" if source is wrapper_payload else "top_level",
+                        "source_key": "next_action",
+                    }
+                )
+            if "ordered_actions" not in plan and isinstance(source.get("ordered_actions"), list):
+                plan["ordered_actions"] = deepcopy(source.get("ordered_actions"))
+                steps.append(
+                    {
+                        "step": "promoted_sibling_ordered_actions_to_plan",
+                        "from": "wrapper" if source is wrapper_payload else "top_level",
+                        "source_key": "ordered_actions",
+                    }
+                )
         ordered = plan.get("ordered_actions")
         normalized_ordered: list[dict[str, Any]] = []
         if isinstance(ordered, list):
@@ -851,6 +877,44 @@ class OllamaLocalBrainProvider(BrainProvider):
             disposition = "accepted_after_repair"
         return working, steps, disposition
 
+    def _build_schema_repair_payload(
+        self,
+        *,
+        invalid_payload: Any,
+        failure_reason: str,
+    ) -> Dict[str, Any]:
+        repair_contract = {
+            "failure_reason": failure_reason,
+            "invalid_payload": invalid_payload,
+            "required_shape": "Return exactly one top-level AgentBrainResponse JSON object.",
+            "rules": [
+                "Output JSON only.",
+                "No wrapper keys like response/result/data.",
+                "Include plan as an object.",
+                "Include plan.next_action as an object with a legal action_type.",
+                "Include non-empty plan.ordered_actions.",
+            ],
+        }
+        return {
+            "model": self.config.local_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Your previous response was structurally invalid. "
+                        "Repair it and return exactly one valid top-level AgentBrainResponse JSON object. JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(repair_contract, separators=(",", ":"), default=str),
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": min(2048, int(self.config.completion_max_tokens)),
+            "response_format": {"type": "json_object"},
+        }
+
     def generate_plan(self, request_packet: AgentBrainRequest) -> AgentBrainResponse:
         started_at = time.perf_counter()
         started_at_epoch_ms = int(time.time() * 1000)
@@ -882,71 +946,110 @@ class OllamaLocalBrainProvider(BrainProvider):
             "result_source": "ollama",
             "trace_outcome_category": "no_result_generated",
             "runtime_disposition": "no_result_generated",
+            "repair_retry_requested": False,
+            "repair_retry_reason": None,
+            "repair_retry_attempted": False,
         }
         attempts = max(1, int(self.config.max_retries) + 1)
         for attempt in range(1, attempts + 1):
             try:
-                payload = self._build_request_payload(request_packet)
-                trace["provider_request_payload"] = payload
-                trace["provider_request_payload_size_chars"] = len(json.dumps(payload, default=str))
-                trace["reasoning_suppression_requested"] = False
-                attempt_trace: Dict[str, Any] = {"attempt": attempt}
-                req = request.Request(
-                    endpoint,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                with request.urlopen(req, timeout=self.config.timeout_s) as response:
-                    raw = response.read().decode("utf-8")
-                attempt_trace["http_body_non_empty"] = bool(raw.strip())
-                attempt_trace["raw_http_response_text"] = raw
-                trace["llm_response_received"] = True
-                parsed = json.loads(raw)
-                attempt_trace["parsed_response_json"] = parsed
-                trace["llm_response_parsed"] = True
-                parse_result = self._parse_response(parsed)
-                response_payload = parse_result["payload"]
-                attempt_trace["response_parse_source"] = parse_result.get("parse_source")
-                trace["provider_response_parse_source"] = parse_result.get("parse_source")
-                attempt_trace["extracted_response_payload"] = response_payload
-                normalized_payload, normalization_steps, runtime_disposition = self._normalize_payload(response_payload)
-                attempt_trace["normalization_steps"] = normalization_steps
-                attempt_trace["normalized_response_payload"] = normalized_payload
-                trace["runtime_disposition"] = runtime_disposition
-                if normalized_payload is None:
-                    if runtime_disposition == "rejected_missing_plan":
-                        raise ValueError("provider payload missing plan")
-                    if runtime_disposition == "rejected_unusable_next_action":
-                        raise ValueError("provider payload has unusable next_action")
-                    if runtime_disposition == "rejected_illegal_action":
-                        raise ValueError("provider payload has illegal action")
-                    raise ValueError("provider payload schema invalid")
-                response_obj = AgentBrainResponse.from_dict(normalized_payload)
-                trace["attempts"].append(attempt_trace)
-                latency_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
-                self.last_outcome = {"fallback": False, "reason": None, "latency_ms": latency_ms}
-                trace.update(
-                    {
-                        "fallback": False,
-                        "fallback_used": False,
-                        "fallback_reason": None,
-                        "fallback_hint": None,
-                        "latency_ms": latency_ms,
-                        "latency_until_outcome_ms": latency_ms,
-                        "response_payload_valid": True,
-                        "llm_response_validated": True,
-                        "result_source": "ollama",
-                        "trace_outcome_category": "llm_success",
-                        "exception": None,
-                        "normalization_steps": list(normalization_steps),
-                        "normalized_response_payload": normalized_payload,
-                        "extracted_response_payload": response_payload,
-                    }
-                )
-                self.last_outcome.update({"outcome_category": "llm_success", "result_source": "ollama"})
-                self.last_trace = trace
-                return response_obj
+                attempted_kinds = ["primary"]
+                for attempt_kind in attempted_kinds:
+                    payload = (
+                        self._build_request_payload(request_packet)
+                        if attempt_kind == "primary"
+                        else self._build_schema_repair_payload(
+                            invalid_payload=response_payload,
+                            failure_reason=fallback_reason or "provider payload schema invalid",
+                        )
+                    )
+                    if attempt_kind == "primary":
+                        trace["provider_request_payload"] = payload
+                        trace["provider_request_payload_size_chars"] = len(json.dumps(payload, default=str))
+                    trace["reasoning_suppression_requested"] = False
+                    attempt_trace: Dict[str, Any] = {"attempt": attempt, "attempt_kind": attempt_kind}
+                    req = request.Request(
+                        endpoint,
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with request.urlopen(req, timeout=self.config.timeout_s) as response:
+                        raw = response.read().decode("utf-8")
+                    attempt_trace["http_body_non_empty"] = bool(raw.strip())
+                    attempt_trace["raw_http_response_text"] = raw
+                    trace["llm_response_received"] = True
+                    parsed = json.loads(raw)
+                    attempt_trace["parsed_response_json"] = parsed
+                    trace["llm_response_parsed"] = True
+                    parse_result = self._parse_response(parsed)
+                    response_payload = parse_result["payload"]
+                    attempt_trace["response_parse_source"] = parse_result.get("parse_source")
+                    trace["provider_response_parse_source"] = parse_result.get("parse_source")
+                    attempt_trace["extracted_response_payload"] = response_payload
+                    normalized_payload, normalization_steps, runtime_disposition = self._normalize_payload(response_payload)
+                    attempt_trace["normalization_steps"] = normalization_steps
+                    attempt_trace["normalized_response_payload"] = normalized_payload
+                    trace["runtime_disposition"] = runtime_disposition
+                    trace["attempts"].append(attempt_trace)
+
+                    if normalized_payload is None:
+                        failure_reason = "provider payload schema invalid"
+                        if runtime_disposition == "rejected_missing_plan":
+                            failure_reason = "provider payload missing plan"
+                        elif runtime_disposition == "rejected_unusable_next_action":
+                            failure_reason = "provider payload has unusable next_action"
+                        elif runtime_disposition == "rejected_illegal_action":
+                            failure_reason = "provider payload has illegal action"
+                        fallback_reason = f"attempt={attempt}/{attempts} error={failure_reason}"
+                        trace["trace_outcome_category"] = "llm_parsed_invalid_payload"
+                        trace["repair_retry_reason"] = failure_reason
+                        can_repair = (
+                            attempt_kind == "primary"
+                            and attempt < attempts
+                            and trace.get("llm_response_received")
+                            and trace.get("llm_response_parsed")
+                            and response_payload is not None
+                        )
+                        if can_repair:
+                            trace["repair_retry_requested"] = True
+                            trace["repair_retry_attempted"] = True
+                            attempted_kinds.append("schema_repair")
+                            continue
+                        raise ValueError(failure_reason)
+
+                    response_obj = AgentBrainResponse.from_dict(normalized_payload)
+                    latency_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
+                    trace_outcome = "llm_success"
+                    resolved_disposition = runtime_disposition
+                    if attempt_kind == "schema_repair":
+                        trace_outcome = "llm_success_after_schema_retry"
+                        resolved_disposition = "accepted_after_schema_retry"
+                    elif runtime_disposition == "accepted_after_repair":
+                        trace_outcome = "llm_success_after_normalization_repair"
+                    self.last_outcome = {"fallback": False, "reason": None, "latency_ms": latency_ms}
+                    trace.update(
+                        {
+                            "fallback": False,
+                            "fallback_used": False,
+                            "fallback_reason": None,
+                            "fallback_hint": None,
+                            "latency_ms": latency_ms,
+                            "latency_until_outcome_ms": latency_ms,
+                            "response_payload_valid": True,
+                            "llm_response_validated": True,
+                            "result_source": "ollama",
+                            "trace_outcome_category": trace_outcome,
+                            "exception": None,
+                            "normalization_steps": list(normalization_steps),
+                            "normalized_response_payload": normalized_payload,
+                            "extracted_response_payload": response_payload,
+                            "runtime_disposition": resolved_disposition,
+                        }
+                    )
+                    self.last_outcome.update({"outcome_category": trace_outcome, "result_source": "ollama"})
+                    self.last_trace = trace
+                    return response_obj
             except (TimeoutError, error.URLError, error.HTTPError, ValueError, KeyError, json.JSONDecodeError) as exc:
                 attempt_trace = {"attempt": attempt, "exception": {"type": type(exc).__name__, "message": str(exc), "repr": repr(exc)}}
                 if "raw" in locals() and isinstance(raw, str):
@@ -959,6 +1062,13 @@ class OllamaLocalBrainProvider(BrainProvider):
                 if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
                     trace["timeout_occurred"] = True
                     trace["runtime_disposition"] = "timed_out"
+                    trace["trace_outcome_category"] = "llm_timeout"
+                elif isinstance(exc, (error.URLError, error.HTTPError)):
+                    trace["runtime_disposition"] = trace.get("runtime_disposition") or "transport_error"
+                    trace["trace_outcome_category"] = "llm_transport_error"
+                elif trace.get("trace_outcome_category") != "llm_parsed_invalid_payload":
+                    trace["runtime_disposition"] = trace.get("runtime_disposition") or "parsed_invalid_payload"
+                    trace["trace_outcome_category"] = "llm_parsed_invalid_payload"
                 if isinstance(exc, error.HTTPError) and getattr(exc, "code", None) == 404:
                     fallback_hint = "HTTP 404 from local backend may indicate missing/incorrect model name"
                 fallback_reason = f"attempt={attempt}/{attempts} error={exc}"
@@ -992,7 +1102,11 @@ class OllamaLocalBrainProvider(BrainProvider):
                 "latency_until_outcome_ms": latency_ms,
                 "response_payload_valid": False,
                 "result_source": "fallback_safe_policy",
-                "trace_outcome_category": "llm_timeout_with_fallback" if trace.get("timeout_occurred") else "llm_error_with_fallback",
+                "trace_outcome_category": (
+                    "llm_timeout_with_fallback"
+                    if trace.get("timeout_occurred")
+                    else ("llm_invalid_after_schema_retry_with_fallback" if trace.get("repair_retry_attempted") else "llm_error_with_fallback")
+                ),
                 "exception": trace.get("attempts", [{}])[-1].get("exception") if trace.get("attempts") else None,
                 "runtime_disposition": trace.get("runtime_disposition") or ("timed_out" if trace.get("timeout_occurred") else "fallback_generated"),
             }
