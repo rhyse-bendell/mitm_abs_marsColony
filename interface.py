@@ -396,7 +396,13 @@ class MarsColonyInterface:
                 or str(row.get("display_name", "")).lower() == lowered
                 or str(row.get("agent", "")).lower() == lowered
             ]
-        rows.sort(key=lambda row: (float(row.get("sim_time", 0.0)), int(row.get("tick", 0))))
+        rows.sort(
+            key=lambda row: (
+                float(row.get("sim_time") or 0.0),
+                int(row.get("tick") or 0),
+                str(row.get("request_id") or ""),
+            )
+        )
         return rows
 
     @staticmethod
@@ -473,9 +479,18 @@ class MarsColonyInterface:
         return tuple(
             (
                 row.get("request_id"),
+                row.get("request_kind"),
                 (row.get("request") or {}).get("status"),
+                (row.get("request") or {}).get("effective_backend"),
+                (row.get("request") or {}).get("model"),
                 (row.get("response") or {}).get("status"),
+                bool((row.get("response") or {}).get("http_response_received")),
+                bool((row.get("response") or {}).get("json_parsed")),
+                bool((row.get("response") or {}).get("normalized_payload_exists")),
                 (row.get("interpretation") or {}).get("status"),
+                (row.get("interpretation") or {}).get("runtime_disposition"),
+                (row.get("interpretation") or {}).get("planner_result"),
+                (row.get("interpretation") or {}).get("adopted_action"),
             )
             for row in (rows or [])
         )
@@ -775,7 +790,7 @@ class MarsColonyInterface:
             self._brain_last_detail_key = None
             return
         rendered = self._format_brain_detail_text(row)
-        detail_key = (row.get("trace_id"), rendered)
+        detail_key = (row.get("request_id"), rendered)
         if not force and detail_key == self._brain_last_detail_key:
             return
         detail_scroll = self.brain_detail_text.yview()
@@ -802,10 +817,7 @@ class MarsColonyInterface:
         self._copy_to_clipboard(text, status_message="Detail copied.")
 
     def _copy_brain_selected_json(self):
-        if not hasattr(self, "brain_request_list"):
-            return
-        selected = self.brain_request_list.curselection()
-        row = self._brain_visible_rows[selected[0]] if selected and selected[0] < len(self._brain_visible_rows) else None
+        row = self._brain_selected_row()
         if not row:
             self._copy_to_clipboard("", status_message="Nothing selected.")
             return
