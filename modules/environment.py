@@ -293,14 +293,14 @@ class Environment:
             "access_scope": meta.get("access_scope"),
         }
 
-    def __init__(self, phases=None, task_model: TaskModel | None = None):
+    def __init__(self, phases=None, task_model: TaskModel | None = None, construction_parameters=None):
         self.objects = _objects_from_task_model(task_model) if task_model and task_model.environment_objects else OBJECTS
         self.zones = _zones_from_task_model(task_model) if task_model and task_model.zones else ZONES
         self.phases = phases if phases else []
         self.current_phase_index = 0
         self.gas_environment = {"co2_level": 400}
         self.resources = []
-        self.construction = ConstructionManager(task_model=task_model)
+        self.construction = ConstructionManager(task_model=task_model, parameters=construction_parameters)
         self.task_model = task_model
         self.source_packet_name_map = dict(self.SOURCE_PACKET_NAME_MAP)
         if self.task_model is not None:
