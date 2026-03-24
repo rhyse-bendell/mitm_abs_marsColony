@@ -139,6 +139,7 @@ class MarsColonyInterface:
         self.create_agents_tab()
         self.create_event_monitor_tab()
         self.create_interaction_tab()
+        self.create_brain_tab()
 
     def _build_environment_canvas(self, parent):
         try:
@@ -309,6 +310,193 @@ class MarsColonyInterface:
 
         self.interaction_list = tk.Text(right, wrap="word", height=30)
         self.interaction_list.pack(fill="both", expand=True)
+
+    @staticmethod
+    def _safe_pretty_json(value):
+        if value is None:
+            return "(none)"
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return "(empty)"
+            try:
+                return json.dumps(json.loads(text), indent=2, sort_keys=True)
+            except (json.JSONDecodeError, TypeError):
+                return text
+        try:
+            return json.dumps(value, indent=2, sort_keys=True, default=str)
+        except TypeError:
+            return str(value)
+
+    @staticmethod
+    def _brain_trace_rows_for_agent(traces, agent_filter):
+        rows = list(traces or [])
+        if agent_filter and agent_filter != "All":
+            lowered = agent_filter.strip().lower()
+            rows = [
+                row
+                for row in rows
+                if str(row.get("agent_id", "")).lower() == lowered
+                or str(row.get("display_name", "")).lower() == lowered
+                or str(row.get("agent", "")).lower() == lowered
+            ]
+        rows.sort(key=lambda row: (float(row.get("sim_time", 0.0)), int(row.get("tick", 0))))
+        return rows
+
+    @staticmethod
+    def _brain_trace_summary_line(row):
+        sim_time = row.get("sim_time")
+        tick = row.get("tick")
+        agent = row.get("display_name") or row.get("agent_id") or "?"
+        disposition = row.get("runtime_disposition") or row.get("planner_result") or "unknown"
+        source = row.get("result_source") or "unknown"
+        action = ((row.get("next_action_summary") or {}).get("action_type")) or "-"
+        return f"t={sim_time} tick={tick} {agent} [{disposition}] src={source} action={action}"
+
+    @staticmethod
+    def _brain_trace_detail_sections(row):
+        provider_trace = row.get("provider_trace") or {}
+        attempts = provider_trace.get("attempts") or row.get("provider_attempts") or []
+        last_attempt = attempts[-1] if attempts else {}
+        request_summary = {
+            "request_id": row.get("request_id"),
+            "trace_id": row.get("trace_id"),
+            "tick": row.get("tick"),
+            "sim_time": row.get("sim_time"),
+            "configured_backend": row.get("configured_backend"),
+            "effective_backend": row.get("effective_backend"),
+            "model": row.get("model"),
+            "trigger_reason": row.get("trigger_reason"),
+        }
+        interpretation = {
+            "runtime_disposition": row.get("runtime_disposition"),
+            "planner_result": row.get("planner_result"),
+            "result_source": row.get("result_source"),
+            "trace_outcome_category": row.get("trace_outcome_category"),
+            "schema_validation_succeeded": row.get("schema_validation_succeeded"),
+            "schema_validation_errors": row.get("schema_validation_errors"),
+            "plan_grounding_status": row.get("plan_grounding_status"),
+            "plan_grounding_notes": row.get("plan_grounding_notes"),
+            "fallback_used": row.get("fallback_used"),
+            "fallback_source": row.get("fallback_source"),
+            "fallback_reason": row.get("fallback_reason"),
+            "adopted_action": (row.get("next_action_summary") or {}).get("action_type"),
+        }
+        errors_notes = {
+            "exception": row.get("exception") or provider_trace.get("exception"),
+            "provider_parse_source": provider_trace.get("provider_response_parse_source"),
+            "normalization_steps": last_attempt.get("normalization_steps") or provider_trace.get("normalization_steps"),
+            "grounding_notes": row.get("plan_grounding_notes"),
+        }
+        return {
+            "request_summary": request_summary,
+            "request_payload": row.get("agent_brain_request_payload") or provider_trace.get("provider_request_payload"),
+            "raw_response": last_attempt.get("raw_http_response_text") or row.get("raw_http_response_text"),
+            "parsed_pre_normalized": last_attempt.get("extracted_response_payload") or row.get("extracted_response_payload"),
+            "normalized_response": last_attempt.get("normalized_response_payload") or row.get("normalized_agent_brain_response"),
+            "system_interpretation": interpretation,
+            "errors_notes": errors_notes,
+        }
+
+    def create_brain_tab(self):
+        self.tab_brain = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_brain, text="Brain")
+
+        controls = ttk.Frame(self.tab_brain, padding=6)
+        controls.pack(fill="x")
+        ttk.Label(controls, text="Agent").pack(side="left")
+        self.brain_agent_filter = StringVar(value="All")
+        self.brain_agent_combo = ttk.Combobox(controls, textvariable=self.brain_agent_filter, values=["All"], width=20, state="readonly")
+        self.brain_agent_combo.pack(side="left", padx=(4, 10))
+        self.brain_agent_combo.bind("<<ComboboxSelected>>", lambda *_: self.update_brain_tab())
+
+        panes = ttk.PanedWindow(self.tab_brain, orient="horizontal")
+        panes.pack(fill="both", expand=True, padx=6, pady=6)
+
+        left = ttk.Frame(panes)
+        right = ttk.Frame(panes)
+        panes.add(left, weight=2)
+        panes.add(right, weight=3)
+
+        self.brain_request_list = tk.Listbox(left, exportselection=False)
+        self.brain_request_list.pack(side="left", fill="both", expand=True)
+        left_scroll = ttk.Scrollbar(left, orient="vertical", command=self.brain_request_list.yview)
+        left_scroll.pack(side="right", fill="y")
+        self.brain_request_list.configure(yscrollcommand=left_scroll.set)
+        self.brain_request_list.bind("<<ListboxSelect>>", lambda *_: self._update_brain_detail())
+
+        detail_frame = ttk.LabelFrame(right, text="Request Detail", padding=6)
+        detail_frame.pack(fill="both", expand=True)
+        self.brain_detail_text = tk.Text(detail_frame, wrap="word")
+        self.brain_detail_text.pack(side="left", fill="both", expand=True)
+        detail_scroll = ttk.Scrollbar(detail_frame, orient="vertical", command=self.brain_detail_text.yview)
+        detail_scroll.pack(side="right", fill="y")
+        self.brain_detail_text.configure(yscrollcommand=detail_scroll.set)
+        self._brain_visible_rows = []
+
+    def _update_brain_detail(self):
+        if not hasattr(self, "brain_request_list"):
+            return
+        selected = self.brain_request_list.curselection()
+        row = self._brain_visible_rows[selected[0]] if selected and selected[0] < len(self._brain_visible_rows) else None
+        self.brain_detail_text.delete("1.0", tk.END)
+        if not row:
+            self.brain_detail_text.insert(tk.END, "No request selected.")
+            return
+        sections = self._brain_trace_detail_sections(row)
+        ordered = [
+            ("1. Request summary", sections["request_summary"]),
+            ("2. Request payload", sections["request_payload"]),
+            ("3. Raw response", sections["raw_response"]),
+            ("4. Parsed / normalized response (pre-normalized)", sections["parsed_pre_normalized"]),
+            ("4b. Parsed / normalized response (normalized)", sections["normalized_response"]),
+            ("5. System interpretation", sections["system_interpretation"]),
+            ("6. Errors / notes", sections["errors_notes"]),
+        ]
+        for heading, value in ordered:
+            self.brain_detail_text.insert(tk.END, f"{heading}\n")
+            self.brain_detail_text.insert(tk.END, f"{self._safe_pretty_json(value)}\n\n")
+
+    def update_brain_tab(self):
+        if not hasattr(self, "brain_request_list"):
+            return
+        traces = []
+        if self.sim and hasattr(self.sim, "logger") and hasattr(self.sim.logger, "get_recent_planner_traces"):
+            traces = list(self.sim.logger.get_recent_planner_traces(500))
+        agent_names = sorted(
+            {
+                str(row.get("display_name") or row.get("agent_id"))
+                for row in traces
+                if row.get("display_name") or row.get("agent_id")
+            }
+        )
+        current = self.brain_agent_filter.get() if hasattr(self, "brain_agent_filter") else "All"
+        values = ["All"] + agent_names
+        self.brain_agent_combo.configure(values=values)
+        if current not in values:
+            current = "All"
+            self.brain_agent_filter.set(current)
+        selected_index = self.brain_request_list.curselection()
+        selected_id = None
+        if selected_index and selected_index[0] < len(self._brain_visible_rows):
+            selected_id = self._brain_visible_rows[selected_index[0]].get("trace_id")
+
+        rows = self._brain_trace_rows_for_agent(traces, self.brain_agent_filter.get())
+        self._brain_visible_rows = rows
+        self.brain_request_list.delete(0, tk.END)
+        for row in rows:
+            self.brain_request_list.insert(tk.END, self._brain_trace_summary_line(row))
+
+        if rows:
+            reselect = 0
+            if selected_id:
+                for idx, row in enumerate(rows):
+                    if row.get("trace_id") == selected_id:
+                        reselect = idx
+                        break
+            self.brain_request_list.selection_set(reselect)
+            self.brain_request_list.activate(reselect)
+        self._update_brain_detail()
 
     def update_interaction_tab(self):
         if not self.sim or not hasattr(self.sim, "logger"):
@@ -686,6 +874,7 @@ class MarsColonyInterface:
         self._update_system_log()
         self._update_backend_status_display()
         self.update_interaction_tab()
+        self.update_brain_tab()
 
     def _create_startup_dialog(self):
         self._close_startup_dialog()
@@ -871,6 +1060,7 @@ class MarsColonyInterface:
         self._sync_construction_summaries()
         self._update_backend_status_display()
         self.update_interaction_tab()
+        self.update_brain_tab()
         self._schedule_next_tick()
 
     def _update_control_states(self):

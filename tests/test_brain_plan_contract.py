@@ -187,6 +187,156 @@ class BrainContractTests(unittest.TestCase):
         payload = provider._build_request_payload(req)
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertIn("Return exactly one JSON object", payload["messages"][0]["content"])
+        self.assertIn("Do not wrap the object under keys like response/result/data", payload["messages"][0]["content"])
+
+    def test_normalize_payload_accepts_top_level_plan(self):
+        provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", max_retries=0), fallback=RuleBrain())
+        payload = {
+            "response_id": "r",
+            "agent_id": "a1",
+            "plan": {
+                "plan_id": "p",
+                "plan_horizon": 1,
+                "ordered_goals": [],
+                "ordered_actions": [{"step_index": 0, "action_type": "wait", "expected_purpose": "ok"}],
+                "next_action": {"step_index": 0, "action_type": "wait", "expected_purpose": "ok"},
+                "confidence": 0.8,
+            },
+        }
+        normalized, steps, disposition = provider._normalize_payload(payload)
+        self.assertIsNotNone(normalized)
+        self.assertEqual(disposition, "accepted_as_is")
+        self.assertFalse(steps)
+
+    def test_normalize_payload_unwraps_response_plan(self):
+        provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", max_retries=0), fallback=RuleBrain())
+        wrapped = {
+            "response": {
+                "response_id": "r",
+                "agent_id": "a1",
+                "plan": {
+                    "plan_id": "p",
+                    "plan_horizon": 1,
+                    "ordered_goals": [],
+                    "ordered_actions": [{"step_index": 0, "action_type": "wait", "expected_purpose": "ok"}],
+                    "next_action": {"step_index": 0, "action_type": "wait", "expected_purpose": "ok"},
+                    "confidence": 0.8,
+                },
+            }
+        }
+        normalized, steps, disposition = provider._normalize_payload(wrapped)
+        self.assertIsNotNone(normalized)
+        self.assertEqual(disposition, "accepted_after_repair")
+        self.assertTrue(any(step.get("step") == "unwrapped_payload" for step in steps))
+
+    def test_normalize_payload_unwraps_result_plan(self):
+        provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", max_retries=0), fallback=RuleBrain())
+        wrapped = {
+            "result": {
+                "response_id": "r",
+                "agent_id": "a1",
+                "plan": {
+                    "plan_id": "p",
+                    "plan_horizon": 1,
+                    "ordered_goals": [],
+                    "ordered_actions": [{"step_index": 0, "action_type": "wait", "expected_purpose": "ok"}],
+                    "next_action": {"step_index": 0, "action_type": "wait", "expected_purpose": "ok"},
+                    "confidence": 0.8,
+                },
+            }
+        }
+        normalized, _steps, disposition = provider._normalize_payload(wrapped)
+        self.assertIsNotNone(normalized)
+        self.assertEqual(disposition, "accepted_after_repair")
+
+    def test_normalize_payload_rejects_missing_plan(self):
+        provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", max_retries=0), fallback=RuleBrain())
+        normalized, _steps, disposition = provider._normalize_payload({"response": {"x": 1}})
+        self.assertIsNone(normalized)
+        self.assertEqual(disposition, "rejected_missing_plan")
+
+    def test_normalize_payload_repairs_string_next_action_from_ordered_actions(self):
+        provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", max_retries=0), fallback=RuleBrain())
+        payload = {
+            "response_id": "r",
+            "agent_id": "a1",
+            "plan": {
+                "plan_id": "p",
+                "plan_horizon": 1,
+                "ordered_goals": [],
+                "ordered_actions": [{"step_index": 0, "action_type": "inspect", "expected_purpose": "inspect"}],
+                "next_action": "inspect_information_source",
+                "confidence": 0.8,
+            },
+        }
+        normalized, steps, disposition = provider._normalize_payload(payload)
+        self.assertEqual(disposition, "accepted_after_repair")
+        self.assertEqual(normalized["plan"]["next_action"]["action_type"], "inspect_information_source")
+        self.assertTrue(any(step.get("step") == "resolved_string_next_action_from_ordered_actions" for step in steps))
+
+    def test_generate_plan_records_normalization_steps_in_trace(self):
+        provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", max_retries=0), fallback=RuleBrain())
+        req = AgentBrainRequest(
+            request_id="q5",
+            tick=1,
+            sim_time=1.0,
+            agent_id="a1",
+            display_name="A1",
+            agent_label="A",
+            task_id="mars_colony",
+            phase="p1",
+            local_context_summary="ctx",
+            local_observations=[],
+            working_memory_summary={},
+            inbox_summary=[],
+            current_goal_stack=[],
+            current_plan_summary={},
+            allowed_actions=[{"action_type": "wait"}, {"action_type": "inspect_information_source"}],
+            planning_horizon_config={"max_steps": 2},
+            request_explanation=False,
+        )
+
+        class _FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+            def read(self):
+                return self.payload.encode("utf-8")
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return False
+
+        body = json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "response": {
+                                        "response_id": "r",
+                                        "agent_id": "a1",
+                                        "plan": {
+                                            "plan_id": "p",
+                                            "plan_horizon": 1,
+                                            "ordered_goals": [],
+                                            "ordered_actions": ["inspect"],
+                                            "next_action": "inspect_information_source",
+                                            "confidence": 0.8,
+                                        },
+                                    }
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
+        )
+        with patch("modules.brain_provider.request.urlopen", return_value=_FakeResponse(body)):
+            provider.generate_plan(req)
+        attempt = provider.last_trace["attempts"][-1]
+        self.assertTrue(attempt.get("normalization_steps"))
+        self.assertEqual(provider.last_trace.get("runtime_disposition"), "accepted_after_repair")
 
 class OllamaProviderFallbackTests(unittest.TestCase):
     def test_ollama_provider_falls_back_on_malformed_payload(self):
@@ -213,6 +363,40 @@ class OllamaProviderFallbackTests(unittest.TestCase):
         with patch("modules.brain_provider.request.urlopen", side_effect=TimeoutError("timeout")):
             response = provider.generate_plan(req)
         self.assertEqual(response.plan.next_action.action_type.value, "wait")
+
+    def test_ollama_provider_rejects_missing_plan_with_explicit_disposition(self):
+        provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", max_retries=0), fallback=RuleBrain())
+        req = AgentBrainRequest(
+            request_id="q6",
+            tick=1,
+            sim_time=1.0,
+            agent_id="a1",
+            display_name="A1",
+            agent_label="A",
+            task_id="mars_colony",
+            phase="p1",
+            local_context_summary="ctx",
+            local_observations=[],
+            working_memory_summary={},
+            inbox_summary=[],
+            current_goal_stack=[],
+            current_plan_summary={},
+            allowed_actions=[{"action_type": "wait"}],
+            planning_horizon_config={"max_steps": 2},
+            request_explanation=False,
+        )
+
+        class _FakeResponse:
+            def read(self):
+                return b'{"choices":[{"message":{"content":"{\\"response\\":{\\"x\\":1}}"}}]}'
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return False
+
+        with patch("modules.brain_provider.request.urlopen", return_value=_FakeResponse()):
+            provider.generate_plan(req)
+        self.assertEqual(provider.last_trace.get("runtime_disposition"), "rejected_missing_plan")
 
 
 if __name__ == "__main__":

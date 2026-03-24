@@ -112,6 +112,7 @@ class TestPlannerTraceObservability(unittest.TestCase):
             with patch("modules.brain_provider.OllamaLocalBrainProvider.generate_plan", new=slow_generate):
                 for _ in range(4):
                     sim.update(0.1)
+                    time.sleep(0.08)
             sim.stop()
 
             rows, _ = _read_trace_rows(sim)

@@ -169,6 +169,8 @@ class SimulationLogger:
         self.interaction_trace_writer = InteractionTraceWriter(self.output_session.build_log_path("interaction_trace.jsonl"))
         self.recent_interactions = []
         self.max_recent_interactions = 300
+        self.recent_planner_traces = []
+        self.max_recent_planner_traces = 800
 
     def _append_recent_event(self, event):
         self.recent_events.append(event)
@@ -281,7 +283,14 @@ class SimulationLogger:
         )
 
     def append_planner_trace(self, payload):
-        self.planner_trace_writer.append(payload)
+        row = dict(payload or {})
+        self.planner_trace_writer.append(row)
+        self.recent_planner_traces.append(row)
+        if len(self.recent_planner_traces) > self.max_recent_planner_traces:
+            self.recent_planner_traces = self.recent_planner_traces[-self.max_recent_planner_traces:]
+
+    def get_recent_planner_traces(self, count=240):
+        return self.recent_planner_traces[-count:]
 
     def initialize_session_outputs(self, speed=None, flash_mode=None, active_agents=None, extra_metadata=None):
         self.output_session.write_manifest(
