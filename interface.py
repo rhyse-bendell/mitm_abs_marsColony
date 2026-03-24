@@ -335,8 +335,58 @@ class MarsColonyInterface:
             return str(value)
 
     @staticmethod
+    def _brain_normalize_lifecycle_row(row):
+        normalized = dict(row or {})
+        request_data = dict(normalized.get("request") or {})
+        response_data = dict(normalized.get("response") or {})
+        interpretation_data = dict(normalized.get("interpretation") or {})
+
+        request_data.setdefault("status", "submitted")
+        request_data.setdefault("configured_backend", normalized.get("configured_backend"))
+        request_data.setdefault("effective_backend", normalized.get("effective_backend"))
+        request_data.setdefault("model", normalized.get("model"))
+        request_data.setdefault("trigger_reason", normalized.get("trigger_reason"))
+        request_data.setdefault("request_payload", normalized.get("agent_brain_request_payload"))
+
+        response_status = response_data.get("status")
+        if not response_status:
+            if response_data.get("http_response_received"):
+                response_status = "response_received"
+            elif response_data.get("timeout_occurred"):
+                response_status = "timeout"
+            elif response_data.get("error"):
+                response_status = "transport_error"
+            else:
+                response_status = "pending_or_no_response"
+        response_data.setdefault("status", response_status)
+        response_data.setdefault("http_response_received", bool(response_data.get("http_response_received")))
+        response_data.setdefault("json_parsed", bool(response_data.get("json_parsed")))
+        response_data.setdefault("normalized_payload_exists", bool(response_data.get("normalized_payload") or response_data.get("normalized_payload_exists")))
+        response_data.setdefault("repair_retry_attempted", bool(response_data.get("repair_retry_attempted")))
+        response_data.setdefault("raw_response_available", bool(response_data.get("raw_response")))
+
+        interpretation_status = (
+            interpretation_data.get("status")
+            or interpretation_data.get("runtime_disposition")
+            or interpretation_data.get("planner_result")
+            or "pending_or_unusable"
+        )
+        interpretation_data.setdefault("status", interpretation_status)
+        interpretation_data.setdefault("runtime_disposition", interpretation_data.get("runtime_disposition") or "unknown")
+        interpretation_data.setdefault("planner_result", interpretation_data.get("planner_result") or "none")
+        interpretation_data.setdefault("adopted_action", interpretation_data.get("adopted_action") or "none")
+        interpretation_data.setdefault("fallback_used", bool(interpretation_data.get("fallback_used")))
+        interpretation_data.setdefault("failure_mode", interpretation_data.get("failure_mode") or interpretation_data.get("stale_discard_reason") or "none")
+
+        normalized["request"] = request_data
+        normalized["response"] = response_data
+        normalized["interpretation"] = interpretation_data
+        normalized.setdefault("request_kind", "planner")
+        return normalized
+
+    @staticmethod
     def _brain_lifecycle_rows_for_agent(traces, agent_filter):
-        rows = list(traces or [])
+        rows = [MarsColonyInterface._brain_normalize_lifecycle_row(row) for row in (traces or [])]
         if agent_filter and agent_filter != "All":
             lowered = agent_filter.strip().lower()
             rows = [
@@ -386,24 +436,37 @@ class MarsColonyInterface:
         agent = row.get("display_name") or row.get("agent_id") or "?"
         request_data = row.get("request") or {}
         source = request_data.get("effective_backend") or request_data.get("configured_backend") or "unknown"
-        return f"t={sim_time} tick={tick} {agent} req={row.get('request_id')} [{request_data.get('status') or 'submitted'}] src={source}"
+        return (
+            f"{row.get('request_id')} t={sim_time} tick={tick} {agent} "
+            f"kind={row.get('request_kind') or 'planner'} src={source} model={request_data.get('model') or '-'} "
+            f"trigger={request_data.get('trigger_reason') or '-'} [{request_data.get('status')}]"
+        )
 
     @staticmethod
     def _brain_response_summary_line(row):
         response = row.get("response") or {}
-        markers = []
-        if response.get("repair_retry_attempted"):
-            markers.append("retry")
-        if response.get("normalized_payload_exists"):
-            markers.append("normalized")
-        marker_text = f" {'/'.join(markers)}" if markers else ""
-        return f"{row.get('request_id')} [{response.get('status') or 'pending'}] http={bool(response.get('http_response_received'))} parsed={bool(response.get('json_parsed'))}{marker_text}"
+        error_marker = response.get("error") or response.get("failure_mode") or ""
+        return (
+            f"{row.get('request_id')} [{response.get('status')}] "
+            f"http={bool(response.get('http_response_received'))} parsed={bool(response.get('json_parsed'))} "
+            f"normalized={bool(response.get('normalized_payload_exists'))} retry={bool(response.get('repair_retry_attempted'))} "
+            f"raw={bool(response.get('raw_response_available') or response.get('raw_response'))}"
+            f"{f' err={error_marker}' if error_marker else ''}"
+        )
 
     @staticmethod
     def _brain_interpretation_summary_line(row):
         interpretation = row.get("interpretation") or {}
-        action = interpretation.get("adopted_action") or "-"
-        return f"{row.get('request_id')} [{interpretation.get('status') or 'pending'}] disp={interpretation.get('runtime_disposition') or '-'} action={action}"
+        stale = ""
+        if interpretation.get("stale_discard_reason"):
+            stale = f" stale={interpretation.get('stale_discard_reason')}"
+        return (
+            f"{row.get('request_id')} [{interpretation.get('status')}] "
+            f"disp={interpretation.get('runtime_disposition')} result={interpretation.get('planner_result')} "
+            f"action={interpretation.get('adopted_action')} fallback={bool(interpretation.get('fallback_used'))}"
+            f"{f' failure={interpretation.get('failure_mode')}' if interpretation.get('failure_mode') and interpretation.get('failure_mode') != 'none' else ''}"
+            f"{stale}"
+        )
 
     @staticmethod
     def _brain_visible_signature(rows):
@@ -468,6 +531,15 @@ class MarsColonyInterface:
         return {
             "request_summary": request_summary,
             "request_payload": request_data.get("request_payload"),
+            "response_summary": {
+                "response_status": response_data.get("status"),
+                "http_response_received": response_data.get("http_response_received"),
+                "json_parsed": response_data.get("json_parsed"),
+                "normalized_payload_exists": response_data.get("normalized_payload_exists"),
+                "repair_retry_attempted": response_data.get("repair_retry_attempted"),
+                "raw_response_available": response_data.get("raw_response_available"),
+                "error": response_data.get("error"),
+            },
             "raw_response": response_data.get("raw_response"),
             "parsed_pre_normalized": response_data.get("parsed_payload"),
             "normalized_response": response_data.get("normalized_payload"),
@@ -501,9 +573,12 @@ class MarsColonyInterface:
     def create_brain_tab(self):
         self.tab_brain = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_brain, text="Brain")
+        self.tab_brain.rowconfigure(1, weight=3)
+        self.tab_brain.rowconfigure(2, weight=2)
+        self.tab_brain.columnconfigure(0, weight=1)
 
         controls = ttk.Frame(self.tab_brain, padding=6)
-        controls.pack(fill="x")
+        controls.grid(row=0, column=0, sticky="ew")
         ttk.Label(controls, text="Agent").pack(side="left")
         self.brain_agent_filter = StringVar(value="All")
         self.brain_agent_combo = ttk.Combobox(controls, textvariable=self.brain_agent_filter, values=["All"], width=20, state="readonly")
@@ -538,40 +613,48 @@ class MarsColonyInterface:
         self.brain_copy_status_var = StringVar(value="")
         ttk.Label(controls, textvariable=self.brain_copy_status_var, foreground="#3f556e").pack(side="right")
 
-        panes = ttk.PanedWindow(self.tab_brain, orient="horizontal")
-        panes.pack(fill="both", expand=True, padx=6, pady=6)
+        lifecycle_frame = ttk.Frame(self.tab_brain, padding=(6, 0, 6, 6))
+        lifecycle_frame.grid(row=1, column=0, sticky="nsew")
+        lifecycle_frame.rowconfigure(0, weight=1)
+        lifecycle_frame.columnconfigure(0, weight=1)
+        lifecycle_frame.columnconfigure(1, weight=1)
+        lifecycle_frame.columnconfigure(2, weight=1)
 
-        req_frame = ttk.LabelFrame(panes, text="Requests", padding=4)
-        resp_frame = ttk.LabelFrame(panes, text="Responses", padding=4)
-        interp_frame = ttk.LabelFrame(panes, text="Interpretation", padding=4)
-        detail_frame = ttk.LabelFrame(panes, text="Request Detail", padding=6)
-        panes.add(req_frame, weight=2)
-        panes.add(resp_frame, weight=2)
-        panes.add(interp_frame, weight=2)
-        panes.add(detail_frame, weight=3)
+        req_frame = ttk.LabelFrame(lifecycle_frame, text="Requests", padding=4)
+        resp_frame = ttk.LabelFrame(lifecycle_frame, text="Responses", padding=4)
+        interp_frame = ttk.LabelFrame(lifecycle_frame, text="Interpretation", padding=4)
+        req_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        resp_frame.grid(row=0, column=1, sticky="nsew", padx=4)
+        interp_frame.grid(row=0, column=2, sticky="nsew", padx=(4, 0))
 
         self.brain_request_list = tk.Listbox(req_frame, exportselection=False)
         self.brain_request_list.pack(side="left", fill="both", expand=True)
-        req_scroll = ttk.Scrollbar(req_frame, orient="vertical", command=self.brain_request_list.yview)
+        req_scroll = ttk.Scrollbar(req_frame, orient="vertical", command=lambda *args: self._brain_sync_lists_yview(*args))
         req_scroll.pack(side="right", fill="y")
         self.brain_request_list.configure(yscrollcommand=req_scroll.set)
         self.brain_request_list.bind("<<ListboxSelect>>", lambda *_: self._on_brain_list_selection_changed("request"))
 
         self.brain_response_list = tk.Listbox(resp_frame, exportselection=False)
         self.brain_response_list.pack(side="left", fill="both", expand=True)
-        resp_scroll = ttk.Scrollbar(resp_frame, orient="vertical", command=self.brain_response_list.yview)
+        resp_scroll = ttk.Scrollbar(resp_frame, orient="vertical", command=lambda *args: self._brain_sync_lists_yview(*args))
         resp_scroll.pack(side="right", fill="y")
         self.brain_response_list.configure(yscrollcommand=resp_scroll.set)
         self.brain_response_list.bind("<<ListboxSelect>>", lambda *_: self._on_brain_list_selection_changed("response"))
 
         self.brain_interpretation_list = tk.Listbox(interp_frame, exportselection=False)
         self.brain_interpretation_list.pack(side="left", fill="both", expand=True)
-        interp_scroll = ttk.Scrollbar(interp_frame, orient="vertical", command=self.brain_interpretation_list.yview)
+        interp_scroll = ttk.Scrollbar(interp_frame, orient="vertical", command=lambda *args: self._brain_sync_lists_yview(*args))
         interp_scroll.pack(side="right", fill="y")
         self.brain_interpretation_list.configure(yscrollcommand=interp_scroll.set)
         self.brain_interpretation_list.bind("<<ListboxSelect>>", lambda *_: self._on_brain_list_selection_changed("interpretation"))
 
-        detail_frame.pack(fill="both", expand=True)
+        for lb in (self.brain_request_list, self.brain_response_list, self.brain_interpretation_list):
+            lb.bind("<MouseWheel>", self._brain_on_listbox_mousewheel)
+            lb.bind("<Button-4>", self._brain_on_listbox_mousewheel)
+            lb.bind("<Button-5>", self._brain_on_listbox_mousewheel)
+
+        detail_frame = ttk.LabelFrame(self.tab_brain, text="Request Detail", padding=6)
+        detail_frame.grid(row=2, column=0, sticky="nsew", padx=6, pady=(0, 6))
         self.brain_detail_text = tk.Text(detail_frame, wrap="word")
         self.brain_detail_text.pack(side="left", fill="both", expand=True)
         detail_scroll = ttk.Scrollbar(detail_frame, orient="vertical", command=self.brain_detail_text.yview)
@@ -581,6 +664,32 @@ class MarsColonyInterface:
         self._brain_visible_signature_cache = ()
         self._brain_last_detail_key = None
         self._brain_user_inspecting = False
+        self._brain_syncing_scroll = False
+
+    def _brain_sync_lists_yview(self, *args):
+        if getattr(self, "_brain_syncing_scroll", False):
+            return
+        self._brain_syncing_scroll = True
+        try:
+            for list_name in ("brain_request_list", "brain_response_list", "brain_interpretation_list"):
+                lb = getattr(self, list_name, None)
+                if lb is not None:
+                    lb.yview(*args)
+        finally:
+            self._brain_syncing_scroll = False
+
+    def _brain_on_listbox_mousewheel(self, event):
+        delta = getattr(event, "delta", 0)
+        if delta:
+            units = -1 if delta > 0 else 1
+        elif getattr(event, "num", None) == 4:
+            units = -1
+        elif getattr(event, "num", None) == 5:
+            units = 1
+        else:
+            return None
+        self._brain_sync_lists_yview("scroll", units, "units")
+        return "break"
 
     @staticmethod
     def _brain_detail_bundle_for_row(row):
@@ -643,11 +752,12 @@ class MarsColonyInterface:
         ordered = [
             ("1. Request summary", sections["request_summary"]),
             ("2. Request payload", sections["request_payload"]),
-            ("3. Raw response", sections["raw_response"]),
-            ("4. Parsed / normalized response (pre-normalized)", sections["parsed_pre_normalized"]),
-            ("4b. Parsed / normalized response (normalized)", sections["normalized_response"]),
-            ("5. System interpretation", sections["system_interpretation"]),
-            ("6. Errors / notes", sections["errors_notes"]),
+            ("3. Response summary", sections["response_summary"]),
+            ("4. Raw response", sections["raw_response"]),
+            ("5. Parsed / normalized response (pre-normalized)", sections["parsed_pre_normalized"]),
+            ("5b. Parsed / normalized response (normalized)", sections["normalized_response"]),
+            ("6. System interpretation", sections["system_interpretation"]),
+            ("7. Errors / notes", sections["errors_notes"]),
         ]
         rendered = []
         for heading, value in ordered:
@@ -778,8 +888,6 @@ class MarsColonyInterface:
         )
         new_signature = self._brain_visible_signature(rows)
         request_scroll = self.brain_request_list.yview()
-        response_scroll = self.brain_response_list.yview() if hasattr(self, "brain_response_list") else None
-        interpretation_scroll = self.brain_interpretation_list.yview() if hasattr(self, "brain_interpretation_list") else None
         rows_changed = force or new_signature != self._brain_visible_signature_cache
         self._brain_visible_rows = rows
         if rows_changed:
@@ -795,11 +903,7 @@ class MarsColonyInterface:
                 if hasattr(self, "brain_interpretation_list"):
                     self.brain_interpretation_list.insert(tk.END, self._brain_interpretation_summary_line(row))
             if request_scroll:
-                self.brain_request_list.yview_moveto(request_scroll[0])
-            if response_scroll and hasattr(self, "brain_response_list"):
-                self.brain_response_list.yview_moveto(response_scroll[0])
-            if interpretation_scroll and hasattr(self, "brain_interpretation_list"):
-                self.brain_interpretation_list.yview_moveto(interpretation_scroll[0])
+                self._brain_sync_lists_yview("moveto", request_scroll[0])
             self._brain_visible_signature_cache = new_signature
 
         if rows:
