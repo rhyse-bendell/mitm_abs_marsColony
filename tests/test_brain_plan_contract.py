@@ -229,6 +229,42 @@ class BrainContractTests(unittest.TestCase):
         self.assertEqual(disposition, "accepted_after_repair")
         self.assertTrue(any(step.get("step") == "unwrapped_payload" for step in steps))
 
+    def test_normalize_payload_promotes_response_sibling_next_action_and_ordered_actions(self):
+        provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", max_retries=0), fallback=RuleBrain())
+        wrapped = {
+            "response": {
+                "response_id": "r",
+                "agent_id": "a1",
+                "plan": {"plan_id": "p", "plan_horizon": 1, "ordered_goals": [], "confidence": 0.8},
+                "next_action": {"step_index": 0, "action_type": "wait", "expected_purpose": "ok"},
+                "ordered_actions": [{"step_index": 0, "action_type": "wait", "expected_purpose": "ok"}],
+            }
+        }
+        normalized, steps, disposition = provider._normalize_payload(wrapped)
+        self.assertIsNotNone(normalized)
+        self.assertEqual(normalized["plan"]["next_action"]["action_type"], "wait")
+        self.assertEqual(normalized["plan"]["ordered_actions"][0]["action_type"], "wait")
+        self.assertEqual(disposition, "accepted_after_repair")
+        self.assertTrue(any(step.get("step") == "promoted_sibling_next_action_to_plan" for step in steps))
+        self.assertTrue(any(step.get("step") == "promoted_sibling_ordered_actions_to_plan" for step in steps))
+
+    def test_normalize_payload_promotes_top_level_sibling_next_action_and_ordered_actions(self):
+        provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", max_retries=0), fallback=RuleBrain())
+        payload = {
+            "response_id": "r",
+            "agent_id": "a1",
+            "plan": {"plan_id": "p", "plan_horizon": 1, "ordered_goals": [], "confidence": 0.8},
+            "next_action": {"step_index": 0, "action_type": "wait", "expected_purpose": "ok"},
+            "ordered_actions": [{"step_index": 0, "action_type": "wait", "expected_purpose": "ok"}],
+        }
+        normalized, steps, disposition = provider._normalize_payload(payload)
+        self.assertIsNotNone(normalized)
+        self.assertEqual(normalized["plan"]["next_action"]["action_type"], "wait")
+        self.assertEqual(normalized["plan"]["ordered_actions"][0]["action_type"], "wait")
+        self.assertEqual(disposition, "accepted_after_repair")
+        self.assertTrue(any(step.get("step") == "promoted_sibling_next_action_to_plan" for step in steps))
+        self.assertTrue(any(step.get("step") == "promoted_sibling_ordered_actions_to_plan" for step in steps))
+
     def test_normalize_payload_unwraps_result_plan(self):
         provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", max_retries=0), fallback=RuleBrain())
         wrapped = {
@@ -397,6 +433,72 @@ class OllamaProviderFallbackTests(unittest.TestCase):
         with patch("modules.brain_provider.request.urlopen", return_value=_FakeResponse()):
             provider.generate_plan(req)
         self.assertEqual(provider.last_trace.get("runtime_disposition"), "rejected_missing_plan")
+
+    def test_ollama_provider_schema_repair_retry_accepts_second_attempt(self):
+        provider = OllamaLocalBrainProvider(BrainBackendConfig(backend="ollama", max_retries=1), fallback=RuleBrain())
+        req = AgentBrainRequest(
+            request_id="q7",
+            tick=1,
+            sim_time=1.0,
+            agent_id="a1",
+            display_name="A1",
+            agent_label="A",
+            task_id="mars_colony",
+            phase="p1",
+            local_context_summary="ctx",
+            local_observations=[],
+            working_memory_summary={},
+            inbox_summary=[],
+            current_goal_stack=[],
+            current_plan_summary={},
+            allowed_actions=[{"action_type": "wait"}],
+            planning_horizon_config={"max_steps": 2},
+            request_explanation=False,
+        )
+
+        class _FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+            def read(self):
+                return self.payload.encode("utf-8")
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return False
+
+        invalid = json.dumps({"choices": [{"message": {"content": json.dumps({"response": {"x": 1}})}}]})
+        repaired = json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "response_id": "r",
+                                    "agent_id": "a1",
+                                    "plan": {
+                                        "plan_id": "p",
+                                        "plan_horizon": 1,
+                                        "ordered_goals": [],
+                                        "ordered_actions": [{"step_index": 0, "action_type": "wait", "expected_purpose": "ok"}],
+                                        "next_action": {"step_index": 0, "action_type": "wait", "expected_purpose": "ok"},
+                                        "confidence": 0.8,
+                                    },
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
+        )
+        with patch("modules.brain_provider.request.urlopen", side_effect=[_FakeResponse(invalid), _FakeResponse(repaired)]):
+            response = provider.generate_plan(req)
+        self.assertEqual(response.plan.next_action.action_type.value, "wait")
+        self.assertTrue(provider.last_trace.get("repair_retry_requested"))
+        self.assertEqual(provider.last_trace.get("runtime_disposition"), "accepted_after_schema_retry")
+        attempt_kinds = [item.get("attempt_kind") for item in provider.last_trace.get("attempts", []) if item.get("attempt_kind")]
+        self.assertIn("primary", attempt_kinds)
+        self.assertIn("schema_repair", attempt_kinds)
 
 
 if __name__ == "__main__":

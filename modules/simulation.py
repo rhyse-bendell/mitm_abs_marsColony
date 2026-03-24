@@ -54,7 +54,21 @@ def _planner_defaults_with_high_latency_mode(planner_defaults, configured_backen
     if unrestricted_local_qwen_mode:
         defaults["high_latency_local_llm_mode"] = True
         for key, value in UNRESTRICTED_QWEN_DEFAULTS.items():
-            defaults.setdefault(key, value)
+            existing = defaults.get(key)
+            if isinstance(value, bool):
+                defaults[key] = bool(existing) if isinstance(existing, bool) else value
+            elif isinstance(value, int):
+                if isinstance(existing, (int, float)):
+                    defaults[key] = max(int(existing), int(value))
+                else:
+                    defaults[key] = int(value)
+            elif isinstance(value, float):
+                if isinstance(existing, (int, float)):
+                    defaults[key] = max(float(existing), float(value))
+                else:
+                    defaults[key] = float(value)
+            else:
+                defaults.setdefault(key, value)
     return defaults
 
 
@@ -185,7 +199,9 @@ class SimulationState:
         if self.brain_backend_config.unrestricted_local_qwen_mode:
             effective_timeout_ceiling = max(60.0, float(self.brain_backend_config.permissive_timeout_ceiling_s))
             effective_completion_ceiling = max(512, int(self.brain_backend_config.permissive_completion_ceiling_tokens))
-            effective_startup_timeout = min(float(self.startup_llm_sanity_config.timeout_s), effective_timeout_ceiling)
+            startup_timeout_floor = float(self.planner_defaults.get("startup_llm_sanity_timeout_seconds", self.startup_llm_sanity_config.timeout_s) or self.startup_llm_sanity_config.timeout_s)
+            startup_tokens_floor = int(self.planner_defaults.get("startup_llm_sanity_completion_max_tokens", self.startup_llm_sanity_config.completion_max_tokens) or self.startup_llm_sanity_config.completion_max_tokens)
+            planner_tokens_floor = int(self.planner_defaults.get("planner_completion_max_tokens", self.brain_backend_config.completion_max_tokens) or self.brain_backend_config.completion_max_tokens)
             requested_planner_timeout = max(
                 float(self.brain_backend_config.timeout_s),
                 float(self.planner_defaults.get("planner_timeout_seconds", self.brain_backend_config.timeout_s) or self.brain_backend_config.timeout_s),
@@ -196,8 +212,9 @@ class SimulationState:
             )
             effective_planner_timeout = min(requested_planner_timeout, effective_timeout_ceiling)
             effective_warmup_timeout = min(requested_warmup_timeout, effective_timeout_ceiling)
-            effective_startup_tokens = min(int(self.startup_llm_sanity_config.completion_max_tokens), effective_completion_ceiling)
-            effective_planner_tokens = min(int(self.brain_backend_config.completion_max_tokens), effective_completion_ceiling)
+            effective_startup_timeout = min(max(float(self.startup_llm_sanity_config.timeout_s), startup_timeout_floor), effective_timeout_ceiling)
+            effective_startup_tokens = min(max(int(self.startup_llm_sanity_config.completion_max_tokens), startup_tokens_floor), effective_completion_ceiling)
+            effective_planner_tokens = min(max(int(self.brain_backend_config.completion_max_tokens), planner_tokens_floor), effective_completion_ceiling)
             self.startup_llm_sanity_config = StartupLLMSanityConfig(
                 enabled=self.startup_llm_sanity_config.enabled,
                 timeout_s=effective_startup_timeout,

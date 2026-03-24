@@ -36,9 +36,9 @@ class MarsColonyInterface:
     EXPERIMENT_PANEL_BORDER = "#586271"
     BACKEND_DEFAULTS = {
         "brain_backend": "ollama",
-        "local_model": "qwen2.5:3b",
+        "local_model": "qwen3.5:9b",
         "local_base_url": "http://127.0.0.1:11434",
-        "timeout_s": 90.0,
+        "timeout_s": 240.0,
         "fallback_backend": "rule_brain",
     }
     LOCAL_MODEL_SHORTLIST = [
@@ -50,20 +50,20 @@ class MarsColonyInterface:
     ]
     PLANNER_DEFAULTS = {
         "planner_interval_steps": 16,
-        "planner_timeout_seconds": 90.0,
-        "planner_max_retries": 0,
-        "backend_timeout_s": 90.0,
-        "backend_max_retries": 0,
+        "planner_timeout_seconds": 240.0,
+        "planner_max_retries": 1,
+        "backend_timeout_s": 240.0,
+        "backend_max_retries": 1,
         "degraded_consecutive_failures_threshold": 24,
         "degraded_cooldown_seconds": 300.0,
         "degraded_step_interval_multiplier": 8.0,
         "enable_startup_llm_sanity": True,
-        "startup_llm_sanity_timeout_seconds": 60.0,
+        "startup_llm_sanity_timeout_seconds": 240.0,
         "startup_llm_sanity_max_sources": 1,
         "startup_llm_sanity_max_items_per_type": 2,
-        "startup_llm_sanity_completion_max_tokens": 512,
-        "planner_completion_max_tokens": 1024,
-        "warmup_timeout_seconds": 45.0,
+        "startup_llm_sanity_completion_max_tokens": 2048,
+        "planner_completion_max_tokens": 4096,
+        "warmup_timeout_seconds": 180.0,
         "startup_llm_sanity_raw_response_max_chars": 4000,
         "enable_bootstrap_summary_reuse": True,
         "bootstrap_summary_max_chars": 280,
@@ -356,8 +356,26 @@ class MarsColonyInterface:
         agent = row.get("display_name") or row.get("agent_id") or "?"
         disposition = row.get("runtime_disposition") or row.get("planner_result") or "unknown"
         source = row.get("result_source") or "unknown"
-        action = ((row.get("next_action_summary") or {}).get("action_type")) or "-"
+        action = (
+            ((row.get("next_action_summary") or {}).get("action_type"))
+            or ((row.get("normalized_agent_brain_response") or {}).get("plan", {}).get("next_action", {}).get("action_type")
+            or (row.get("planner_result") if isinstance(row.get("planner_result"), str) else None)
+            or row.get("runtime_disposition")
+            or "-")
+        )
         return f"t={sim_time} tick={tick} {agent} [{disposition}] src={source} action={action}"
+
+    @staticmethod
+    def _brain_visible_signature(rows):
+        return tuple(
+            (
+                row.get("trace_id"),
+                row.get("runtime_disposition"),
+                row.get("result_source"),
+                (row.get("next_action_summary") or {}).get("action_type"),
+            )
+            for row in (rows or [])
+        )
 
     @staticmethod
     def _brain_trace_detail_sections(row):
@@ -415,6 +433,15 @@ class MarsColonyInterface:
         self.brain_agent_combo = ttk.Combobox(controls, textvariable=self.brain_agent_filter, values=["All"], width=20, state="readonly")
         self.brain_agent_combo.pack(side="left", padx=(4, 10))
         self.brain_agent_combo.bind("<<ComboboxSelected>>", lambda *_: self.update_brain_tab())
+        ttk.Button(controls, text="Refresh", command=lambda: self.update_brain_tab(force=True)).pack(side="left", padx=(2, 4))
+        self.brain_auto_refresh_var = BooleanVar(value=True)
+        ttk.Checkbutton(controls, text="Auto-refresh", variable=self.brain_auto_refresh_var).pack(side="left", padx=4)
+        self.brain_follow_latest_var = BooleanVar(value=True)
+        ttk.Checkbutton(controls, text="Follow latest", variable=self.brain_follow_latest_var).pack(side="left", padx=4)
+        ttk.Button(controls, text="Copy detail", command=self._copy_brain_detail_text).pack(side="left", padx=(8, 4))
+        ttk.Button(controls, text="Copy selected JSON", command=self._copy_brain_selected_json).pack(side="left", padx=4)
+        self.brain_copy_status_var = StringVar(value="")
+        ttk.Label(controls, textvariable=self.brain_copy_status_var, foreground="#3f556e").pack(side="right")
 
         panes = ttk.PanedWindow(self.tab_brain, orient="horizontal")
         panes.pack(fill="both", expand=True, padx=6, pady=6)
@@ -429,7 +456,7 @@ class MarsColonyInterface:
         left_scroll = ttk.Scrollbar(left, orient="vertical", command=self.brain_request_list.yview)
         left_scroll.pack(side="right", fill="y")
         self.brain_request_list.configure(yscrollcommand=left_scroll.set)
-        self.brain_request_list.bind("<<ListboxSelect>>", lambda *_: self._update_brain_detail())
+        self.brain_request_list.bind("<<ListboxSelect>>", self._on_brain_list_selection_changed)
 
         detail_frame = ttk.LabelFrame(right, text="Request Detail", padding=6)
         detail_frame.pack(fill="both", expand=True)
@@ -439,16 +466,25 @@ class MarsColonyInterface:
         detail_scroll.pack(side="right", fill="y")
         self.brain_detail_text.configure(yscrollcommand=detail_scroll.set)
         self._brain_visible_rows = []
+        self._brain_visible_signature_cache = ()
+        self._brain_last_detail_key = None
+        self._brain_user_inspecting = False
 
-    def _update_brain_detail(self):
+    @staticmethod
+    def _brain_detail_bundle_for_row(row):
+        return MarsColonyInterface._brain_trace_detail_sections(row)
+
+    def _on_brain_list_selection_changed(self, *_args):
         if not hasattr(self, "brain_request_list"):
             return
         selected = self.brain_request_list.curselection()
-        row = self._brain_visible_rows[selected[0]] if selected and selected[0] < len(self._brain_visible_rows) else None
-        self.brain_detail_text.delete("1.0", tk.END)
-        if not row:
-            self.brain_detail_text.insert(tk.END, "No request selected.")
-            return
+        rows = self._brain_visible_rows or []
+        if selected and selected[0] < len(rows):
+            is_latest = selected[0] == len(rows) - 1
+            self._brain_user_inspecting = not is_latest
+        self._update_brain_detail()
+
+    def _format_brain_detail_text(self, row):
         sections = self._brain_trace_detail_sections(row)
         ordered = [
             ("1. Request summary", sections["request_summary"]),
@@ -459,12 +495,63 @@ class MarsColonyInterface:
             ("5. System interpretation", sections["system_interpretation"]),
             ("6. Errors / notes", sections["errors_notes"]),
         ]
+        rendered = []
         for heading, value in ordered:
-            self.brain_detail_text.insert(tk.END, f"{heading}\n")
-            self.brain_detail_text.insert(tk.END, f"{self._safe_pretty_json(value)}\n\n")
+            rendered.append(f"{heading}\n{self._safe_pretty_json(value)}\n")
+        return "\n".join(rendered)
 
-    def update_brain_tab(self):
+    def _update_brain_detail(self, *, force=False):
         if not hasattr(self, "brain_request_list"):
+            return
+        selected = self.brain_request_list.curselection()
+        row = self._brain_visible_rows[selected[0]] if selected and selected[0] < len(self._brain_visible_rows) else None
+        if not row:
+            self.brain_detail_text.delete("1.0", tk.END)
+            self.brain_detail_text.insert(tk.END, "No request selected.")
+            self._brain_last_detail_key = None
+            return
+        rendered = self._format_brain_detail_text(row)
+        detail_key = (row.get("trace_id"), rendered)
+        if not force and detail_key == self._brain_last_detail_key:
+            return
+        detail_scroll = self.brain_detail_text.yview()
+        self.brain_detail_text.delete("1.0", tk.END)
+        self.brain_detail_text.insert(tk.END, rendered)
+        if detail_scroll:
+            self.brain_detail_text.yview_moveto(detail_scroll[0])
+        self._brain_last_detail_key = detail_key
+
+    def _copy_to_clipboard(self, content, *, status_message):
+        text = str(content or "").strip()
+        if not text:
+            self.brain_copy_status_var.set("Nothing to copy.")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.brain_copy_status_var.set(status_message)
+        self.root.after(1200, lambda: self.brain_copy_status_var.set(""))
+
+    def _copy_brain_detail_text(self):
+        if not hasattr(self, "brain_detail_text"):
+            return
+        text = self.brain_detail_text.get("1.0", "end-1c")
+        self._copy_to_clipboard(text, status_message="Detail copied.")
+
+    def _copy_brain_selected_json(self):
+        if not hasattr(self, "brain_request_list"):
+            return
+        selected = self.brain_request_list.curselection()
+        row = self._brain_visible_rows[selected[0]] if selected and selected[0] < len(self._brain_visible_rows) else None
+        if not row:
+            self._copy_to_clipboard("", status_message="Nothing selected.")
+            return
+        bundle = self._brain_detail_bundle_for_row(row)
+        self._copy_to_clipboard(json.dumps(bundle, indent=2, sort_keys=True, default=str), status_message="Selected JSON copied.")
+
+    def update_brain_tab(self, *, force=False):
+        if not hasattr(self, "brain_request_list"):
+            return
+        if not force and hasattr(self, "brain_auto_refresh_var") and not self.brain_auto_refresh_var.get():
             return
         traces = []
         if self.sim and hasattr(self.sim, "logger") and hasattr(self.sim.logger, "get_recent_planner_traces"):
@@ -488,10 +575,17 @@ class MarsColonyInterface:
             selected_id = self._brain_visible_rows[selected_index[0]].get("trace_id")
 
         rows = self._brain_trace_rows_for_agent(traces, self.brain_agent_filter.get())
+        new_signature = self._brain_visible_signature(rows)
+        list_scroll = self.brain_request_list.yview()
+        rows_changed = force or new_signature != self._brain_visible_signature_cache
         self._brain_visible_rows = rows
-        self.brain_request_list.delete(0, tk.END)
-        for row in rows:
-            self.brain_request_list.insert(tk.END, self._brain_trace_summary_line(row))
+        if rows_changed:
+            self.brain_request_list.delete(0, tk.END)
+            for row in rows:
+                self.brain_request_list.insert(tk.END, self._brain_trace_summary_line(row))
+            if list_scroll:
+                self.brain_request_list.yview_moveto(list_scroll[0])
+            self._brain_visible_signature_cache = new_signature
 
         if rows:
             reselect = 0
@@ -500,9 +594,13 @@ class MarsColonyInterface:
                     if row.get("trace_id") == selected_id:
                         reselect = idx
                         break
+            elif self.brain_follow_latest_var.get() and not self._brain_user_inspecting:
+                reselect = len(rows) - 1
+            if self.brain_follow_latest_var.get() and not self._brain_user_inspecting and not selected_id:
+                reselect = len(rows) - 1
             self.brain_request_list.selection_set(reselect)
             self.brain_request_list.activate(reselect)
-        self._update_brain_detail()
+        self._update_brain_detail(force=force or rows_changed)
 
     def update_interaction_tab(self):
         if not self.sim or not hasattr(self.sim, "logger"):
