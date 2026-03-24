@@ -67,6 +67,7 @@ class PlannerCadenceConfig:
     unrestricted_local_qwen_mode: bool = False
     high_latency_stale_result_grace_s: float = 0.0
     sticky_backend_demotion_enabled: bool = False
+    planner_blocks_sim_time: bool | None = None
 
     @classmethod
     def from_dict(cls, payload):
@@ -100,6 +101,11 @@ class PlannerCadenceConfig:
                     "sticky_backend_demotion_enabled",
                     payload.get("allow_persistent_backend_demotion", False),
                 )
+            ),
+            planner_blocks_sim_time=(
+                bool(payload.get("planner_blocks_sim_time"))
+                if payload.get("planner_blocks_sim_time") is not None
+                else None
             ),
         )
 
@@ -278,6 +284,8 @@ class Agent:
             "startup_target_resolution_failures": 0,
             "startup_movement_blockers": 0,
             "startup_plan_invalidations": 0,
+            "blocking_sim_barrier": False,
+            "barrier_reason": None,
         }
         self._planner_future = None
         self._planner_future_lock = threading.Lock()
@@ -479,6 +487,21 @@ class Agent:
         self.planner_state["requested_at"] = None
         self.planner_state["request_tick"] = None
         self.planner_state["consecutive_inflight_skips"] = 0
+        self.planner_state["blocking_sim_barrier"] = False
+        self.planner_state["barrier_reason"] = None
+
+    def planner_request_blocks_sim_time(self, sim_state=None, runtime=None):
+        explicit = self.planner_cadence.planner_blocks_sim_time
+        if explicit is not None:
+            return bool(explicit)
+        runtime = runtime or (sim_state.get_agent_brain_runtime(self) if sim_state is not None and hasattr(sim_state, "get_agent_brain_runtime") else {})
+        configured_backend = str(runtime.get("configured_backend", self.brain_config.get("backend", "rule_brain")) or "rule_brain").lower()
+        effective_backend = str(runtime.get("effective_backend", configured_backend) or configured_backend).lower()
+        if self.planner_cadence.unrestricted_local_qwen_mode or self.planner_cadence.high_latency_local_llm_mode:
+            return True
+        if configured_backend in {"ollama", "ollama_local"} or effective_backend in {"ollama", "ollama_local"}:
+            return True
+        return False
 
     def _maybe_hard_demote_backend(self, sim_state, reason, activate_bootstrap=True):
         if sim_state is None or not hasattr(sim_state, "hard_demote_agent_backend"):
@@ -2330,7 +2353,7 @@ class Agent:
             ExecutableActionType.VALIDATE_CONSTRUCTION.value,
         }
 
-    def _execute_planner_request_sync(self, sim_state, trigger_reason, request_packet, request_explanation, request_started_at, request_sim_time, request_wallclock_time, trace_id):
+    def _execute_planner_request_sync(self, sim_state, trigger_reason, request_packet, request_explanation, request_started_at, request_sim_time, request_wallclock_time, trace_id, blocking_sim_barrier=False):
         context = sim_state.brain_context_builder.build(sim_state, self)
         runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"provider": sim_state.brain_provider, "config": sim_state.brain_backend_config, "configured_backend": getattr(sim_state, "configured_brain_backend", sim_state.brain_backend_config.backend), "effective_backend": getattr(sim_state, "effective_brain_backend", sim_state.brain_backend_config.backend)}
         provider = runtime["provider"]
@@ -2492,6 +2515,7 @@ class Agent:
             "fallback_source": provider_trace.get("fallback_source"),
             "trace_outcome_category": trace_outcome_category,
             "runtime_disposition": disposition,
+            "blocking_sim_barrier": bool(blocking_sim_barrier),
             "trace": {
                 "trace_id": trace_id,
                 "schema_validation_succeeded": not bool(schema_validation_errors),
@@ -2527,6 +2551,7 @@ class Agent:
         provider_cfg = runtime["config"]
         configured_backend = runtime.get("configured_backend", getattr(sim_state, "configured_brain_backend", sim_state.brain_backend_config.backend))
         effective_backend = runtime.get("effective_backend", configured_backend)
+        blocking_sim_barrier = self.planner_request_blocks_sim_time(sim_state=sim_state, runtime=runtime)
         request_explanation = self._should_request_explanation()
         request_packet = self._build_brain_request(sim_state, context, request_explanation, trigger_reason)
         trace_id = self._make_planner_trace_id(request_packet.request_id)
@@ -2546,6 +2571,8 @@ class Agent:
         self.planner_state["configured_backend"] = configured_backend
         self.planner_state["effective_backend"] = effective_backend
         self.planner_state["model"] = provider_cfg.local_model
+        self.planner_state["blocking_sim_barrier"] = bool(blocking_sim_barrier)
+        self.planner_state["barrier_reason"] = "planner_request_in_flight" if blocking_sim_barrier else None
         self.planner_state["last_result"] = None
         self.planner_state["total_started"] += 1
         if hasattr(sim_state, "logger") and hasattr(sim_state.logger, "record_brain_request_submitted"):
@@ -2564,9 +2591,10 @@ class Agent:
                     "trigger_reason": trigger_reason,
                     "request_payload": request_packet.to_dict(),
                     "status": "in_flight",
+                    "blocking_sim_barrier": bool(blocking_sim_barrier),
                 }
             )
-        self._emit_event(sim_state, "planner_request_started_async", {"request_id": request_packet.request_id, "trace_id": trace_id, "trigger_reason": trigger_reason, "backend": configured_backend, "effective_backend": effective_backend, "timeout": self.planner_cadence.planner_timeout_seconds, "model": provider_cfg.local_model, "queue_depth": 1, "high_latency_local_llm_mode": bool(self.planner_cadence.high_latency_local_llm_mode)})
+        self._emit_event(sim_state, "planner_request_started_async", {"request_id": request_packet.request_id, "trace_id": trace_id, "trigger_reason": trigger_reason, "backend": configured_backend, "effective_backend": effective_backend, "timeout": self.planner_cadence.planner_timeout_seconds, "model": provider_cfg.local_model, "queue_depth": 1, "high_latency_local_llm_mode": bool(self.planner_cadence.high_latency_local_llm_mode), "blocking_sim_barrier": bool(blocking_sim_barrier)})
         self._emit_event(sim_state, "planner_request_queue_depth", {"request_id": request_packet.request_id, "trace_id": trace_id, "queue_depth": 1, "backend": configured_backend})
 
         with self._planner_future_lock:
@@ -2580,6 +2608,7 @@ class Agent:
                 request_sim_time,
                 request_wallclock_time,
                 trace_id,
+                bool(blocking_sim_barrier),
             )
 
     def _planner_cooldown_remaining(self, sim_state):
@@ -2588,6 +2617,8 @@ class Agent:
 
     def _register_planner_failure(self, sim_state, request_id, reason, timed_out=False):
         self.planner_state["status"] = "timed_out" if timed_out else "failed"
+        self.planner_state["blocking_sim_barrier"] = False
+        self.planner_state["barrier_reason"] = None
         if timed_out:
             self.planner_state["total_timed_out"] += 1
             self.planner_state["llm_timeout_count"] += 1
@@ -2779,6 +2810,8 @@ class Agent:
         self.planner_state["last_result"] = result
         self.planner_state["last_result_request_id"] = request_id
         self.planner_state["total_completed"] += 1
+        self.planner_state["blocking_sim_barrier"] = False
+        self.planner_state["barrier_reason"] = None
 
         decision = result["decision"]
         status = result["status"]
@@ -2826,6 +2859,7 @@ class Agent:
             and trigger_reason not in {"no_active_plan", "plan_invalidated", "plan_completed"}
             and getattr(self.current_plan, "source", None) == "planner"
             and (not self.planner_cadence.high_latency_local_llm_mode)
+            and (not bool(result.get("blocking_sim_barrier")))
         ):
             self.planner_state["total_stale_discarded"] += 1
             self.planner_state["status"] = "completed"
@@ -4066,7 +4100,7 @@ class Agent:
         self._evaluate_goal_state(environment)
         self.current_action = self._plan_actions_for_current_goal()
 
-    def update(self, dt, environment, sim_state=None):
+    def update(self, dt, environment, sim_state=None, planner_lifecycle_already_polled=False):
         self.update_physiology(exertion=0.5)
         self.update_knowledge(environment, full_packet_sweep=(sim_state is None), sim_state=sim_state)
         self._apply_task_derivations(sim_state=sim_state)
@@ -4076,8 +4110,9 @@ class Agent:
         else:
             self.perceive_environment(sim_state)
             self.sim_step_count += 1
-            self._check_inflight_timeout(sim_state)
-            self._poll_planner_request(sim_state, environment)
+            if not planner_lifecycle_already_polled:
+                self._check_inflight_timeout(sim_state)
+                self._poll_planner_request(sim_state, environment)
             if self.active_actions:
                 self._advance_active_actions(dt, sim_state=sim_state)
             else:

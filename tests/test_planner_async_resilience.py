@@ -278,6 +278,125 @@ class TestPlannerAsyncResilience(unittest.TestCase):
             self.assertIn("llm_timeout_count", planner_metrics)
             self.assertIn("fallback_generated_count", planner_metrics)
 
+    def test_blocking_backend_pauses_sim_time_until_result(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                brain_backend="local_http",
+                brain_backend_options={"timeout_s": 1.0, "max_retries": 0, "fallback_backend": "rule_brain"},
+                planner_config={"planner_interval_steps": 1, "planner_interval_time": 0.0, "high_latency_local_llm_mode": True, "enable_startup_llm_sanity": False},
+            )
+
+            def slow_generate(self, request_packet):
+                time.sleep(0.25)
+                return self.fallback.generate_plan(request_packet)
+
+            with patch("modules.brain_provider.OllamaLocalBrainProvider.generate_plan", new=slow_generate):
+                sim.agents[0]._submit_planner_request_async(sim, "unit_test")
+                paused_time = sim.time
+                for _ in range(3):
+                    time.sleep(0.08)
+                    sim.update(0.1)
+                    self.assertEqual(sim.time, paused_time)
+                time.sleep(0.3)
+                sim.update(0.1)
+                self.assertGreater(sim.time, paused_time)
+                events = sim.logger.get_recent_events(300)
+                self.assertTrue(any(e.get("event_type") == "planner_barrier_started" for e in events))
+                self.assertTrue(any(e.get("event_type") == "planner_barrier_resolved" for e in events))
+            sim.stop()
+
+    def test_rule_brain_path_does_not_hold_barrier(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                brain_backend="rule_brain",
+                planner_config={"planner_interval_steps": 1, "planner_interval_time": 0.0},
+            )
+            t0 = sim.time
+            sim.update(0.1)
+            sim.update(0.1)
+            self.assertGreater(sim.time, t0)
+            self.assertFalse(sim.planner_barrier_state.get("active"))
+            sim.stop()
+
+    def test_single_agent_blocking_request_pauses_global_sim(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                brain_backend="local_http",
+                brain_backend_options={"timeout_s": 1.0, "max_retries": 0, "fallback_backend": "rule_brain"},
+                planner_config={"planner_interval_steps": 1, "planner_interval_time": 0.0, "high_latency_local_llm_mode": True, "enable_startup_llm_sanity": False},
+            )
+            sim.agents[1].planner_cadence.planner_enabled = False
+            sim.agents[2].planner_cadence.planner_enabled = False
+
+            def slow_generate(self, request_packet):
+                time.sleep(0.25)
+                return self.fallback.generate_plan(request_packet)
+
+            with patch("modules.brain_provider.OllamaLocalBrainProvider.generate_plan", new=slow_generate):
+                sim.agents[0]._submit_planner_request_async(sim, "unit_test")
+                paused = sim.time
+                sim.update(0.1)
+                self.assertEqual(sim.time, paused)
+                self.assertTrue(sim.planner_barrier_state.get("active"))
+                self.assertGreaterEqual(len(sim.planner_barrier_state.get("blocking_agent_ids", [])), 1)
+            sim.stop()
+
+    def test_brain_lifecycle_updates_while_sim_time_paused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                brain_backend="local_http",
+                brain_backend_options={"timeout_s": 1.0, "max_retries": 0, "fallback_backend": "rule_brain"},
+                planner_config={"planner_interval_steps": 1, "planner_interval_time": 0.0, "high_latency_local_llm_mode": True, "enable_startup_llm_sanity": False},
+            )
+
+            def slow_generate(self, request_packet):
+                time.sleep(0.2)
+                return self.fallback.generate_plan(request_packet)
+
+            with patch("modules.brain_provider.OllamaLocalBrainProvider.generate_plan", new=slow_generate):
+                sim.agents[0]._submit_planner_request_async(sim, "unit_test")
+                paused = sim.time
+                time.sleep(0.25)
+                sim.update(0.1)
+                lifecycle = sim.logger.get_recent_brain_lifecycle(40)
+                self.assertTrue(lifecycle)
+                self.assertTrue(any(row.get("response", {}).get("status") in {"response_received", "pending"} for row in lifecycle))
+                self.assertEqual(paused, lifecycle[-1].get("sim_time"))
+                sim.stop()
+
+    def test_manifest_tracks_barrier_totals(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                brain_backend="local_http",
+                brain_backend_options={"timeout_s": 1.0, "max_retries": 0, "fallback_backend": "rule_brain"},
+                planner_config={"planner_interval_steps": 1, "planner_interval_time": 0.0, "high_latency_local_llm_mode": True, "enable_startup_llm_sanity": False},
+            )
+
+            def slow_generate(self, request_packet):
+                time.sleep(0.2)
+                return self.fallback.generate_plan(request_packet)
+
+            with patch("modules.brain_provider.OllamaLocalBrainProvider.generate_plan", new=slow_generate):
+                sim.agents[0]._submit_planner_request_async(sim, "unit_test")
+                time.sleep(0.25)
+                sim.update(0.1)
+            sim.stop()
+            session_dir = next((sim.logger.output_session.outputs_root).iterdir())
+            manifest = json.loads((session_dir / "session_manifest.json").read_text(encoding="utf-8"))
+            self.assertIn("planner_barrier_pause_count", manifest)
+            self.assertIn("planner_barrier_total_wallclock_wait_s", manifest)
+            self.assertEqual(manifest.get("planner_barrier_policy"), "global")
+
 
 if __name__ == "__main__":
     unittest.main()
