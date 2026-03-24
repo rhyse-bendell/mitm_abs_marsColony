@@ -477,6 +477,8 @@ def run_startup_llm_sanity_check(
         runtime = simulation.get_agent_brain_runtime(agent)
         runtime_config = runtime["config"]
         backend = str(runtime.get("configured_backend", runtime_config.backend)).lower()
+        request_id = f"startup-sanity-{getattr(agent, 'agent_id', agent.name)}-{timestamp}-{idx}"
+        trace_id = f"trace-{request_id}"
         prompt = build_startup_sanity_prompt(
             agent,
             simulation.task_model,
@@ -486,6 +488,8 @@ def run_startup_llm_sanity_check(
         endpoint = f"{runtime_config.local_base_url.rstrip('/')}{runtime_config.local_endpoint}"
         runtime_bootstrap = runtime.get("bootstrap") if isinstance(runtime, dict) else None
         row: Dict[str, Any] = {
+            "request_id": request_id,
+            "trace_id": trace_id,
             "agent_id": getattr(agent, "agent_id", agent.name),
             "agent_name": agent.name,
             "display_name": agent.display_name,
@@ -531,9 +535,56 @@ def run_startup_llm_sanity_check(
             "validation_errors": [],
             "error": None,
         }
+        if hasattr(simulation.logger, "record_brain_request_submitted"):
+            simulation.logger.record_brain_request_submitted(
+                {
+                    "request_id": request_id,
+                    "trace_id": trace_id,
+                    "request_kind": "startup_sanity",
+                    "agent_id": row["agent_id"],
+                    "display_name": row["display_name"],
+                    "tick": 0,
+                    "sim_time": float(getattr(simulation, "time", 0.0)),
+                    "configured_backend": row.get("configured_backend"),
+                    "effective_backend": row.get("effective_backend"),
+                    "model": row.get("model"),
+                    "trigger_reason": "startup_sanity",
+                    "request_payload": prompt.get("prompt_contract"),
+                    "status": "in_flight",
+                }
+            )
 
         if backend not in LOCAL_BACKEND_ALIASES:
             row["error"] = f"backend_not_local:{backend}"
+            if hasattr(simulation.logger, "record_brain_response_phase"):
+                simulation.logger.record_brain_response_phase(
+                    request_id,
+                    {
+                        "trace_id": trace_id,
+                        "sim_time": float(getattr(simulation, "time", 0.0)),
+                        "tick": 0,
+                        "status": "transport_error",
+                        "http_response_received": False,
+                        "json_parsed": False,
+                        "normalized_payload_exists": False,
+                        "error": row["error"],
+                    },
+                )
+            if hasattr(simulation.logger, "record_brain_interpretation_phase"):
+                simulation.logger.record_brain_interpretation_phase(
+                    request_id,
+                    {
+                        "trace_id": trace_id,
+                        "sim_time": float(getattr(simulation, "time", 0.0)),
+                        "tick": 0,
+                        "status": "rejected_schema_invalid",
+                        "runtime_disposition": "rejected_schema_invalid",
+                        "planner_result": "failed",
+                        "usable_plan": False,
+                        "failure_mode": row["error"],
+                        "request_status": "failed",
+                    },
+                )
             if isinstance(runtime_bootstrap, dict):
                 runtime_bootstrap.update({"status": "failed", "latency_ms": None, "validated_response": None, "summary_text": None, "summary_structured": None})
             results.append(row)
@@ -648,6 +699,46 @@ def run_startup_llm_sanity_check(
         provider = runtime.get("provider")
         if hasattr(provider, "last_outcome") and isinstance(provider.last_outcome, dict):
             row["fallback_used"] = bool(provider.last_outcome.get("fallback", False))
+        if hasattr(simulation.logger, "record_brain_response_phase"):
+            if row.get("timeout"):
+                response_status = "no_response_timeout"
+            elif row.get("response_received"):
+                response_status = "response_received"
+            elif row.get("error"):
+                response_status = "transport_error"
+            else:
+                response_status = "parsed_invalid"
+            simulation.logger.record_brain_response_phase(
+                request_id,
+                {
+                    "trace_id": trace_id,
+                    "sim_time": float(getattr(simulation, "time", 0.0)),
+                    "tick": 0,
+                    "status": response_status,
+                    "http_response_received": bool(row.get("response_received")),
+                    "json_parsed": bool(row.get("json_parsed")),
+                    "normalized_payload_exists": bool(row.get("parsed_response")),
+                    "raw_response": row.get("raw_response_text"),
+                    "parsed_payload": row.get("parsed_response"),
+                    "error": row.get("error"),
+                },
+            )
+        if hasattr(simulation.logger, "record_brain_interpretation_phase"):
+            runtime_disposition = "accepted_as_is" if row.get("validation_success") else ("timed_out" if row.get("timeout") else "rejected_schema_invalid")
+            simulation.logger.record_brain_interpretation_phase(
+                request_id,
+                {
+                    "trace_id": trace_id,
+                    "sim_time": float(getattr(simulation, "time", 0.0)),
+                    "tick": 0,
+                    "status": runtime_disposition,
+                    "runtime_disposition": runtime_disposition,
+                    "planner_result": "accepted" if row.get("validation_success") else ("timed_out" if row.get("timeout") else "failed"),
+                    "usable_plan": bool(row.get("validation_success")),
+                    "failure_mode": row.get("failure_category") or row.get("error"),
+                    "request_status": "completed" if row.get("validation_success") else ("timed_out" if row.get("timeout") else "failed"),
+                },
+            )
 
         results.append(row)
         _emit_progress(

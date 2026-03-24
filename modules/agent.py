@@ -2548,6 +2548,24 @@ class Agent:
         self.planner_state["model"] = provider_cfg.local_model
         self.planner_state["last_result"] = None
         self.planner_state["total_started"] += 1
+        if hasattr(sim_state, "logger") and hasattr(sim_state.logger, "record_brain_request_submitted"):
+            sim_state.logger.record_brain_request_submitted(
+                {
+                    "request_id": request_packet.request_id,
+                    "trace_id": trace_id,
+                    "request_kind": "planner",
+                    "agent_id": self.agent_id,
+                    "display_name": self.display_name,
+                    "tick": self.sim_step_count,
+                    "sim_time": float(sim_state.time),
+                    "configured_backend": configured_backend,
+                    "effective_backend": effective_backend,
+                    "model": provider_cfg.local_model,
+                    "trigger_reason": trigger_reason,
+                    "request_payload": request_packet.to_dict(),
+                    "status": "in_flight",
+                }
+            )
         self._emit_event(sim_state, "planner_request_started_async", {"request_id": request_packet.request_id, "trace_id": trace_id, "trigger_reason": trigger_reason, "backend": configured_backend, "effective_backend": effective_backend, "timeout": self.planner_cadence.planner_timeout_seconds, "model": provider_cfg.local_model, "queue_depth": 1, "high_latency_local_llm_mode": bool(self.planner_cadence.high_latency_local_llm_mode)})
         self._emit_event(sim_state, "planner_request_queue_depth", {"request_id": request_packet.request_id, "trace_id": trace_id, "queue_depth": 1, "backend": configured_backend})
 
@@ -2628,6 +2646,38 @@ class Agent:
                 "plan_disposition": "failed_before_response",
             },
         )
+        if hasattr(sim_state, "logger") and hasattr(sim_state.logger, "record_brain_response_phase"):
+            sim_state.logger.record_brain_response_phase(
+                request_id,
+                {
+                    "trace_id": self.planner_state.get("trace_id"),
+                    "sim_time": float(sim_state.time),
+                    "tick": self.sim_step_count,
+                    "status": "no_response_timeout" if timed_out else "transport_error",
+                    "http_response_received": False,
+                    "json_parsed": False,
+                    "normalized_payload_exists": False,
+                    "repair_retry_attempted": False,
+                    "raw_response_available": False,
+                    "parsed_payload_available": False,
+                    "error": str(reason),
+                },
+            )
+        if hasattr(sim_state, "logger") and hasattr(sim_state.logger, "record_brain_interpretation_phase"):
+            sim_state.logger.record_brain_interpretation_phase(
+                request_id,
+                {
+                    "trace_id": self.planner_state.get("trace_id"),
+                    "sim_time": float(sim_state.time),
+                    "tick": self.sim_step_count,
+                    "status": "timed_out" if timed_out else "transport_error",
+                    "runtime_disposition": "timed_out" if timed_out else "fallback_generated",
+                    "planner_result": "timed_out" if timed_out else "failed",
+                    "usable_plan": False,
+                    "failure_mode": "timeout" if timed_out else "transport_error",
+                    "request_status": "timed_out" if timed_out else "failed",
+                },
+            )
 
     def _check_inflight_timeout(self, sim_state):
         if self.planner_state.get("status") != "in_flight":
@@ -2659,11 +2709,40 @@ class Agent:
             self._register_planner_failure(sim_state, request_id, reason=str(exc), timed_out=False)
             self._emit_event(sim_state, "planner_request_completed_async", {"request_id": request_id, "trace_id": self.planner_state.get("trace_id"), "result": "failed", "error": str(exc), "consecutive_failures": self.planner_state["consecutive_failures"], "cooldown_remaining": self._planner_cooldown_remaining(sim_state)})
             return False
+        if hasattr(sim_state, "logger") and hasattr(sim_state.logger, "record_brain_response_phase"):
+            provider_trace = (result.get("trace", {}) or {}).get("provider_trace") or {}
+            attempts = provider_trace.get("attempts") or []
+            last_attempt = attempts[-1] if attempts else {}
+            sim_state.logger.record_brain_response_phase(
+                result.get("request_id"),
+                {
+                    "trace_id": result.get("trace_id"),
+                    "sim_time": float(sim_state.time),
+                    "tick": self.sim_step_count,
+                    "status": (
+                        "no_response_timeout"
+                        if result.get("timeout_occurred")
+                        else ("response_received" if result.get("llm_response_received") else ("transport_error" if result.get("fallback_used") else "pending"))
+                    ),
+                    "http_response_received": bool(result.get("llm_response_received")),
+                    "json_parsed": bool(result.get("llm_response_parsed")),
+                    "normalized_payload_exists": bool(last_attempt.get("normalized_response_payload") or (result.get("trace", {}) or {}).get("normalized_agent_brain_response")),
+                    "repair_retry_attempted": bool(provider_trace.get("repair_retry_attempted")),
+                    "raw_response_available": bool(last_attempt.get("raw_http_response_text")),
+                    "parsed_payload_available": bool(last_attempt.get("extracted_response_payload")),
+                    "raw_response": last_attempt.get("raw_http_response_text"),
+                    "parsed_payload": last_attempt.get("extracted_response_payload"),
+                    "normalized_payload": last_attempt.get("normalized_response_payload") or (result.get("trace", {}) or {}).get("normalized_agent_brain_response"),
+                    "provider_trace": provider_trace or None,
+                },
+            )
 
         if result.get("request_id") != request_id:
             self.planner_state["total_stale_discarded"] += 1
             self._emit_event(sim_state, "planner_request_result_arrived_stale", {"request_id": result.get("request_id"), "expected_request_id": request_id, "trace_id": result.get("trace_id")})
             self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": result.get("request_id"), "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": "stale_discarded", "plan_disposition": "discarded_stale_request_id_mismatch", "runtime_disposition": "stale_discarded_request_id_mismatch", "fallback": True, "fallback_used": True, "fallback_source": "stale_response_guard", "result_source": "fallback_safe_policy", "fallback_reason": "request_id_mismatch", "trace_outcome_category": "stale_response_discarded", "late_result_arrived": bool(result.get("request_id") in self._timed_out_request_ids), "late_result_accepted": False, "stale_discard_reason": "request_id_mismatch"})
+            if hasattr(sim_state, "logger") and hasattr(sim_state.logger, "record_brain_interpretation_phase"):
+                sim_state.logger.record_brain_interpretation_phase(result.get("request_id"), {"trace_id": result.get("trace_id"), "sim_time": float(sim_state.time), "tick": self.sim_step_count, "status": "stale_discarded", "runtime_disposition": "stale_discarded_request_id_mismatch", "planner_result": "stale_discarded", "usable_plan": False, "failure_mode": "request_id_mismatch", "request_status": "discarded"})
             return False
         late_result_accepted = False
         late_result_elapsed_s = None
@@ -2687,6 +2766,8 @@ class Agent:
                 self.planner_state["total_stale_discarded"] += 1
                 self._emit_event(sim_state, "planner_request_result_arrived_stale", {"request_id": result.get("request_id"), "reason": "arrived_after_timeout", "trace_id": result.get("trace_id")})
                 self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": result.get("request_id"), "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": "stale_discarded", "plan_disposition": "discarded_arrived_after_timeout", "runtime_disposition": "stale_discarded_arrived_after_timeout", "fallback": True, "fallback_used": True, "fallback_source": "stale_response_guard", "result_source": "fallback_safe_policy", "fallback_reason": "arrived_after_timeout", "trace_outcome_category": "stale_response_discarded", "trace": result.get("trace"), "late_result_arrived": True, "late_result_accepted": False, "late_result_elapsed_s": late_result_elapsed_s, "stale_discard_reason": "arrived_after_timeout"})
+                if hasattr(sim_state, "logger") and hasattr(sim_state.logger, "record_brain_interpretation_phase"):
+                    sim_state.logger.record_brain_interpretation_phase(result.get("request_id"), {"trace_id": result.get("trace_id"), "sim_time": float(sim_state.time), "tick": self.sim_step_count, "status": "stale_discarded", "runtime_disposition": "stale_discarded_arrived_after_timeout", "planner_result": "stale_discarded", "usable_plan": False, "failure_mode": "arrived_after_timeout", "late_result_arrived": True, "late_result_accepted": False, "request_status": "discarded"})
                 return False
 
         self.planner_call_count += 1
@@ -2752,6 +2833,8 @@ class Agent:
             if result.get("fallback_used"):
                 self._emit_event(sim_state, "fallback_result_rejected", {"request_id": request_id, "trace_id": result.get("trace_id"), "reason": "state_changed_before_adoption"})
             self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": request_id, "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": status, "plan_disposition": "discarded_due_to_state_change", "runtime_disposition": "stale_discarded_state_changed", "fallback": bool(result.get("fallback_used")), "fallback_used": bool(result.get("fallback_used")), "fallback_source": result.get("fallback_source"), "result_source": result.get("result_source"), "fallback_reason": "state_changed_before_adoption", "trace_outcome_category": "stale_response_discarded", "trace": result.get("trace"), "late_result_arrived": late_result_accepted, "late_result_accepted": False, "late_result_elapsed_s": late_result_elapsed_s, "stale_discard_reason": "state_changed_before_adoption"})
+            if hasattr(sim_state, "logger") and hasattr(sim_state.logger, "record_brain_interpretation_phase"):
+                sim_state.logger.record_brain_interpretation_phase(request_id, {"trace_id": result.get("trace_id"), "sim_time": float(sim_state.time), "tick": self.sim_step_count, "status": "stale_discarded", "runtime_disposition": "stale_discarded_state_changed", "planner_result": status, "usable_plan": False, "failure_mode": "state_changed_before_adoption", "late_result_arrived": late_result_accepted, "late_result_accepted": False, "request_status": "discarded"})
             return False
 
         self._adopt_new_plan(decision, trigger_reason, sim_state, response=response, trace_id=result.get("trace_id"), result_source=result.get("result_source"), fallback_used=bool(result.get("fallback_used")) )
@@ -2841,6 +2924,28 @@ class Agent:
             "action_translation_outcome": "succeeded" if translated_actions else "none",
             "translated_actions": translated_actions,
         })
+        if hasattr(sim_state, "logger") and hasattr(sim_state.logger, "record_brain_interpretation_phase"):
+            sim_state.logger.record_brain_interpretation_phase(
+                request_id,
+                {
+                    "trace_id": result.get("trace_id"),
+                    "sim_time": float(sim_state.time),
+                    "tick": self.sim_step_count,
+                    "status": str(result.get("runtime_disposition") or ("fallback_adopted" if result.get("fallback_used") else "accepted_as_is")),
+                    "runtime_disposition": result.get("runtime_disposition") or ("fallback_adopted" if result.get("fallback_used") else "accepted_as_is"),
+                    "planner_result": status,
+                    "usable_plan": True,
+                    "adopted_action": decision.selected_action.value,
+                    "fallback_source": result.get("fallback_source"),
+                    "fallback_used": bool(result.get("fallback_used")),
+                    "schema_validation_errors": (result.get("trace", {}) or {}).get("schema_validation_errors"),
+                    "plan_grounding_status": (result.get("trace", {}) or {}).get("grounding_status"),
+                    "plan_grounding_notes": (result.get("trace", {}) or {}).get("grounding_notes"),
+                    "late_result_arrived": late_result_accepted,
+                    "late_result_accepted": late_result_accepted,
+                    "request_status": "completed",
+                },
+            )
         selected_action_value = decision.selected_action.value
         if self.selection_loop_guard.get("last_action") == selected_action_value:
             self.selection_loop_guard["consecutive_count"] = int(self.selection_loop_guard.get("consecutive_count", 0) or 0) + 1
