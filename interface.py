@@ -418,7 +418,7 @@ class MarsColonyInterface:
         )
 
     @staticmethod
-    def _brain_trace_detail_sections(row):
+    def _brain_lifecycle_detail_sections(row):
         request_data = row.get("request") or {}
         response_data = row.get("response") or {}
         interpretation_data = row.get("interpretation") or {}
@@ -476,6 +476,11 @@ class MarsColonyInterface:
         }
 
     @staticmethod
+    def _brain_trace_detail_sections(row):
+        """Backward-compatible alias for older helper names."""
+        return MarsColonyInterface._brain_lifecycle_detail_sections(row)
+
+    @staticmethod
     def _brain_trace_rows_for_agent(traces, agent_filter):
         return MarsColonyInterface._brain_lifecycle_rows_for_agent(traces, agent_filter)
 
@@ -529,7 +534,7 @@ class MarsColonyInterface:
         ttk.Button(controls, text="Copy raw", command=self._copy_brain_raw_response).pack(side="left", padx=4)
         ttk.Button(controls, text="Copy normalized", command=self._copy_brain_normalized_response).pack(side="left", padx=4)
         ttk.Button(controls, text="Copy attempts", command=self._copy_brain_provider_attempts).pack(side="left", padx=4)
-        ttk.Button(controls, text="Copy trace bundle", command=self._copy_brain_trace_bundle).pack(side="left", padx=4)
+        ttk.Button(controls, text="Copy lifecycle bundle", command=self._copy_brain_lifecycle_bundle).pack(side="left", padx=4)
         self.brain_copy_status_var = StringVar(value="")
         ttk.Label(controls, textvariable=self.brain_copy_status_var, foreground="#3f556e").pack(side="right")
 
@@ -579,13 +584,13 @@ class MarsColonyInterface:
 
     @staticmethod
     def _brain_detail_bundle_for_row(row):
-        return MarsColonyInterface._brain_trace_detail_sections(row)
+        return MarsColonyInterface._brain_lifecycle_detail_sections(row)
 
     @staticmethod
     def _brain_lifecycle_bundle_for_request(rows, request_id):
         for row in rows or []:
             if str(row.get("request_id")) == str(request_id):
-                return MarsColonyInterface._brain_trace_detail_sections(row)
+                return MarsColonyInterface._brain_lifecycle_detail_sections(row)
         return {}
 
     @staticmethod
@@ -634,7 +639,7 @@ class MarsColonyInterface:
                 lb.activate(index)
 
     def _format_brain_detail_text(self, row):
-        sections = self._brain_trace_detail_sections(row)
+        sections = self._brain_lifecycle_detail_sections(row)
         ordered = [
             ("1. Request summary", sections["request_summary"]),
             ("2. Request payload", sections["request_payload"]),
@@ -717,27 +722,31 @@ class MarsColonyInterface:
         attempts = (((row or {}).get("response") or {}).get("provider_trace") or {}).get("attempts") or []
         self._copy_to_clipboard(self._safe_pretty_json(attempts), status_message="Provider attempts copied.")
 
-    def _copy_brain_trace_bundle(self):
+    def _copy_brain_lifecycle_bundle(self):
         row = self._brain_selected_row()
         bundle = self._brain_detail_bundle_for_row(row) if row else {}
-        self._copy_to_clipboard(self._safe_pretty_json(bundle), status_message="Trace bundle copied.")
+        self._copy_to_clipboard(self._safe_pretty_json(bundle), status_message="Lifecycle bundle copied.")
+
+    def _copy_brain_trace_bundle(self):
+        """Backward-compatible alias for older tests/callers."""
+        self._copy_brain_lifecycle_bundle()
 
     def update_brain_tab(self, *, force=False):
         if not hasattr(self, "brain_request_list"):
             return
         if not force and hasattr(self, "brain_auto_refresh_var") and not self.brain_auto_refresh_var.get():
             return
-        traces = []
+        lifecycle_rows = []
         if self.sim and hasattr(self.sim, "logger"):
             if hasattr(self.sim.logger, "get_recent_brain_lifecycle"):
-                traces = list(self.sim.logger.get_recent_brain_lifecycle(500))
+                lifecycle_rows = list(self.sim.logger.get_recent_brain_lifecycle(500))
             elif hasattr(self.sim.logger, "get_recent_planner_traces"):
                 raw_traces = list(self.sim.logger.get_recent_planner_traces(500))
-                traces = [{"request_id": row.get("request_id"), "trace_id": row.get("trace_id"), "agent_id": row.get("agent_id"), "display_name": row.get("display_name"), "sim_time": row.get("sim_time"), "tick": row.get("tick"), "request_kind": "planner", "request": {"status": "completed", "configured_backend": row.get("configured_backend"), "effective_backend": row.get("effective_backend"), "model": row.get("model"), "trigger_reason": row.get("trigger_reason"), "request_payload": row.get("agent_brain_request_payload")}, "response": {"status": "response_received" if row.get("llm_response_received") else ("no_response_timeout" if row.get("timeout_occurred") else "transport_error"), "http_response_received": row.get("llm_response_received"), "json_parsed": row.get("llm_response_parsed"), "normalized_payload_exists": bool(row.get("normalized_agent_brain_response")), "raw_response": row.get("raw_http_response_text"), "parsed_payload": row.get("extracted_response_payload"), "normalized_payload": row.get("normalized_agent_brain_response"), "provider_trace": row.get("provider_trace")}, "interpretation": {"status": row.get("runtime_disposition") or row.get("planner_result"), "runtime_disposition": row.get("runtime_disposition"), "planner_result": row.get("planner_result"), "result_source": row.get("result_source"), "adopted_action": (row.get("next_action_summary") or {}).get("action_type"), "fallback_used": row.get("fallback_used"), "fallback_source": row.get("fallback_source"), "schema_validation_errors": row.get("schema_validation_errors"), "plan_grounding_status": row.get("plan_grounding_status"), "plan_grounding_notes": row.get("plan_grounding_notes"), "late_result_arrived": row.get("late_result_arrived"), "late_result_accepted": row.get("late_result_accepted"), "stale_discard_reason": row.get("stale_discard_reason")}} for row in raw_traces]
+                lifecycle_rows = [{"request_id": row.get("request_id"), "trace_id": row.get("trace_id"), "agent_id": row.get("agent_id"), "display_name": row.get("display_name"), "sim_time": row.get("sim_time"), "tick": row.get("tick"), "request_kind": "planner", "request": {"status": "completed", "configured_backend": row.get("configured_backend"), "effective_backend": row.get("effective_backend"), "model": row.get("model"), "trigger_reason": row.get("trigger_reason"), "request_payload": row.get("agent_brain_request_payload")}, "response": {"status": "response_received" if row.get("llm_response_received") else ("no_response_timeout" if row.get("timeout_occurred") else "transport_error"), "http_response_received": row.get("llm_response_received"), "json_parsed": row.get("llm_response_parsed"), "normalized_payload_exists": bool(row.get("normalized_agent_brain_response")), "raw_response": row.get("raw_http_response_text"), "parsed_payload": row.get("extracted_response_payload"), "normalized_payload": row.get("normalized_agent_brain_response"), "provider_trace": row.get("provider_trace")}, "interpretation": {"status": row.get("runtime_disposition") or row.get("planner_result"), "runtime_disposition": row.get("runtime_disposition"), "planner_result": row.get("planner_result"), "result_source": row.get("result_source"), "adopted_action": (row.get("next_action_summary") or {}).get("action_type"), "fallback_used": row.get("fallback_used"), "fallback_source": row.get("fallback_source"), "schema_validation_errors": row.get("schema_validation_errors"), "plan_grounding_status": row.get("plan_grounding_status"), "plan_grounding_notes": row.get("plan_grounding_notes"), "late_result_arrived": row.get("late_result_arrived"), "late_result_accepted": row.get("late_result_accepted"), "stale_discard_reason": row.get("stale_discard_reason")}} for row in raw_traces]
         agent_names = sorted(
             {
                 str(row.get("display_name") or row.get("agent_id"))
-                for row in traces
+                for row in lifecycle_rows
                 if row.get("display_name") or row.get("agent_id")
             }
         )
@@ -752,8 +761,8 @@ class MarsColonyInterface:
         if selected_index is not None and selected_index < len(self._brain_visible_rows):
             selected_id = self._brain_visible_rows[selected_index].get("request_id")
 
-        disposition_values = sorted({str((r.get("interpretation") or {}).get("runtime_disposition") or (r.get("interpretation") or {}).get("planner_result") or (r.get("interpretation") or {}).get("status") or "") for r in traces if (r.get("interpretation") or {}).get("status") or (r.get("interpretation") or {}).get("runtime_disposition") or (r.get("interpretation") or {}).get("planner_result")})
-        source_values = sorted({str((r.get("interpretation") or {}).get("result_source") or (r.get("request") or {}).get("effective_backend") or (r.get("request") or {}).get("configured_backend") or "") for r in traces if (r.get("request") or {}).get("configured_backend") or (r.get("interpretation") or {}).get("result_source")})
+        disposition_values = sorted({str((r.get("interpretation") or {}).get("runtime_disposition") or (r.get("interpretation") or {}).get("planner_result") or (r.get("interpretation") or {}).get("status") or "") for r in lifecycle_rows if (r.get("interpretation") or {}).get("status") or (r.get("interpretation") or {}).get("runtime_disposition") or (r.get("interpretation") or {}).get("planner_result")})
+        source_values = sorted({str((r.get("interpretation") or {}).get("result_source") or (r.get("request") or {}).get("effective_backend") or (r.get("request") or {}).get("configured_backend") or "") for r in lifecycle_rows if (r.get("request") or {}).get("configured_backend") or (r.get("interpretation") or {}).get("result_source")})
         self.brain_disposition_combo.configure(values=["All"] + disposition_values)
         if self.brain_disposition_filter.get() not in (["All"] + disposition_values):
             self.brain_disposition_filter.set("All")
@@ -761,7 +770,7 @@ class MarsColonyInterface:
         if self.brain_source_filter.get() not in (["All"] + source_values):
             self.brain_source_filter.set("All")
         rows = self._brain_lifecycle_rows_filtered(
-            traces,
+            lifecycle_rows,
             agent_filter=self.brain_agent_filter.get(),
             disposition_filter=self.brain_disposition_filter.get(),
             source_filter=self.brain_source_filter.get(),
