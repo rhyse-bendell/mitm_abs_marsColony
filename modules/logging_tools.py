@@ -3,6 +3,7 @@
 import csv
 import json
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -171,6 +172,9 @@ class SimulationLogger:
         self.max_recent_interactions = 300
         self.recent_planner_traces = []
         self.max_recent_planner_traces = 800
+        self.brain_lifecycle_by_request = {}
+        self.brain_lifecycle_order = []
+        self.max_recent_brain_lifecycle = 1000
 
     def _append_recent_event(self, event):
         self.recent_events.append(event)
@@ -291,6 +295,94 @@ class SimulationLogger:
 
     def get_recent_planner_traces(self, count=240):
         return self.recent_planner_traces[-count:]
+
+    def _ensure_brain_lifecycle_row(self, request_id, defaults=None):
+        rid = str(request_id or "").strip()
+        if not rid:
+            return None
+        row = self.brain_lifecycle_by_request.get(rid)
+        if row is None:
+            row = {
+                "request_id": rid,
+                "trace_id": None,
+                "request_kind": "planner",
+                "request": {},
+                "response": {"status": "pending"},
+                "interpretation": {"status": "pending"},
+                "sim_time": 0.0,
+                "tick": 0,
+            }
+            if isinstance(defaults, dict):
+                row.update({k: v for k, v in defaults.items() if k not in {"request", "response", "interpretation"}})
+                if isinstance(defaults.get("request"), dict):
+                    row["request"].update(defaults.get("request"))
+                if isinstance(defaults.get("response"), dict):
+                    row["response"].update(defaults.get("response"))
+                if isinstance(defaults.get("interpretation"), dict):
+                    row["interpretation"].update(defaults.get("interpretation"))
+            self.brain_lifecycle_by_request[rid] = row
+            self.brain_lifecycle_order.append(rid)
+        return row
+
+    def record_brain_request_submitted(self, payload):
+        row_payload = dict(payload or {})
+        row = self._ensure_brain_lifecycle_row(row_payload.get("request_id"), defaults=row_payload)
+        if row is None:
+            return
+        row["trace_id"] = row_payload.get("trace_id") or row.get("trace_id")
+        row["request_kind"] = row_payload.get("request_kind") or row.get("request_kind") or "planner"
+        row["sim_time"] = float(row_payload.get("sim_time", row.get("sim_time", 0.0)) or 0.0)
+        row["tick"] = int(row_payload.get("tick", row.get("tick", 0)) or 0)
+        row["request"].update(row_payload)
+        row["request"]["status"] = str(row_payload.get("status") or row["request"].get("status") or "submitted")
+        row["response"].setdefault("status", "pending")
+        row["interpretation"].setdefault("status", "pending")
+        row["last_updated_wallclock_s"] = time.time()
+        self._trim_brain_lifecycle()
+
+    def record_brain_response_phase(self, request_id, payload):
+        row = self._ensure_brain_lifecycle_row(request_id)
+        if row is None:
+            return
+        data = dict(payload or {})
+        row["response"].update(data)
+        if data.get("sim_time") is not None:
+            row["sim_time"] = float(data.get("sim_time") or row.get("sim_time") or 0.0)
+        if data.get("tick") is not None:
+            row["tick"] = int(data.get("tick") or row.get("tick") or 0)
+        row["last_updated_wallclock_s"] = time.time()
+        self._trim_brain_lifecycle()
+
+    def record_brain_interpretation_phase(self, request_id, payload):
+        row = self._ensure_brain_lifecycle_row(request_id)
+        if row is None:
+            return
+        data = dict(payload or {})
+        row["interpretation"].update(data)
+        if data.get("sim_time") is not None:
+            row["sim_time"] = float(data.get("sim_time") or row.get("sim_time") or 0.0)
+        if data.get("tick") is not None:
+            row["tick"] = int(data.get("tick") or row.get("tick") or 0)
+        req_status = str(data.get("request_status") or "").strip()
+        if req_status:
+            row["request"]["status"] = req_status
+        row["last_updated_wallclock_s"] = time.time()
+        self._trim_brain_lifecycle()
+
+    def _trim_brain_lifecycle(self):
+        overflow = len(self.brain_lifecycle_order) - int(self.max_recent_brain_lifecycle)
+        if overflow <= 0:
+            return
+        for rid in self.brain_lifecycle_order[:overflow]:
+            self.brain_lifecycle_by_request.pop(rid, None)
+        self.brain_lifecycle_order = self.brain_lifecycle_order[overflow:]
+
+    def get_recent_brain_lifecycle(self, count=240):
+        ids = self.brain_lifecycle_order[-int(count):]
+        rows = [self.brain_lifecycle_by_request.get(rid) for rid in ids]
+        rows = [r for r in rows if isinstance(r, dict)]
+        rows.sort(key=lambda row: (float(row.get("sim_time", 0.0)), int(row.get("tick", 0)), str(row.get("request_id", ""))))
+        return rows
 
     def initialize_session_outputs(self, speed=None, flash_mode=None, active_agents=None, extra_metadata=None):
         self.output_session.write_manifest(
