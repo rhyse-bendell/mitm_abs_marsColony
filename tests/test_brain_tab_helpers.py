@@ -119,15 +119,23 @@ class _FakeListbox:
         self.items = []
         self.selected = ()
         self.ypos = 0.0
+        self.delete_calls = 0
 
     def delete(self, *_args):
+        self.delete_calls += 1
         self.items = []
         self.selected = ()
 
     def insert(self, _idx, value):
         self.items.append(value)
 
-    def yview(self):
+    def yview(self, *args):
+        if args:
+            if args[0] == "moveto":
+                self.yview_moveto(args[1])
+            elif args[0] == "scroll":
+                step = int(args[1])
+                self.ypos = min(1.0, max(0.0, self.ypos + step * 0.05))
         return (self.ypos, min(1.0, self.ypos + 0.25))
 
     def yview_moveto(self, value):
@@ -232,6 +240,10 @@ class BrainTabWiringTests(unittest.TestCase):
         app._on_brain_list_selection_changed("response")
         self.assertEqual(app.brain_request_list.curselection(), (0,))
         self.assertEqual(app.brain_interpretation_list.curselection(), (0,))
+        app.brain_interpretation_list.selection_set(1)
+        app._on_brain_list_selection_changed("interpretation")
+        self.assertEqual(app.brain_request_list.curselection(), (1,))
+        self.assertEqual(app.brain_response_list.curselection(), (1,))
 
     def test_detail_and_copy_bundle_are_lifecycle_based(self):
         row = BrainTabHelperTests()._row("req-copy")
@@ -259,6 +271,21 @@ class BrainTabWiringTests(unittest.TestCase):
         self.assertEqual(before_items, app.brain_request_list.items)
         self.assertEqual(app.brain_request_list.curselection(), (0,))
         self.assertAlmostEqual(app.brain_request_list.yview()[0], 0.4)
+        self.assertEqual(app.brain_request_list.delete_calls, 1)
+
+    def test_summary_lines_include_three_pane_lifecycle_fields(self):
+        row = BrainTabHelperTests()._row("req-rich")
+        row["request_kind"] = "startup_sanity"
+        row["response"]["status"] = "timeout"
+        row["interpretation"]["failure_mode"] = "no_usable_plan"
+        req_line = MarsColonyInterface._brain_request_summary_line(row)
+        resp_line = MarsColonyInterface._brain_response_summary_line(row)
+        interp_line = MarsColonyInterface._brain_interpretation_summary_line(row)
+        self.assertIn("kind=startup_sanity", req_line)
+        self.assertIn("model=", req_line)
+        self.assertIn("timeout", resp_line)
+        self.assertIn("normalized=", resp_line)
+        self.assertIn("failure=no_usable_plan", interp_line)
 
 
 if __name__ == "__main__":
