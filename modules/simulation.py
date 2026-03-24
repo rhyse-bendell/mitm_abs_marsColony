@@ -93,6 +93,7 @@ class SimulationState:
         construction_parameters=None,
         task_id="mars_colony",
         startup_progress_callback=None,
+        execution_metadata=None,
     ):
         self.task_model = load_task_model(task_id=task_id)
         self.construction_parameters = _load_task_construction_defaults(task_id)
@@ -153,6 +154,7 @@ class SimulationState:
         }
         self.bootstrap_reuse_included_count = 0
         self.startup_progress_callback = startup_progress_callback
+        self.execution_metadata = dict(execution_metadata or {})
         planner_trace_enabled = bool(self.planner_defaults.get("enable_planner_trace", True))
         planner_trace_mode = str(self.planner_defaults.get("planner_trace_mode", "full") or "full").lower()
         planner_trace_max_chars = int(self.planner_defaults.get("planner_trace_max_chars", 12000) or 12000)
@@ -427,7 +429,10 @@ class SimulationState:
             speed=speed,
             flash_mode=self.flash_mode,
             active_agents=[self._agent_manifest_row(agent) for agent in self.agents],
-            extra_metadata=self._backend_settings_for_manifest(),
+            extra_metadata={
+                **self._backend_settings_for_manifest(),
+                **self.execution_metadata,
+            },
         )
         self.run_startup_llm_sanity_check()
         self.logger.log_event(
@@ -438,6 +443,7 @@ class SimulationState:
                 "speed": speed,
                 "flash_mode": self.flash_mode,
                 "agents": [agent.name for agent in self.agents],
+                "execution_metadata": self.execution_metadata,
             },
         )
 
@@ -837,7 +843,12 @@ class SimulationState:
     def stop(self):
         self.runtime_witness_audit_result = self.runtime_witness_audit.finalize()
         self.metrics.finalize()
-        self.logger.update_session_manifest(extra_metadata=self._backend_settings_for_manifest())
+        self.logger.update_session_manifest(
+            extra_metadata={
+                **self._backend_settings_for_manifest(),
+                **self.execution_metadata,
+            }
+        )
         self.logger.save_csv()
         self.planner_executor.shutdown(wait=False, cancel_futures=True)
 

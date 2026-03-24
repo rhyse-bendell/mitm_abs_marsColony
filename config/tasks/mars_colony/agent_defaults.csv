@@ -1,4 +1,4 @@
 role_id,agent_name,teamwork_potential,taskwork_potential,mechanism_overrides_json,source_access_override,planner_config_json,enabled,agent_id,display_name,agent_label,template_id,initial_goal_seeds,communication_params_json,brain_config_json,task_overrides_json
-Architect,Architect,0.5,0.5,{},,{},True,architect_1,Architect,Architect,mars_architect,align_team_plan|verify_phase_objectives,{}, {},{}
-Engineer,Engineer,0.5,0.5,{},,{},True,engineer_1,Engineer,Engineer,mars_engineer,prepare_build_logistics,{}, {},{}
-Botanist,Botanist,0.5,0.5,{},,{},True,botanist_1,Botanist,Botanist,mars_botanist,sustain_greenhouse_support,{}, {},{}
+Architect,Architect,0.5,0.5,{},Team_Packet|Architect_Packet,{},True,architect_1,Architect,Architect,mars_architect,align_team_plan|verify_phase_objectives,{}, {},{}
+Engineer,Engineer,0.5,0.5,{},Team_Packet|Engineer_Packet,{},True,engineer_1,Engineer,Engineer,mars_engineer,prepare_build_logistics,{}, {},{}
+Botanist,Botanist,0.5,0.5,{},Team_Packet|Botanist_Packet,{},True,botanist_1,Botanist,Botanist,mars_botanist,sustain_greenhouse_support,{}, {},{}
