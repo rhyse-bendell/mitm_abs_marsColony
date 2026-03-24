@@ -4,11 +4,12 @@ import tkinter as tk
 import queue
 import threading
 import traceback
+import json
+from pathlib import Path
 from tkinter import ttk, messagebox
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.patches import Circle, Polygon, Rectangle
-from matplotlib.lines import Line2D
+from matplotlib.patches import Circle, Rectangle
 from modules.simulation import SimulationState
 from tkinter import StringVar, BooleanVar, DoubleVar, IntVar
 from modules.construction import ConstructionManager
@@ -92,7 +93,7 @@ class MarsColonyInterface:
         self.flash_mode = BooleanVar(value=False)
 
         self.sim = None
-        self.construction = ConstructionManager()
+        self.construction_defaults = self._load_construction_defaults()
         self.run_state = self.STATE_IDLE
         self._run_loop_job = None
         self._startup_poll_job = None
@@ -517,6 +518,36 @@ class MarsColonyInterface:
             "high_latency_stale_result_grace_s": max(0.0, float(self.high_latency_stale_result_grace_var.get())),
         }
 
+    @staticmethod
+    def _load_construction_defaults():
+        path = Path(__file__).resolve().parent / "config" / "tasks" / "mars_colony" / "construction_parameters.json"
+        if not path.exists():
+            return dict(ConstructionManager.DEFAULT_PARAMETERS)
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return dict(ConstructionManager.DEFAULT_PARAMETERS)
+        defaults = dict(ConstructionManager.DEFAULT_PARAMETERS)
+        if isinstance(payload, dict):
+            defaults.update(payload)
+        return defaults
+
+    def _collect_construction_parameters(self):
+        return {
+            "pile_a_quantity": max(0, int(self.construction_param_vars["pile_a_quantity"].get())),
+            "pile_c_quantity": max(0, int(self.construction_param_vars["pile_c_quantity"].get())),
+            "housing_cost": max(1, int(self.construction_param_vars["housing_cost"].get())),
+            "greenhouse_cost": max(1, int(self.construction_param_vars["greenhouse_cost"].get())),
+            "water_generator_cost": max(1, int(self.construction_param_vars["water_generator_cost"].get())),
+            "bridge_bc_cost": max(1, int(self.construction_param_vars["bridge_bc_cost"].get())),
+            "site_a_capacity": max(1, int(self.construction_param_vars["site_a_capacity"].get())),
+            "site_b_capacity": max(1, int(self.construction_param_vars["site_b_capacity"].get())),
+            "site_c_capacity": max(1, int(self.construction_param_vars["site_c_capacity"].get())),
+            "move_time_per_unit": max(1, int(self.construction_param_vars["move_time_per_unit"].get())),
+            "carry_capacity": max(1, int(self.construction_param_vars["carry_capacity"].get())),
+        }
+
     def _add_help_text(self, parent, row, text):
         ttk.Label(parent, text=text, foreground="#5f6b7a", wraplength=620, justify="left").grid(
             row=row,
@@ -608,9 +639,11 @@ class MarsColonyInterface:
         print("Number of Runs:", self.num_runs.get())
         selected_backend, backend_options = self._collect_brain_backend_config()
         planner_config = self._collect_global_planner_config()
+        construction_parameters = self._collect_construction_parameters()
         print("Brain Backend:", selected_backend)
         print("Brain Backend Options:", backend_options)
         print("Planner Config:", planner_config)
+        print("Construction Parameters:", construction_parameters)
 
         agent_configs = self.build_agent_configs()
         for agent in agent_configs:
@@ -631,6 +664,7 @@ class MarsColonyInterface:
             brain_backend=selected_backend,
             brain_backend_options=backend_options,
             planner_config=planner_config,
+            construction_parameters=construction_parameters,
             startup_progress_callback=startup_progress_callback,
         )
 
@@ -957,15 +991,14 @@ class MarsColonyInterface:
     def _sync_construction_summaries(self):
         self.construction_text.delete("1.0", tk.END)
         self.dashboard_construction_text.delete("1.0", tk.END)
-        projects = list(self.sim.environment.construction.projects.values())
-        if not projects:
-            msg = "No active construction projects."
-            self.construction_text.insert(tk.END, msg)
-            self.dashboard_construction_text.insert(tk.END, msg)
-            self._render_construction_tab({"structures": [], "connectors": []})
-            return
-
-        for project in projects:
+        construction = self.sim.environment.construction
+        scene = construction.get_construction_scene_data()
+        started_projects = [p for p in construction.projects.values() if p.get("started")]
+        if not started_projects:
+            line = "No structures started yet.\n"
+            self.construction_text.insert(tk.END, line)
+            self.dashboard_construction_text.insert(tk.END, line)
+        for project in started_projects:
             req = project.get("required_resources", {}).get("bricks", 0)
             delivered = project.get("delivered_resources", {}).get("bricks", 0)
             status = project.get("status", "unknown")
@@ -973,26 +1006,27 @@ class MarsColonyInterface:
             line = f"{project.get('id', 'unknown')}: status={status}, bricks={delivered}/{req}, builders={', '.join(builders) or 'none'}\n"
             self.construction_text.insert(tk.END, line)
             self.dashboard_construction_text.insert(tk.END, line)
+        bridge = construction.bridges.get("bridge_bc")
+        bridge_line = f"bridge_bc: status={bridge.status}, resources={bridge.delivered_resources}/{bridge.required_resources}\n"
+        self.construction_text.insert(tk.END, bridge_line)
+        self.dashboard_construction_text.insert(tk.END, bridge_line)
+        for pile in scene.get("resource_piles", []):
+            pile_line = f"{pile['pile_id']}: remaining={pile['remaining']}/{pile['max_quantity']}\n"
+            self.construction_text.insert(tk.END, pile_line)
+            self.dashboard_construction_text.insert(tk.END, pile_line)
 
-        self._render_construction_tab(self.sim.environment.construction.get_construction_scene_data())
+        self._render_construction_tab(scene)
 
     @staticmethod
     def _map_structure_visual(structure):
         structure_type = str(structure.get("structure_type") or structure.get("type") or "").lower()
-        name_blob = " ".join(
-            str(structure.get(field, "") or "").lower() for field in ("project_id", "name", "label", "artifact_type", "symbol")
-        )
-        token_blob = f"{structure_type} {name_blob}"
-        if any(token in token_blob for token in ("connector", "pipeline", "resource line", "resource_link", "resource-link")):
-            return {"symbol": "connector", "color": "black"}
-        if any(token in token_blob for token in ("water", "generator")):
-            return {"symbol": "water_generator", "color": "#2f6fbf"}
-        if any(token in token_blob for token in ("greenhouse", "food")):
-            return {"symbol": "greenhouse", "color": "#2f8f46"}
-        if any(token in token_blob for token in ("house", "housing", "shelter")):
-            return {"symbol": "house", "color": "#b6423a"}
-        symbol = str(structure.get("symbol") or "generic").lower()
-        return {"symbol": symbol, "color": str(structure.get("color") or "#666666")}
+        if structure_type in {"house", "housing"}:
+            return {"symbol": "square", "color": "#c6362f"}
+        if structure_type == "greenhouse":
+            return {"symbol": "square", "color": "#2f8f46"}
+        if structure_type == "water_generator":
+            return {"symbol": "square", "color": "#2f6fbf"}
+        return {"symbol": "square", "color": str(structure.get("color") or "#666666")}
 
     @staticmethod
     def _progress_fill_fraction(structure):
@@ -1031,112 +1065,28 @@ class MarsColonyInterface:
         return ""
 
     @staticmethod
-    def _draw_house_structure(ax, x, y, progress, color):
-        width, height = 0.56, 0.34
-        left, bottom = x - width / 2.0, y - 0.30
-        roof = Polygon(
-            [(x - 0.34, bottom + height), (x, y + 0.34), (x + 0.34, bottom + height)],
-            closed=True,
-            edgecolor=color,
-            facecolor="none",
-            linewidth=1.9,
-            zorder=3.1,
-        )
-        outline = Rectangle((left, bottom), width, height, edgecolor=color, facecolor="none", linewidth=1.9, zorder=3)
+    def _draw_progress_square(ax, x, y, size, progress, color, zorder=3):
+        left, bottom = x - size / 2.0, y - size / 2.0
+        outline = Rectangle((left, bottom), size, size, edgecolor=color, facecolor="none", linewidth=1.7, zorder=zorder)
         ax.add_patch(outline)
-        ax.add_patch(roof)
         if progress > 0:
-            fill_bounds = (x - 0.36, y - 0.32, 0.72, 0.68)
-            fill_clip = MarsColonyInterface._progress_clip_rect(*fill_bounds, progress)
-            house_fill = Rectangle((left, bottom), width, height, edgecolor="none", facecolor=color, zorder=2.8)
-            roof_fill = Polygon([(x - 0.34, bottom + height), (x, y + 0.34), (x + 0.34, bottom + height)], closed=True, edgecolor="none", facecolor=color, zorder=2.8)
-            house_fill.set_clip_path(fill_clip.get_path(), transform=ax.transData)
-            roof_fill.set_clip_path(fill_clip.get_path(), transform=ax.transData)
-            ax.add_patch(house_fill)
-            ax.add_patch(roof_fill)
-        ax.add_patch(Rectangle((x - 0.07, bottom), 0.14, 0.18, edgecolor=color, facecolor="none", linewidth=1.1, zorder=3.2))
+            ax.add_patch(
+                Rectangle(
+                    (left, bottom),
+                    size,
+                    size * progress,
+                    edgecolor="none",
+                    facecolor=color,
+                    zorder=zorder - 0.2,
+                )
+            )
 
     @staticmethod
-    def _draw_greenhouse_structure(ax, x, y, progress, color):
-        width, height = 0.64, 0.38
-        left, bottom = x - width / 2.0, y - 0.28
-        roof = Polygon(
-            [(left, bottom + height), (x, y + 0.26), (left + width, bottom + height)],
-            closed=False,
-            edgecolor=color,
-            facecolor="none",
-            linewidth=1.4,
-            zorder=3.1,
-        )
-        outline = Rectangle((left, bottom), width, height, edgecolor=color, facecolor="none", linewidth=1.9, zorder=3)
-        ax.add_patch(outline)
-        ax.add_patch(roof)
-        if progress > 0:
-            fill_clip = MarsColonyInterface._progress_clip_rect(x - 0.34, y - 0.30, 0.68, 0.58, progress)
-            body_fill = Rectangle((left, bottom), width, height, edgecolor="none", facecolor=color, zorder=2.8)
-            roof_fill = Polygon([(left, bottom + height), (x, y + 0.26), (left + width, bottom + height)], closed=True, edgecolor="none", facecolor=color, zorder=2.8)
-            body_fill.set_clip_path(fill_clip.get_path(), transform=ax.transData)
-            roof_fill.set_clip_path(fill_clip.get_path(), transform=ax.transData)
-            ax.add_patch(body_fill)
-            ax.add_patch(roof_fill)
-        ax.add_line(Line2D([x, x], [bottom, bottom + height], color=color, linewidth=1.1, zorder=3.2))
-        ax.add_line(Line2D([x - width / 4.0, x - width / 4.0], [bottom, bottom + height], color=color, linewidth=1.0, zorder=3.2))
-        ax.add_line(Line2D([x + width / 4.0, x + width / 4.0], [bottom, bottom + height], color=color, linewidth=1.0, zorder=3.2))
-        ax.add_line(Line2D([left, left + width], [bottom + height / 2.0, bottom + height / 2.0], color=color, linewidth=0.9, zorder=3.2))
-
-    @staticmethod
-    def _draw_water_generator_structure(ax, x, y, progress, color):
-        cx, cy, radius = x, y + 0.04, 0.22
-        tank = Rectangle((x - 0.30, y - 0.30), 0.60, 0.12, edgecolor=color, facecolor="none", linewidth=1.6, zorder=3)
-        core_outline = Circle((cx, cy), radius, edgecolor=color, facecolor="none", linewidth=1.9, zorder=3)
-        droplet = Polygon(
-            [(x, y + 0.30), (x - 0.08, y + 0.14), (x, y + 0.06), (x + 0.08, y + 0.14)],
-            closed=True,
-            edgecolor=color,
-            facecolor="none",
-            linewidth=1.3,
-            zorder=3.2,
-        )
-        ax.add_patch(tank)
-        ax.add_patch(core_outline)
-        ax.add_patch(droplet)
-        if progress > 0:
-            fill_clip = MarsColonyInterface._progress_clip_rect(x - 0.32, y - 0.32, 0.64, 0.66, progress)
-            core_fill = Circle((cx, cy), radius, edgecolor="none", facecolor=color, zorder=2.8)
-            tank_fill = Rectangle((x - 0.30, y - 0.30), 0.60, 0.12, edgecolor="none", facecolor=color, zorder=2.8)
-            droplet_fill = Polygon([(x, y + 0.30), (x - 0.08, y + 0.14), (x, y + 0.06), (x + 0.08, y + 0.14)], closed=True, edgecolor="none", facecolor=color, zorder=2.8)
-            core_fill.set_clip_path(fill_clip.get_path(), transform=ax.transData)
-            tank_fill.set_clip_path(fill_clip.get_path(), transform=ax.transData)
-            droplet_fill.set_clip_path(fill_clip.get_path(), transform=ax.transData)
-            ax.add_patch(core_fill)
-            ax.add_patch(tank_fill)
-            ax.add_patch(droplet_fill)
-        ax.add_line(Line2D([x - 0.08, x + 0.08], [y + 0.03, y + 0.03], color=color, linewidth=1.1, zorder=3.3))
-        ax.add_line(Line2D([x, x], [y - 0.05, y + 0.11], color=color, linewidth=1.0, zorder=3.3))
-
-    @staticmethod
-    def _draw_structure_symbol(ax, structure, x, y):
+    def _draw_structure_symbol(ax, structure, x, y, size=0.56):
         visual = MarsColonyInterface._map_structure_visual(structure)
-        symbol = visual["symbol"]
         color = visual["color"]
         progress = MarsColonyInterface._progress_fill_fraction(structure)
-
-        if symbol == "house":
-            MarsColonyInterface._draw_house_structure(ax, x, y, progress, color)
-        elif symbol == "greenhouse":
-            MarsColonyInterface._draw_greenhouse_structure(ax, x, y, progress, color)
-        elif symbol == "water_generator":
-            MarsColonyInterface._draw_water_generator_structure(ax, x, y, progress, color)
-        else:
-            outline = Rectangle((x - 0.30, y - 0.22), 0.60, 0.44, edgecolor=color, facecolor="none", linewidth=1.7, zorder=3)
-            ax.add_patch(outline)
-            if progress > 0:
-                ax.add_patch(Rectangle((x - 0.30, y - 0.22), 0.60, 0.44 * progress, edgecolor="none", facecolor=color, zorder=2.8))
-
-    @staticmethod
-    def _progress_clip_rect(left, bottom, width, height, progress):
-        fill_height = max(0.0, min(1.0, float(progress))) * height
-        return Rectangle((left, bottom), width, fill_height)
+        MarsColonyInterface._draw_progress_square(ax, x, y, size, progress, color)
 
     @staticmethod
     def _draw_construction_scene(ax, scene_data):
@@ -1149,6 +1099,8 @@ class MarsColonyInterface:
 
         structures = scene_data.get("structures", [])
         sites = scene_data.get("sites", [])
+        resource_piles = scene_data.get("resource_piles", [])
+        bridges = scene_data.get("bridges", [])
         site_lookup = {
             site.get("site_id"): {
                 "site_id": site.get("site_id"),
@@ -1165,6 +1117,7 @@ class MarsColonyInterface:
             if site_id in grouped_by_site:
                 grouped_by_site[site_id].append(structure)
 
+        # 1) Empty site circles
         for site_id, site in site_lookup.items():
             sx, sy = site["position"]
             site_style = MarsColonyInterface._site_circle_style()
@@ -1190,22 +1143,34 @@ class MarsColonyInterface:
                 color="#8c95a3",
             )
 
-            site_structures = grouped_by_site.get(site_id, [])
+        # 2) Resource piles as black squares with proportional fill
+        for pile in resource_piles:
+            x, y = tuple(pile.get("position", (0.0, 0.0)))
+            fill = max(0.0, min(1.0, float(pile.get("fill_fraction", 0.0) or 0.0)))
+            MarsColonyInterface._draw_progress_square(ax, x, y, size=0.24, progress=fill, color="black", zorder=2)
+
+        # 3) Bridges
+        for bridge in bridges:
+            start = bridge.get("start")
+            end = bridge.get("end")
+            if not start or not end:
+                continue
+            status = str(bridge.get("status") or "complete")
+            width = 2.0 if status == "complete" else 1.3
+            alpha = 1.0 if status == "complete" else 0.6
+            ax.plot([start[0], end[0]], [start[1], end[1]], color="black", linewidth=width, alpha=alpha, zorder=1.5)
+
+        # 4) Structure squares inside site circles (only started structures provided in scene data)
+        for site_id, site_structures in grouped_by_site.items():
             if not site_structures:
                 continue
-            structure = site_structures[0]
-            x, y = sx, sy
-            MarsColonyInterface._draw_structure_symbol(ax, structure, x, y)
-            overlay_state = MarsColonyInterface._project_overlay_state(structure)
-            if overlay_state == "ready_for_validation":
-                ax.text(x, y + 0.52, "ready", ha="center", va="bottom", fontsize=6.0, color="#7c5a2e")
-            elif overlay_state == "invalid":
-                ax.add_line(Line2D([x - 0.24, x + 0.24], [y - 0.24, y + 0.24], color="#4a4a4a", linewidth=1.2, zorder=4))
-                ax.add_line(Line2D([x - 0.24, x + 0.24], [y + 0.24, y - 0.24], color="#4a4a4a", linewidth=1.2, zorder=4))
-            label_text = MarsColonyInterface._structure_label_text(structure)
-            if label_text:
-                ax.text(x, y - 0.50, label_text, ha="center", va="top", fontsize=6.0, color="#6f7785")
+            sx, sy = site_lookup[site_id]["position"]
+            spacing = 0.34
+            start_x = sx - ((len(site_structures) - 1) * spacing / 2.0)
+            for idx, structure in enumerate(site_structures):
+                MarsColonyInterface._draw_structure_symbol(ax, structure, start_x + idx * spacing, sy, size=0.28)
 
+        # 5) Connectors
         for connector in scene_data.get("connectors", []):
             start = connector.get("start")
             end = connector.get("end")
@@ -1460,6 +1425,41 @@ class MarsColonyInterface:
         ttk.Label(settings_frame, text="Stale Result Grace (s)").grid(row=46, column=0, sticky="w", padx=(0, 8), pady=3)
         ttk.Entry(settings_frame, textvariable=self.high_latency_stale_result_grace_var, width=10).grid(row=46, column=1, sticky="w", pady=3)
         self._add_help_text(settings_frame, 47, "Additional grace window to accept late but still relevant planner responses in high-latency mode.")
+
+        self.construction_param_vars = {
+            "pile_a_quantity": IntVar(value=int(self.construction_defaults["pile_a_quantity"])),
+            "pile_c_quantity": IntVar(value=int(self.construction_defaults["pile_c_quantity"])),
+            "housing_cost": IntVar(value=int(self.construction_defaults["housing_cost"])),
+            "greenhouse_cost": IntVar(value=int(self.construction_defaults["greenhouse_cost"])),
+            "water_generator_cost": IntVar(value=int(self.construction_defaults["water_generator_cost"])),
+            "bridge_bc_cost": IntVar(value=int(self.construction_defaults["bridge_bc_cost"])),
+            "site_a_capacity": IntVar(value=int(self.construction_defaults["site_a_capacity"])),
+            "site_b_capacity": IntVar(value=int(self.construction_defaults["site_b_capacity"])),
+            "site_c_capacity": IntVar(value=int(self.construction_defaults["site_c_capacity"])),
+            "move_time_per_unit": IntVar(value=int(self.construction_defaults["move_time_per_unit"])),
+            "carry_capacity": IntVar(value=int(self.construction_defaults["carry_capacity"])),
+        }
+        row = 48
+        ttk.Label(settings_frame, text="Construction Parameters").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=(8, 3))
+        self._add_help_text(settings_frame, row + 1, "Site/resource/bridge settings loaded from task defaults and overridable before run start.")
+        row += 2
+        construction_fields = [
+            ("Pile A Quantity", "pile_a_quantity"),
+            ("Pile C Quantity", "pile_c_quantity"),
+            ("Housing Cost", "housing_cost"),
+            ("Greenhouse Cost", "greenhouse_cost"),
+            ("Water Generator Cost", "water_generator_cost"),
+            ("Bridge BC Cost", "bridge_bc_cost"),
+            ("Site A Capacity", "site_a_capacity"),
+            ("Site B Capacity", "site_b_capacity"),
+            ("Site C Capacity", "site_c_capacity"),
+            ("Move Time Per Unit", "move_time_per_unit"),
+            ("Carry Capacity Per Trip", "carry_capacity"),
+        ]
+        for label, key in construction_fields:
+            ttk.Label(settings_frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=3)
+            ttk.Entry(settings_frame, textvariable=self.construction_param_vars[key], width=10).grid(row=row, column=1, sticky="w", pady=3)
+            row += 1
 
         self._local_backend_widgets = [local_model_entry, local_base_url_entry, local_timeout_entry, fallback_combo]
         self._update_backend_field_states()

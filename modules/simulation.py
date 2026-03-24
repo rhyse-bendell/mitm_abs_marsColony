@@ -1,7 +1,9 @@
 # File: modules/simulation.py
 
 import math
+import json
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from modules.agent import Agent
 from modules.brain_context import BrainContextBuilder
 from modules.brain_provider import BrainBackendConfig, create_brain_provider
@@ -56,6 +58,18 @@ def _planner_defaults_with_high_latency_mode(planner_defaults, configured_backen
     return defaults
 
 
+def _load_task_construction_defaults(task_id):
+    path = Path(__file__).resolve().parents[1] / "config" / "tasks" / task_id / "construction_parameters.json"
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 class SimulationState:
 
     SPEED_MULTIPLIERS = {
@@ -76,10 +90,14 @@ class SimulationState:
         brain_backend="rule_brain",
         brain_backend_options=None,
         planner_config=None,
+        construction_parameters=None,
         task_id="mars_colony",
         startup_progress_callback=None,
     ):
         self.task_model = load_task_model(task_id=task_id)
+        self.construction_parameters = _load_task_construction_defaults(task_id)
+        if isinstance(construction_parameters, dict):
+            self.construction_parameters.update(construction_parameters)
         if phases is None and self.task_model.phases:
             phases = [
                 {
@@ -93,7 +111,11 @@ class SimulationState:
                 }
                 for p in self.task_model.phases
             ]
-        self.environment = Environment(phases=phases, task_model=self.task_model)
+        self.environment = Environment(
+            phases=phases,
+            task_model=self.task_model,
+            construction_parameters=self.construction_parameters,
+        )
         self.agents = []
         self.num_runs = num_runs
         self.flash_mode = flash_mode
@@ -791,6 +813,14 @@ class SimulationState:
 
         for agent in self.agents:
             agent.current_time = self.time
+            if self.environment.construction.is_agent_transporting(agent.name):
+                self.logger.log_event(
+                    self.time,
+                    "agent_occupied_transport",
+                    {"agent": agent.name},
+                )
+                self.logger.log_agent_state(self.time, agent)
+                continue
             agent.update(dt, self.environment, sim_state=self)
             agent.compare_and_repair_construction(self.environment.construction, sim_state=self)
             self.refresh_agent_backend_effective_state(agent, reason="planner_call")

@@ -9,175 +9,78 @@ except ModuleNotFoundError:  # pragma: no cover - env dependent
 
 try:
     from matplotlib.figure import Figure
-    from matplotlib.patches import Circle, Polygon, Rectangle
+    from matplotlib.patches import Circle, Rectangle
 except ModuleNotFoundError:  # pragma: no cover - env dependent
     Figure = None
-    Circle = Polygon = Rectangle = None
+    Circle = Rectangle = None
 
 
 class ConstructionVisualizationTests(unittest.TestCase):
-    def test_scene_data_includes_explicit_sites_and_structures(self):
+    def test_mission_start_scene_layers_and_counts(self):
         manager = ConstructionManager()
         scene = manager.get_construction_scene_data()
 
-        self.assertIn("sites", scene)
-        self.assertIn("structures", scene)
-        self.assertIn("connectors", scene)
-        self.assertGreaterEqual(len(scene["sites"]), 1)
+        self.assertEqual(len(scene["sites"]), 3)
+        self.assertEqual(len(scene["resource_piles"]), 2)
+        self.assertEqual(len(scene["bridges"]), 1)
+        self.assertEqual(scene["bridges"][0]["bridge_id"], "bridge_ab")
+        self.assertEqual(scene["structures"], [])
 
-        site = scene["sites"][0]
-        self.assertIn("site_id", site)
-        self.assertIn("position", site)
-        self.assertIn("label", site)
-        self.assertIn("project_ids", site)
-
-        structure = scene["structures"][0]
-        for field in (
-            "project_id",
-            "site_id",
-            "structure_type",
-            "progress",
-            "status",
-            "correct",
-            "validated_complete",
-            "resource_complete",
-            "builders",
-        ):
-            self.assertIn(field, structure)
-
-    def test_scene_data_tracks_project_states_without_logic_changes(self):
+    def test_started_structures_only_appear_after_start(self):
         manager = ConstructionManager()
-        manager.deliver_resource("Build_Table_A", "bricks", quantity=12)
-        manager.mark_validated("Build_Table_A", is_valid=True)
-        manager.deliver_resource("Build_Table_B", "bricks", quantity=7)
+        self.assertEqual(manager.get_construction_scene_data()["structures"], [])
+        manager.assign_builder("Build_Table_A", "Architect")
+        scene = manager.get_construction_scene_data()
+        self.assertEqual(len(scene["structures"]), 1)
+        self.assertEqual(scene["structures"][0]["site_id"], "site_a")
+
+    def test_structure_progress_and_color_mapping(self):
+        manager = ConstructionManager()
+        manager.assign_builder("Build_Table_A", "Architect")
+        manager.assign_builder("Build_Table_B", "Engineer")
+        manager.build_bridge_bc(quantity=20)
+        manager.assign_builder("Build_Table_C", "Botanist")
+        manager.deliver_resource("Build_Table_B", "bricks", quantity=5)
 
         scene = manager.get_construction_scene_data()
         by_id = {row["project_id"]: row for row in scene["structures"]}
-        self.assertEqual(by_id["Build_Table_A"]["status"], "complete")
-        self.assertTrue(by_id["Build_Table_A"]["validated_complete"])
+        self.assertEqual(by_id["Build_Table_A"]["color"], "#c6362f")
+        self.assertEqual(by_id["Build_Table_B"]["color"], "#2f8f46")
+        self.assertEqual(by_id["Build_Table_C"]["color"], "#2f6fbf")
         self.assertGreater(by_id["Build_Table_B"]["progress"], 0.0)
         self.assertLess(by_id["Build_Table_B"]["progress"], 1.0)
 
-    def test_semantic_visual_mapping_uses_symbol_types(self):
-        if MarsColonyInterface is None:
-            self.skipTest("interface module unavailable")
+    def test_resource_pile_fill_reflects_remaining_quantity(self):
+        manager = ConstructionManager(parameters={"pile_a_quantity": 100, "pile_c_quantity": 100})
+        manager.deliver_resource("Build_Table_A", "bricks", quantity=50)
+        scene = manager.get_construction_scene_data()
+        piles = {p["pile_id"]: p for p in scene["resource_piles"]}
+        self.assertEqual(piles["pile_a"]["remaining"], 50)
+        self.assertAlmostEqual(piles["pile_a"]["fill_fraction"], 0.5)
 
-        self.assertEqual(
-            MarsColonyInterface._map_structure_visual({"structure_type": "house"})["symbol"],
-            "house",
-        )
-        self.assertEqual(
-            MarsColonyInterface._map_structure_visual({"structure_type": "greenhouse"})["symbol"],
-            "greenhouse",
-        )
-        self.assertEqual(
-            MarsColonyInterface._map_structure_visual({"structure_type": "water_generator"})["symbol"],
-            "water_generator",
-        )
-
-    def test_render_draws_neutral_site_containers_and_nested_structures(self):
+    def test_render_draw_order_and_literals(self):
         if MarsColonyInterface is None or Figure is None:
             self.skipTest("interface/matplotlib unavailable")
 
-        scene = {
-            "sites": [{"site_id": "site_a", "position": (4.0, 4.0), "label": "Site A"}],
-            "structures": [{"project_id": "H", "site_id": "site_a", "structure_type": "house", "progress": 0.3, "status": "in_progress", "correct": True}],
-            "connectors": [],
-        }
-        fig = Figure(figsize=(4, 4))
-        ax = fig.add_subplot(111)
-        MarsColonyInterface._draw_construction_scene(ax, scene)
-
-        site_circles = [p for p in ax.patches if isinstance(p, Circle) and abs(p.radius - 0.86) < 1e-9]
-        self.assertEqual(len(site_circles), 1)
-        self.assertAlmostEqual(site_circles[0].get_facecolor()[3], 0.0)
-
-        # Structure centers should be inside the site circle center, not detached from the site marker.
-        structure_rects = [p for p in ax.patches if isinstance(p, Rectangle) and p.get_linewidth() >= 1.7]
-        self.assertGreaterEqual(len(structure_rects), 1)
-        sx, sy = site_circles[0].center
-        rect = structure_rects[0]
-        cx = rect.get_x() + rect.get_width() / 2.0
-        cy = rect.get_y() + rect.get_height() / 2.0
-        self.assertLessEqual(((cx - sx) ** 2 + (cy - sy) ** 2) ** 0.5, 0.86)
-
-    def test_symbolic_paths_are_distinct_for_house_greenhouse_water(self):
-        if MarsColonyInterface is None or Figure is None:
-            self.skipTest("interface/matplotlib unavailable")
-
-        scene = {
-            "sites": [
-                {"site_id": "s1", "position": (3.5, 4.0), "label": "S1"},
-                {"site_id": "s2", "position": (5.0, 4.0), "label": "S2"},
-                {"site_id": "s3", "position": (6.5, 4.0), "label": "S3"},
-            ],
-            "structures": [
-                {"project_id": "H", "site_id": "s1", "structure_type": "house", "progress": 0.5, "status": "in_progress", "correct": True},
-                {"project_id": "G", "site_id": "s2", "structure_type": "greenhouse", "progress": 0.5, "status": "in_progress", "correct": True},
-                {"project_id": "W", "site_id": "s3", "structure_type": "water_generator", "progress": 0.5, "status": "in_progress", "correct": True},
-            ],
-            "connectors": [],
-        }
-
+        manager = ConstructionManager()
+        scene = manager.get_construction_scene_data()
         fig = Figure(figsize=(6, 4))
         ax = fig.add_subplot(111)
         MarsColonyInterface._draw_construction_scene(ax, scene)
 
-        self.assertGreaterEqual(len([p for p in ax.patches if isinstance(p, Polygon)]), 1)  # house roof
-        self.assertGreaterEqual(len([p for p in ax.patches if isinstance(p, Circle) and abs(p.radius - 0.22) < 1e-9]), 1)  # water core
-        self.assertGreaterEqual(len(ax.lines), 3)  # greenhouse frame + water cue lines
-
-    def test_progress_fill_is_geometry_based_not_alpha_only(self):
-        if MarsColonyInterface is None or Figure is None:
-            self.skipTest("interface/matplotlib unavailable")
-
-        scene = {
-            "sites": [{"site_id": "s1", "position": (4.0, 4.0), "label": "S1"}],
-            "structures": [{"project_id": "G", "site_id": "s1", "structure_type": "greenhouse", "progress": 0.25, "status": "in_progress", "correct": True}],
-            "connectors": [],
-        }
-        fig = Figure(figsize=(4, 4))
-        ax = fig.add_subplot(111)
-        MarsColonyInterface._draw_construction_scene(ax, scene)
-
-        structure_fill_rects = [
-            p
-            for p in ax.patches
-            if isinstance(p, Rectangle)
-            and abs(p.get_width() - 0.64) < 1e-9
-            and p.get_facecolor()[3] > 0
-        ]
-        self.assertTrue(any(abs(rect.get_height() - 0.38) < 1e-9 for rect in structure_fill_rects))
-        self.assertTrue(any(rect.get_clip_path() is not None for rect in structure_fill_rects))
         site_circles = [p for p in ax.patches if isinstance(p, Circle) and abs(p.radius - 0.86) < 1e-9]
-        self.assertTrue(site_circles)
-        self.assertTrue(all(c.get_facecolor()[3] == 0.0 for c in site_circles))
+        self.assertEqual(len(site_circles), 3)
+        pile_squares = [p for p in ax.patches if isinstance(p, Rectangle) and abs(p.get_width() - 0.24) < 1e-9]
+        self.assertEqual(len(pile_squares), 4)  # 2 outlines + 2 fills
+        self.assertEqual(len(ax.lines), 1)  # AB bridge only at mission start
 
-    def test_state_overlays_and_secondary_labels(self):
-        if MarsColonyInterface is None or Figure is None:
-            self.skipTest("interface/matplotlib unavailable")
-
-        scene = {
-            "sites": [
-                {"site_id": "v", "position": (4.0, 4.0), "label": "Site V"},
-                {"site_id": "x", "position": (6.0, 4.0), "label": "Site X"},
-            ],
-            "structures": [
-                {"project_id": "V", "site_id": "v", "structure_type": "house", "progress": 1.0, "resource_complete": True, "validated_complete": False, "correct": True},
-                {"project_id": "X", "site_id": "x", "structure_type": "house", "progress": 0.5, "status": "needs_repair", "resource_complete": False, "validated_complete": False, "correct": False},
-            ],
-            "connectors": [],
-        }
-
-        fig = Figure(figsize=(5, 4))
-        ax = fig.add_subplot(111)
-        MarsColonyInterface._draw_construction_scene(ax, scene)
-
-        texts = [t.get_text() for t in ax.texts]
-        self.assertIn("ready", texts)
-        self.assertIn("Site V", texts)
-        self.assertNotIn("Build_Table_A", texts)
-        self.assertGreaterEqual(len(ax.lines), 2)  # invalid X overlay
+        manager.assign_builder("Build_Table_B", "Engineer")
+        scene_started = manager.get_construction_scene_data()
+        fig2 = Figure(figsize=(6, 4))
+        ax2 = fig2.add_subplot(111)
+        MarsColonyInterface._draw_construction_scene(ax2, scene_started)
+        structure_squares = [p for p in ax2.patches if isinstance(p, Rectangle) and abs(p.get_width() - 0.28) < 1e-9]
+        self.assertGreaterEqual(len(structure_squares), 1)
 
 
 if __name__ == "__main__":
