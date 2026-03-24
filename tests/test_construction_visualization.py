@@ -36,6 +36,10 @@ class ConstructionVisualizationTests(unittest.TestCase):
             outlines.append((patch.get_x() + patch.get_width() / 2.0, patch.get_y() + patch.get_height() / 2.0))
         return outlines
 
+    @staticmethod
+    def _site_lookup(scene):
+        return {s["site_id"]: tuple(s["position"]) for s in scene["sites"]}
+
     def test_mission_start_scene_layers_and_counts(self):
         manager = ConstructionManager()
         scene = manager.get_construction_scene_data()
@@ -108,7 +112,7 @@ class ConstructionVisualizationTests(unittest.TestCase):
 
         manager = ConstructionManager()
         scene = manager.get_construction_scene_data()
-        site_lookup = {s["site_id"]: tuple(s["position"]) for s in scene["sites"]}
+        site_lookup = self._site_lookup(scene)
 
         fig = Figure(figsize=(6, 4))
         ax = fig.add_subplot(111)
@@ -123,6 +127,34 @@ class ConstructionVisualizationTests(unittest.TestCase):
             px, py = min(pile_centers, key=lambda c: math.hypot(c[0] - sx, c[1] - sy))
             center_distance = math.hypot(px - sx, py - sy)
             self.assertGreaterEqual(center_distance - half_diag, radius)
+
+    def test_pile_a_is_outside_site_a_on_lower_right_side(self):
+        if MarsColonyInterface is None:
+            self.skipTest("interface unavailable")
+        manager = ConstructionManager()
+        scene = manager.get_construction_scene_data()
+        site_lookup = self._site_lookup(scene)
+        radius = self._site_radius()
+        half_diag = MarsColonyInterface._PILE_DRAW_SIZE * math.sqrt(2.0) / 2.0
+        px, py = MarsColonyInterface._resource_pile_center(site_lookup["site_a"], "pile_a", radius)
+        sx, sy = site_lookup["site_a"]
+        self.assertGreater(px, sx)
+        self.assertLess(py, sy)
+        self.assertGreaterEqual(math.hypot(px - sx, py - sy) - half_diag, radius)
+
+    def test_pile_c_is_outside_site_c_on_lower_left_side(self):
+        if MarsColonyInterface is None:
+            self.skipTest("interface unavailable")
+        manager = ConstructionManager()
+        scene = manager.get_construction_scene_data()
+        site_lookup = self._site_lookup(scene)
+        radius = self._site_radius()
+        half_diag = MarsColonyInterface._PILE_DRAW_SIZE * math.sqrt(2.0) / 2.0
+        px, py = MarsColonyInterface._resource_pile_center(site_lookup["site_c"], "pile_c", radius)
+        sx, sy = site_lookup["site_c"]
+        self.assertLess(px, sx)
+        self.assertLess(py, sy)
+        self.assertGreaterEqual(math.hypot(px - sx, py - sy) - half_diag, radius)
 
     def test_rendered_bridge_ab_segment_is_trimmed_and_still_overlaps_site_edges(self):
         if MarsColonyInterface is None or Figure is None:
@@ -156,6 +188,75 @@ class ConstructionVisualizationTests(unittest.TestCase):
         self.assertLess(end_inside, radius)
         self.assertGreater(start_inside, radius - 0.3)
         self.assertGreater(end_inside, radius - 0.3)
+
+    def test_bridge_ab_trimmed_segment_shorter_than_center_to_center(self):
+        if MarsColonyInterface is None:
+            self.skipTest("interface unavailable")
+        manager = ConstructionManager()
+        scene = manager.get_construction_scene_data()
+        site_lookup = self._site_lookup(scene)
+        radius = self._site_radius()
+        start, end = MarsColonyInterface._trimmed_bridge_endpoints(site_lookup["site_a"], site_lookup["site_b"], radius)
+        center_distance = math.hypot(site_lookup["site_b"][0] - site_lookup["site_a"][0], site_lookup["site_b"][1] - site_lookup["site_a"][1])
+        rendered_length = math.hypot(end[0] - start[0], end[1] - start[1])
+        self.assertLess(rendered_length, center_distance)
+
+    def test_bridge_ab_endpoints_extend_slightly_into_each_site_circle(self):
+        if MarsColonyInterface is None:
+            self.skipTest("interface unavailable")
+        manager = ConstructionManager()
+        scene = manager.get_construction_scene_data()
+        site_lookup = self._site_lookup(scene)
+        radius = self._site_radius()
+        start, end = MarsColonyInterface._trimmed_bridge_endpoints(site_lookup["site_a"], site_lookup["site_b"], radius)
+        start_inside = math.hypot(start[0] - site_lookup["site_a"][0], start[1] - site_lookup["site_a"][1])
+        end_inside = math.hypot(end[0] - site_lookup["site_b"][0], end[1] - site_lookup["site_b"][1])
+        self.assertLess(start_inside, radius)
+        self.assertLess(end_inside, radius)
+        self.assertGreater(start_inside, radius - MarsColonyInterface._BRIDGE_SITE_INSET - 1e-9)
+        self.assertGreater(end_inside, radius - MarsColonyInterface._BRIDGE_SITE_INSET - 1e-9)
+
+    def test_single_structure_is_not_placed_at_exact_site_center(self):
+        if MarsColonyInterface is None:
+            self.skipTest("interface unavailable")
+        radius = self._site_radius()
+        draw_size = MarsColonyInterface._structure_draw_size(radius)
+        offsets = MarsColonyInterface._structure_anchor_offsets(radius, draw_size)
+        self.assertNotEqual(offsets[0], (0.0, 0.0))
+
+    def test_multiple_structures_use_interior_offsets_within_site_circle(self):
+        if MarsColonyInterface is None:
+            self.skipTest("interface unavailable")
+        radius = self._site_radius()
+        draw_size = MarsColonyInterface._structure_draw_size(radius)
+        offsets = MarsColonyInterface._structure_anchor_offsets(radius, draw_size)
+        half_diag = draw_size * math.sqrt(2.0) / 2.0
+        self.assertGreater(len({(round(x, 6), round(y, 6)) for x, y in offsets[:3]}), 1)
+        for ox, oy in offsets:
+            self.assertLessEqual(math.hypot(ox, oy) + half_diag, radius + 1e-9)
+
+    def test_structure_glyph_area_remains_small_relative_to_site_circle(self):
+        if MarsColonyInterface is None:
+            self.skipTest("interface unavailable")
+        radius = self._site_radius()
+        draw_size = MarsColonyInterface._structure_draw_size(radius)
+        glyph_area = draw_size * draw_size
+        circle_area = math.pi * radius * radius
+        self.assertLessEqual(glyph_area / circle_area, MarsColonyInterface._STRUCTURE_AREA_RATIO_CAP + 1e-9)
+
+    def test_connector_lines_use_nearest_square_corner_endpoints(self):
+        if MarsColonyInterface is None:
+            self.skipTest("interface unavailable")
+        bounds_a = (4.0, 4.0, 0.28)
+        bounds_b = (5.0, 4.2, 0.28)
+        start, end = MarsColonyInterface._nearest_corner_pair(bounds_a, bounds_b)
+        center_to_center = math.hypot(bounds_b[0] - bounds_a[0], bounds_b[1] - bounds_a[1])
+        corner_to_corner = math.hypot(end[0] - start[0], end[1] - start[1])
+        self.assertLess(corner_to_corner, center_to_center)
+        possible_a = MarsColonyInterface._square_corners(*bounds_a)
+        possible_b = MarsColonyInterface._square_corners(*bounds_b)
+        self.assertIn(start, possible_a)
+        self.assertIn(end, possible_b)
 
 
 if __name__ == "__main__":
