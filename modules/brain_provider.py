@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict
 from urllib import error, request
@@ -13,6 +14,14 @@ from modules.brain_contract import AgentBrainRequest, AgentBrainResponse, Planne
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+RUNTIME_ACTION_ALIASES: dict[str, str] = {
+    "inspect": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
+    "inspect_info": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
+    "observe": ExecutableActionType.OBSERVE_ENVIRONMENT.value,
+    "communicate_with_team": ExecutableActionType.COMMUNICATE.value,
+}
 
 
 def _truncate_text(value: Any, *, max_chars: int) -> str:
@@ -632,6 +641,10 @@ class OllamaLocalBrainProvider(BrainProvider):
                     "content": (
                         "Return exactly one JSON object that matches AgentBrainResponse. "
                         "Output JSON only. No markdown. No analysis or chain-of-thought in visible output. "
+                        "Do not wrap the object under keys like response/result/data. "
+                        "The top-level JSON must be the planner response object. "
+                        "plan.next_action must be an object, not a string. "
+                        "plan.ordered_actions must be a list of action objects. "
                         "Include plan.next_action and non-empty plan.ordered_actions. "
                         "Keep plan concise, action-oriented, and bounded to immediate horizon."
                     ),
@@ -684,6 +697,160 @@ class OllamaLocalBrainProvider(BrainProvider):
                 continue
         raise ValueError("local backend response did not contain parseable JSON")
 
+    def _normalize_action_type(self, value: Any, note_sink: list[dict[str, Any]], *, field: str) -> str | None:
+        if not isinstance(value, str):
+            return None
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw in ExecutableActionType._value2member_map_:
+            return raw
+        lowered = raw.lower()
+        if lowered in RUNTIME_ACTION_ALIASES:
+            mapped = RUNTIME_ACTION_ALIASES[lowered]
+            note_sink.append(
+                {
+                    "step": "normalized_action_alias",
+                    "field": field,
+                    "original_action": raw,
+                    "normalized_action": mapped,
+                    "automatic": True,
+                }
+            )
+            return mapped
+        if lowered == "build":
+            note_sink.append(
+                {
+                    "step": "ambiguous_action_alias_unresolved",
+                    "field": field,
+                    "original_action": raw,
+                    "note": "build alias is ambiguous; no automatic mapping performed",
+                }
+            )
+        return None
+
+    def _extract_action_type_from_entry(self, entry: dict[str, Any]) -> tuple[str | None, str | None]:
+        for key in ("action_type", "action", "type", "action_name", "name"):
+            value = entry.get(key)
+            if isinstance(value, str) and value.strip():
+                return key, value
+        return None, None
+
+    def _normalize_payload(self, payload: Any) -> tuple[dict[str, Any] | None, list[dict[str, Any]], str]:
+        steps: list[dict[str, Any]] = []
+        if not isinstance(payload, dict):
+            return None, steps, "rejected_schema_invalid"
+        working = deepcopy(payload)
+        wrapper_source = "top_level_plan"
+        if "plan" not in working:
+            for wrapper in ("response", "result", "data"):
+                wrapped = working.get(wrapper)
+                if isinstance(wrapped, dict) and isinstance(wrapped.get("plan"), dict):
+                    working = {**working, **wrapped}
+                    wrapper_source = f"{wrapper}.plan"
+                    steps.append({"step": "unwrapped_payload", "wrapper_source": wrapper_source})
+                    break
+        if "plan" not in working or not isinstance(working.get("plan"), dict):
+            return None, steps, "rejected_missing_plan"
+
+        plan = working.get("plan") or {}
+        ordered = plan.get("ordered_actions")
+        normalized_ordered: list[dict[str, Any]] = []
+        if isinstance(ordered, list):
+            for idx, entry in enumerate(ordered):
+                if isinstance(entry, str):
+                    normalized = {"step_index": idx, "action_type": entry}
+                    steps.append({"step": "ordered_action_string_to_object", "index": idx, "original": entry})
+                elif isinstance(entry, dict):
+                    normalized = dict(entry)
+                else:
+                    steps.append({"step": "ordered_action_unusable_entry", "index": idx, "entry_type": type(entry).__name__})
+                    continue
+
+                key, action_value = self._extract_action_type_from_entry(normalized)
+                if action_value is None:
+                    steps.append({"step": "ordered_action_missing_action_type", "index": idx})
+                    continue
+                canonical = self._normalize_action_type(action_value, steps, field=f"plan.ordered_actions[{idx}]")
+                if canonical is None:
+                    steps.append({"step": "ordered_action_illegal_action", "index": idx, "original_action": action_value})
+                    continue
+                normalized["action_type"] = canonical
+                if key and key != "action_type":
+                    steps.append(
+                        {
+                            "step": "ordered_action_alias_field_promoted",
+                            "index": idx,
+                            "original_field": key,
+                            "normalized_action": canonical,
+                        }
+                    )
+                normalized.setdefault("step_index", idx)
+                if "step_index" not in entry if isinstance(entry, dict) else True:
+                    steps.append({"step": "ordered_action_step_index_filled", "index": idx, "value": idx})
+                normalized_ordered.append(normalized)
+        elif ordered is not None:
+            steps.append({"step": "ordered_actions_not_list", "entry_type": type(ordered).__name__})
+
+        if normalized_ordered:
+            plan["ordered_actions"] = normalized_ordered
+
+        next_action = plan.get("next_action")
+        if isinstance(next_action, str):
+            canonical_next = self._normalize_action_type(next_action, steps, field="plan.next_action")
+            if canonical_next is None:
+                return None, steps, "rejected_unusable_next_action"
+            matched = next((item for item in normalized_ordered if item.get("action_type") == canonical_next), None)
+            if matched:
+                plan["next_action"] = dict(matched)
+                steps.append(
+                    {
+                        "step": "resolved_string_next_action_from_ordered_actions",
+                        "original_action": next_action,
+                        "normalized_action": canonical_next,
+                    }
+                )
+            else:
+                plan["next_action"] = {"step_index": 0, "action_type": canonical_next}
+                steps.append(
+                    {
+                        "step": "constructed_minimal_next_action",
+                        "original_action": next_action,
+                        "normalized_action": canonical_next,
+                    }
+                )
+        elif isinstance(next_action, dict):
+            key, action_value = self._extract_action_type_from_entry(next_action)
+            if action_value is None:
+                return None, steps, "rejected_unusable_next_action"
+            canonical = self._normalize_action_type(action_value, steps, field="plan.next_action")
+            if canonical is None:
+                return None, steps, "rejected_illegal_action"
+            next_action["action_type"] = canonical
+            next_action.setdefault("step_index", 0)
+            if key and key != "action_type":
+                steps.append({"step": "next_action_alias_field_promoted", "original_field": key, "normalized_action": canonical})
+            plan["next_action"] = next_action
+        else:
+            return None, steps, "rejected_unusable_next_action"
+
+        if not isinstance(plan.get("ordered_actions"), list) or not plan.get("ordered_actions"):
+            if isinstance(plan.get("next_action"), dict):
+                plan["ordered_actions"] = [dict(plan["next_action"])]
+                steps.append({"step": "filled_ordered_actions_from_next_action"})
+            else:
+                return None, steps, "rejected_schema_invalid"
+
+        working["plan"] = plan
+        disposition = "accepted_as_is"
+        if wrapper_source != "top_level_plan":
+            disposition = "accepted_after_unwrap"
+        if steps and disposition == "accepted_as_is":
+            disposition = "accepted_after_repair"
+        elif steps and disposition == "accepted_after_unwrap":
+            disposition = "accepted_after_repair"
+        return working, steps, disposition
+
     def generate_plan(self, request_packet: AgentBrainRequest) -> AgentBrainResponse:
         started_at = time.perf_counter()
         started_at_epoch_ms = int(time.time() * 1000)
@@ -714,6 +881,7 @@ class OllamaLocalBrainProvider(BrainProvider):
             "fallback_source": None,
             "result_source": "ollama",
             "trace_outcome_category": "no_result_generated",
+            "runtime_disposition": "no_result_generated",
         }
         attempts = max(1, int(self.config.max_retries) + 1)
         for attempt in range(1, attempts + 1):
@@ -742,12 +910,19 @@ class OllamaLocalBrainProvider(BrainProvider):
                 attempt_trace["response_parse_source"] = parse_result.get("parse_source")
                 trace["provider_response_parse_source"] = parse_result.get("parse_source")
                 attempt_trace["extracted_response_payload"] = response_payload
-                if not isinstance(response_payload, dict) or "plan" not in response_payload:
-                    raise ValueError("provider payload missing plan")
-                plan_payload = response_payload.get("plan") or {}
-                if "next_action" not in plan_payload or "ordered_actions" not in plan_payload:
-                    raise ValueError("provider payload missing required plan fields")
-                response_obj = AgentBrainResponse.from_dict(response_payload)
+                normalized_payload, normalization_steps, runtime_disposition = self._normalize_payload(response_payload)
+                attempt_trace["normalization_steps"] = normalization_steps
+                attempt_trace["normalized_response_payload"] = normalized_payload
+                trace["runtime_disposition"] = runtime_disposition
+                if normalized_payload is None:
+                    if runtime_disposition == "rejected_missing_plan":
+                        raise ValueError("provider payload missing plan")
+                    if runtime_disposition == "rejected_unusable_next_action":
+                        raise ValueError("provider payload has unusable next_action")
+                    if runtime_disposition == "rejected_illegal_action":
+                        raise ValueError("provider payload has illegal action")
+                    raise ValueError("provider payload schema invalid")
+                response_obj = AgentBrainResponse.from_dict(normalized_payload)
                 trace["attempts"].append(attempt_trace)
                 latency_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
                 self.last_outcome = {"fallback": False, "reason": None, "latency_ms": latency_ms}
@@ -764,6 +939,9 @@ class OllamaLocalBrainProvider(BrainProvider):
                         "result_source": "ollama",
                         "trace_outcome_category": "llm_success",
                         "exception": None,
+                        "normalization_steps": list(normalization_steps),
+                        "normalized_response_payload": normalized_payload,
+                        "extracted_response_payload": response_payload,
                     }
                 )
                 self.last_outcome.update({"outcome_category": "llm_success", "result_source": "ollama"})
@@ -780,6 +958,7 @@ class OllamaLocalBrainProvider(BrainProvider):
                 trace["attempts"].append(attempt_trace)
                 if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
                     trace["timeout_occurred"] = True
+                    trace["runtime_disposition"] = "timed_out"
                 if isinstance(exc, error.HTTPError) and getattr(exc, "code", None) == 404:
                     fallback_hint = "HTTP 404 from local backend may indicate missing/incorrect model name"
                 fallback_reason = f"attempt={attempt}/{attempts} error={exc}"
@@ -815,6 +994,7 @@ class OllamaLocalBrainProvider(BrainProvider):
                 "result_source": "fallback_safe_policy",
                 "trace_outcome_category": "llm_timeout_with_fallback" if trace.get("timeout_occurred") else "llm_error_with_fallback",
                 "exception": trace.get("attempts", [{}])[-1].get("exception") if trace.get("attempts") else None,
+                "runtime_disposition": trace.get("runtime_disposition") or ("timed_out" if trace.get("timeout_occurred") else "fallback_generated"),
             }
         )
         self.last_trace = trace

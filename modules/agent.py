@@ -2346,6 +2346,7 @@ class Agent:
         validation_repaired = False
         grounding_status = None
         grounding_notes = []
+        runtime_disposition = None
         provider_decide = getattr(provider, "decide", None)
         if callable(provider_decide) and provider.__class__.__name__ == "RuleBrain":
             legacy_decision = provider_decide(context)
@@ -2386,6 +2387,8 @@ class Agent:
             )
 
         provider_trace = getattr(provider, "last_trace", None)
+        if isinstance(provider_trace, dict):
+            runtime_disposition = provider_trace.get("runtime_disposition")
         response = self._validate_and_ground_response_plan(response, context, request_packet)
         plan_obj = getattr(response, "plan", None)
         grounding_status = getattr(plan_obj, "_method_status", None) if plan_obj else None
@@ -2429,8 +2432,11 @@ class Agent:
         legacy_errors = validate_brain_decision(decision, [ExecutableActionType(a) for a in legal_action_ids])
         legacy_validation_errors = list(legacy_errors)
         status = "repaired" if repaired else "accepted"
+        if repaired and runtime_disposition in {None, "accepted_as_is", "accepted_after_unwrap"}:
+            runtime_disposition = "accepted_after_repair"
         if legacy_errors:
             status = "rejected"
+            runtime_disposition = "rejected_schema_invalid"
             decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="Fallback due to decision validation failure.", confidence=1.0)
 
         latency_s = max(0.0, time.perf_counter() - float(request_wallclock_time))
@@ -2442,7 +2448,23 @@ class Agent:
         timeout_occurred = bool(provider_trace.get("timeout_occurred", False))
         fallback_used = bool(provider_trace.get("fallback_used", False) or provider_outcome.get("fallback"))
         result_source = provider_trace.get("result_source") or provider_outcome.get("result_source") or configured_backend
-        trace_outcome_category = provider_trace.get("trace_outcome_category") or provider_outcome.get("outcome_category") or ("llm_success" if not fallback_used else "llm_error_with_fallback")
+        disposition = runtime_disposition or provider_trace.get("runtime_disposition")
+        if timeout_occurred and not disposition:
+            disposition = "timed_out"
+        if fallback_used and not disposition:
+            disposition = "fallback_generated"
+        if grounding_status in {"rejected_unknown_method"}:
+            disposition = "rejected_grounding_failure"
+        trace_outcome_category = provider_trace.get("trace_outcome_category") or provider_outcome.get("outcome_category")
+        if not trace_outcome_category:
+            if timeout_occurred:
+                trace_outcome_category = "llm_timeout_with_fallback"
+            elif fallback_used and llm_response_received and not llm_response_validated:
+                trace_outcome_category = "llm_invalid_with_fallback"
+            elif fallback_used and not llm_response_received:
+                trace_outcome_category = "llm_error_with_fallback"
+            else:
+                trace_outcome_category = "llm_success"
         return {
             "request_id": request_packet.request_id,
             "trace_id": trace_id,
@@ -2469,6 +2491,7 @@ class Agent:
             "result_source": result_source,
             "fallback_source": provider_trace.get("fallback_source"),
             "trace_outcome_category": trace_outcome_category,
+            "runtime_disposition": disposition,
             "trace": {
                 "trace_id": trace_id,
                 "schema_validation_succeeded": not bool(schema_validation_errors),
@@ -2477,6 +2500,7 @@ class Agent:
                 "validation_repaired": bool(validation_repaired),
                 "grounding_status": grounding_status,
                 "grounding_notes": list(grounding_notes),
+                "runtime_disposition": disposition,
                 "provider_trace": provider_trace or None,
                 "normalized_agent_brain_response": {
                     "response_id": response.response_id,
@@ -2552,14 +2576,14 @@ class Agent:
             self._timed_out_request_ids.add(str(request_id))
         else:
             self.planner_state["total_failed"] += 1
-            self.planner_state["llm_transport_error_count"] += 1
+            self.planner_state["llm_invalid_count"] += 1
         self.planner_state["error"] = str(reason)
         self.planner_state["consecutive_failures"] += 1
         self.planner_state["fallback_generated_count"] += 1
         if timed_out:
             self._emit_event(sim_state, "llm_timeout", {"request_id": request_id, "trace_id": self.planner_state.get("trace_id")})
         else:
-            self._emit_event(sim_state, "llm_transport_error", {"request_id": request_id, "trace_id": self.planner_state.get("trace_id")})
+            self._emit_event(sim_state, "llm_response_invalid", {"request_id": request_id, "trace_id": self.planner_state.get("trace_id")})
         self._emit_event(sim_state, "fallback_result_generated", {"request_id": request_id, "trace_id": self.planner_state.get("trace_id"), "fallback_source": "fallback_safe_policy", "result_source": "fallback_safe_policy"})
         threshold = self.planner_cadence.degraded_consecutive_failures_threshold
         if self.planner_state["consecutive_failures"] >= threshold:
@@ -2594,6 +2618,7 @@ class Agent:
                 "fallback_reason": str(reason),
                 "timeout_occurred": bool(timed_out),
                 "trace_outcome_category": "llm_timeout_with_fallback" if timed_out else "llm_error_with_fallback",
+                "runtime_disposition": "timed_out" if timed_out else "fallback_generated",
                 "exception": {"type": "TimeoutError" if timed_out else "PlannerExecutionError", "message": str(reason)},
                 "schema_validation_succeeded": False,
                 "llm_response_received": False,
@@ -2638,7 +2663,7 @@ class Agent:
         if result.get("request_id") != request_id:
             self.planner_state["total_stale_discarded"] += 1
             self._emit_event(sim_state, "planner_request_result_arrived_stale", {"request_id": result.get("request_id"), "expected_request_id": request_id, "trace_id": result.get("trace_id")})
-            self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": result.get("request_id"), "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": "stale_discarded", "plan_disposition": "discarded_stale_request_id_mismatch", "fallback": True, "fallback_used": True, "fallback_source": "stale_response_guard", "result_source": "fallback_safe_policy", "fallback_reason": "request_id_mismatch", "trace_outcome_category": "stale_response_discarded"})
+            self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": result.get("request_id"), "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": "stale_discarded", "plan_disposition": "discarded_stale_request_id_mismatch", "runtime_disposition": "stale_discarded", "fallback": True, "fallback_used": True, "fallback_source": "stale_response_guard", "result_source": "fallback_safe_policy", "fallback_reason": "request_id_mismatch", "trace_outcome_category": "stale_response_discarded"})
             return False
         if result.get("request_id") in self._timed_out_request_ids:
             request_wallclock_started = self.planner_state.get("requested_wallclock_at")
@@ -2657,7 +2682,7 @@ class Agent:
                 self._timed_out_request_ids.discard(result.get("request_id"))
                 self.planner_state["total_stale_discarded"] += 1
                 self._emit_event(sim_state, "planner_request_result_arrived_stale", {"request_id": result.get("request_id"), "reason": "arrived_after_timeout", "trace_id": result.get("trace_id")})
-                self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": result.get("request_id"), "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": "stale_discarded", "plan_disposition": "discarded_arrived_after_timeout", "fallback": True, "fallback_used": True, "fallback_source": "stale_response_guard", "result_source": "fallback_safe_policy", "fallback_reason": "arrived_after_timeout", "trace_outcome_category": "stale_response_discarded", "trace": result.get("trace")})
+                self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": result.get("request_id"), "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": "stale_discarded", "plan_disposition": "discarded_arrived_after_timeout", "runtime_disposition": "stale_discarded", "fallback": True, "fallback_used": True, "fallback_source": "stale_response_guard", "result_source": "fallback_safe_policy", "fallback_reason": "arrived_after_timeout", "trace_outcome_category": "stale_response_discarded", "trace": result.get("trace")})
                 return False
 
         self.planner_call_count += 1
@@ -2722,7 +2747,7 @@ class Agent:
             self._emit_event(sim_state, "planner_response_discarded_due_to_state_change", {"request_id": request_id, "trace_id": result.get("trace_id"), "request_tick": self.planner_state["request_tick"], "current_tick": self.sim_step_count, "current_plan_id": getattr(self.current_plan, "plan_id", None)})
             if result.get("fallback_used"):
                 self._emit_event(sim_state, "fallback_result_rejected", {"request_id": request_id, "trace_id": result.get("trace_id"), "reason": "state_changed_before_adoption"})
-            self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": request_id, "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": status, "plan_disposition": "discarded_due_to_state_change", "fallback": bool(result.get("fallback_used")), "fallback_used": bool(result.get("fallback_used")), "fallback_source": result.get("fallback_source"), "result_source": result.get("result_source"), "fallback_reason": "state_changed_before_adoption", "trace_outcome_category": "stale_response_discarded", "trace": result.get("trace")})
+            self._append_planner_trace(sim_state, {"trace_id": result.get("trace_id"), "request_id": request_id, "agent_id": self.agent_id, "sim_time": float(sim_state.time), "planner_result": status, "plan_disposition": "discarded_due_to_state_change", "runtime_disposition": "stale_discarded", "fallback": bool(result.get("fallback_used")), "fallback_used": bool(result.get("fallback_used")), "fallback_source": result.get("fallback_source"), "result_source": result.get("result_source"), "fallback_reason": "state_changed_before_adoption", "trace_outcome_category": "stale_response_discarded", "trace": result.get("trace")})
             return False
 
         self._adopt_new_plan(decision, trigger_reason, sim_state, response=response, trace_id=result.get("trace_id"), result_source=result.get("result_source"), fallback_used=bool(result.get("fallback_used")) )
@@ -2752,7 +2777,8 @@ class Agent:
         if result.get("llm_response_received") and not result.get("llm_response_validated"):
             self.planner_state["llm_invalid_count"] += 1
         if result.get("fallback_used") and (not result.get("timeout_occurred")) and (not result.get("llm_response_received") or not result.get("llm_response_validated")):
-            self.planner_state["llm_transport_error_count"] += 1
+            if not result.get("llm_response_received"):
+                self.planner_state["llm_transport_error_count"] += 1
 
         self._emit_event(sim_state, "planner_request_completed_async", {"request_id": request_id, "trace_id": result.get("trace_id"), "result": status, "latency": result.get("latency_s"), "consecutive_failures": self.planner_state["consecutive_failures"], "result_source": result.get("result_source"), "fallback_used": bool(result.get("fallback_used"))})
         translated_actions = list(self.current_action or [])
@@ -2787,6 +2813,7 @@ class Agent:
             "llm_response_validated": bool(result.get("llm_response_validated")),
             "timeout_occurred": bool(result.get("timeout_occurred")),
             "trace_outcome_category": result.get("trace_outcome_category") or ("llm_success" if not result.get("fallback_used") else "llm_error_with_fallback"),
+            "runtime_disposition": result.get("runtime_disposition") or ("fallback_adopted" if result.get("fallback_used") else "accepted_as_is"),
             "agent_brain_request_payload": self.planner_state.get("request_payload"),
             "planner_result": status,
             "schema_validation_succeeded": not bool(result.get("trace", {}).get("schema_validation_errors")),
