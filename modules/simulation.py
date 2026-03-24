@@ -2,6 +2,7 @@
 
 import math
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from modules.agent import Agent
@@ -258,6 +259,20 @@ class SimulationState:
         self.agent_brain_runtime = {}
         worker_count = int(self.planner_defaults.get("planner_async_workers", max(2, len(self.task_model.agent_defaults) if self.task_model.agent_defaults else 3)))
         self.planner_executor = ThreadPoolExecutor(max_workers=max(1, worker_count), thread_name_prefix="planner")
+        self.planner_barrier_policy = str(self.planner_defaults.get("planner_barrier_policy", "global") or "global").lower()
+        self.planner_barrier_state = {
+            "active": False,
+            "reason": None,
+            "blocking_agent_ids": [],
+            "blocking_request_ids": [],
+            "pause_started_wallclock_at": None,
+            "pause_started_sim_time": None,
+            "pause_started_tick": None,
+            "pause_count": 0,
+            "total_wallclock_wait_s": 0.0,
+            "last_wallclock_wait_s": 0.0,
+            "last_active_emit_at": 0.0,
+        }
         self.effective_brain_backend = self.configured_brain_backend
         self.fallback_occurred = False
         self.backend_fallback_count = 0
@@ -296,6 +311,16 @@ class SimulationState:
             self.time,
             "planner_cadence_configured",
             {"planner_defaults": self.planner_defaults},
+        )
+        self.logger.log_event(
+            self.time,
+            "planner_barrier_configured",
+            {
+                "planner_barrier_policy": self.planner_barrier_policy,
+                "planner_blocks_sim_time_default": self.planner_defaults.get("planner_blocks_sim_time"),
+                "high_latency_local_llm_mode": bool(self.planner_defaults.get("high_latency_local_llm_mode", False)),
+                "unrestricted_local_qwen_mode": bool(self.planner_defaults.get("unrestricted_local_qwen_mode", False)),
+            },
         )
         self.logger.log_event(
             self.time,
@@ -544,6 +569,7 @@ class SimulationState:
             "unrestricted_local_qwen_mode": bool(agent.planner_cadence.unrestricted_local_qwen_mode),
             "high_latency_stale_result_grace_s": float(agent.planner_cadence.high_latency_stale_result_grace_s),
             "sticky_backend_demotion_enabled": bool(agent.planner_cadence.sticky_backend_demotion_enabled),
+            "planner_blocks_sim_time": agent.planner_cadence.planner_blocks_sim_time,
         }
 
     def _register_agent_brain_runtime(self, agent):
@@ -700,6 +726,7 @@ class SimulationState:
             "warmup_timeout_s": cfg.warmup_timeout_s if self.configured_brain_backend != "rule_brain" else None,
             "high_latency_local_llm_mode": bool(self.planner_defaults.get("high_latency_local_llm_mode", False)),
             "unrestricted_local_qwen_mode": bool(self.planner_defaults.get("unrestricted_local_qwen_mode", False)),
+            "planner_blocks_sim_time_default": self.planner_defaults.get("planner_blocks_sim_time"),
             "effective_planner_timeout_seconds": float(self.planner_defaults.get("planner_timeout_seconds", 0.0) or 0.0),
             "effective_startup_llm_sanity_timeout_seconds": float(self.planner_defaults.get("startup_llm_sanity_timeout_seconds", 0.0) or 0.0),
             "effective_warmup_timeout_seconds": float(self.brain_backend_config.warmup_timeout_s or 0.0),
@@ -721,8 +748,113 @@ class SimulationState:
             "backend_warmup": self.provider_warmup_status,
             "bootstrap_summary_max_chars": self.bootstrap_summary_max_chars,
             "bootstrap_reuse_included_count": int(getattr(self, "bootstrap_reuse_included_count", 0)),
+            "planner_barrier_policy": self.planner_barrier_policy,
+            "planner_barrier_active": bool(self.planner_barrier_state.get("active")),
+            "planner_barrier_pause_count": int(self.planner_barrier_state.get("pause_count", 0)),
+            "planner_barrier_total_wallclock_wait_s": float(self.planner_barrier_state.get("total_wallclock_wait_s", 0.0)),
+            "planner_blocking_backends_detected": sorted(
+                {
+                    str(self.get_agent_brain_runtime(agent).get("effective_backend", self.configured_brain_backend))
+                    for agent in self.agents
+                    if hasattr(agent, "planner_request_blocks_sim_time")
+                    and bool(agent.planner_request_blocks_sim_time(sim_state=self, runtime=self.get_agent_brain_runtime(agent)))
+                }
+            ),
             **dict(self.startup_llm_sanity_summary),
         }
+
+    def _collect_blocking_planner_requests(self):
+        active = []
+        for agent in self.agents:
+            planner_state = getattr(agent, "planner_state", {}) or {}
+            if planner_state.get("status") != "in_flight":
+                continue
+            runtime = self.get_agent_brain_runtime(agent)
+            if not hasattr(agent, "planner_request_blocks_sim_time"):
+                continue
+            if not bool(agent.planner_request_blocks_sim_time(sim_state=self, runtime=runtime)):
+                continue
+            active.append(
+                {
+                    "agent_id": agent.agent_id,
+                    "agent_name": agent.name,
+                    "request_id": planner_state.get("request_id"),
+                    "reason": planner_state.get("barrier_reason") or "planner_request_in_flight",
+                    "effective_backend": runtime.get("effective_backend", self.configured_brain_backend),
+                    "configured_backend": runtime.get("configured_backend", self.configured_brain_backend),
+                }
+            )
+        return active
+
+    def _refresh_planner_barrier_state(self):
+        now_wallclock = time.perf_counter()
+        blocking_requests = self._collect_blocking_planner_requests()
+        barrier_active = bool(blocking_requests) and self.planner_barrier_policy == "global"
+        state = self.planner_barrier_state
+        state["blocking_agent_ids"] = [row["agent_id"] for row in blocking_requests]
+        state["blocking_request_ids"] = [row["request_id"] for row in blocking_requests if row.get("request_id")]
+        state["reason"] = blocking_requests[0]["reason"] if blocking_requests else None
+        if barrier_active and not state.get("active"):
+            state["active"] = True
+            state["pause_started_wallclock_at"] = now_wallclock
+            state["pause_started_sim_time"] = float(self.time)
+            state["pause_started_tick"] = int(round(self.time * 1000.0))
+            state["pause_count"] = int(state.get("pause_count", 0)) + 1
+            self.logger.log_event(
+                self.time,
+                "planner_barrier_started",
+                {
+                    "cognition_pause_reason": state.get("reason"),
+                    "blocking_request_ids": list(state.get("blocking_request_ids", [])),
+                    "blocking_agent_ids": list(state.get("blocking_agent_ids", [])),
+                    "planner_barrier_policy": self.planner_barrier_policy,
+                },
+            )
+        elif barrier_active and state.get("active"):
+            if now_wallclock - float(state.get("last_active_emit_at", 0.0) or 0.0) >= 0.2:
+                wait_s = max(0.0, now_wallclock - float(state.get("pause_started_wallclock_at") or now_wallclock))
+                state["last_active_emit_at"] = now_wallclock
+                self.logger.log_event(
+                    self.time,
+                    "planner_barrier_active",
+                    {
+                        "cognition_pause_reason": state.get("reason"),
+                        "blocking_request_ids": list(state.get("blocking_request_ids", [])),
+                        "blocking_agent_ids": list(state.get("blocking_agent_ids", [])),
+                        "wallclock_wait_s": wait_s,
+                    },
+                )
+        elif (not barrier_active) and state.get("active"):
+            wait_s = max(0.0, now_wallclock - float(state.get("pause_started_wallclock_at") or now_wallclock))
+            state["total_wallclock_wait_s"] = float(state.get("total_wallclock_wait_s", 0.0)) + wait_s
+            state["last_wallclock_wait_s"] = wait_s
+            self.logger.log_event(
+                self.time,
+                "planner_barrier_resolved",
+                {
+                    "cognition_pause_reason": state.get("reason"),
+                    "blocking_request_ids": list(state.get("blocking_request_ids", [])),
+                    "blocking_agent_ids": list(state.get("blocking_agent_ids", [])),
+                    "wallclock_wait_s": wait_s,
+                },
+            )
+            self.logger.log_event(
+                self.time,
+                "planner_barrier_released",
+                {
+                    "wallclock_wait_s": wait_s,
+                    "planner_barrier_pause_count": int(state.get("pause_count", 0)),
+                    "planner_barrier_total_wallclock_wait_s": float(state.get("total_wallclock_wait_s", 0.0)),
+                },
+            )
+            state["active"] = False
+            state["reason"] = None
+            state["blocking_agent_ids"] = []
+            state["blocking_request_ids"] = []
+            state["pause_started_wallclock_at"] = None
+            state["pause_started_sim_time"] = None
+            state["pause_started_tick"] = None
+            state["last_active_emit_at"] = 0.0
 
     def _refresh_backend_effective_state(self, reason="runtime_update"):
         configured = self.configured_brain_backend
@@ -809,6 +941,16 @@ class SimulationState:
 
     def update(self, base_dt):
         dt = base_dt * self.speed_multiplier
+        for agent in self.agents:
+            agent.current_time = self.time
+            agent._check_inflight_timeout(self)
+            agent._poll_planner_request(self, self.environment)
+        self._refresh_planner_barrier_state()
+        if self.planner_barrier_state.get("active"):
+            for agent in self.agents:
+                self.logger.log_agent_state(self.time, agent)
+            return
+
         previous_phase_index = self.environment.current_phase_index
         previous_phase = self.environment.get_current_phase() or {"name": "default"}
         self.environment.update(self.time)
@@ -844,7 +986,7 @@ class SimulationState:
                 )
                 self.logger.log_agent_state(self.time, agent)
                 continue
-            agent.update(dt, self.environment, sim_state=self)
+            agent.update(dt, self.environment, sim_state=self, planner_lifecycle_already_polled=True)
             agent.compare_and_repair_construction(self.environment.construction, sim_state=self)
             self.refresh_agent_backend_effective_state(agent, reason="planner_call")
             self.logger.log_agent_state(self.time, agent)
