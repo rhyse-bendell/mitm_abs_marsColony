@@ -463,6 +463,9 @@ class MarsColonyInterface:
     @staticmethod
     def _brain_interpretation_summary_line(row):
         interpretation = row.get("interpretation") or {}
+        failure = ""
+        if interpretation.get("failure_mode") and interpretation.get("failure_mode") != "none":
+            failure = f" failure={interpretation.get('failure_mode')}"
         stale = ""
         if interpretation.get("stale_discard_reason"):
             stale = f" stale={interpretation.get('stale_discard_reason')}"
@@ -470,7 +473,7 @@ class MarsColonyInterface:
             f"{row.get('request_id')} [{interpretation.get('status')}] "
             f"disp={interpretation.get('runtime_disposition')} result={interpretation.get('planner_result')} "
             f"action={interpretation.get('adopted_action')} fallback={bool(interpretation.get('fallback_used'))}"
-            f"{f' failure={interpretation.get('failure_mode')}' if interpretation.get('failure_mode') and interpretation.get('failure_mode') != 'none' else ''}"
+            f"{failure}"
             f"{stale}"
         )
 
