@@ -7,6 +7,8 @@ import traceback
 import json
 import math
 import time
+import hashlib
+import colorsys
 from pathlib import Path
 from tkinter import ttk, messagebox
 from matplotlib.figure import Figure
@@ -16,7 +18,7 @@ from modules.simulation import SimulationState
 from tkinter import StringVar, BooleanVar, DoubleVar, IntVar
 from modules.construction import ConstructionManager
 from modules.phase_definitions import MISSION_PHASES
-from modules.task_model import load_task_model
+from modules.task_model import load_task_model, normalize_rule_token
 from modules.interaction_graph import CANONICAL_NODES
 from modules.headless_runner import run_batch_experiment
 
@@ -180,6 +182,8 @@ class MarsColonyInterface:
         self.create_event_monitor_tab()
         self.create_interaction_tab()
         self.create_brain_tab()
+        self.create_dik_derivations_tab()
+        self.create_rule_derivations_tab()
 
     def _build_environment_canvas(self, parent):
         try:
@@ -1029,6 +1033,251 @@ class MarsColonyInterface:
             canvas.create_oval(x-r, y-r, x+r, y+r, fill=fill, outline="#dddddd")
             canvas.create_text(x, y-26, text=node.label, fill="#e5e7eb", font=("Arial", 8))
 
+    def _get_epistemic_task_model(self):
+        if self.sim and getattr(self.sim, "task_model", None) is not None:
+            return self.sim.task_model
+        if not hasattr(self, "_epistemic_task_model_cache"):
+            self._epistemic_task_model_cache = load_task_model(task_id="mars_colony")
+        return self._epistemic_task_model_cache
+
+    def _epistemic_selector_values(self):
+        names = ["Team Union"]
+        if self.sim:
+            names.extend([str(getattr(a, "name", f"Agent {idx+1}")) for idx, a in enumerate(self.sim.agents)])
+        return names
+
+    def _refresh_epistemic_selector_values(self):
+        values = self._epistemic_selector_values()
+        if not hasattr(self, "epistemic_view_var"):
+            return
+        if self.epistemic_view_var.get() not in values:
+            self.epistemic_view_var.set("Team Union")
+        for name in ("dik_view_combo", "rule_view_combo"):
+            combo = getattr(self, name, None)
+            if combo is not None:
+                combo.configure(values=values)
+
+    def _stable_data_color(self, data_id):
+        digest = hashlib.md5(str(data_id).encode("utf-8")).hexdigest()
+        hue = (int(digest[:8], 16) % 360) / 360.0
+        sat = 0.62
+        val = 0.88
+        r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
+        return f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
+
+    @staticmethod
+    def _agent_held_sets(agent):
+        data_ids = {getattr(item, "id", str(item)) for item in list(agent.mental_model.get("data", []))}
+        info_ids = {getattr(item, "id", str(item)) for item in list(agent.mental_model.get("information", []))}
+        knowledge_ids = {str(item) for item in list(getattr(agent.mental_model.get("knowledge"), "rules", []))}
+        normalized_rule_ids = {normalize_rule_token(r) for r in knowledge_ids}
+        return {
+            "data": data_ids,
+            "information": info_ids,
+            "knowledge": knowledge_ids,
+            "rules": normalized_rule_ids | knowledge_ids,
+        }
+
+    def _collect_epistemic_state(self):
+        view = self.epistemic_view_var.get() if hasattr(self, "epistemic_view_var") else "Team Union"
+        state = {"data": set(), "information": set(), "knowledge": set(), "rules": set()}
+        if not self.sim:
+            return state
+        if view == "Team Union":
+            for agent in self.sim.agents:
+                held = self._agent_held_sets(agent)
+                for key in state:
+                    state[key].update(held[key])
+            return state
+        for agent in self.sim.agents:
+            if str(getattr(agent, "name", "")) == view:
+                held = self._agent_held_sets(agent)
+                for key in state:
+                    state[key].update(held[key])
+                break
+        return state
+
+    def _element_is_held(self, element_id, element_type, state):
+        if element_type == "data":
+            return element_id in state["data"]
+        if element_type == "information":
+            return element_id in state["information"]
+        if element_type == "knowledge":
+            return element_id in state["knowledge"] or normalize_rule_token(element_id) in state["rules"]
+        return element_id in state["data"] or element_id in state["information"] or element_id in state["knowledge"] or normalize_rule_token(element_id) in state["rules"]
+
+    @staticmethod
+    def _build_derivation_groups(task_model, *, output_type):
+        groups = {}
+        for derivation in task_model.derivations.values():
+            if not derivation.enabled or str(derivation.output_type) != str(output_type):
+                continue
+            group = groups.setdefault(derivation.output_element_id, [])
+            group.append(derivation)
+        return [(output_id, groups[output_id]) for output_id in sorted(groups.keys())]
+
+    def _pathway_satisfied(self, derivation, state, task_model):
+        req_ids = [str(x) for x in (derivation.required_inputs or []) if str(x)]
+        held = 0
+        for req_id in req_ids:
+            element = task_model.dik_elements.get(req_id)
+            etype = element.element_type if element else None
+            if self._element_is_held(req_id, etype, state):
+                held += 1
+        if derivation.min_required_count:
+            return held >= int(derivation.min_required_count)
+        return held == len(req_ids)
+
+    def _draw_data_square(self, canvas, x, y, data_id, *, held, label=None, size=14):
+        color = self._stable_data_color(data_id)
+        fill = color if held else "white"
+        canvas.create_rectangle(x, y, x + size, y + size, fill=fill, outline=color, width=1.5)
+        if label:
+            canvas.create_text(x + size + 6, y + size / 2, text=label, anchor="w", font=("Arial", 8))
+
+    def _draw_requirement_chip(self, canvas, x, y, req_id, state, task_model, *, width=160, height=18):
+        element = task_model.dik_elements.get(req_id)
+        etype = element.element_type if element else "unknown"
+        held = self._element_is_held(req_id, etype, state)
+        label = f"{req_id}"
+        if etype == "data":
+            self._draw_data_square(canvas, x, y + 2, req_id, held=held, label=label, size=12)
+            return y + height
+        outline = "#2f6f9f" if etype == "information" else "#6b4f8c"
+        fill = "#d6ecff" if held else "#f6f8fa"
+        if etype == "knowledge":
+            fill = "#e6dcff" if held else "#f6f8fa"
+        canvas.create_rectangle(x, y, x + width, y + height, outline=outline, fill=fill, width=1.2)
+        canvas.create_text(x + 5, y + height / 2, text=label, anchor="w", font=("Arial", 8))
+        return y + height + 4
+
+    def create_dik_derivations_tab(self):
+        self.tab_dik_derivations = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_dik_derivations, text="DIK Derivations")
+        controls = ttk.Frame(self.tab_dik_derivations, padding=(6, 6, 6, 0))
+        controls.pack(fill="x")
+        ttk.Label(controls, text="View").pack(side="left")
+        self.epistemic_view_var = StringVar(value="Team Union")
+        self.dik_view_combo = ttk.Combobox(controls, textvariable=self.epistemic_view_var, values=["Team Union"], state="readonly", width=24)
+        self.dik_view_combo.pack(side="left", padx=(6, 0))
+        self.dik_view_combo.bind("<<ComboboxSelected>>", lambda *_: (self.update_dik_derivations_tab(), self.update_rule_derivations_tab()))
+
+        canvas_wrap = ttk.Frame(self.tab_dik_derivations, padding=6)
+        canvas_wrap.pack(fill="both", expand=True)
+        self.dik_derivations_canvas = tk.Canvas(canvas_wrap, background="#ffffff")
+        y_scroll = ttk.Scrollbar(canvas_wrap, orient="vertical", command=self.dik_derivations_canvas.yview)
+        self.dik_derivations_canvas.configure(yscrollcommand=y_scroll.set)
+        self.dik_derivations_canvas.pack(side="left", fill="both", expand=True)
+        y_scroll.pack(side="right", fill="y")
+
+    def create_rule_derivations_tab(self):
+        self.tab_rule_derivations = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_rule_derivations, text="Rule Derivations")
+        controls = ttk.Frame(self.tab_rule_derivations, padding=(6, 6, 6, 0))
+        controls.pack(fill="x")
+        ttk.Label(controls, text="View").pack(side="left")
+        self.rule_view_combo = ttk.Combobox(controls, textvariable=self.epistemic_view_var, values=["Team Union"], state="readonly", width=24)
+        self.rule_view_combo.pack(side="left", padx=(6, 0))
+        self.rule_view_combo.bind("<<ComboboxSelected>>", lambda *_: (self.update_dik_derivations_tab(), self.update_rule_derivations_tab()))
+
+        canvas_wrap = ttk.Frame(self.tab_rule_derivations, padding=6)
+        canvas_wrap.pack(fill="both", expand=True)
+        self.rule_derivations_canvas = tk.Canvas(canvas_wrap, background="#ffffff")
+        y_scroll = ttk.Scrollbar(canvas_wrap, orient="vertical", command=self.rule_derivations_canvas.yview)
+        self.rule_derivations_canvas.configure(yscrollcommand=y_scroll.set)
+        self.rule_derivations_canvas.pack(side="left", fill="both", expand=True)
+        y_scroll.pack(side="right", fill="y")
+
+    def update_dik_derivations_tab(self):
+        if not hasattr(self, "dik_derivations_canvas"):
+            return
+        self._refresh_epistemic_selector_values()
+        canvas = self.dik_derivations_canvas
+        canvas.delete("all")
+        task_model = self._get_epistemic_task_model()
+        state = self._collect_epistemic_state()
+        y = 10
+        canvas.create_text(10, y, text="Data Elements", anchor="nw", font=("Arial", 11, "bold"))
+        y += 24
+        data_ids = sorted([eid for eid, elem in task_model.dik_elements.items() if elem.enabled and elem.element_type == "data"])
+        col_count = 5
+        row_h = 24
+        for idx, data_id in enumerate(data_ids):
+            row = idx // col_count
+            col = idx % col_count
+            dx = 16 + col * 180
+            dy = y + row * row_h
+            self._draw_data_square(canvas, dx, dy, data_id, held=self._element_is_held(data_id, "data", state), label=data_id, size=12)
+        y += max(1, math.ceil(max(1, len(data_ids)) / col_count)) * row_h + 18
+
+        for section_name, output_type, border_color, fill_active, fill_inactive in [
+            ("Information Derivations", "information", "#2f6f9f", "#d6ecff", "#f8fbff"),
+            ("Knowledge Derivations", "knowledge", "#6b4f8c", "#e6dcff", "#fbf8ff"),
+        ]:
+            canvas.create_text(10, y, text=section_name, anchor="nw", font=("Arial", 11, "bold"))
+            y += 22
+            groups = self._build_derivation_groups(task_model, output_type=output_type)
+            if not groups:
+                canvas.create_text(20, y, text="(no derivations)", anchor="nw", font=("Arial", 9), fill="#666666")
+                y += 22
+                continue
+            for output_id, pathways in groups:
+                output_held = self._element_is_held(output_id, output_type, state)
+                canvas.create_text(16, y, text=f"{output_id}  ({'achieved' if output_held else 'not achieved'})", anchor="nw", font=("Arial", 10, "bold"), fill="#14395f" if output_held else "#7a8188")
+                y += 18
+                for derivation in pathways:
+                    card_h = 26 + (20 * max(1, len(derivation.required_inputs)))
+                    satisfied = self._pathway_satisfied(derivation, state, task_model)
+                    fill = fill_active if satisfied else fill_inactive
+                    canvas.create_rectangle(28, y, 760, y + card_h, outline=border_color, fill=fill, width=1.5)
+                    canvas.create_text(36, y + 6, text=f"{derivation.derivation_id} ({'path satisfied' if satisfied else 'path unsatisfied'})", anchor="nw", font=("Arial", 9, "bold"))
+                    req_y = y + 24
+                    for req_id in derivation.required_inputs:
+                        req_y = self._draw_requirement_chip(canvas, 44, req_y, req_id, state, task_model, width=220, height=18)
+                    y += card_h + 8
+                y += 4
+            y += 10
+        canvas.configure(scrollregion=(0, 0, 900, max(500, y + 20)))
+
+    def update_rule_derivations_tab(self):
+        if not hasattr(self, "rule_derivations_canvas"):
+            return
+        self._refresh_epistemic_selector_values()
+        canvas = self.rule_derivations_canvas
+        canvas.delete("all")
+        task_model = self._get_epistemic_task_model()
+        state = self._collect_epistemic_state()
+        y = 10
+        canvas.create_text(10, y, text="Rule Derivations", anchor="nw", font=("Arial", 11, "bold"))
+        y += 24
+        for rule_id in sorted(task_model.rules.keys()):
+            rule = task_model.rules[rule_id]
+            if not rule.enabled:
+                continue
+            req_info = [r for r in rule.required_information if r]
+            req_knowledge = [r for r in rule.required_knowledge if r]
+            prereq_ok = all(self._element_is_held(i, "information", state) for i in req_info) and all(
+                self._element_is_held(k, "knowledge", state) for k in req_knowledge
+            )
+            achieved = normalize_rule_token(rule.rule_id) in state["rules"] or rule.rule_id in state["knowledge"]
+            card_h = 56 + (len(req_info) + len(req_knowledge)) * 24
+            canvas.create_rectangle(16, y, 780, y + card_h, outline="#444444", width=1.6, fill="#edf9ed" if achieved else "#fafafa")
+            canvas.create_text(24, y + 8, text=f"{rule.rule_id} ({'achieved' if achieved else 'not achieved'})", anchor="nw", font=("Arial", 10, "bold"))
+            canvas.create_text(24, y + 24, text=f"Prerequisites: {'satisfied' if prereq_ok else 'unsatisfied'}", anchor="nw", font=("Arial", 9), fill="#2f7a2f" if prereq_ok else "#9a3c3c")
+            req_y = y + 42
+            if req_info:
+                canvas.create_text(30, req_y, text="Required Information", anchor="nw", font=("Arial", 8, "bold"))
+                req_y += 14
+                for req_id in req_info:
+                    req_y = self._draw_requirement_chip(canvas, 40, req_y, req_id, state, task_model, width=260, height=18)
+            if req_knowledge:
+                canvas.create_text(320, y + 42, text="Required Knowledge", anchor="nw", font=("Arial", 8, "bold"))
+                k_y = y + 56
+                for req_id in req_knowledge:
+                    k_y = self._draw_requirement_chip(canvas, 330, k_y, req_id, state, task_model, width=260, height=18)
+            y += card_h + 12
+        canvas.configure(scrollregion=(0, 0, 900, max(500, y + 20)))
+
     def create_event_monitor_tab(self):
         self.tab_event = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_event, text="Event Monitor")
@@ -1458,6 +1707,8 @@ class MarsColonyInterface:
         self._update_observability_status_display()
         self.update_interaction_tab()
         self.update_brain_tab()
+        self.update_dik_derivations_tab()
+        self.update_rule_derivations_tab()
 
     def _create_startup_dialog(self):
         self._close_startup_dialog()
@@ -1645,6 +1896,8 @@ class MarsColonyInterface:
         self._update_observability_status_display()
         self.update_interaction_tab()
         self.update_brain_tab()
+        self.update_dik_derivations_tab()
+        self.update_rule_derivations_tab()
         self._schedule_next_tick()
 
     def _update_control_states(self):
