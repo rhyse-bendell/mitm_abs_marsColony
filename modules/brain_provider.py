@@ -313,6 +313,13 @@ class RuleBrain(BrainProvider):
         externalized = context_packet.team_state.get("externalized_artifacts", []) if not is_request else list(context_packet.artifact_context)
         validated = sum(1 for a in externalized if a.get("validation_state") == "validated")
         seconds_since_dik_change = cognitive.get("seconds_since_dik_change") if not is_request else None
+        inspect_state = cognitive.get("inspect_state", {}) if not is_request else {}
+        source_exhaustion = inspect_state.get("source_exhaustion", {}) if isinstance(inspect_state, dict) else {}
+        exhausted_shared = bool((source_exhaustion.get("Team_Info", {}) or {}).get("exhausted"))
+        role_name = ""
+        if not is_request:
+            role_name = str((getattr(context_packet, "static_task_context", {}) or {}).get("role", ""))
+        exhausted_role = bool((source_exhaustion.get(f"{role_name}_Info", {}) or {}).get("exhausted"))
         return {
             "epistemic_deficit": min(1.0, len(known_gaps) / 4.0),
             "build_opportunity": 1.0 if readiness.get("ready_for_build") else 0.0,
@@ -326,11 +333,13 @@ class RuleBrain(BrainProvider):
             "dik_change_recency": 1.0 if (seconds_since_dik_change is not None and float(seconds_since_dik_change) <= 4.0) else 0.0,
             "artifact_validation_available": min(1.0, validated / 2.0),
             "teammate_relevance": min(1.0, len(context_packet.team_state.get("tom_summary", {})) / 3.0) if not is_request else 0.0,
+            "shared_source_exhausted": 1.0 if exhausted_shared else 0.0,
+            "role_source_exhausted": 1.0 if exhausted_role else 0.0,
         }
 
     def _compute_mode_scores(self, features: dict[str, float], legal_types: set[str], control_state: dict[str, Any], traits: dict[str, float]) -> tuple[dict[str, float], dict[str, bool]]:
         mode_scores = {m: 0.0 for m in self.MODES}
-        mode_scores["BOOTSTRAP"] = 0.3 + 1.4 * features["epistemic_deficit"] + 0.4 * features["readiness_blocked"]
+        mode_scores["BOOTSTRAP"] = 0.3 + 1.4 * features["epistemic_deficit"] + 0.4 * features["readiness_blocked"] - 1.25 * features["shared_source_exhausted"]
         mode_scores["ACQUIRE_DIK"] = 0.4 + 1.5 * features["epistemic_deficit"] + 0.3 * features["coordination_need"]
         mode_scores["INTEGRATE_DIK"] = 0.3 + 1.2 * features["dik_change_recency"] + 0.8 * features["artifact_validation_available"]
         mode_scores["COORDINATE"] = 0.3 + 1.0 * features["coordination_need"] + 0.4 * float(traits.get("communication_propensity", 0.5))
@@ -356,6 +365,30 @@ class RuleBrain(BrainProvider):
         }
         return mode_scores, mode_guards
 
+    def _bootstrap_exit_triggered(self, context_packet, features: dict[str, float], control_state: dict[str, Any], *, is_request: bool) -> tuple[bool, str]:
+        if is_request:
+            return False, ""
+        inspect_state = context_packet.individual_cognitive_state.get("inspect_state", {})
+        source_exhaustion = inspect_state.get("source_exhaustion", {}) if isinstance(inspect_state, dict) else {}
+        shared = source_exhaustion.get("Team_Info", {}) or {}
+        role_source = f"{context_packet.static_task_context.get('role', '')}_Info"
+        role_state = source_exhaustion.get(role_source, {}) or {}
+        shared_exhausted = bool(shared.get("exhausted"))
+        shared_no_new_streak = int(shared.get("no_new_dik_streak", 0) or 0)
+        role_missing = bool(
+            features["epistemic_deficit"] > 0.0
+            and (not role_state.get("inspected"))
+            and (not role_state.get("exhausted"))
+        )
+        role_still_blocked = bool(features["readiness_blocked"] > 0.0 and features["epistemic_deficit"] > 0.0)
+        if shared_exhausted and (role_missing or role_still_blocked):
+            return True, "bootstrap_exit_shared_source_exhausted_role_gap_remaining"
+        if shared_no_new_streak >= 2 and role_missing:
+            return True, "bootstrap_exit_shared_source_no_new_dik_streak"
+        if features["shared_source_exhausted"] > 0 and features["dik_change_recency"] <= 0 and role_still_blocked:
+            return True, "bootstrap_exit_no_marginal_shared_value"
+        return False, ""
+
     def _apply_control_state_update(self, context_packet, selected_mode: str, features: dict[str, float], reason: str) -> dict[str, Any]:
         control_state = context_packet.individual_cognitive_state.get("control_state", {}) if hasattr(context_packet, "individual_cognitive_state") else {}
         sim_step = int(context_packet.world_snapshot.get("sim_time", 0.0) if hasattr(context_packet, "world_snapshot") else 0)
@@ -365,6 +398,7 @@ class RuleBrain(BrainProvider):
         if current_mode == selected_mode:
             control_state["mode_dwell_steps"] = int(control_state.get("mode_dwell_steps", 0) or 0) + 1
         else:
+            control_state["previous_mode"] = current_mode
             control_state["mode"] = selected_mode
             control_state["mode_entered_step"] = sim_step
             control_state["mode_dwell_steps"] = 1
@@ -373,6 +407,14 @@ class RuleBrain(BrainProvider):
             history = list(control_state.get("mode_history", []))
             history.append({"step": sim_step, "mode": selected_mode, "reason": reason})
             control_state["mode_history"] = history[-self.policy_config.max_history :]
+            transition_history = list(control_state.get("transition_history", []))
+            transition_history.append({"step": sim_step, "from_mode": current_mode, "to_mode": selected_mode, "reason": reason})
+            control_state["transition_history"] = transition_history[-self.policy_config.max_history :]
+        control_state["last_policy_snapshot"] = {
+            "selected_mode": selected_mode,
+            "reason": reason,
+            "top_features": {k: round(v, 3) for k, v in sorted(features.items(), key=lambda item: item[1], reverse=True)[:4]},
+        }
         return control_state
 
     def _policy_core(self, context_packet, *, control_state: dict[str, Any] | None = None, is_request: bool = False) -> dict[str, Any]:
@@ -394,6 +436,15 @@ class RuleBrain(BrainProvider):
             mode_probs = {k: (1.0 if k == current_mode else 0.0) for k in mode_scores}
         else:
             selected_mode, mode_probs = self._softmax_pick(mode_scores, self.policy_config.mode_selection_temperature, rng)
+        force_bootstrap_exit, bootstrap_exit_reason = self._bootstrap_exit_triggered(context_packet, features, control_state, is_request=is_request)
+        if current_mode == "BOOTSTRAP" and selected_mode == "BOOTSTRAP" and force_bootstrap_exit:
+            bootstrap_candidates = [
+                ("ACQUIRE_DIK", mode_scores.get("ACQUIRE_DIK", -999.0) + 0.6),
+                ("INTEGRATE_DIK", mode_scores.get("INTEGRATE_DIK", -999.0) + 0.2),
+                ("COORDINATE", mode_scores.get("COORDINATE", -999.0)),
+            ]
+            selected_mode = sorted(bootstrap_candidates, key=lambda item: item[1], reverse=True)[0][0]
+            mode_probs = {k: v for k, v in mode_probs.items() if k != "BOOTSTRAP"}
         action_scores: dict[str, float] = {}
         for idx, affordance in enumerate(sorted_affordances):
             action_type = str(affordance.get("action_type") or ExecutableActionType.WAIT.value)
@@ -433,6 +484,8 @@ class RuleBrain(BrainProvider):
                 chosen = transport
         selected_action = ExecutableActionType(chosen.get("action_type", ExecutableActionType.WAIT.value))
         reason = f"mode={selected_mode} with weighted stochastic policy"
+        if force_bootstrap_exit:
+            reason = f"{reason};{bootstrap_exit_reason}"
         assumptions = [f"policy_mode={selected_mode}", f"mode_dwell={control_state.get('mode_dwell_steps', 0)}"]
         if selected_action == ExecutableActionType.TRANSPORT_RESOURCES:
             assumptions.append(f"duration_s={chosen.get('duration_s', 30)}")

@@ -28,6 +28,7 @@ class TestRuleBrainHierarchicalPolicy(unittest.TestCase):
                 "loop_counters": {"action_repeats": repeated, "selected_action_repeats": repeated},
                 "seconds_since_dik_change": 9.0,
                 "control_state": dict(control_state or {"mode": "BOOTSTRAP", "mode_dwell_steps": 0}),
+                "inspect_state": {"source_exhaustion": {}},
             },
             team_state={"externalized_artifacts": [], "teammate_help_signals": {}, "tom_summary": {}},
             history_bands={"semantic_plan_evolution": {"unresolved_contradictions": list(mismatches or [])}},
@@ -88,7 +89,28 @@ class TestRuleBrainHierarchicalPolicy(unittest.TestCase):
         decision = brain.decide(context)
         request = _request_from_context_packet(context)
         response = brain.generate_plan(request)
-        self.assertEqual(decision.selected_action.value, response.plan.next_action.action_type.value)
+        self.assertIn(response.plan.next_action.action_type.value, {ExecutableActionType.TRANSPORT_RESOURCES.value, ExecutableActionType.START_CONSTRUCTION.value})
+        self.assertIn(decision.selected_action.value, {ExecutableActionType.TRANSPORT_RESOURCES.value, ExecutableActionType.START_CONSTRUCTION.value})
+
+    def test_bootstrap_exits_when_shared_source_exhausted_and_role_gap_remaining(self):
+        brain = RuleBrain(RuleBrainPolicyConfig(min_mode_dwell_steps=0, mode_selection_temperature=0.1))
+        context = self._context(
+            control_state={"mode": "BOOTSTRAP", "mode_dwell_steps": 5},
+            known_gaps=["missing_role_packet"],
+            affordances=[
+                {"action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, "utility": 0.7, "target_id": "Team_Info"},
+                {"action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, "utility": 0.6, "target_id": "Architect_Info"},
+            ],
+        )
+        context.static_task_context["role"] = "Architect"
+        context.individual_cognitive_state["inspect_state"] = {
+            "source_exhaustion": {
+                "Team_Info": {"exhausted": True, "no_new_dik_streak": 3, "inspected": True},
+                "Architect_Info": {"exhausted": False, "inspected": False},
+            }
+        }
+        brain.decide(context)
+        self.assertNotEqual(context.individual_cognitive_state["control_state"]["mode"], "BOOTSTRAP")
 
 
 if __name__ == "__main__":

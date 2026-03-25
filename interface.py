@@ -1517,9 +1517,9 @@ class MarsColonyInterface:
         }
         profile_traits = {
             "High_Team": {
-                "communication_propensity": 0.9,
-                "goal_alignment": 0.9,
-                "help_tendency": 0.8
+                "communication_propensity": 1.0,
+                "goal_alignment": 1.0,
+                "help_tendency": 1.0
             },
             "Low_Team": {
                 "communication_propensity": 0.3,
@@ -1528,7 +1528,7 @@ class MarsColonyInterface:
             },
             "High_Task": {
                 "build_speed": 1.0,
-                "rule_accuracy": 0.95
+                "rule_accuracy": 1.0
             },
             "Low_Task": {
                 "build_speed": 0.5,
@@ -3198,9 +3198,9 @@ class MarsColonyInterface:
 
         # Preset values
         profile_traits = {
-            "High_Team": {"communication_propensity": 0.9, "goal_alignment": 0.9, "help_tendency": 0.8},
+            "High_Team": {"communication_propensity": 1.0, "goal_alignment": 1.0, "help_tendency": 1.0},
             "Low_Team": {"communication_propensity": 0.3, "goal_alignment": 0.4, "help_tendency": 0.2},
-            "High_Task": {"build_speed": 1.0, "rule_accuracy": 0.95},
+            "High_Task": {"build_speed": 1.0, "rule_accuracy": 1.0},
             "Low_Task": {"build_speed": 0.5, "rule_accuracy": 0.5}
         }
 
