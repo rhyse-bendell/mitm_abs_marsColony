@@ -135,6 +135,34 @@ class AgentBrainRequest:
     artifact_context: List[Dict[str, Any]] = field(default_factory=list)
     bootstrap_summary: Optional[Dict[str, Any]] = None
 
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "AgentBrainRequest":
+        return cls(
+            request_id=str(payload.get("request_id", "")),
+            tick=int(payload.get("tick", 0)),
+            sim_time=float(payload.get("sim_time", 0.0)),
+            agent_id=str(payload.get("agent_id", "")),
+            display_name=str(payload.get("display_name", "")),
+            task_id=str(payload.get("task_id", "")),
+            phase=str(payload.get("phase", "")),
+            local_context_summary=str(payload.get("local_context_summary", "")),
+            local_observations=[str(item) for item in payload.get("local_observations", [])],
+            working_memory_summary=dict(payload.get("working_memory_summary", {})),
+            inbox_summary=[str(item) for item in payload.get("inbox_summary", [])],
+            current_goal_stack=list(payload.get("current_goal_stack", [])),
+            current_plan_summary=dict(payload.get("current_plan_summary", {})),
+            allowed_actions=list(payload.get("allowed_actions", [])),
+            planning_horizon_config=dict(payload.get("planning_horizon_config", {})),
+            request_explanation=bool(payload.get("request_explanation", False)),
+            agent_label=payload.get("agent_label"),
+            explanation_style=payload.get("explanation_style"),
+            task_context=dict(payload.get("task_context", {})),
+            rule_context=[str(item) for item in payload.get("rule_context", [])],
+            derivation_context=[str(item) for item in payload.get("derivation_context", [])],
+            artifact_context=list(payload.get("artifact_context", [])),
+            bootstrap_summary=payload.get("bootstrap_summary"),
+        )
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "request_id": self.request_id,
