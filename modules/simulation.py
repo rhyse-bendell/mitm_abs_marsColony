@@ -273,6 +273,8 @@ class SimulationState:
             "last_wallclock_wait_s": 0.0,
             "last_active_emit_at": 0.0,
         }
+        self.run_started_wallclock_at = time.perf_counter()
+        self.run_stopped_wallclock_at = None
         self.effective_brain_backend = self.configured_brain_backend
         self.fallback_occurred = False
         self.backend_fallback_count = 0
@@ -856,6 +858,41 @@ class SimulationState:
             state["pause_started_tick"] = None
             state["last_active_emit_at"] = 0.0
 
+    def _observability_now_wallclock(self, now_wallclock=None):
+        now = time.perf_counter() if now_wallclock is None else float(now_wallclock)
+        if self.run_stopped_wallclock_at is not None:
+            return min(now, float(self.run_stopped_wallclock_at))
+        return now
+
+    def _current_planner_barrier_wait_s(self, now_wallclock=None):
+        state = self.planner_barrier_state
+        if not state.get("active"):
+            return 0.0
+        now = self._observability_now_wallclock(now_wallclock)
+        start = float(state.get("pause_started_wallclock_at") or now)
+        return max(0.0, now - start)
+
+    def get_observability_status(self, now_wallclock=None):
+        now = self._observability_now_wallclock(now_wallclock)
+        run_elapsed_s = max(0.0, now - float(self.run_started_wallclock_at))
+        current_pause_wait_s = self._current_planner_barrier_wait_s(now)
+        completed_pause_wait_s = float(self.planner_barrier_state.get("total_wallclock_wait_s", 0.0) or 0.0)
+        cumulative_pause_wait_s = completed_pause_wait_s + current_pause_wait_s
+        blocking_request_ids = list(self.planner_barrier_state.get("blocking_request_ids", []))
+        blocking_agent_ids = list(self.planner_barrier_state.get("blocking_agent_ids", []))
+        return {
+            "run_wallclock_elapsed_s": run_elapsed_s,
+            "sim_time_elapsed_s": float(self.time),
+            "barrier_active": bool(self.planner_barrier_state.get("active")),
+            "current_cognition_pause_elapsed_s": current_pause_wait_s,
+            "cumulative_cognition_wait_s": cumulative_pause_wait_s,
+            "completed_cognition_wait_s": completed_pause_wait_s,
+            "barrier_pause_count": int(self.planner_barrier_state.get("pause_count", 0) or 0),
+            "last_barrier_duration_s": float(self.planner_barrier_state.get("last_wallclock_wait_s", 0.0) or 0.0),
+            "blocking_request_ids": blocking_request_ids,
+            "blocking_agent_ids": blocking_agent_ids,
+        }
+
     def _refresh_backend_effective_state(self, reason="runtime_update"):
         configured = self.configured_brain_backend
         provider = self.brain_provider
@@ -1000,6 +1037,8 @@ class SimulationState:
             self._last_save_time = self.time
 
     def stop(self):
+        if self.run_stopped_wallclock_at is None:
+            self.run_stopped_wallclock_at = time.perf_counter()
         self.runtime_witness_audit_result = self.runtime_witness_audit.finalize()
         self.metrics.finalize()
         self.logger.update_session_manifest(

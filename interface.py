@@ -6,6 +6,7 @@ import threading
 import traceback
 import json
 import math
+import time
 from pathlib import Path
 from tkinter import ttk, messagebox
 from matplotlib.figure import Figure
@@ -116,6 +117,14 @@ class MarsColonyInterface:
         self._batch_poll_job = None
         self.run_loop_interval_ms = 100
         self.base_dt = 0.1
+        self.wallclock_elapsed_var = StringVar(value="Wall-clock: 00:00:00.0")
+        self.sim_time_elapsed_var = StringVar(value="Sim-time: 00:00:00.0")
+        self.current_pause_elapsed_var = StringVar(value="Current cognition-pause: none")
+        self.cumulative_pause_wait_var = StringVar(value="Cumulative cognition wait: 00:00:00.0")
+        self.barrier_summary_var = StringVar(value="Barrier: none")
+        self.pause_count_var = StringVar(value="Cognition pauses: 0")
+        self.last_barrier_duration_var = StringVar(value="Last barrier: none")
+        self.last_planner_latency_var = StringVar(value="Last planner latency: n/a")
 
         self.create_widgets()
         self._update_control_states()
@@ -129,12 +138,30 @@ class MarsColonyInterface:
         self.pause_button = ttk.Button(self.control_frame, text="Pause", command=self.pause_experiment)
         self.stop_button = ttk.Button(self.control_frame, text="Stop", command=self.stop_experiment)
         self.lifecycle_label = ttk.Label(self.control_frame, text="State: idle")
+        self.observability_frame = ttk.Frame(self.root, padding=(8, 0, 8, 4))
+        self.observability_line_primary = ttk.Label(self.observability_frame, textvariable=self.wallclock_elapsed_var)
+        self.observability_line_primary_2 = ttk.Label(self.observability_frame, textvariable=self.sim_time_elapsed_var)
+        self.observability_line_primary_3 = ttk.Label(self.observability_frame, textvariable=self.current_pause_elapsed_var)
+        self.observability_line_primary_4 = ttk.Label(self.observability_frame, textvariable=self.cumulative_pause_wait_var)
+        self.observability_line_secondary = ttk.Label(self.observability_frame, textvariable=self.barrier_summary_var)
+        self.observability_line_secondary_2 = ttk.Label(self.observability_frame, textvariable=self.pause_count_var)
+        self.observability_line_secondary_3 = ttk.Label(self.observability_frame, textvariable=self.last_barrier_duration_var)
+        self.observability_line_secondary_4 = ttk.Label(self.observability_frame, textvariable=self.last_planner_latency_var)
 
         self.start_button.pack(side="left", padx=(0, 6))
         self.run_batch_button.pack(side="left", padx=6)
         self.pause_button.pack(side="left", padx=6)
         self.stop_button.pack(side="left", padx=6)
         self.lifecycle_label.pack(side="right")
+        self.observability_frame.pack(fill="x")
+        self.observability_line_primary.pack(side="left", padx=(0, 12))
+        self.observability_line_primary_2.pack(side="left", padx=(0, 12))
+        self.observability_line_primary_3.pack(side="left", padx=(0, 12))
+        self.observability_line_primary_4.pack(side="left", padx=(0, 12))
+        self.observability_line_secondary.pack(side="left", padx=(0, 12))
+        self.observability_line_secondary_2.pack(side="left", padx=(0, 12))
+        self.observability_line_secondary_3.pack(side="left", padx=(0, 12))
+        self.observability_line_secondary_4.pack(side="left")
 
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True)
@@ -1290,6 +1317,78 @@ class MarsColonyInterface:
         suffix = f" (fallbacks={fallback_count})" if fallback_count else ""
         self.backend_status_var.set(f"Backend (configured/effective): {configured} / {effective}{suffix}")
 
+    @staticmethod
+    def _format_elapsed_duration(seconds):
+        total = max(0.0, float(seconds or 0.0))
+        hours = int(total // 3600)
+        minutes = int((total % 3600) // 60)
+        secs = total - (hours * 3600 + minutes * 60)
+        return f"{hours:02d}:{minutes:02d}:{secs:04.1f}"
+
+    @staticmethod
+    def _format_barrier_summary(status):
+        if not status or not status.get("barrier_active"):
+            return "Barrier: none"
+        request_count = len(status.get("blocking_request_ids") or [])
+        agent_count = len(status.get("blocking_agent_ids") or [])
+        return f"Barrier: active ({request_count} requests, {agent_count} agents)"
+
+    @staticmethod
+    def _resolve_last_planner_latency_text(sim):
+        logger = getattr(sim, "logger", None)
+        if logger is None or not hasattr(logger, "get_recent_planner_traces"):
+            return "Last planner latency: n/a"
+        rows = list(logger.get_recent_planner_traces(40))
+        for row in reversed(rows):
+            for key in ("planner_latency_s", "llm_latency_s", "latency_s", "duration_s"):
+                if key in row and row.get(key) is not None:
+                    return f"Last planner latency: {MarsColonyInterface._format_elapsed_duration(float(row.get(key)))}"
+        return "Last planner latency: n/a"
+
+    def _update_observability_status_display(self):
+        required_vars = [
+            "wallclock_elapsed_var",
+            "sim_time_elapsed_var",
+            "current_pause_elapsed_var",
+            "cumulative_pause_wait_var",
+            "barrier_summary_var",
+            "pause_count_var",
+            "last_barrier_duration_var",
+            "last_planner_latency_var",
+        ]
+        if any(not hasattr(self, name) for name in required_vars):
+            return
+        if not self.sim or not hasattr(self.sim, "get_observability_status"):
+            self.wallclock_elapsed_var.set("Wall-clock: 00:00:00.0")
+            self.sim_time_elapsed_var.set("Sim-time: 00:00:00.0")
+            self.current_pause_elapsed_var.set("Current cognition-pause: none")
+            self.cumulative_pause_wait_var.set("Cumulative cognition wait: 00:00:00.0")
+            self.barrier_summary_var.set("Barrier: none")
+            self.pause_count_var.set("Cognition pauses: 0")
+            self.last_barrier_duration_var.set("Last barrier: none")
+            self.last_planner_latency_var.set("Last planner latency: n/a")
+            return
+        status = self.sim.get_observability_status(now_wallclock=time.perf_counter())
+        self.wallclock_elapsed_var.set(f"Wall-clock: {self._format_elapsed_duration(status.get('run_wallclock_elapsed_s', 0.0))}")
+        self.sim_time_elapsed_var.set(f"Sim-time: {self._format_elapsed_duration(status.get('sim_time_elapsed_s', 0.0))}")
+        if status.get("barrier_active"):
+            self.current_pause_elapsed_var.set(
+                f"Current cognition-pause: {self._format_elapsed_duration(status.get('current_cognition_pause_elapsed_s', 0.0))}"
+            )
+        else:
+            self.current_pause_elapsed_var.set("Current cognition-pause: none")
+        self.cumulative_pause_wait_var.set(
+            f"Cumulative cognition wait: {self._format_elapsed_duration(status.get('cumulative_cognition_wait_s', 0.0))}"
+        )
+        self.barrier_summary_var.set(self._format_barrier_summary(status))
+        self.pause_count_var.set(f"Cognition pauses: {int(status.get('barrier_pause_count', 0) or 0)}")
+        last_barrier_s = float(status.get("last_barrier_duration_s", 0.0) or 0.0)
+        if last_barrier_s > 0.0:
+            self.last_barrier_duration_var.set(f"Last barrier: {self._format_elapsed_duration(last_barrier_s)}")
+        else:
+            self.last_barrier_duration_var.set("Last barrier: none")
+        self.last_planner_latency_var.set(self._resolve_last_planner_latency_text(self.sim))
+
     def apply_experiment_settings(self):
         sim = self._build_simulation_from_settings()
         self._finalize_simulation_install(sim)
@@ -1337,6 +1436,7 @@ class MarsColonyInterface:
         self._sync_construction_summaries()
         self._update_system_log()
         self._update_backend_status_display()
+        self._update_observability_status_display()
         self.update_interaction_tab()
         self.update_brain_tab()
 
@@ -1523,6 +1623,7 @@ class MarsColonyInterface:
         self.update_dashboard()
         self._sync_construction_summaries()
         self._update_backend_status_display()
+        self._update_observability_status_display()
         self.update_interaction_tab()
         self.update_brain_tab()
         self._schedule_next_tick()
@@ -1537,6 +1638,7 @@ class MarsColonyInterface:
         self.pause_button.config(state="normal" if pause_enabled else "disabled")
         self.stop_button.config(state="normal" if stop_enabled else "disabled")
         self.lifecycle_label.config(text=f"State: {self.run_state}")
+        self._update_observability_status_display()
 
     def start_experiment(self):
         if self.run_state in {self.STATE_RUNNING, self.STATE_STARTING}:
