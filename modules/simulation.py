@@ -563,6 +563,9 @@ class SimulationState:
             "local_model": runtime["config"].local_model if runtime["configured_backend"] != "rule_brain" else None,
             "planner_interval_steps": agent.planner_cadence.planner_interval_steps,
             "planner_timeout_seconds": agent.planner_cadence.planner_timeout_seconds,
+            "planner_request_policy": getattr(agent.planner_cadence, "planner_request_policy", "legacy"),
+            "split_mode_planning_interval_steps": getattr(agent.planner_cadence, "split_mode_planning_interval_steps", None),
+            "split_mode_dik_integration_cooldown_steps": getattr(agent.planner_cadence, "split_mode_dik_integration_cooldown_steps", None),
             "planner_max_retries": agent.planner_cadence.planner_max_retries,
             "degraded_consecutive_failures_threshold": agent.planner_cadence.degraded_consecutive_failures_threshold,
             "degraded_cooldown_seconds": agent.planner_cadence.degraded_cooldown_seconds,
@@ -982,6 +985,8 @@ class SimulationState:
             agent.current_time = self.time
             agent._check_inflight_timeout(self)
             agent._poll_planner_request(self, self.environment)
+            if hasattr(agent, "_poll_dik_integration_request"):
+                agent._poll_dik_integration_request(self)
         self._refresh_planner_barrier_state()
         if self.planner_barrier_state.get("active"):
             for agent in self.agents:
