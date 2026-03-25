@@ -252,7 +252,7 @@ class TestInterfacePerAgentDefaults(unittest.TestCase):
         try:
             app.root.withdraw()
             self.assertEqual(app.brain_backend_var.get(), "ollama")
-            self.assertEqual(app.local_model_var.get(), "qwen2.5:3b")
+            self.assertEqual(app.local_model_var.get(), "qwen2.5:3b-instruct")
             self.assertEqual(app.local_base_url_var.get(), "http://127.0.0.1:11434")
             self.assertEqual(app.local_timeout_var.get(), 90.0)
             self.assertEqual(app.fallback_backend_var.get(), "rule_brain")
@@ -302,10 +302,10 @@ class TestInterfacePerAgentDefaults(unittest.TestCase):
             app._update_agent_inheritance_display(role)
 
             self.assertIn("Inherited from global Backend: ollama", app.agent_inheritance_note_vars[role]["backend"].get())
-            self.assertIn("Inherited from global Model: qwen2.5:3b", app.agent_inheritance_note_vars[role]["local_model"].get())
+            self.assertIn("Inherited from global Model: qwen2.5:3b-instruct", app.agent_inheritance_note_vars[role]["local_model"].get())
             self.assertIn("Inherited from global Fallback: rule_brain", app.agent_inheritance_note_vars[role]["fallback_backend"].get())
             self.assertEqual(app.agent_effective_summary_vars[role]["backend"].get(), "Effective Backend: ollama")
-            self.assertEqual(app.agent_effective_summary_vars[role]["local_model"].get(), "Effective Model: qwen2.5:3b")
+            self.assertEqual(app.agent_effective_summary_vars[role]["local_model"].get(), "Effective Model: qwen2.5:3b-instruct")
             self.assertEqual(app.agent_effective_summary_vars[role]["fallback_backend"].get(), "Effective Fallback: rule_brain")
 
             app.agent_brain_settings[role]["backend"].set("rule_brain")

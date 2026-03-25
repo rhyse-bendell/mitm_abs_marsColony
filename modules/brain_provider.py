@@ -121,7 +121,7 @@ class BrainBackendConfig:
     backend: str = "rule_brain"
     local_base_url: str = "http://127.0.0.1:11434"
     local_endpoint: str = "/v1/chat/completions"
-    local_model: str = "qwen2.5:3b"
+    local_model: str = "qwen2.5:3b-instruct"
     timeout_s: float = 90.0
     warmup_timeout_s: float = 45.0
     completion_max_tokens: int = 1024
@@ -640,7 +640,11 @@ class OllamaLocalBrainProvider(BrainProvider):
                     "role": "system",
                     "content": (
                         "Return exactly one JSON object that matches AgentBrainResponse. "
-                        "Output JSON only. No markdown. No analysis or chain-of-thought in visible output. "
+                        "Reason internally if needed, but output only the final JSON object. "
+                        "Output JSON only. No markdown fences. No prose before or after JSON. "
+                        "Do not output reasoning, analysis, or thinking text. "
+                        "Do not place the answer in a reasoning/thinking field. "
+                        "Do not leave message.content empty; put the final JSON object in message.content. "
                         "Do not wrap the object under keys like response/result/data. "
                         "The top-level JSON must be the planner response object. "
                         "plan.next_action must be an object, not a string. "
