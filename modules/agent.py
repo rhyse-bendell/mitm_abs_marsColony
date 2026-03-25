@@ -254,6 +254,16 @@ class Agent:
         self.planner_call_count = 0
         self.loop_counters = {"action_signature": None, "action_repeats": 0, "plan_signature": None, "plan_repeats": 0, "target_failures": {}}
         self.selection_loop_guard = {"last_action": None, "consecutive_count": 0}
+        self.control_state = {
+            "mode": "BOOTSTRAP",
+            "mode_entered_step": 0,
+            "mode_dwell_steps": 0,
+            "last_transition_reason": "agent_initialized",
+            "last_transition_features": {},
+            "mode_history": [{"step": 0, "mode": "BOOTSTRAP", "reason": "agent_initialized"}],
+            "recovery_active": False,
+            "last_policy_snapshot": {},
+        }
         self._planner_request_seq = 0
         self.planner_state = {
             "status": "idle",
@@ -2446,6 +2456,10 @@ class Agent:
                     },
                 }
             )
+
+        updated_control_state = context.individual_cognitive_state.get("control_state", {})
+        if isinstance(updated_control_state, dict) and updated_control_state:
+            self.control_state.update(updated_control_state)
 
         provider_trace = getattr(provider, "last_trace", None)
         if isinstance(provider_trace, dict):

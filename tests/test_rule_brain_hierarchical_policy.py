@@ -1,0 +1,95 @@
+import unittest
+
+from modules.action_schema import ExecutableActionType
+from modules.brain_context import BrainContextPacket
+from modules.brain_provider import RuleBrain, RuleBrainPolicyConfig, _request_from_context_packet
+
+
+class TestRuleBrainHierarchicalPolicy(unittest.TestCase):
+    def _context(self, affordances=None, control_state=None, known_gaps=None, ready=False, repeated=0, mismatches=None):
+        affordances = affordances or [
+            {"action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, "utility": 0.6, "target_id": "Team_Info"},
+            {"action_type": ExecutableActionType.REQUEST_ASSISTANCE.value, "utility": 0.4, "target_id": "nearby_agent"},
+            {"action_type": ExecutableActionType.OBSERVE_ENVIRONMENT.value, "utility": 0.2},
+            {"action_type": ExecutableActionType.WAIT.value, "utility": 0.1},
+        ]
+        return BrainContextPacket(
+            static_task_context={"role": "Engineer"},
+            world_snapshot={
+                "sim_time": 12.0,
+                "phase_profile": {"stage": "execution", "name": "default"},
+                "built_state": [{"state": "in_progress", "progress": 0.2, "needs_repair": False}],
+            },
+            individual_cognitive_state={
+                "traits": {"communication_propensity": 0.7},
+                "known_gaps": list(known_gaps or []),
+                "build_readiness": {"ready_for_build": ready},
+                "goal_stack": [{"goal_id": "g1"}],
+                "loop_counters": {"action_repeats": repeated, "selected_action_repeats": repeated},
+                "seconds_since_dik_change": 9.0,
+                "control_state": dict(control_state or {"mode": "BOOTSTRAP", "mode_dwell_steps": 0}),
+            },
+            team_state={"externalized_artifacts": [], "teammate_help_signals": {}, "tom_summary": {}},
+            history_bands={"semantic_plan_evolution": {"unresolved_contradictions": list(mismatches or [])}},
+            action_affordances=affordances,
+        )
+
+    def test_policy_returns_legal_action(self):
+        brain = RuleBrain()
+        context = self._context()
+        decision = brain.decide(context)
+        legal = {a["action_type"] for a in context.action_affordances}
+        self.assertIn(decision.selected_action.value, legal)
+
+    def test_control_state_persists_and_dwell_increases(self):
+        brain = RuleBrain(RuleBrainPolicyConfig(min_mode_dwell_steps=3))
+        context = self._context(control_state={"mode": "ACQUIRE_DIK", "mode_dwell_steps": 0})
+        brain.decide(context)
+        self.assertEqual(context.individual_cognitive_state["control_state"]["mode"], "ACQUIRE_DIK")
+        self.assertEqual(context.individual_cognitive_state["control_state"]["mode_dwell_steps"], 1)
+        brain.decide(context)
+        self.assertEqual(context.individual_cognitive_state["control_state"]["mode_dwell_steps"], 2)
+
+    def test_hysteresis_reduces_mode_thrash(self):
+        brain = RuleBrain(RuleBrainPolicyConfig(min_mode_dwell_steps=2))
+        context = self._context(control_state={"mode": "CONSTRUCT", "mode_dwell_steps": 0}, ready=True,
+                                affordances=[
+                                    {"action_type": ExecutableActionType.START_CONSTRUCTION.value, "utility": 0.8},
+                                    {"action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, "utility": 0.7},
+                                ])
+        brain.decide(context)
+        self.assertEqual(context.individual_cognitive_state["control_state"]["mode"], "CONSTRUCT")
+
+    def test_recovery_mode_activates_under_loop_pressure(self):
+        brain = RuleBrain(RuleBrainPolicyConfig(min_mode_dwell_steps=0))
+        context = self._context(repeated=6, mismatches=["mismatch"],
+                                affordances=[
+                                    {"action_type": ExecutableActionType.REASSESS_PLAN.value, "utility": 0.4},
+                                    {"action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, "utility": 0.4},
+                                ])
+        brain.decide(context)
+        self.assertIn(context.individual_cognitive_state["control_state"]["mode"], {"RECOVERY", "ACQUIRE_DIK"})
+
+    def test_weighting_responds_to_context(self):
+        brain = RuleBrain(RuleBrainPolicyConfig(min_mode_dwell_steps=0, mode_selection_temperature=0.15))
+        context = self._context(ready=True, affordances=[
+            {"action_type": ExecutableActionType.TRANSPORT_RESOURCES.value, "utility": 0.7},
+            {"action_type": ExecutableActionType.START_CONSTRUCTION.value, "utility": 0.8},
+        ])
+        decision = brain.decide(context)
+        self.assertIn(decision.selected_action, {ExecutableActionType.TRANSPORT_RESOURCES, ExecutableActionType.START_CONSTRUCTION})
+
+    def test_decide_and_generate_plan_share_policy_core(self):
+        brain = RuleBrain(RuleBrainPolicyConfig(mode_selection_temperature=0.2, action_selection_temperature=0.2))
+        context = self._context(ready=True, affordances=[
+            {"action_type": ExecutableActionType.TRANSPORT_RESOURCES.value, "utility": 0.8, "target_id": "resource_zone_to_work_zone"},
+            {"action_type": ExecutableActionType.START_CONSTRUCTION.value, "utility": 0.7, "target_id": "Build_Table_A"},
+        ])
+        decision = brain.decide(context)
+        request = _request_from_context_packet(context)
+        response = brain.generate_plan(request)
+        self.assertEqual(decision.selected_action.value, response.plan.next_action.action_type.value)
+
+
+if __name__ == "__main__":
+    unittest.main()

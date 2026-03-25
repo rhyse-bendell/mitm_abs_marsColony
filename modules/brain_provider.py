@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import random
 import time
 from abc import ABC, abstractmethod
 from copy import deepcopy
@@ -144,6 +146,19 @@ class BrainBackendConfig:
     planner_trace_max_chars: int = 12000
 
 
+@dataclass(frozen=True)
+class RuleBrainPolicyConfig:
+    mode_selection_temperature: float = 0.45
+    action_selection_temperature: float = 0.55
+    dwell_bonus: float = 0.3
+    switch_penalty: float = 0.25
+    recovery_bonus: float = 0.75
+    randomness_floor: float = 0.02
+    min_mode_dwell_steps: int = 2
+    max_history: int = 12
+    max_logged_candidates: int = 6
+
+
 def create_brain_provider(config: BrainBackendConfig | None = None) -> BrainProvider:
     config = config or BrainBackendConfig()
     selected = config.backend.lower()
@@ -220,7 +235,35 @@ def _request_from_context_packet(context_packet) -> AgentBrainRequest:
 
 
 class RuleBrain(BrainProvider):
-    """Deterministic baseline brain used as default backend."""
+    """Hierarchical stochastic fallback brain with simulator-side control-state."""
+
+    MODES = (
+        "BOOTSTRAP",
+        "ACQUIRE_DIK",
+        "INTEGRATE_DIK",
+        "COORDINATE",
+        "LOGISTICS",
+        "CONSTRUCT",
+        "VALIDATE",
+        "REPAIR",
+        "RECOVERY",
+        "MONITOR",
+    )
+    MODE_ACTION_PREFERENCES = {
+        "BOOTSTRAP": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value: 1.3, ExecutableActionType.OBSERVE_ENVIRONMENT.value: 0.5},
+        "ACQUIRE_DIK": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value: 1.6, ExecutableActionType.CONSULT_TEAM_ARTIFACT.value: 0.4, ExecutableActionType.REQUEST_ASSISTANCE.value: 0.4},
+        "INTEGRATE_DIK": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value: 1.1, ExecutableActionType.REASSESS_PLAN.value: 0.9, ExecutableActionType.EXTERNALIZE_PLAN.value: 0.5},
+        "COORDINATE": {ExecutableActionType.COMMUNICATE.value: 1.2, ExecutableActionType.EXTERNALIZE_PLAN.value: 1.0, ExecutableActionType.REQUEST_ASSISTANCE.value: 0.8},
+        "LOGISTICS": {ExecutableActionType.TRANSPORT_RESOURCES.value: 1.5, ExecutableActionType.COMMUNICATE.value: 0.3},
+        "CONSTRUCT": {ExecutableActionType.START_CONSTRUCTION.value: 1.4, ExecutableActionType.CONTINUE_CONSTRUCTION.value: 1.5},
+        "VALIDATE": {ExecutableActionType.VALIDATE_CONSTRUCTION.value: 1.6, ExecutableActionType.OBSERVE_ENVIRONMENT.value: 0.3},
+        "REPAIR": {ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value: 1.7, ExecutableActionType.VALIDATE_CONSTRUCTION.value: 0.4},
+        "RECOVERY": {ExecutableActionType.REASSESS_PLAN.value: 1.0, ExecutableActionType.INSPECT_INFORMATION_SOURCE.value: 0.8, ExecutableActionType.OBSERVE_ENVIRONMENT.value: 0.5},
+        "MONITOR": {ExecutableActionType.OBSERVE_ENVIRONMENT.value: 0.9, ExecutableActionType.WAIT.value: 0.3, ExecutableActionType.REASSESS_PLAN.value: 0.4},
+    }
+
+    def __init__(self, policy_config: RuleBrainPolicyConfig | None = None):
+        self.policy_config = policy_config or RuleBrainPolicyConfig()
 
     @staticmethod
     def _best_affordance(
@@ -236,282 +279,217 @@ class RuleBrain(BrainProvider):
             return reachable[0]
         return next((item for item in sorted_affordances if item.get("action_type") in allowed_action_types), None)
 
-    def _decision_logic(self, context_packet) -> BrainDecision:
-        affordances = context_packet.action_affordances
-        affordance_types = [item["action_type"] for item in affordances]
+    def _softmax_pick(self, weighted_scores: dict[str, float], temperature: float, rng: random.Random) -> tuple[str, dict[str, float]]:
+        if not weighted_scores:
+            return "MONITOR", {"MONITOR": 1.0}
+        temp = max(0.05, float(temperature))
+        max_score = max(weighted_scores.values())
+        exp_scores: dict[str, float] = {}
+        for key, score in weighted_scores.items():
+            exp_scores[key] = math.exp((score - max_score) / temp)
+        total = sum(exp_scores.values()) or 1.0
+        probs = {k: v / total for k, v in exp_scores.items()}
+        pick = rng.random()
+        csum = 0.0
+        selected = next(iter(probs))
+        for key, prob in sorted(probs.items(), key=lambda item: item[1], reverse=True):
+            csum += prob
+            if pick <= csum:
+                selected = key
+                break
+        return selected, probs
 
-        traits = context_packet.individual_cognitive_state.get("traits", {})
-        communication_propensity = float(traits.get("communication_propensity", 0.5))
-        goal_alignment = float(traits.get("goal_alignment", 0.5))
-        help_tendency = float(traits.get("help_tendency", 0.5))
-
-        phase_profile = context_packet.world_snapshot.get("phase_profile", {})
-        stage = phase_profile.get("stage", "execution")
-        readiness = context_packet.individual_cognitive_state.get("build_readiness", {})
-        ready_for_build = bool(readiness.get("ready_for_build"))
-
-        has_validated_artifact = any(
-            a.get("validation_state") == "validated" for a in context_packet.team_state.get("externalized_artifacts", [])
-        )
-        has_known_gaps = bool(context_packet.individual_cognitive_state.get("known_gaps"))
-        mismatch_signals = context_packet.history_bands.get("semantic_plan_evolution", {}).get("unresolved_contradictions", [])
-
-        sorted_affordances = sorted(affordances, key=lambda a: float(a.get("utility", 0.0)), reverse=True)
-        top_affordance = sorted_affordances[0] if sorted_affordances else None
-        built_state = context_packet.world_snapshot.get("built_state", [])
-        active_incomplete_projects = [
-            item
-            for item in built_state
-            if item.get("state") in {"absent", "in_progress"} and float(item.get("progress", 0.0)) < 1.0
-        ]
-        needs_resource_delivery = any(float(item.get("progress", 0.0)) < 1.0 for item in active_incomplete_projects)
-        in_progress_resource_incomplete = any(
-            item.get("state") == "in_progress" and float(item.get("progress", 0.0)) < 1.0
-            for item in active_incomplete_projects
-        )
-        productive_build_types = {
-            ExecutableActionType.TRANSPORT_RESOURCES.value,
-            ExecutableActionType.START_CONSTRUCTION.value,
-            ExecutableActionType.CONTINUE_CONSTRUCTION.value,
+    def _extract_features(self, context_packet, *, is_request: bool = False) -> dict[str, float]:
+        cognitive = context_packet.individual_cognitive_state if not is_request else {}
+        world = context_packet.world_snapshot if not is_request else {}
+        known_gaps = cognitive.get("known_gaps", []) if not is_request else list(context_packet.working_memory_summary.get("known_gaps", []))
+        readiness = cognitive.get("build_readiness", {}) if not is_request else {}
+        built_state = world.get("built_state", []) if not is_request else []
+        active_projects = [p for p in built_state if p.get("state") in {"absent", "in_progress"} and float(p.get("progress", 0.0)) < 1.0]
+        mismatch_signals = context_packet.history_bands.get("semantic_plan_evolution", {}).get("unresolved_contradictions", []) if not is_request else []
+        loop_counters = cognitive.get("loop_counters", {}) if not is_request else {}
+        repeated = max(int(loop_counters.get("action_repeats", 0) or 0), int(loop_counters.get("selected_action_repeats", 0) or 0))
+        goal_stack = cognitive.get("goal_stack", []) if not is_request else list(context_packet.current_goal_stack)
+        externalized = context_packet.team_state.get("externalized_artifacts", []) if not is_request else list(context_packet.artifact_context)
+        validated = sum(1 for a in externalized if a.get("validation_state") == "validated")
+        seconds_since_dik_change = cognitive.get("seconds_since_dik_change") if not is_request else None
+        return {
+            "epistemic_deficit": min(1.0, len(known_gaps) / 4.0),
+            "build_opportunity": 1.0 if readiness.get("ready_for_build") else 0.0,
+            "coordination_need": min(1.0, (len(known_gaps) + len(context_packet.team_state.get("teammate_help_signals", {}))) / 6.0) if not is_request else min(1.0, len(known_gaps) / 4.0),
+            "repair_pressure": min(1.0, (len(mismatch_signals) / 3.0) + (0.5 if any(p.get("needs_repair") for p in built_state) else 0.0)),
+            "loop_pressure": min(1.0, repeated / 4.0),
+            "readiness_blocked": 0.0 if readiness.get("ready_for_build") else 1.0,
+            "contradiction_pressure": min(1.0, len(mismatch_signals) / 3.0),
+            "active_incomplete_projects": min(1.0, len(active_projects) / 3.0),
+            "goal_pressure": min(1.0, len(goal_stack) / 4.0),
+            "dik_change_recency": 1.0 if (seconds_since_dik_change is not None and float(seconds_since_dik_change) <= 4.0) else 0.0,
+            "artifact_validation_available": min(1.0, validated / 2.0),
+            "teammate_relevance": min(1.0, len(context_packet.team_state.get("tom_summary", {})) / 3.0) if not is_request else 0.0,
         }
-        loop_counters = context_packet.individual_cognitive_state.get("loop_counters", {})
-        repeated_action_count = int(loop_counters.get("action_repeats", 0) or 0)
-        repeated_selected_action_count = int(loop_counters.get("selected_action_repeats", 0) or 0)
-        seconds_since_dik_change = context_packet.individual_cognitive_state.get("seconds_since_dik_change")
-        recent_meaningful_epistemic_change = (
-            seconds_since_dik_change is not None
-            and float(seconds_since_dik_change) <= 2.0
-            and (bool(mismatch_signals) or (has_known_gaps and not ready_for_build))
-        )
-        productive_build_affordance = None
-        if ready_for_build and active_incomplete_projects:
-            if needs_resource_delivery and (in_progress_resource_incomplete or not recent_meaningful_epistemic_change):
-                productive_build_affordance = self._best_affordance(
-                    sorted_affordances, {ExecutableActionType.TRANSPORT_RESOURCES.value}
-                )
-            if productive_build_affordance is None:
-                productive_build_affordance = self._best_affordance(sorted_affordances, productive_build_types)
-        post_readiness_pivot_active = (
-            ready_for_build
-            and bool(active_incomplete_projects)
-            and productive_build_affordance is not None
-            and not recent_meaningful_epistemic_change
-        )
 
-        assistance_stalled = (
-            max(repeated_action_count, repeated_selected_action_count) >= 3
-            and (seconds_since_dik_change is None or float(seconds_since_dik_change) > 8.0)
-        )
+    def _compute_mode_scores(self, features: dict[str, float], legal_types: set[str], control_state: dict[str, Any], traits: dict[str, float]) -> tuple[dict[str, float], dict[str, bool]]:
+        mode_scores = {m: 0.0 for m in self.MODES}
+        mode_scores["BOOTSTRAP"] = 0.3 + 1.4 * features["epistemic_deficit"] + 0.4 * features["readiness_blocked"]
+        mode_scores["ACQUIRE_DIK"] = 0.4 + 1.5 * features["epistemic_deficit"] + 0.3 * features["coordination_need"]
+        mode_scores["INTEGRATE_DIK"] = 0.3 + 1.2 * features["dik_change_recency"] + 0.8 * features["artifact_validation_available"]
+        mode_scores["COORDINATE"] = 0.3 + 1.0 * features["coordination_need"] + 0.4 * float(traits.get("communication_propensity", 0.5))
+        mode_scores["LOGISTICS"] = 0.35 + 1.5 * features["build_opportunity"] + 0.9 * features["active_incomplete_projects"]
+        mode_scores["CONSTRUCT"] = 0.35 + 1.7 * features["build_opportunity"] + 0.9 * features["active_incomplete_projects"]
+        mode_scores["VALIDATE"] = 0.2 + 1.4 * features["artifact_validation_available"] + 0.5 * features["goal_pressure"]
+        mode_scores["REPAIR"] = 0.2 + 1.8 * features["repair_pressure"]
+        mode_scores["RECOVERY"] = 0.2 + 1.8 * features["loop_pressure"] + self.policy_config.recovery_bonus * features["contradiction_pressure"]
+        mode_scores["MONITOR"] = 0.35 + 0.2 * (1.0 - features["goal_pressure"])
+        current_mode = str(control_state.get("mode") or "BOOTSTRAP")
+        if current_mode in mode_scores:
+            mode_scores[current_mode] += self.policy_config.dwell_bonus
+        for mode in mode_scores:
+            if mode != current_mode:
+                mode_scores[mode] -= self.policy_config.switch_penalty
+        mode_guards = {
+            "CONSTRUCT": features["build_opportunity"] > 0 and any(t in legal_types for t in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value}),
+            "LOGISTICS": ExecutableActionType.TRANSPORT_RESOURCES.value in legal_types,
+            "VALIDATE": ExecutableActionType.VALIDATE_CONSTRUCTION.value in legal_types and features["active_incomplete_projects"] > 0,
+            "REPAIR": ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value in legal_types and features["repair_pressure"] > 0.0,
+            "ACQUIRE_DIK": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value in legal_types,
+            "COORDINATE": any(t in legal_types for t in {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.EXTERNALIZE_PLAN.value, ExecutableActionType.REQUEST_ASSISTANCE.value}),
+        }
+        return mode_scores, mode_guards
 
-        if post_readiness_pivot_active:
-            selected = ExecutableActionType(productive_build_affordance["action_type"])
-            goal_update = "execute_build"
-            reason = "Readiness unlocked with incomplete projects; pivot from epistemic actions to productive build progression."
-            if selected == ExecutableActionType.TRANSPORT_RESOURCES:
-                goal_update = "satisfy_build_logistics"
-                reason = "Readiness unlocked with incomplete projects; prioritize logistics delivery before construction."
-            return BrainDecision(
-                selected_action=selected,
-                target_id=productive_build_affordance.get("target_id"),
-                target_zone=productive_build_affordance.get("target_zone"),
-                goal_update=goal_update,
-                plan_steps=["advance active construction project"],
-                reason_summary=reason,
-                confidence=0.84,
-                assumptions=["duration_s=30"] if selected == ExecutableActionType.TRANSPORT_RESOURCES else [],
-            )
+    def _apply_control_state_update(self, context_packet, selected_mode: str, features: dict[str, float], reason: str) -> dict[str, Any]:
+        control_state = context_packet.individual_cognitive_state.get("control_state", {}) if hasattr(context_packet, "individual_cognitive_state") else {}
+        sim_step = int(context_packet.world_snapshot.get("sim_time", 0.0) if hasattr(context_packet, "world_snapshot") else 0)
+        if not isinstance(control_state, dict):
+            return {"mode": selected_mode, "mode_dwell_steps": 1}
+        current_mode = str(control_state.get("mode") or "BOOTSTRAP")
+        if current_mode == selected_mode:
+            control_state["mode_dwell_steps"] = int(control_state.get("mode_dwell_steps", 0) or 0) + 1
+        else:
+            control_state["mode"] = selected_mode
+            control_state["mode_entered_step"] = sim_step
+            control_state["mode_dwell_steps"] = 1
+            control_state["last_transition_reason"] = reason
+            control_state["last_transition_features"] = {k: round(v, 3) for k, v in sorted(features.items(), key=lambda item: item[1], reverse=True)[:4]}
+            history = list(control_state.get("mode_history", []))
+            history.append({"step": sim_step, "mode": selected_mode, "reason": reason})
+            control_state["mode_history"] = history[-self.policy_config.max_history :]
+        return control_state
 
+    def _policy_core(self, context_packet, *, control_state: dict[str, Any] | None = None, is_request: bool = False) -> dict[str, Any]:
+        affordances = list(context_packet.action_affordances if not is_request else context_packet.allowed_actions)
+        sorted_affordances = sorted(affordances, key=lambda a: float(a.get("utility", 0.0)), reverse=True)
+        legal_types = {a.get("action_type") for a in affordances if a.get("action_type")}
+        traits = (context_packet.individual_cognitive_state.get("traits", {}) if not is_request else {}) or {}
+        features = self._extract_features(context_packet, is_request=is_request)
+        control_state = dict(control_state or (context_packet.individual_cognitive_state.get("control_state", {}) if not is_request else {}))
+        if not control_state:
+            control_state = {"mode": "BOOTSTRAP", "mode_dwell_steps": 0}
+        mode_scores, mode_guards = self._compute_mode_scores(features, legal_types, control_state, traits)
+        mode_scores = {mode: score for mode, score in mode_scores.items() if mode_guards.get(mode, True)}
+        rng_seed = f"{getattr(context_packet, 'request_id', 'ctx')}-{len(affordances)}-{control_state.get('mode')}-{int(features['goal_pressure']*100)}"
+        rng = random.Random(rng_seed)
+        current_mode = str(control_state.get("mode") or "BOOTSTRAP")
+        if int(control_state.get("mode_dwell_steps", 0) or 0) < self.policy_config.min_mode_dwell_steps and current_mode in mode_scores:
+            selected_mode = current_mode
+            mode_probs = {k: (1.0 if k == current_mode else 0.0) for k in mode_scores}
+        else:
+            selected_mode, mode_probs = self._softmax_pick(mode_scores, self.policy_config.mode_selection_temperature, rng)
+        action_scores: dict[str, float] = {}
+        for idx, affordance in enumerate(sorted_affordances):
+            action_type = str(affordance.get("action_type") or ExecutableActionType.WAIT.value)
+            utility = float(affordance.get("utility", 0.0))
+            score = utility + self.MODE_ACTION_PREFERENCES.get(selected_mode, {}).get(action_type, 0.0)
+            score += 0.6 * features["goal_pressure"] + 0.4 * features["build_opportunity"]
+            if action_type == ExecutableActionType.REQUEST_ASSISTANCE.value:
+                score += 0.9 * features["epistemic_deficit"] + 0.5 * float(traits.get("help_tendency", 0.5))
+            score -= 0.8 * features["loop_pressure"] if action_type == ExecutableActionType.REQUEST_ASSISTANCE.value else 0.0
+            if (
+                features["build_opportunity"] > 0.0
+                and features["active_incomplete_projects"] > 0.0
+                and action_type == ExecutableActionType.START_CONSTRUCTION.value
+            ):
+                score += 1.15
+            if (
+                features["build_opportunity"] > 0.0
+                and features["active_incomplete_projects"] > 0.0
+                and features["dik_change_recency"] > 0.0
+                and action_type == ExecutableActionType.TRANSPORT_RESOURCES.value
+            ):
+                score += 1.25
+            if action_type == ExecutableActionType.WAIT.value:
+                score -= 0.35
+            score += self.policy_config.randomness_floor * (1.0 - (idx / max(1, len(sorted_affordances))))
+            action_scores[f"{idx}:{action_type}"] = score
+        selected_action_key, action_probs = self._softmax_pick(action_scores or {"0:wait": 0.0}, self.policy_config.action_selection_temperature, rng)
+        selected_idx = int(selected_action_key.split(":")[0])
+        chosen = sorted_affordances[selected_idx] if sorted_affordances else {"action_type": ExecutableActionType.WAIT.value}
         if (
-            stage in {"early", "execution"}
-            and ExecutableActionType.EXTERNALIZE_PLAN.value in affordance_types
-            and communication_propensity >= 0.7
-            and context_packet.individual_cognitive_state.get("knowledge_summary")
+            features["build_opportunity"] > 0.0
+            and features["active_incomplete_projects"] > 0.0
+            and features["dik_change_recency"] > 0.0
         ):
-            return BrainDecision(
-                selected_action=ExecutableActionType.EXTERNALIZE_PLAN,
-                goal_update="share_plan",
-                communication_intent=CommunicationIntent.TPP,
-                plan_steps=["externalize rule summary", "invite uptake"],
-                reason_summary="Communication propensity favors whiteboard/team externalization.",
-                confidence=0.78,
-            )
-
-        if (
-            ExecutableActionType.CONSULT_TEAM_ARTIFACT.value in affordance_types
-            and goal_alignment >= 0.65
-            and has_validated_artifact
-        ):
-            return BrainDecision(
-                selected_action=ExecutableActionType.CONSULT_TEAM_ARTIFACT,
-                goal_update="align_with_team_plan",
-                plan_steps=["consult validated artifact", "align local plan"],
-                reason_summary="Goal alignment favors consulting validated team artifacts.",
-                confidence=0.82,
-                assumptions=[f"phase_stage={stage}"],
-            )
-
-        if (
-            ExecutableActionType.REQUEST_ASSISTANCE.value in affordance_types
-            and help_tendency >= 0.7
-            and has_known_gaps
-            and (
-                not ready_for_build
-                or not active_incomplete_projects
-                or productive_build_affordance is None
-            )
-            and not assistance_stalled
-        ):
-            return BrainDecision(
-                selected_action=ExecutableActionType.REQUEST_ASSISTANCE,
-                goal_update="request_or_offer_help",
-                communication_intent=CommunicationIntent.TKRQ,
-                plan_steps=["ask for clarification", "integrate support"],
-                reason_summary="Help tendency and known gaps prompt assistance-seeking.",
-                confidence=0.76,
-            )
-
-        if assistance_stalled:
-            anti_loop_affordance = self._best_affordance(
-                sorted_affordances,
-                {
-                    ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
-                    ExecutableActionType.CONSULT_TEAM_ARTIFACT.value,
-                    ExecutableActionType.TRANSPORT_RESOURCES.value,
-                    ExecutableActionType.START_CONSTRUCTION.value,
-                    ExecutableActionType.CONTINUE_CONSTRUCTION.value,
-                },
-            )
-            if anti_loop_affordance is not None:
-                selected = ExecutableActionType(anti_loop_affordance["action_type"])
-                return BrainDecision(
-                    selected_action=selected,
-                    target_id=anti_loop_affordance.get("target_id"),
-                    target_zone=anti_loop_affordance.get("target_zone"),
-                    goal_update="break_assistance_loop",
-                    plan_steps=["de-prioritize repeated assistance", "execute next productive affordance"],
-                    reason_summary="Repeated assistance without recent DIK/team-state change; force productive anti-loop action.",
-                    confidence=0.78,
-                )
-
-        if productive_build_affordance is not None:
-            selected = ExecutableActionType(productive_build_affordance["action_type"])
-            goal_update = "execute_build"
-            reason = "Build readiness unlocked; prioritize highest-utility productive construction progression affordance."
-            if selected == ExecutableActionType.TRANSPORT_RESOURCES:
-                goal_update = "satisfy_build_logistics"
-                reason = "Build readiness unlocked with incomplete projects; prioritize resource transport progression."
-            return BrainDecision(
-                selected_action=selected,
-                target_id=productive_build_affordance.get("target_id"),
-                target_zone=productive_build_affordance.get("target_zone"),
-                goal_update=goal_update,
-                plan_steps=["advance active construction project"],
-                reason_summary=reason,
-                confidence=0.82,
-                assumptions=["duration_s=30"] if selected == ExecutableActionType.TRANSPORT_RESOURCES else [],
-            )
-
-        if stage == "late" and mismatch_signals and ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value in affordance_types:
-            return BrainDecision(
-                selected_action=ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
-                goal_update="repair_detected_mismatch",
-                plan_steps=["locate contradiction", "apply corrective construction"],
-                reason_summary="Late-phase contradictions increase correction priority.",
-                confidence=0.83,
-            )
-
-        if stage == "early" and ExecutableActionType.INSPECT_INFORMATION_SOURCE.value in affordance_types:
-            target = next(
-                (a for a in sorted_affordances if a["action_type"] == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value),
-                None,
-            )
-            return BrainDecision(
-                selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
-                target_id=target.get("target_id") if target else None,
-                target_zone=target.get("target_zone") if target else None,
-                goal_update="seek_info",
-                plan_steps=["inspect team/role information", "share useful findings"],
-                communication_intent=CommunicationIntent.TIP,
-                reason_summary="Early phase prioritizes information gathering.",
-                confidence=0.82,
-            )
-
-        if ready_for_build and stage in {"execution", "late"}:
-            transport = next((a for a in sorted_affordances if a["action_type"] == ExecutableActionType.TRANSPORT_RESOURCES.value), None)
-            if transport and float(transport.get("utility", 0.0)) >= 0.6:
-                return BrainDecision(
-                    selected_action=ExecutableActionType.TRANSPORT_RESOURCES,
-                    goal_update="satisfy_build_logistics",
-                    plan_steps=["move resources to active work zone"],
-                    reason_summary="Execution phase elevates logistics before construction.",
-                    confidence=0.79,
-                    assumptions=["duration_s=30"],
-                )
-
-            start = next((a for a in sorted_affordances if a["action_type"] == ExecutableActionType.START_CONSTRUCTION.value), None)
-            if start:
-                return BrainDecision(
-                    selected_action=ExecutableActionType.START_CONSTRUCTION,
-                    target_id=start.get("target_id"),
-                    target_zone=start.get("target_zone"),
-                    goal_update="execute_build",
-                    plan_steps=["start construction at viable work zone"],
-                    reason_summary="Build readiness and phase progression support execution.",
-                    confidence=0.8,
-                )
-
-        if ExecutableActionType.INSPECT_INFORMATION_SOURCE.value in affordance_types and not ready_for_build:
-            target = next(
-                (a for a in sorted_affordances if a["action_type"] == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value),
-                None,
-            )
-            return BrainDecision(
-                selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
-                target_id=target.get("target_id") if target else None,
-                target_zone=target.get("target_zone") if target else None,
-                goal_update="seek_info",
-                plan_steps=["inspect needed source", "update build readiness"],
-                communication_intent=CommunicationIntent.TIP,
-                reason_summary="Continue information gathering until readiness is plausible.",
-                confidence=0.77,
-            )
-
-        if top_affordance and top_affordance.get("action_type") in affordance_types:
-            selected = ExecutableActionType(top_affordance["action_type"])
-            assumptions = []
-            if selected == ExecutableActionType.TRANSPORT_RESOURCES:
-                assumptions.append("duration_s=30")
-            return BrainDecision(
-                selected_action=selected,
-                target_id=top_affordance.get("target_id"),
-                target_zone=top_affordance.get("target_zone"),
-                reason_summary="Selected highest-utility legal affordance.",
-                confidence=0.7,
-                assumptions=assumptions,
-            )
-
-        return BrainDecision(
-            selected_action=ExecutableActionType.WAIT,
-            reason_summary="No specific high-value affordance available; wait and reassess.",
-            confidence=0.6,
-            assumptions=["holding position is legal"],
-        )
+            transport = next((a for a in sorted_affordances if a.get("action_type") == ExecutableActionType.TRANSPORT_RESOURCES.value), None)
+            if transport is not None:
+                chosen = transport
+        selected_action = ExecutableActionType(chosen.get("action_type", ExecutableActionType.WAIT.value))
+        reason = f"mode={selected_mode} with weighted stochastic policy"
+        assumptions = [f"policy_mode={selected_mode}", f"mode_dwell={control_state.get('mode_dwell_steps', 0)}"]
+        if selected_action == ExecutableActionType.TRANSPORT_RESOURCES:
+            assumptions.append(f"duration_s={chosen.get('duration_s', 30)}")
+        if not is_request:
+            updated_control = self._apply_control_state_update(context_packet, selected_mode, features, reason)
+            context_packet.individual_cognitive_state["control_state"] = updated_control
+        else:
+            updated_control = control_state
+        top_mode_probs = sorted(mode_probs.items(), key=lambda item: item[1], reverse=True)[: self.policy_config.max_logged_candidates]
+        top_action_probs = sorted(action_probs.items(), key=lambda item: item[1], reverse=True)[: self.policy_config.max_logged_candidates]
+        return {
+            "selected_action": selected_action,
+            "chosen_affordance": chosen,
+            "selected_mode": selected_mode,
+            "features": features,
+            "mode_probs": top_mode_probs,
+            "action_probs": top_action_probs,
+            "reason": reason,
+            "assumptions": assumptions,
+            "control_state": updated_control,
+            "goal_update": "execute_build" if selected_mode in {"LOGISTICS", "CONSTRUCT"} else ("repair_detected_mismatch" if selected_mode == "REPAIR" else "maintain_forward_progress"),
+        }
 
     def decide(self, context_packet):
-        return self._decision_logic(context_packet)
+        result = self._policy_core(context_packet, is_request=False)
+        communication_intent = CommunicationIntent.TIP if result["selected_mode"] in {"BOOTSTRAP", "ACQUIRE_DIK"} else None
+        if result["selected_mode"] == "COORDINATE":
+            communication_intent = CommunicationIntent.TPP
+        return BrainDecision(
+            selected_action=result["selected_action"],
+            target_id=result["chosen_affordance"].get("target_id"),
+            target_zone=result["chosen_affordance"].get("target_zone"),
+            goal_update=result["goal_update"],
+            plan_steps=[
+                f"macro_state:{result['selected_mode']}",
+                "execute legal action aligned with weighted affordance policy",
+            ],
+            reason_summary=result["reason"],
+            communication_intent=communication_intent,
+            confidence=max(prob for _, prob in result["action_probs"]) if result["action_probs"] else 0.6,
+            assumptions=result["assumptions"]
+            + [
+                f"mode_probs={[(m, round(p,3)) for m,p in result['mode_probs']]}",
+                f"action_probs={[(a, round(p,3)) for a,p in result['action_probs']]}",
+                f"features={{{', '.join(f'{k}:{round(v,2)}' for k,v in sorted(result['features'].items(), key=lambda i: i[1], reverse=True)[:4])}}}",
+            ],
+        )
 
     def generate_plan(self, request_packet: AgentBrainRequest) -> AgentBrainResponse:
-        legal = request_packet.allowed_actions
-        step = PlannedActionStep(step_index=0, action_type=ExecutableActionType.WAIT, expected_purpose="hold position")
-        if legal:
-            first = legal[0]
-            step = PlannedActionStep(
-                step_index=0,
-                action_type=ExecutableActionType(first.get("action_type", ExecutableActionType.WAIT.value)),
-                target_id=first.get("target_id"),
-                target_zone=first.get("target_zone"),
-                expected_purpose="deterministic first legal action",
-            )
+        result = self._policy_core(request_packet, control_state={"mode": "BOOTSTRAP", "mode_dwell_steps": 0}, is_request=True)
+        step = PlannedActionStep(
+            step_index=0,
+            action_type=result["selected_action"],
+            target_id=result["chosen_affordance"].get("target_id"),
+            target_zone=result["chosen_affordance"].get("target_zone"),
+            expected_purpose=result["reason"],
+        )
         payload = {
             "response_id": f"rule-{request_packet.request_id}",
             "agent_id": request_packet.agent_id,
@@ -529,10 +507,20 @@ class RuleBrain(BrainProvider):
                 ],
                 "ordered_actions": [step.__dict__],
                 "next_action": step.__dict__,
-                "confidence": 0.7,
+                "confidence": max(prob for _, prob in result["action_probs"]) if result["action_probs"] else 0.65,
+                "plan_method_id": "rule_brain_hierarchical_policy_v1",
+                "notes": [
+                    f"mode={result['selected_mode']}",
+                    f"mode_probs={[(m, round(p, 3)) for m, p in result['mode_probs']]}",
+                    f"action_probs={[(a, round(p, 3)) for a, p in result['action_probs']]}",
+                ],
             },
-            "explanation": "rule fallback selected legal first action" if request_packet.request_explanation else None,
-            "confidence": 0.7,
+            "explanation": (
+                f"rule fallback selected {result['selected_action'].value} in {result['selected_mode']} mode"
+                if request_packet.request_explanation
+                else None
+            ),
+            "confidence": max(prob for _, prob in result["action_probs"]) if result["action_probs"] else 0.65,
         }
         return AgentBrainResponse.from_dict(payload)
 

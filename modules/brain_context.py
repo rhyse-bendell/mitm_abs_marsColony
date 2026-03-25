@@ -433,6 +433,21 @@ class BrainContextBuilder:
                 if float(getattr(agent, "last_dik_change_time", -1.0) or -1.0) < 0.0
                 else max(0.0, float(sim_state.time) - float(getattr(agent, "last_dik_change_time", 0.0)))
             ),
+            "control_state": dict(getattr(agent, "control_state", {}) or {}),
+            "planner_state": {
+                "status": getattr(agent, "planner_state", {}).get("status"),
+                "request_id": getattr(agent, "planner_state", {}).get("request_id"),
+                "degraded_mode": bool(getattr(agent, "planner_state", {}).get("degraded_mode")),
+            },
+            "dik_integration_state": {
+                "status": getattr(agent, "dik_integration_state", {}).get("status"),
+                "last_completed_step": getattr(agent, "dik_integration_state", {}).get("last_completed_step"),
+            },
+            "inspect_state": {
+                "current_target_id": getattr(agent, "current_inspect_target_id", None),
+                "session_state": (getattr(agent, "inspect_session", {}) or {}).get("state"),
+                "source_access_target": (getattr(agent, "source_access_state", {}) or {}).get("source_id"),
+            },
         }
 
         history_bands["semantic_plan_evolution"] = {
