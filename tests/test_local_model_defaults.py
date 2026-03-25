@@ -7,7 +7,7 @@ from interface import MarsColonyInterface
 
 class TestLocalModelDefaults(unittest.TestCase):
     def test_default_visible_local_model_is_qwen25_3b_instruct(self):
-        self.assertEqual(MarsColonyInterface.BACKEND_DEFAULTS["brain_backend"], "ollama")
+        self.assertEqual(MarsColonyInterface.BACKEND_DEFAULTS["brain_backend"], "rule_brain")
         self.assertEqual(MarsColonyInterface.BACKEND_DEFAULTS["local_model"], "qwen2.5:3b-instruct")
 
     def test_local_model_shortlist_includes_supported_models(self):

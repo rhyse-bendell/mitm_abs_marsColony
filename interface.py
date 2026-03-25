@@ -36,9 +36,7 @@ class MarsColonyInterface:
     EXPERIMENT_MAX_CONTENT_WIDTH = 940
     EXPERIMENT_PANEL_BORDER = "#586271"
     BACKEND_DEFAULTS = {
-        "brain_backend": "ollama",
-        # Default changed after manual planner replay succeeded on target hardware
-        # with provider parse + normalization; previous qwen3.5:9b default did not.
+        "brain_backend": "rule_brain",
         "local_model": "qwen2.5:3b-instruct",
         "local_base_url": "http://127.0.0.1:11434",
         "timeout_s": 240.0,
@@ -63,7 +61,7 @@ class MarsColonyInterface:
         "degraded_consecutive_failures_threshold": 24,
         "degraded_cooldown_seconds": 300.0,
         "degraded_step_interval_multiplier": 8.0,
-        "enable_startup_llm_sanity": True,
+        "enable_startup_llm_sanity": False,
         "startup_llm_sanity_timeout_seconds": 240.0,
         "startup_llm_sanity_max_sources": 1,
         "startup_llm_sanity_max_items_per_type": 2,
@@ -73,9 +71,13 @@ class MarsColonyInterface:
         "startup_llm_sanity_raw_response_max_chars": 4000,
         "enable_bootstrap_summary_reuse": True,
         "bootstrap_summary_max_chars": 280,
-        "high_latency_local_llm_mode": True,
-        "unrestricted_local_qwen_mode": True,
+        "high_latency_local_llm_mode": False,
+        "unrestricted_local_qwen_mode": False,
         "high_latency_stale_result_grace_s": 1800.0,
+        "planner_request_policy": "cadence_with_dik_integration",
+        "planning_interval_steps": 60,
+        "dik_integration_cooldown_steps": 12,
+        "dik_integration_batch_threshold": 2,
     }
     RETRY_HELP_TEXT = {
         "backend_max_retries": "0 means make one attempt and then rely on fallback/degraded behavior instead of retrying immediately.",
@@ -1111,6 +1113,10 @@ class MarsColonyInterface:
                 planner_cadence = max(1, int(planner_settings["planner_interval_steps"].get()))
                 planner_timeout = max(0.1, float(planner_settings["planner_timeout_seconds"].get()))
                 planner_max_retries = max(0, int(planner_settings["planner_max_retries"].get()))
+                planner_request_policy = str(planner_settings["planner_request_policy"].get() or self.PLANNER_DEFAULTS["planner_request_policy"]).strip() or self.PLANNER_DEFAULTS["planner_request_policy"]
+                planning_interval_steps = max(1, int(planner_settings["planning_interval_steps"].get()))
+                dik_integration_cooldown_steps = max(1, int(planner_settings["dik_integration_cooldown_steps"].get()))
+                dik_integration_batch_threshold = max(1, int(planner_settings["dik_integration_batch_threshold"].get()))
                 degraded_threshold = max(1, int(planner_settings["degraded_consecutive_failures_threshold"].get()))
                 degraded_cooldown = max(0.0, float(planner_settings["degraded_cooldown_seconds"].get()))
                 degraded_interval_multiplier = max(1.0, float(planner_settings["degraded_step_interval_multiplier"].get()))
@@ -1128,6 +1134,10 @@ class MarsColonyInterface:
                     "planner_interval_steps": planner_cadence,
                     "planner_timeout_seconds": planner_timeout,
                     "planner_max_retries": planner_max_retries,
+                    "planner_request_policy": planner_request_policy,
+                    "planning_interval_steps": planning_interval_steps,
+                    "dik_integration_cooldown_steps": dik_integration_cooldown_steps,
+                    "dik_integration_batch_threshold": dik_integration_batch_threshold,
                     "degraded_consecutive_failures_threshold": degraded_threshold,
                     "degraded_cooldown_seconds": degraded_cooldown,
                     "degraded_step_interval_multiplier": degraded_interval_multiplier,
@@ -1176,6 +1186,10 @@ class MarsColonyInterface:
             "high_latency_local_llm_mode": bool(self.high_latency_local_llm_mode_var.get()),
             "unrestricted_local_qwen_mode": bool(self.unrestricted_local_qwen_mode_var.get()),
             "planner_timeout_seconds": max(0.1, float(self.planner_timeout_seconds_var.get())),
+            "planner_request_policy": str(self.planner_request_policy_var.get() or self.PLANNER_DEFAULTS["planner_request_policy"]).strip() or self.PLANNER_DEFAULTS["planner_request_policy"],
+            "planning_interval_steps": max(1, int(self.planning_interval_steps_var.get())),
+            "dik_integration_cooldown_steps": max(1, int(self.dik_integration_cooldown_steps_var.get())),
+            "dik_integration_batch_threshold": max(1, int(self.dik_integration_batch_threshold_var.get())),
             "warmup_timeout_seconds": max(0.1, float(self.warmup_timeout_var.get())),
             "startup_llm_sanity_completion_max_tokens": max(256, int(self.startup_llm_sanity_completion_tokens_var.get())),
             "planner_completion_max_tokens": max(256, int(self.planner_completion_tokens_var.get())),
@@ -2335,6 +2349,10 @@ class MarsColonyInterface:
         self.bootstrap_reuse_enabled_var = BooleanVar(value=bool(self.PLANNER_DEFAULTS["enable_bootstrap_summary_reuse"]))
         self.bootstrap_summary_max_chars_var = IntVar(value=int(self.PLANNER_DEFAULTS["bootstrap_summary_max_chars"]))
         self.planner_timeout_seconds_var = DoubleVar(value=float(self.PLANNER_DEFAULTS["planner_timeout_seconds"]))
+        self.planner_request_policy_var = StringVar(value=str(self.PLANNER_DEFAULTS["planner_request_policy"]))
+        self.planning_interval_steps_var = IntVar(value=int(self.PLANNER_DEFAULTS["planning_interval_steps"]))
+        self.dik_integration_cooldown_steps_var = IntVar(value=int(self.PLANNER_DEFAULTS["dik_integration_cooldown_steps"]))
+        self.dik_integration_batch_threshold_var = IntVar(value=int(self.PLANNER_DEFAULTS["dik_integration_batch_threshold"]))
         self.high_latency_local_llm_mode_var = BooleanVar(value=bool(self.PLANNER_DEFAULTS["high_latency_local_llm_mode"]))
         self.unrestricted_local_qwen_mode_var = BooleanVar(value=bool(self.PLANNER_DEFAULTS["unrestricted_local_qwen_mode"]))
         self.warmup_timeout_var = DoubleVar(value=float(self.PLANNER_DEFAULTS["warmup_timeout_seconds"]))
@@ -2370,33 +2388,49 @@ class MarsColonyInterface:
         ttk.Entry(settings_frame, textvariable=self.planner_timeout_seconds_var, width=10).grid(row=34, column=1, sticky="w", pady=3)
         self._add_help_text(settings_frame, 35, "Per-request planner timeout budget for local LLM calls.")
 
-        ttk.Label(settings_frame, text="Warmup Timeout (s)").grid(row=36, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(settings_frame, textvariable=self.warmup_timeout_var, width=10).grid(row=36, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 37, "Startup backend warmup timeout budget.")
+        ttk.Label(settings_frame, text="Planner Request Policy").grid(row=36, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Combobox(settings_frame, textvariable=self.planner_request_policy_var, values=["cadence_with_dik_integration", "legacy"], state="readonly", width=30).grid(row=36, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 37, "Split mode runs planning on cadence and DIK integration on epistemic triggers. Legacy preserves prior mixed cadence logic.")
 
-        ttk.Label(settings_frame, text="Raw Response Max Chars").grid(row=38, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(settings_frame, textvariable=self.startup_llm_sanity_raw_max_chars_var, width=10).grid(row=38, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 39, "Truncate captured raw startup responses to keep artifacts bounded.")
+        ttk.Label(settings_frame, text="Split Planning Interval (steps)").grid(row=38, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.planning_interval_steps_var, width=10).grid(row=38, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 39, "When split mode is enabled, submit planner requests every N simulation ticks.")
 
-        ttk.Label(settings_frame, text="Reuse Bootstrap Summary in Planner Requests").grid(row=40, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Checkbutton(settings_frame, text="Include compact bootstrap summary on future planner requests", variable=self.bootstrap_reuse_enabled_var).grid(row=40, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 41, "Agents remain persistent simulator entities for the session, but model calls stay explicit stateless requests. Reuse adds a compact inspectable summary field; no hidden model-side memory is assumed.")
+        ttk.Label(settings_frame, text="DIK Cooldown (steps)").grid(row=40, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.dik_integration_cooldown_steps_var, width=10).grid(row=40, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 41, "Minimum ticks between DIK integration requests while in split mode.")
 
-        ttk.Label(settings_frame, text="Bootstrap Summary Max Chars").grid(row=42, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(settings_frame, textvariable=self.bootstrap_summary_max_chars_var, width=10).grid(row=42, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 43, "Upper bound for compact bootstrap summaries attached to planner requests.")
+        ttk.Label(settings_frame, text="DIK Batch Threshold").grid(row=42, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.dik_integration_batch_threshold_var, width=10).grid(row=42, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 43, "Minimum epistemic delta required before split-mode DIK integration is submitted.")
 
-        ttk.Label(settings_frame, text="High-Latency Local LLM Mode").grid(row=44, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Checkbutton(settings_frame, text="Let local LLM requests run with relaxed timing and stale-result tolerance", variable=self.high_latency_local_llm_mode_var).grid(row=44, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 45, "Diagnostic mode for slow local inference: relaxed timeouts, reduced planner pressure, and less eager stale-result discards.")
+        ttk.Label(settings_frame, text="Warmup Timeout (s)").grid(row=44, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.warmup_timeout_var, width=10).grid(row=44, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 45, "Startup backend warmup timeout budget.")
 
-        ttk.Label(settings_frame, text="Unrestricted Local Qwen Mode").grid(row=46, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Checkbutton(settings_frame, text="Very permissive mode: multi-minute waits + very large completion budgets (with safety ceilings)", variable=self.unrestricted_local_qwen_mode_var).grid(row=46, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 47, "Intentionally patient diagnostics mode for slow local Qwen runs.")
+        ttk.Label(settings_frame, text="Raw Response Max Chars").grid(row=46, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.startup_llm_sanity_raw_max_chars_var, width=10).grid(row=46, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 47, "Truncate captured raw startup responses to keep artifacts bounded.")
 
-        ttk.Label(settings_frame, text="Stale Result Grace (s)").grid(row=48, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(settings_frame, textvariable=self.high_latency_stale_result_grace_var, width=10).grid(row=48, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 49, "Additional grace window to accept late but still relevant planner responses in high-latency mode.")
+        ttk.Label(settings_frame, text="Reuse Bootstrap Summary in Planner Requests").grid(row=48, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Checkbutton(settings_frame, text="Include compact bootstrap summary on future planner requests", variable=self.bootstrap_reuse_enabled_var).grid(row=48, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 49, "Agents remain persistent simulator entities for the session, but model calls stay explicit stateless requests. Reuse adds a compact inspectable summary field; no hidden model-side memory is assumed.")
+
+        ttk.Label(settings_frame, text="Bootstrap Summary Max Chars").grid(row=50, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.bootstrap_summary_max_chars_var, width=10).grid(row=50, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 51, "Upper bound for compact bootstrap summaries attached to planner requests.")
+
+        ttk.Label(settings_frame, text="High-Latency Local LLM Mode").grid(row=52, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Checkbutton(settings_frame, text="Let local LLM requests run with relaxed timing and stale-result tolerance", variable=self.high_latency_local_llm_mode_var).grid(row=52, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 53, "Diagnostic mode for slow local inference: relaxed timeouts, reduced planner pressure, and less eager stale-result discards.")
+
+        ttk.Label(settings_frame, text="Unrestricted Local Qwen Mode").grid(row=54, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Checkbutton(settings_frame, text="Very permissive mode: multi-minute waits + very large completion budgets (with safety ceilings)", variable=self.unrestricted_local_qwen_mode_var).grid(row=54, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 55, "Intentionally patient diagnostics mode for slow local Qwen runs.")
+
+        ttk.Label(settings_frame, text="Stale Result Grace (s)").grid(row=56, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(settings_frame, textvariable=self.high_latency_stale_result_grace_var, width=10).grid(row=56, column=1, sticky="w", pady=3)
+        self._add_help_text(settings_frame, 57, "Additional grace window to accept late but still relevant planner responses in high-latency mode.")
 
         self.construction_param_vars = {
             "pile_a_quantity": IntVar(value=int(self.construction_defaults["pile_a_quantity"])),
@@ -2411,7 +2445,7 @@ class MarsColonyInterface:
             "move_time_per_unit": IntVar(value=int(self.construction_defaults["move_time_per_unit"])),
             "carry_capacity": IntVar(value=int(self.construction_defaults["carry_capacity"])),
         }
-        row = 50
+        row = 58
         ttk.Label(settings_frame, text="Construction Parameters").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=(8, 3))
         self._add_help_text(settings_frame, row + 1, "Site/resource/bridge settings loaded from task defaults and overridable before run start.")
         row += 2
@@ -2544,6 +2578,10 @@ class MarsColonyInterface:
             "planner_interval_steps": IntVar(value=int(default_planner.get("planner_interval_steps", self.PLANNER_DEFAULTS["planner_interval_steps"]))),
             "planner_timeout_seconds": DoubleVar(value=float(default_planner.get("planner_timeout_seconds", self.PLANNER_DEFAULTS["planner_timeout_seconds"]))),
             "planner_max_retries": IntVar(value=int(default_planner.get("planner_max_retries", self.PLANNER_DEFAULTS["planner_max_retries"]))),
+            "planner_request_policy": StringVar(value=str(default_planner.get("planner_request_policy", self.PLANNER_DEFAULTS["planner_request_policy"]))),
+            "planning_interval_steps": IntVar(value=int(default_planner.get("planning_interval_steps", self.PLANNER_DEFAULTS["planning_interval_steps"]))),
+            "dik_integration_cooldown_steps": IntVar(value=int(default_planner.get("dik_integration_cooldown_steps", self.PLANNER_DEFAULTS["dik_integration_cooldown_steps"]))),
+            "dik_integration_batch_threshold": IntVar(value=int(default_planner.get("dik_integration_batch_threshold", self.PLANNER_DEFAULTS["dik_integration_batch_threshold"]))),
             "degraded_consecutive_failures_threshold": IntVar(value=int(default_planner.get("degraded_consecutive_failures_threshold", self.PLANNER_DEFAULTS["degraded_consecutive_failures_threshold"]))),
             "degraded_cooldown_seconds": DoubleVar(value=float(default_planner.get("degraded_cooldown_seconds", self.PLANNER_DEFAULTS["degraded_cooldown_seconds"]))),
             "degraded_step_interval_multiplier": DoubleVar(value=float(default_planner.get("degraded_step_interval_multiplier", self.PLANNER_DEFAULTS["degraded_step_interval_multiplier"]))),
@@ -2569,6 +2607,10 @@ class MarsColonyInterface:
             ("Backend Timeout (s)", ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["timeout_s"], width=8), "Maximum backend request time for this agent.", None),
             ("Backend Max Retries", ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["max_retries"], width=8), self.RETRY_HELP_TEXT["backend_max_retries"], None),
             ("Planner Max Retries", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_max_retries"], width=8), self.RETRY_HELP_TEXT["planner_max_retries"], None),
+            ("Planner Request Policy", ttk.Combobox(settings_frame, textvariable=self.agent_planner_settings[role]["planner_request_policy"], values=["cadence_with_dik_integration", "legacy"], state="readonly", width=28), "Optional per-agent policy override for split DIK/planning cadence.", None),
+            ("Split Planning Interval", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planning_interval_steps"], width=8), "Per-agent split mode planner interval in ticks.", None),
+            ("DIK Cooldown (steps)", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["dik_integration_cooldown_steps"], width=8), "Per-agent minimum spacing between DIK integration requests.", None),
+            ("DIK Batch Threshold", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["dik_integration_batch_threshold"], width=8), "Per-agent minimum epistemic delta before DIK integration is requested.", None),
             ("Degraded Threshold", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_consecutive_failures_threshold"], width=8), "Number of consecutive backend failures before degraded mode begins.", None),
             ("Degraded Cooldown (s)", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_cooldown_seconds"], width=8), "How long this agent waits before retrying the backend after repeated failures.", None),
             ("Degraded Step Multiplier", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_step_interval_multiplier"], width=8), "In degraded mode, increases the interval between planning attempts.", None),
