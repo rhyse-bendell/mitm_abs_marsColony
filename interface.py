@@ -1,6 +1,7 @@
 # File: interface.py
 
 import tkinter as tk
+import tkinter.font as tkfont
 import queue
 import threading
 import traceback
@@ -1128,28 +1129,141 @@ class MarsColonyInterface:
             return held >= int(derivation.min_required_count)
         return held == len(req_ids)
 
-    def _draw_data_square(self, canvas, x, y, data_id, *, held, label=None, size=14):
-        color = self._stable_data_color(data_id)
-        fill = color if held else "white"
-        canvas.create_rectangle(x, y, x + size, y + size, fill=fill, outline=color, width=1.5)
-        if label:
-            canvas.create_text(x + size + 6, y + size / 2, text=label, anchor="w", font=("Arial", 8))
+    @staticmethod
+    def _abbreviated_element_id(element_id, element_type=None):
+        text = str(element_id or "")
+        prefixes = []
+        if element_type == "data":
+            prefixes.append("D_")
+        elif element_type == "information":
+            prefixes.append("I_")
+        elif element_type == "knowledge":
+            prefixes.append("K_")
+        elif element_type == "rule":
+            prefixes.append("R_")
+        prefixes.extend(["D_", "I_", "K_", "R_"])
+        for prefix in prefixes:
+            if text.startswith(prefix):
+                return text[len(prefix):]
+        return text
 
-    def _draw_requirement_chip(self, canvas, x, y, req_id, state, task_model, *, width=160, height=18):
-        element = task_model.dik_elements.get(req_id)
-        etype = element.element_type if element else "unknown"
-        held = self._element_is_held(req_id, etype, state)
-        label = f"{req_id}"
-        if etype == "data":
-            self._draw_data_square(canvas, x, y + 2, req_id, held=held, label=label, size=12)
-            return y + height
-        outline = "#2f6f9f" if etype == "information" else "#6b4f8c"
-        fill = "#d6ecff" if held else "#f6f8fa"
-        if etype == "knowledge":
-            fill = "#e6dcff" if held else "#f6f8fa"
-        canvas.create_rectangle(x, y, x + width, y + height, outline=outline, fill=fill, width=1.2)
-        canvas.create_text(x + 5, y + height / 2, text=label, anchor="w", font=("Arial", 8))
-        return y + height + 4
+    @staticmethod
+    def _wrap_flow_rows(widths, max_width, hgap):
+        rows = []
+        current = []
+        row_width = 0
+        for idx, width in enumerate(widths):
+            candidate = width if not current else row_width + hgap + width
+            if current and candidate > max_width:
+                rows.append(current)
+                current = [idx]
+                row_width = width
+            else:
+                current.append(idx)
+                row_width = candidate
+        if current:
+            rows.append(current)
+        return rows
+
+    def _ensure_epistemic_fonts(self):
+        if hasattr(self, "_epi_font_chip"):
+            return
+        self._epi_font_chip = tkfont.Font(root=self.root, family="Arial", size=8)
+        self._epi_font_title = tkfont.Font(root=self.root, family="Arial", size=9, weight="bold")
+        self._epi_font_section = tkfont.Font(root=self.root, family="Arial", size=11, weight="bold")
+
+    def _measure_text(self, text, *, font_key="chip"):
+        self._ensure_epistemic_fonts()
+        font = self._epi_font_chip
+        if font_key == "title":
+            font = self._epi_font_title
+        elif font_key == "section":
+            font = self._epi_font_section
+        return int(font.measure(str(text)))
+
+    def _display_label(self, task_model, element_id, element_type=None):
+        element = getattr(task_model, "dik_elements", {}).get(element_id)
+        candidate = str(getattr(element, "label", "") or "").strip() if element else ""
+        if candidate:
+            return candidate
+        return self._abbreviated_element_id(element_id, element_type=element_type)
+
+    def _chip_style(self, chip_type, held, canonical_id):
+        if chip_type == "data":
+            accent = self._stable_data_color(canonical_id)
+            return {"outline": accent, "fill": "#eff7ff" if held else "#f8fafc", "accent": accent}
+        if chip_type == "knowledge":
+            return {"outline": "#6b4f8c", "fill": "#e6dcff" if held else "#f6f8fa", "accent": "#6b4f8c"}
+        if chip_type == "information":
+            return {"outline": "#2f6f9f", "fill": "#d6ecff" if held else "#f6f8fa", "accent": "#2f6f9f"}
+        return {"outline": "#7a8188", "fill": "#f6f8fa", "accent": "#7a8188"}
+
+    def _chip_metrics(self, label):
+        square = 8
+        pad_x = 6
+        inner_gap = 6
+        outer_gap = 6
+        text_w = self._measure_text(label, font_key="chip")
+        width = pad_x + square + inner_gap + text_w + pad_x
+        height = 20
+        return {"square": square, "pad_x": pad_x, "inner_gap": inner_gap, "outer_gap": outer_gap, "width": width, "height": height}
+
+    def _bind_epistemic_detail(self, canvas, item_id, detail_text):
+        if not hasattr(self, "_epistemic_detail_var"):
+            return
+        canvas.tag_bind(item_id, "<Button-1>", lambda _e, txt=detail_text: self._epistemic_detail_var.set(txt))
+
+    def _draw_chip(self, canvas, x, y, chip):
+        metrics = self._chip_metrics(chip["display_label"])
+        style = self._chip_style(chip["chip_type"], chip["held"], chip["canonical_id"])
+        rect = canvas.create_rectangle(
+            x,
+            y,
+            x + metrics["width"],
+            y + metrics["height"],
+            outline=style["outline"],
+            fill=style["fill"],
+            width=1.0,
+        )
+        square_y = y + (metrics["height"] - metrics["square"]) / 2
+        canvas.create_rectangle(
+            x + metrics["pad_x"],
+            square_y,
+            x + metrics["pad_x"] + metrics["square"],
+            square_y + metrics["square"],
+            outline=style["accent"],
+            fill=style["accent"] if chip["held"] else "#ffffff",
+            width=1.0,
+        )
+        text_x = x + metrics["pad_x"] + metrics["square"] + metrics["inner_gap"]
+        canvas.create_text(text_x, y + metrics["height"] / 2, text=chip["display_label"], anchor="w", font=("Arial", 8), fill="#1f2933")
+        detail = f"{chip['chip_type']} | {chip['display_label']} | canonical: {chip['canonical_id']} | {'held' if chip['held'] else 'not held'}"
+        self._bind_epistemic_detail(canvas, rect, detail)
+        return metrics
+
+    def _draw_chip_flow(self, canvas, x, y, max_width, chips, *, draw=True):
+        if not chips:
+            return 0
+        widths = [self._chip_metrics(chip["display_label"])["width"] for chip in chips]
+        hgap = 6
+        vgap = 6
+        rows = self._wrap_flow_rows(widths, max(80, int(max_width)), hgap)
+        row_h = 20
+        if draw:
+            for row_idx, row in enumerate(rows):
+                cur_x = x
+                row_y = y + row_idx * (row_h + vgap)
+                for idx_in_row, chip_idx in enumerate(row):
+                    chip = chips[chip_idx]
+                    self._draw_chip(canvas, cur_x, row_y, chip)
+                    cur_x += widths[chip_idx] + (hgap if idx_in_row < len(row) - 1 else 0)
+        return len(rows) * row_h + max(0, len(rows) - 1) * vgap
+
+    def _canvas_content_width(self, canvas):
+        width = int(canvas.winfo_width() or 0)
+        if width <= 1:
+            width = int(canvas.winfo_reqwidth() or 900)
+        return max(420, width - 24)
 
     def create_dik_derivations_tab(self):
         self.tab_dik_derivations = ttk.Frame(self.notebook)
@@ -1158,9 +1272,16 @@ class MarsColonyInterface:
         controls.pack(fill="x")
         ttk.Label(controls, text="View").pack(side="left")
         self.epistemic_view_var = StringVar(value="Team Union")
+        self.epistemic_unsatisfied_only_var = BooleanVar(value=False)
         self.dik_view_combo = ttk.Combobox(controls, textvariable=self.epistemic_view_var, values=["Team Union"], state="readonly", width=24)
         self.dik_view_combo.pack(side="left", padx=(6, 0))
         self.dik_view_combo.bind("<<ComboboxSelected>>", lambda *_: (self.update_dik_derivations_tab(), self.update_rule_derivations_tab()))
+        ttk.Checkbutton(
+            controls,
+            text="Show only unsatisfied outputs",
+            variable=self.epistemic_unsatisfied_only_var,
+            command=lambda: (self.update_dik_derivations_tab(), self.update_rule_derivations_tab()),
+        ).pack(side="left", padx=(12, 0))
 
         canvas_wrap = ttk.Frame(self.tab_dik_derivations, padding=6)
         canvas_wrap.pack(fill="both", expand=True)
@@ -1169,6 +1290,9 @@ class MarsColonyInterface:
         self.dik_derivations_canvas.configure(yscrollcommand=y_scroll.set)
         self.dik_derivations_canvas.pack(side="left", fill="both", expand=True)
         y_scroll.pack(side="right", fill="y")
+        self.dik_derivations_canvas.bind("<Configure>", lambda *_: self.update_dik_derivations_tab())
+        self._epistemic_detail_var = StringVar(value="Select an item to see canonical details.")
+        ttk.Label(self.tab_dik_derivations, textvariable=self._epistemic_detail_var, anchor="w").pack(fill="x", padx=8, pady=(0, 6))
 
     def create_rule_derivations_tab(self):
         self.tab_rule_derivations = ttk.Frame(self.notebook)
@@ -1179,6 +1303,12 @@ class MarsColonyInterface:
         self.rule_view_combo = ttk.Combobox(controls, textvariable=self.epistemic_view_var, values=["Team Union"], state="readonly", width=24)
         self.rule_view_combo.pack(side="left", padx=(6, 0))
         self.rule_view_combo.bind("<<ComboboxSelected>>", lambda *_: (self.update_dik_derivations_tab(), self.update_rule_derivations_tab()))
+        ttk.Checkbutton(
+            controls,
+            text="Show only unsatisfied outputs",
+            variable=self.epistemic_unsatisfied_only_var,
+            command=lambda: (self.update_dik_derivations_tab(), self.update_rule_derivations_tab()),
+        ).pack(side="left", padx=(12, 0))
 
         canvas_wrap = ttk.Frame(self.tab_rule_derivations, padding=6)
         canvas_wrap.pack(fill="both", expand=True)
@@ -1187,6 +1317,7 @@ class MarsColonyInterface:
         self.rule_derivations_canvas.configure(yscrollcommand=y_scroll.set)
         self.rule_derivations_canvas.pack(side="left", fill="both", expand=True)
         y_scroll.pack(side="right", fill="y")
+        self.rule_derivations_canvas.bind("<Configure>", lambda *_: self.update_rule_derivations_tab())
 
     def update_dik_derivations_tab(self):
         if not hasattr(self, "dik_derivations_canvas"):
@@ -1196,48 +1327,94 @@ class MarsColonyInterface:
         canvas.delete("all")
         task_model = self._get_epistemic_task_model()
         state = self._collect_epistemic_state()
+        left = 12
+        width = self._canvas_content_width(canvas)
         y = 10
-        canvas.create_text(10, y, text="Data Elements", anchor="nw", font=("Arial", 11, "bold"))
+        canvas.create_text(left, y, text="Data Elements", anchor="nw", font=("Arial", 11, "bold"))
         y += 24
         data_ids = sorted([eid for eid, elem in task_model.dik_elements.items() if elem.enabled and elem.element_type == "data"])
-        col_count = 5
-        row_h = 24
-        for idx, data_id in enumerate(data_ids):
-            row = idx // col_count
-            col = idx % col_count
-            dx = 16 + col * 180
-            dy = y + row * row_h
-            self._draw_data_square(canvas, dx, dy, data_id, held=self._element_is_held(data_id, "data", state), label=data_id, size=12)
-        y += max(1, math.ceil(max(1, len(data_ids)) / col_count)) * row_h + 18
+        data_chips = [
+            {
+                "canonical_id": data_id,
+                "display_label": self._display_label(task_model, data_id, "data"),
+                "chip_type": "data",
+                "held": self._element_is_held(data_id, "data", state),
+            }
+            for data_id in data_ids
+        ]
+        y += self._draw_chip_flow(canvas, left + 4, y, width - 20, data_chips, draw=True) + 18
 
         for section_name, output_type, border_color, fill_active, fill_inactive in [
             ("Information Derivations", "information", "#2f6f9f", "#d6ecff", "#f8fbff"),
             ("Knowledge Derivations", "knowledge", "#6b4f8c", "#e6dcff", "#fbf8ff"),
         ]:
-            canvas.create_text(10, y, text=section_name, anchor="nw", font=("Arial", 11, "bold"))
+            canvas.create_text(left, y, text=section_name, anchor="nw", font=("Arial", 11, "bold"))
             y += 22
             groups = self._build_derivation_groups(task_model, output_type=output_type)
             if not groups:
-                canvas.create_text(20, y, text="(no derivations)", anchor="nw", font=("Arial", 9), fill="#666666")
+                canvas.create_text(left + 8, y, text="(no derivations)", anchor="nw", font=("Arial", 9), fill="#666666")
                 y += 22
                 continue
             for output_id, pathways in groups:
                 output_held = self._element_is_held(output_id, output_type, state)
-                canvas.create_text(16, y, text=f"{output_id}  ({'achieved' if output_held else 'not achieved'})", anchor="nw", font=("Arial", 10, "bold"), fill="#14395f" if output_held else "#7a8188")
-                y += 18
+                if self.epistemic_unsatisfied_only_var.get() and output_held:
+                    continue
+                display_output = self._display_label(task_model, output_id, output_type)
+                heading = canvas.create_text(
+                    left + 6,
+                    y,
+                    text=display_output,
+                    anchor="nw",
+                    font=("Arial", 10, "bold"),
+                    fill="#14395f" if output_held else "#7a8188",
+                )
+                heading_w = self._measure_text(display_output, font_key="title")
+                tag_x = left + 14 + heading_w
+                canvas.create_rectangle(tag_x, y + 1, tag_x + 82, y + 17, outline="#9aa4ae", fill="#e9f6ea" if output_held else "#f5e9ea")
+                canvas.create_text(tag_x + 41, y + 9, text="achieved" if output_held else "not achieved", anchor="center", font=("Arial", 8))
+                self._bind_epistemic_detail(
+                    canvas,
+                    heading,
+                    f"{output_type} output | {display_output} | canonical: {output_id} | {'achieved' if output_held else 'not achieved'}",
+                )
+                y += 24
                 for derivation in pathways:
-                    card_h = 26 + (20 * max(1, len(derivation.required_inputs)))
                     satisfied = self._pathway_satisfied(derivation, state, task_model)
-                    fill = fill_active if satisfied else fill_inactive
-                    canvas.create_rectangle(28, y, 760, y + card_h, outline=border_color, fill=fill, width=1.5)
-                    canvas.create_text(36, y + 6, text=f"{derivation.derivation_id} ({'path satisfied' if satisfied else 'path unsatisfied'})", anchor="nw", font=("Arial", 9, "bold"))
-                    req_y = y + 24
+                    req_chips = []
                     for req_id in derivation.required_inputs:
-                        req_y = self._draw_requirement_chip(canvas, 44, req_y, req_id, state, task_model, width=220, height=18)
+                        element = task_model.dik_elements.get(req_id)
+                        req_type = element.element_type if element else "unknown"
+                        req_chips.append(
+                            {
+                                "canonical_id": req_id,
+                                "display_label": self._display_label(task_model, req_id, req_type),
+                                "chip_type": req_type,
+                                "held": self._element_is_held(req_id, req_type, state),
+                            }
+                        )
+                    card_x = left + 18
+                    card_w = width - 36
+                    chips_h = self._draw_chip_flow(canvas, card_x + 14, y + 34, card_w - 28, req_chips, draw=False)
+                    card_h = 40 + max(20, chips_h)
+                    fill = fill_active if satisfied else fill_inactive
+                    canvas.create_rectangle(card_x, y, card_x + card_w, y + card_h, outline=border_color, fill=fill, width=1.5)
+                    title = canvas.create_text(
+                        card_x + 8,
+                        y + 6,
+                        text=f"{derivation.derivation_id} ({'path satisfied' if satisfied else 'path unsatisfied'})",
+                        anchor="nw",
+                        font=("Arial", 9, "bold"),
+                    )
+                    self._bind_epistemic_detail(
+                        canvas,
+                        title,
+                        f"derivation | {derivation.derivation_id} | output: {output_id} | {'path satisfied' if satisfied else 'path unsatisfied'}",
+                    )
+                    self._draw_chip_flow(canvas, card_x + 14, y + 34, card_w - 28, req_chips, draw=True)
                     y += card_h + 8
-                y += 4
+                y += 8
             y += 10
-        canvas.configure(scrollregion=(0, 0, 900, max(500, y + 20)))
+        canvas.configure(scrollregion=(0, 0, width + 24, max(500, y + 20)))
 
     def update_rule_derivations_tab(self):
         if not hasattr(self, "rule_derivations_canvas"):
@@ -1247,8 +1424,10 @@ class MarsColonyInterface:
         canvas.delete("all")
         task_model = self._get_epistemic_task_model()
         state = self._collect_epistemic_state()
+        left = 12
+        width = self._canvas_content_width(canvas)
         y = 10
-        canvas.create_text(10, y, text="Rule Derivations", anchor="nw", font=("Arial", 11, "bold"))
+        canvas.create_text(left, y, text="Rule Derivations", anchor="nw", font=("Arial", 11, "bold"))
         y += 24
         for rule_id in sorted(task_model.rules.keys()):
             rule = task_model.rules[rule_id]
@@ -1260,23 +1439,48 @@ class MarsColonyInterface:
                 self._element_is_held(k, "knowledge", state) for k in req_knowledge
             )
             achieved = normalize_rule_token(rule.rule_id) in state["rules"] or rule.rule_id in state["knowledge"]
-            card_h = 56 + (len(req_info) + len(req_knowledge)) * 24
-            canvas.create_rectangle(16, y, 780, y + card_h, outline="#444444", width=1.6, fill="#edf9ed" if achieved else "#fafafa")
-            canvas.create_text(24, y + 8, text=f"{rule.rule_id} ({'achieved' if achieved else 'not achieved'})", anchor="nw", font=("Arial", 10, "bold"))
-            canvas.create_text(24, y + 24, text=f"Prerequisites: {'satisfied' if prereq_ok else 'unsatisfied'}", anchor="nw", font=("Arial", 9), fill="#2f7a2f" if prereq_ok else "#9a3c3c")
-            req_y = y + 42
-            if req_info:
-                canvas.create_text(30, req_y, text="Required Information", anchor="nw", font=("Arial", 8, "bold"))
-                req_y += 14
-                for req_id in req_info:
-                    req_y = self._draw_requirement_chip(canvas, 40, req_y, req_id, state, task_model, width=260, height=18)
-            if req_knowledge:
-                canvas.create_text(320, y + 42, text="Required Knowledge", anchor="nw", font=("Arial", 8, "bold"))
-                k_y = y + 56
-                for req_id in req_knowledge:
-                    k_y = self._draw_requirement_chip(canvas, 330, k_y, req_id, state, task_model, width=260, height=18)
+            if self.epistemic_unsatisfied_only_var.get() and achieved:
+                continue
+            info_chips = [
+                {
+                    "canonical_id": req_id,
+                    "display_label": self._display_label(task_model, req_id, "information"),
+                    "chip_type": "information",
+                    "held": self._element_is_held(req_id, "information", state),
+                }
+                for req_id in req_info
+            ]
+            knowledge_chips = [
+                {
+                    "canonical_id": req_id,
+                    "display_label": self._display_label(task_model, req_id, "knowledge"),
+                    "chip_type": "knowledge",
+                    "held": self._element_is_held(req_id, "knowledge", state),
+                }
+                for req_id in req_knowledge
+            ]
+            card_x = left + 4
+            card_w = width - 8
+            info_h = self._draw_chip_flow(canvas, card_x + 16, y + 62, card_w - 32, info_chips, draw=False) if info_chips else 0
+            info_section_h = (16 + info_h + 6) if info_chips else 0
+            know_h = self._draw_chip_flow(canvas, card_x + 16, y + 62 + info_section_h, card_w - 32, knowledge_chips, draw=False) if knowledge_chips else 0
+            know_section_h = (16 + know_h + 6) if knowledge_chips else 0
+            card_h = 62 + info_section_h + know_section_h + 8
+            canvas.create_rectangle(card_x, y, card_x + card_w, y + card_h, outline="#444444", width=1.6, fill="#edf9ed" if achieved else "#fafafa")
+            display_rule = self._abbreviated_element_id(rule.rule_id, element_type="rule")
+            title = canvas.create_text(card_x + 8, y + 8, text=f"{display_rule} ({'achieved' if achieved else 'not achieved'})", anchor="nw", font=("Arial", 10, "bold"))
+            self._bind_epistemic_detail(canvas, title, f"rule | {display_rule} | canonical: {rule.rule_id} | {'achieved' if achieved else 'not achieved'}")
+            canvas.create_text(card_x + 8, y + 26, text=f"Prerequisites: {'satisfied' if prereq_ok else 'unsatisfied'}", anchor="nw", font=("Arial", 9), fill="#2f7a2f" if prereq_ok else "#9a3c3c")
+            section_y = y + 44
+            if info_chips:
+                canvas.create_text(card_x + 12, section_y, text="Required Information", anchor="nw", font=("Arial", 8, "bold"))
+                self._draw_chip_flow(canvas, card_x + 16, section_y + 16, card_w - 32, info_chips, draw=True)
+                section_y += info_section_h
+            if knowledge_chips:
+                canvas.create_text(card_x + 12, section_y, text="Required Knowledge", anchor="nw", font=("Arial", 8, "bold"))
+                self._draw_chip_flow(canvas, card_x + 16, section_y + 16, card_w - 32, knowledge_chips, draw=True)
             y += card_h + 12
-        canvas.configure(scrollregion=(0, 0, 900, max(500, y + 20)))
+        canvas.configure(scrollregion=(0, 0, width + 24, max(500, y + 20)))
 
     def create_event_monitor_tab(self):
         self.tab_event = ttk.Frame(self.notebook)

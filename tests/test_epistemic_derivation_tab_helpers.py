@@ -5,6 +5,15 @@ from interface import MarsColonyInterface
 
 
 class EpistemicDerivationTabHelperTests(unittest.TestCase):
+    def test_abbreviated_element_id_strips_type_prefix(self):
+        self.assertEqual(MarsColonyInterface._abbreviated_element_id("D_ARCH_AIRLOCK_SIZE", "data"), "ARCH_AIRLOCK_SIZE")
+        self.assertEqual(MarsColonyInterface._abbreviated_element_id("I_BUILD_PLAN", "information"), "BUILD_PLAN")
+        self.assertEqual(MarsColonyInterface._abbreviated_element_id("K_RULE_CHAIN", "knowledge"), "RULE_CHAIN")
+
+    def test_wrap_flow_rows_wraps_when_width_exceeded(self):
+        rows = MarsColonyInterface._wrap_flow_rows([80, 90, 70], max_width=180, hgap=6)
+        self.assertEqual(rows, [[0, 1], [2]])
+
     def test_derivation_groups_preserve_alternative_pathways(self):
         task_model = SimpleNamespace(
             derivations={
