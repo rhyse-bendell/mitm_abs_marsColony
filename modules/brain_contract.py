@@ -306,6 +306,9 @@ class AgentDIKIntegrationRequest:
     candidate_information_ids: List[str] = field(default_factory=list)
     candidate_knowledge_ids: List[str] = field(default_factory=list)
     candidate_rule_ids: List[str] = field(default_factory=list)
+    candidate_information_grounding: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    candidate_knowledge_grounding: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    candidate_rule_grounding: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     max_candidates_per_type: int = 8
 
     @classmethod
@@ -329,6 +332,19 @@ class AgentDIKIntegrationRequest:
             candidate_information_ids=[str(item) for item in payload.get("candidate_information_ids", [])],
             candidate_knowledge_ids=[str(item) for item in payload.get("candidate_knowledge_ids", [])],
             candidate_rule_ids=[str(item) for item in payload.get("candidate_rule_ids", [])],
+            candidate_information_grounding={
+                str(k): [dict(entry) for entry in (v or []) if isinstance(entry, dict)]
+                for k, v in dict(payload.get("candidate_information_grounding", {})).items()
+            },
+            candidate_knowledge_grounding={
+                str(k): [dict(entry) for entry in (v or []) if isinstance(entry, dict)]
+                for k, v in dict(payload.get("candidate_knowledge_grounding", {})).items()
+            },
+            candidate_rule_grounding={
+                str(k): dict(v)
+                for k, v in dict(payload.get("candidate_rule_grounding", {})).items()
+                if isinstance(v, dict)
+            },
             max_candidates_per_type=max(1, int(payload.get("max_candidates_per_type", 8) or 8)),
         )
 
@@ -352,6 +368,9 @@ class AgentDIKIntegrationRequest:
             "candidate_information_ids": list(self.candidate_information_ids),
             "candidate_knowledge_ids": list(self.candidate_knowledge_ids),
             "candidate_rule_ids": list(self.candidate_rule_ids),
+            "candidate_information_grounding": dict(self.candidate_information_grounding),
+            "candidate_knowledge_grounding": dict(self.candidate_knowledge_grounding),
+            "candidate_rule_grounding": dict(self.candidate_rule_grounding),
             "max_candidates_per_type": self.max_candidates_per_type,
         }
 

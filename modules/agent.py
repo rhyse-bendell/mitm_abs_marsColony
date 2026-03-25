@@ -73,7 +73,7 @@ class PlannerCadenceConfig:
     high_latency_stale_result_grace_s: float = 0.0
     sticky_backend_demotion_enabled: bool = False
     planner_blocks_sim_time: bool | None = None
-    planner_request_policy: str = "legacy"
+    planner_request_policy: str = "cadence_with_dik_integration"
     split_mode_planning_interval_steps: int = 60
     split_mode_dik_integration_cooldown_steps: int = 12
     split_mode_dik_batch_threshold: int = 2
@@ -116,7 +116,7 @@ class PlannerCadenceConfig:
                 if payload.get("planner_blocks_sim_time") is not None
                 else None
             ),
-            planner_request_policy=str(payload.get("planner_request_policy", "legacy") or "legacy").lower(),
+            planner_request_policy=str(payload.get("planner_request_policy", "cadence_with_dik_integration") or "cadence_with_dik_integration").lower(),
             split_mode_planning_interval_steps=max(1, int(payload.get("planning_interval_steps", payload.get("split_mode_planning_interval_steps", 60)) or 60)),
             split_mode_dik_integration_cooldown_steps=max(1, int(payload.get("dik_integration_cooldown_steps", payload.get("split_mode_dik_integration_cooldown_steps", 12)) or 12)),
             split_mode_dik_batch_threshold=max(1, int(payload.get("dik_integration_batch_threshold", payload.get("split_mode_dik_batch_threshold", 2)) or 2)),
@@ -2653,15 +2653,43 @@ class Agent:
         candidate_information_ids = []
         candidate_knowledge_ids = []
         candidate_rule_ids = []
+        candidate_information_grounding = {}
+        candidate_knowledge_grounding = {}
+        candidate_rule_grounding = {}
         if self.task_model is not None:
-            for element_id, element in self.task_model.dik_elements.items():
+            derivations_by_output = {}
+            for derivation in getattr(self.task_model, "derivations", {}).values():
+                if not getattr(derivation, "enabled", True):
+                    continue
+                derivations_by_output.setdefault(str(derivation.output_element_id), []).append(
+                    {
+                        "derivation_id": str(derivation.derivation_id),
+                        "required_inputs": [str(x) for x in derivation.required_inputs],
+                        "optional_inputs": [str(x) for x in derivation.optional_inputs],
+                        "min_required_count": int(derivation.min_required_count or 0),
+                        "derivation_kind": str(derivation.derivation_kind),
+                    }
+                )
+            for element_id, element in getattr(self.task_model, "dik_elements", {}).items():
                 if not getattr(element, "enabled", True):
                     continue
                 if element.element_type == "information":
                     candidate_information_ids.append(element_id)
+                    candidate_information_grounding[element_id] = list(derivations_by_output.get(element_id, []))
                 elif element.element_type == "knowledge":
                     candidate_knowledge_ids.append(element_id)
-            candidate_rule_ids = [rid for rid, r in self.task_model.rules.items() if getattr(r, "enabled", True)]
+                    candidate_knowledge_grounding[element_id] = list(derivations_by_output.get(element_id, []))
+            for rid, rule in getattr(self.task_model, "rules", {}).items():
+                if not getattr(rule, "enabled", True):
+                    continue
+                candidate_rule_ids.append(rid)
+                required_info = [str(x) for x in getattr(rule, "required_information", [])]
+                required_knowledge = [str(x) for x in getattr(rule, "required_knowledge", [])]
+                candidate_rule_grounding[rid] = {
+                    "required_information_ids": required_info,
+                    "required_knowledge_ids": required_knowledge,
+                    "required_evidence_ids": sorted(set(required_info) | set(required_knowledge)),
+                }
         return AgentDIKIntegrationRequest(
             request_id=f"dik-{self.agent_id}-{uuid.uuid4().hex[:8]}",
             tick=self.sim_step_count,
@@ -2681,6 +2709,9 @@ class Agent:
             candidate_information_ids=candidate_information_ids,
             candidate_knowledge_ids=candidate_knowledge_ids,
             candidate_rule_ids=candidate_rule_ids,
+            candidate_information_grounding=candidate_information_grounding,
+            candidate_knowledge_grounding=candidate_knowledge_grounding,
+            candidate_rule_grounding=candidate_rule_grounding,
             max_candidates_per_type=8,
         )
 
@@ -2726,6 +2757,71 @@ class Agent:
         _process("rules", response.candidate_rule_supports, valid_rules)
         return accepted, rejected
 
+    def _project_accepted_dik_updates(self, sim_state, accepted_updates):
+        projected = {"information": [], "knowledge": [], "rules": []}
+        if not accepted_updates:
+            return projected
+        held_data_ids, held_info_ids, held_knowledge_ids = self._held_dik_ids()
+        held_ids = set(held_data_ids) | set(held_info_ids) | set(held_knowledge_ids)
+        held_ids |= {normalize_rule_token(r) for r in list(self.mental_model["knowledge"].rules)}
+
+        def _evidence_currently_held(rec):
+            evidence_ids = [str(e) for e in rec.get("evidence_ids", []) if str(e).strip()]
+            return all(e in held_ids for e in evidence_ids)
+
+        for rec in list(accepted_updates.get("information", [])):
+            candidate_id = str(rec.get("candidate_id", "")).strip()
+            elements = getattr(self.task_model, "dik_elements", {}) if self.task_model is not None else {}
+            element = elements.get(candidate_id) if isinstance(elements, dict) else None
+            if not candidate_id or element is None or element.element_type != "information":
+                self._emit_event(sim_state, "dik_projection_rejected", {"bucket": "information", "candidate_id": candidate_id, "reason": "noncanonical_or_wrong_type"})
+                continue
+            if candidate_id in held_info_ids:
+                self._emit_event(sim_state, "dik_projection_rejected", {"bucket": "information", "candidate_id": candidate_id, "reason": "already_held"})
+                continue
+            if not _evidence_currently_held(rec):
+                self._emit_event(sim_state, "dik_projection_rejected", {"bucket": "information", "candidate_id": candidate_id, "reason": "evidence_not_currently_held"})
+                continue
+            info_obj = Information(
+                str(getattr(element, "element_id", candidate_id)),
+                str(getattr(element, "description", candidate_id)),
+                source="deterministic_dik_integration",
+                tags=[str(getattr(element, "role_scope", "all")), str(getattr(element, "phase_scope", "all")), "accepted_dik_projection"],
+            )
+            self.mental_model["information"].add(info_obj)
+            held_info_ids.add(candidate_id)
+            projected["information"].append({"candidate_id": candidate_id, "evidence_ids": list(rec.get("evidence_ids", [])), "provenance": "accepted_dik_projection"})
+
+        for bucket_name in ("knowledge", "rules"):
+            for rec in list(accepted_updates.get(bucket_name, [])):
+                candidate_id = str(rec.get("candidate_id", "")).strip()
+                normalized = normalize_rule_token(candidate_id)
+                if bucket_name == "knowledge":
+                    element = self.task_model.dik_elements.get(candidate_id) if self.task_model is not None else None
+                    canonical = bool(element is not None and element.element_type == "knowledge")
+                else:
+                    rules = getattr(self.task_model, "rules", {}) if self.task_model is not None else {}
+                    canonical = bool(candidate_id in rules)
+                if not canonical:
+                    self._emit_event(sim_state, "dik_projection_rejected", {"bucket": bucket_name, "candidate_id": candidate_id, "reason": "noncanonical_or_wrong_type"})
+                    continue
+                if candidate_id in held_knowledge_ids or normalized in self.mental_model["knowledge"].rules:
+                    self._emit_event(sim_state, "dik_projection_rejected", {"bucket": bucket_name, "candidate_id": candidate_id, "reason": "already_held"})
+                    continue
+                if not _evidence_currently_held(rec):
+                    self._emit_event(sim_state, "dik_projection_rejected", {"bucket": bucket_name, "candidate_id": candidate_id, "reason": "evidence_not_currently_held"})
+                    continue
+                evidence_ids = [str(e) for e in rec.get("evidence_ids", []) if str(e).strip()]
+                self.mental_model["knowledge"].add_rule(candidate_id, evidence_ids, inferred_by_agents=[self.name])
+                held_knowledge_ids.add(candidate_id)
+                held_ids.add(candidate_id)
+                held_ids.add(normalized)
+                projected[bucket_name].append({"candidate_id": candidate_id, "evidence_ids": evidence_ids, "provenance": "accepted_dik_projection"})
+
+        if any(projected.values()):
+            self.last_dik_change_time = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        return projected
+
     def _submit_dik_integration_request_async(self, sim_state, trigger_reason):
         request_packet = self._build_dik_integration_request(sim_state, trigger_reason)
         trace_id = self._make_planner_trace_id(request_packet.request_id)
@@ -2734,6 +2830,17 @@ class Agent:
         self.dik_integration_state["trigger_reason"] = trigger_reason
         self.dik_integration_state["request_payload"] = request_packet.to_dict()
         self.dik_integration_state["total_started"] = int(self.dik_integration_state.get("total_started", 0)) + 1
+        self._emit_event(
+            sim_state,
+            "dik_integration_request_submitted",
+            {
+                "request_id": request_packet.request_id,
+                "trigger_reason": trigger_reason,
+                "candidate_information_count": len(request_packet.candidate_information_ids),
+                "candidate_knowledge_count": len(request_packet.candidate_knowledge_ids),
+                "candidate_rule_count": len(request_packet.candidate_rule_ids),
+            },
+        )
         if hasattr(sim_state, "logger") and hasattr(sim_state.logger, "record_brain_request_submitted"):
             sim_state.logger.record_brain_request_submitted(
                 {
@@ -2770,6 +2877,7 @@ class Agent:
         request_payload = self.dik_integration_state.get("request_payload") or {}
         request_packet = AgentDIKIntegrationRequest.from_dict(request_payload)
         accepted, rejected = self._accept_dik_integration_candidates(sim_state, request_packet, response)
+        projected = self._project_accepted_dik_updates(sim_state, accepted)
         self.dik_integration_state["status"] = "completed"
         self.dik_integration_state["last_completed_step"] = self.sim_step_count
         self.dik_integration_state["total_completed"] = int(self.dik_integration_state.get("total_completed", 0)) + 1
@@ -2790,7 +2898,12 @@ class Agent:
             "contradictions": list(response.contradictions),
             "accepted": accepted,
             "rejected": rejected,
+            "projected": projected,
         }
+        self._emit_event(sim_state, "dik_integration_candidates_proposed", {"request_id": result.get("request_id"), "counts": {k: len(v) for k, v in self.dik_integration_state["recent_candidates"].items()}})
+        self._emit_event(sim_state, "dik_integration_candidates_accepted", {"request_id": result.get("request_id"), "counts": {k: len(v) for k, v in accepted.items()}})
+        self._emit_event(sim_state, "dik_integration_candidates_rejected", {"request_id": result.get("request_id"), "counts": {k: len(v) for k, v in rejected.items()}, "rejections": rejected})
+        self._emit_event(sim_state, "dik_integration_candidates_projected", {"request_id": result.get("request_id"), "counts": {k: len(v) for k, v in projected.items()}, "projected": projected})
         self._emit_event(
             sim_state,
             "dik_integration_completed",
@@ -2816,7 +2929,7 @@ class Agent:
                 },
             )
         if hasattr(sim_state, "logger") and hasattr(sim_state.logger, "record_brain_interpretation_phase"):
-            sim_state.logger.record_brain_interpretation_phase(
+                sim_state.logger.record_brain_interpretation_phase(
                 result.get("request_id"),
                 {
                     "trace_id": result.get("trace_id"),
@@ -2827,6 +2940,7 @@ class Agent:
                     "candidate_updates_returned": sum(len(v) for v in self.dik_integration_state["recent_candidates"].values()),
                     "candidate_updates_accepted": sum(len(v) for v in accepted.values()),
                     "candidate_updates_rejected": sum(len(v) for v in rejected.values()),
+                    "candidate_updates_projected": sum(len(v) for v in projected.values()),
                     "request_status": "completed",
                 },
             )
@@ -3695,6 +3809,9 @@ class Agent:
             self._emit_event(sim_state, "repeated_action_loop_detected", {"repetition_count": self.loop_counters["action_repeats"], "window_size": 3, "plan_id": self.current_plan.plan_id, "selected_action": self.current_plan.decision.selected_action.value})
         return True
     def _translate_brain_decision_to_legacy_action(self, decision, environment, sim_state=None):
+        # NOTE: This is still a live legacy adapter in the execution path.
+        # Planner outputs are normalized to action-dict records consumed by the
+        # existing simulator executor. Retain this bridge until executor cleanup.
         if not self.startup_state.get("first_productive_action_started"):
             self._emit_event(sim_state, "first_action_translation_started", {"planner_action_type": decision.selected_action.value})
         self._emit_event(sim_state, "planner_next_action_selected", {"planner_action_type": decision.selected_action.value, "plan_id": getattr(self.current_plan, "plan_id", None)})
@@ -4337,7 +4454,7 @@ class Agent:
         if "mismatch with construction" in " ".join(self.activity_log[-6:]).lower() and self.current_inspect_target_id:
             self.mark_source_revisitable(self.current_inspect_target_id, reason="construction_mismatch")
 
-        self._apply_task_derivations(sim_state=None)
+        self._apply_task_derivations(sim_state=sim_state)
 
         known_info = list(self.mental_model["information"])
         if known_info:
@@ -4363,7 +4480,6 @@ class Agent:
     def update(self, dt, environment, sim_state=None, planner_lifecycle_already_polled=False):
         self.update_physiology(exertion=0.5)
         self.update_knowledge(environment, full_packet_sweep=(sim_state is None), sim_state=sim_state)
-        self._apply_task_derivations(sim_state=sim_state)
         if sim_state is None:
             # Legacy compatibility path for unit-level agent calls outside full simulation state.
             self._run_goal_management_pipeline(dt, environment)

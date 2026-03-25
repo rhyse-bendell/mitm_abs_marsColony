@@ -537,14 +537,101 @@ class RuleBrain(BrainProvider):
         return AgentBrainResponse.from_dict(payload)
 
     def generate_dik_integration(self, request_packet: AgentDIKIntegrationRequest) -> AgentDIKIntegrationResponse:
+        held_ids = set(request_packet.held_data_ids) | set(request_packet.held_information_ids) | set(request_packet.held_knowledge_ids)
+        held_information = set(request_packet.held_information_ids)
+        held_knowledge = set(request_packet.held_knowledge_ids)
+        max_items = max(1, int(request_packet.max_candidates_per_type or 8))
+
+        def _confidence_for(required_ids: list[str]) -> float:
+            count = max(1, len([rid for rid in required_ids if str(rid).strip()]))
+            return max(0.55, min(0.95, 0.55 + (0.08 * min(count, 5))))
+
+        candidate_information_updates: list[dict[str, Any]] = []
+        for candidate_id in request_packet.candidate_information_ids:
+            if candidate_id in held_information:
+                continue
+            grounding_paths = list((request_packet.candidate_information_grounding or {}).get(candidate_id, []))
+            for path in grounding_paths:
+                required_inputs = [str(x) for x in path.get("required_inputs", []) if str(x).strip()]
+                if required_inputs and all(req in held_ids for req in required_inputs):
+                    candidate_information_updates.append(
+                        {
+                            "candidate_id": candidate_id,
+                            "evidence_ids": required_inputs,
+                            "justification": f"deterministic_derivation:{path.get('derivation_id', 'unknown')}",
+                            "confidence": _confidence_for(required_inputs),
+                        }
+                    )
+                    break
+            if len(candidate_information_updates) >= max_items:
+                break
+
+        candidate_knowledge_updates: list[dict[str, Any]] = []
+        for candidate_id in request_packet.candidate_knowledge_ids:
+            if candidate_id in held_knowledge:
+                continue
+            grounding_paths = list((request_packet.candidate_knowledge_grounding or {}).get(candidate_id, []))
+            for path in grounding_paths:
+                required_inputs = [str(x) for x in path.get("required_inputs", []) if str(x).strip()]
+                if required_inputs and all(req in held_ids for req in required_inputs):
+                    candidate_knowledge_updates.append(
+                        {
+                            "candidate_id": candidate_id,
+                            "evidence_ids": required_inputs,
+                            "justification": f"deterministic_derivation:{path.get('derivation_id', 'unknown')}",
+                            "confidence": _confidence_for(required_inputs),
+                        }
+                    )
+                    break
+            if len(candidate_knowledge_updates) >= max_items:
+                break
+
+        candidate_rule_supports: list[dict[str, Any]] = []
+        for candidate_id in request_packet.candidate_rule_ids:
+            if candidate_id in held_knowledge:
+                continue
+            grounding = dict((request_packet.candidate_rule_grounding or {}).get(candidate_id, {}))
+            required = [str(x) for x in grounding.get("required_evidence_ids", []) if str(x).strip()]
+            if required and all(req in held_ids for req in required):
+                candidate_rule_supports.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "evidence_ids": required,
+                        "justification": "deterministic_rule_prerequisites_satisfied",
+                        "confidence": _confidence_for(required),
+                    }
+                )
+            if len(candidate_rule_supports) >= max_items:
+                break
+
+        total = len(candidate_information_updates) + len(candidate_knowledge_updates) + len(candidate_rule_supports)
+        confidence = 0.0 if total == 0 else max(
+            0.55,
+            min(
+                0.95,
+                sum(
+                    [x["confidence"] for x in candidate_information_updates]
+                    + [x["confidence"] for x in candidate_knowledge_updates]
+                    + [x["confidence"] for x in candidate_rule_supports]
+                )
+                / float(total),
+            ),
+        )
         return AgentDIKIntegrationResponse.from_dict(
             {
                 "response_id": f"dik-rule-{request_packet.request_id}",
                 "agent_id": request_packet.agent_id,
+                "candidate_information_updates": candidate_information_updates,
+                "candidate_knowledge_updates": candidate_knowledge_updates,
+                "candidate_rule_supports": candidate_rule_supports,
                 "unresolved_gaps": list(request_packet.unresolved_gaps[:6]),
                 "contradictions": list(request_packet.contradiction_signals[:6]),
-                "summary": "Rule fallback: no candidate epistemic integrations proposed.",
-                "confidence": 0.0,
+                "summary": (
+                    "Rule deterministic DIK integration completed."
+                    if total
+                    else "Rule deterministic DIK integration found no fully grounded candidates."
+                ),
+                "confidence": confidence,
             }
         )
 

@@ -566,6 +566,7 @@ class SimulationState:
             "planner_request_policy": getattr(agent.planner_cadence, "planner_request_policy", "legacy"),
             "split_mode_planning_interval_steps": getattr(agent.planner_cadence, "split_mode_planning_interval_steps", None),
             "split_mode_dik_integration_cooldown_steps": getattr(agent.planner_cadence, "split_mode_dik_integration_cooldown_steps", None),
+            "split_mode_dik_batch_threshold": getattr(agent.planner_cadence, "split_mode_dik_batch_threshold", None),
             "planner_max_retries": agent.planner_cadence.planner_max_retries,
             "degraded_consecutive_failures_threshold": agent.planner_cadence.degraded_consecutive_failures_threshold,
             "degraded_cooldown_seconds": agent.planner_cadence.degraded_cooldown_seconds,

@@ -213,6 +213,105 @@ class SplitDIKPlanningTests(unittest.TestCase):
         self.assertEqual(logger.submitted[0]["request_kind"], "dik_integration")
         self.assertTrue(logger.interpretations)
 
+    def test_dik_request_contains_candidate_grounding_maps(self):
+        agent = self._agent(policy="cadence_with_dik_integration")
+        agent.task_model = SimpleNamespace(
+            dik_elements={
+                "I_SYN": SimpleNamespace(element_type="information", enabled=True),
+                "K_SYN": SimpleNamespace(element_type="knowledge", enabled=True),
+            },
+            derivations={
+                "DER_I": SimpleNamespace(
+                    derivation_id="DER_I",
+                    output_element_id="I_SYN",
+                    required_inputs=["D_A"],
+                    optional_inputs=[],
+                    min_required_count=1,
+                    derivation_kind="deterministic",
+                    enabled=True,
+                ),
+                "DER_K": SimpleNamespace(
+                    derivation_id="DER_K",
+                    output_element_id="K_SYN",
+                    required_inputs=["I_SYN"],
+                    optional_inputs=[],
+                    min_required_count=1,
+                    derivation_kind="deterministic",
+                    enabled=True,
+                ),
+            },
+            rules={
+                "R_SYN": SimpleNamespace(enabled=True, required_information=["I_SYN"], required_knowledge=["K_SYN"]),
+            },
+        )
+        sim = SimpleNamespace(
+            time=3.0,
+            environment=SimpleNamespace(get_current_phase=lambda: {"name": "phase"}),
+            team_knowledge_manager=SimpleNamespace(recent_updates=[], artifacts={}),
+        )
+        request = agent._build_dik_integration_request(sim, "new_dik_acquired")
+        self.assertIn("I_SYN", request.candidate_information_grounding)
+        self.assertIn("K_SYN", request.candidate_knowledge_grounding)
+        self.assertEqual(request.candidate_rule_grounding["R_SYN"]["required_evidence_ids"], ["I_SYN", "K_SYN"])
+
+    def test_rule_brain_proposes_grounded_candidates_only(self):
+        provider = RuleBrain()
+        request = AgentDIKIntegrationRequest.from_dict(
+            {
+                "request_id": "dik-rb",
+                "tick": 1,
+                "sim_time": 1.0,
+                "agent_id": "A",
+                "display_name": "A",
+                "phase": "p",
+                "trigger_reason": "new_dik_acquired",
+                "held_data_ids": ["D1"],
+                "held_information_ids": [],
+                "held_knowledge_ids": [],
+                "candidate_information_ids": ["I1"],
+                "candidate_knowledge_ids": [],
+                "candidate_rule_ids": [],
+                "candidate_information_grounding": {
+                    "I1": [{"derivation_id": "DER1", "required_inputs": ["D1"]}],
+                },
+            }
+        )
+        response = provider.generate_dik_integration(request)
+        self.assertEqual([u.candidate_id for u in response.candidate_information_updates], ["I1"])
+        self.assertEqual(response.candidate_information_updates[0].evidence_ids, ["D1"])
+
+    def test_accepted_candidates_project_into_authoritative_state(self):
+        agent = self._agent(policy="cadence_with_dik_integration")
+        agent.task_model = SimpleNamespace(
+            dik_elements={"I2": SimpleNamespace(element_type="information", element_id="I2", description="info", role_scope="all", phase_scope="all")},
+            rules={"R2": SimpleNamespace(enabled=True)},
+        )
+        agent.mental_model["data"].add(Data("D1", "d"))
+        projected = agent._project_accepted_dik_updates(
+            sim_state=SimpleNamespace(time=2.0),
+            accepted_updates={
+                "information": [{"candidate_id": "I2", "evidence_ids": ["D1"]}],
+                "knowledge": [],
+                "rules": [{"candidate_id": "R2", "evidence_ids": ["D1"]}],
+            },
+        )
+        info_ids = {i.id for i in agent.mental_model["information"]}
+        self.assertIn("I2", info_ids)
+        self.assertIn("R2", agent.mental_model["knowledge"].rules)
+        self.assertEqual(len(projected["information"]), 1)
+
+    def test_update_calls_task_derivations_once_per_tick(self):
+        agent = self._agent(policy="cadence_with_dik_integration")
+        calls = {"count": 0}
+
+        def _count(*_args, **_kwargs):
+            calls["count"] += 1
+
+        agent._apply_task_derivations = _count
+        environment = SimpleNamespace(knowledge_packets={})
+        agent.update_knowledge(environment=environment, full_packet_sweep=False, sim_state=None)
+        self.assertEqual(calls["count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
