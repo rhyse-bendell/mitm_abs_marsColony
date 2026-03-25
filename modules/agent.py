@@ -256,11 +256,13 @@ class Agent:
         self.selection_loop_guard = {"last_action": None, "consecutive_count": 0}
         self.control_state = {
             "mode": "BOOTSTRAP",
+            "previous_mode": None,
             "mode_entered_step": 0,
             "mode_dwell_steps": 0,
             "last_transition_reason": "agent_initialized",
             "last_transition_features": {},
             "mode_history": [{"step": 0, "mode": "BOOTSTRAP", "reason": "agent_initialized"}],
+            "transition_history": [],
             "recovery_active": False,
             "last_policy_snapshot": {},
         }
@@ -741,7 +743,7 @@ class Agent:
             self.source_inspection_state.setdefault(packet_name, "unseen")
             self.source_exhaustion_state.setdefault(
                 packet_name,
-                {"inspect_count": 0, "last_dik_changed": None, "exhausted": False},
+                {"inspect_count": 0, "last_dik_changed": None, "no_new_dik_streak": 0, "inspected": False, "exhausted": False},
             )
 
     def _release_source_slot(self, environment, source_id=None, emit=False, sim_state=None, reason="released"):
@@ -903,6 +905,8 @@ class Agent:
     def _candidate_information_sources(self, environment, sim_state=None):
         self._ensure_source_state(environment)
         critical_needs = self._critical_unmet_source_targets(sim_state, environment)
+        top_goal = next((g for g in self.goal_stack if g.get("status") in {"active", "queued", "candidate"}), self.goal_stack[0] if self.goal_stack else {})
+        goal_text = str(top_goal.get("goal") or top_goal.get("goal_id") or "").lower()
         role_source = f"{self.role}_Info"
         missing_baseline_sources = {
             source_id
@@ -935,6 +939,8 @@ class Agent:
             exhaustion = self.source_exhaustion_state.get(packet_name, {})
             if exhaustion.get("exhausted"):
                 score -= 6.0
+            no_new_streak = int(exhaustion.get("no_new_dik_streak", 0) or 0)
+            score -= min(4.5, 1.5 * no_new_streak)
             if packet_name in critical_needs:
                 score += 5.0 + (0.85 * info_pressure)
             if packet_name in missing_baseline_sources:
@@ -943,9 +949,17 @@ class Agent:
                 score += 1.5
             if packet_name == "Team_Info":
                 score += 1.0
+            if packet_name == "Team_Info" and (bool(exhaustion.get("exhausted")) or no_new_streak >= 2):
+                score -= 3.5
+            if self.role == "Architect" and packet_name == "Architect_Info" and any(k in goal_text for k in {"shelter", "build", "construction"}):
+                score += 2.2
+            if self.role == "Engineer" and packet_name == "Engineer_Info" and any(k in goal_text for k in {"water", "power", "connectivity", "logistics"}):
+                score += 2.2
+            if self.role == "Botanist" and packet_name == "Botanist_Info" and any(k in goal_text for k in {"food", "greenhouse", "sustain"}):
+                score += 2.2
             score -= stalled * 1.5
             score -= math.hypot(point[0] - self.position[0], point[1] - self.position[1]) * 0.2
-            candidates.append((score, packet_name, point, status, stalled, bool(packet_name in critical_needs), bool(exhaustion.get("exhausted"))))
+            candidates.append((score, packet_name, point, status, stalled, bool(packet_name in critical_needs), bool(exhaustion.get("exhausted")), no_new_streak))
 
         candidates.sort(key=lambda c: c[0], reverse=True)
         return candidates
@@ -988,6 +1002,24 @@ class Agent:
             )
             self._emit_event(sim_state, "source_revisit_suppressed", {"source_id": explicit_target, "next_source_target": chosen[1], "reason": "source_exhausted_or_unreachable"})
         self._emit_event(sim_state, "next_source_target_selected", {"current_location": self.position, "current_source_target": explicit_target, "next_source_target": chosen[1], "critical_witness_source_need": chosen[5], "reason": "candidate_scoring"})
+        self._emit_event(
+            sim_state,
+            "source_target_ranking",
+            {
+                "top_candidates": [
+                    {
+                        "source_id": c[1],
+                        "score": round(c[0], 3),
+                        "status": c[3],
+                        "stalled": c[4],
+                        "exhausted": c[6],
+                        "no_new_dik_streak": c[7],
+                    }
+                    for c in candidates[:3]
+                ],
+                "selected_source": chosen[1],
+            },
+        )
         if chosen[5] and chosen[1] == "Team_Info":
             self._emit_event(sim_state, "shared_source_target_selected", {"source_id": chosen[1], "reason": "critical_witness_source_need"})
         self._emit_event(sim_state, "target_resolved", {"target_type": "information_source", "target_id": chosen[1], "candidate_count": len(candidates)})
@@ -1249,6 +1281,11 @@ class Agent:
         source_state = self.source_exhaustion_state.setdefault(source_id, {"inspect_count": 0, "last_dik_changed": None, "exhausted": False})
         source_state["inspect_count"] = int(source_state.get("inspect_count", 0)) + 1
         source_state["last_dik_changed"] = bool(net_dik_changed)
+        if net_dik_changed:
+            source_state["no_new_dik_streak"] = 0
+        else:
+            source_state["no_new_dik_streak"] = int(source_state.get("no_new_dik_streak", 0) or 0) + 1
+        source_state["inspected"] = bool(self.source_inspection_state.get(source_id) == "inspected")
         source_state["exhausted"] = bool((not net_dik_changed) and self.source_inspection_state.get(source_id) == "inspected")
         if sim_state is not None and source_state["exhausted"]:
             self._emit_event(sim_state, "source_already_inspected_no_new_dik", {"source_id": source_id, "inspect_count": source_state["inspect_count"]})
@@ -3219,6 +3256,7 @@ class Agent:
                 sim_state.logger.record_brain_interpretation_phase(request_id, {"trace_id": result.get("trace_id"), "sim_time": float(sim_state.time), "tick": self.sim_step_count, "status": "stale_discarded", "runtime_disposition": "stale_discarded_state_changed", "planner_result": status, "usable_plan": False, "failure_mode": "state_changed_before_adoption", "late_result_arrived": late_result_accepted, "late_result_accepted": False, "request_status": "discarded"})
             return False
 
+        decision = self._apply_policy_pivots(decision, environment, sim_state=sim_state, pivot_origin="planner_response")
         self._adopt_new_plan(decision, trigger_reason, sim_state, response=response, trace_id=result.get("trace_id"), result_source=result.get("result_source"), fallback_used=bool(result.get("fallback_used")) )
         self._refresh_goal_plan_state(decision, sim_state, trigger_reason, response=response)
         self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment, sim_state=sim_state)
@@ -3730,76 +3768,13 @@ class Agent:
             ExecutableActionType.REQUEST_ASSISTANCE,
         }:
             context = sim_state.brain_context_builder.build(sim_state, self)
-            readiness = context.individual_cognitive_state.get("build_readiness", {})
-            built_state = context.world_snapshot.get("built_state", [])
-            active_incomplete_projects = [
-                item
-                for item in built_state
-                if item.get("state") in {"absent", "in_progress"} and float(item.get("progress", 0.0)) < 1.0
-            ]
-            mismatch_signals = context.history_bands.get("semantic_plan_evolution", {}).get("unresolved_contradictions", [])
-            seconds_since_dik_change = context.individual_cognitive_state.get("seconds_since_dik_change")
-            recent_meaningful_epistemic_change = (
-                seconds_since_dik_change is not None
-                and float(seconds_since_dik_change) <= 2.0
-                and bool(mismatch_signals)
+            self.current_plan.decision = self._apply_policy_pivots(
+                self.current_plan.decision,
+                environment,
+                sim_state=sim_state,
+                context=context,
+                pivot_origin="cached_plan",
             )
-            if readiness.get("ready_for_build") and active_incomplete_projects and not recent_meaningful_epistemic_change:
-                sorted_affordances = sorted(
-                    context.action_affordances,
-                    key=lambda a: float(a.get("utility", 0.0)),
-                    reverse=True,
-                )
-                needs_resource_delivery = any(float(item.get("progress", 0.0)) < 1.0 for item in active_incomplete_projects)
-                previous_action = self.current_plan.decision.selected_action.value
-                build_candidates = [
-                    c
-                    for c in sorted_affordances
-                    if c.get("action_type")
-                    in {
-                        ExecutableActionType.TRANSPORT_RESOURCES.value,
-                        ExecutableActionType.START_CONSTRUCTION.value,
-                        ExecutableActionType.CONTINUE_CONSTRUCTION.value,
-                    }
-                ]
-                preferred_order = (
-                    [
-                        ExecutableActionType.TRANSPORT_RESOURCES.value,
-                        ExecutableActionType.START_CONSTRUCTION.value,
-                        ExecutableActionType.CONTINUE_CONSTRUCTION.value,
-                    ]
-                    if needs_resource_delivery
-                    else [
-                        ExecutableActionType.CONTINUE_CONSTRUCTION.value,
-                        ExecutableActionType.START_CONSTRUCTION.value,
-                        ExecutableActionType.TRANSPORT_RESOURCES.value,
-                    ]
-                )
-                candidate = None
-                for action_type in preferred_order:
-                    candidate = next((c for c in build_candidates if c.get("action_type") == action_type), None)
-                    if candidate is not None:
-                        break
-                if candidate is not None:
-                    self.current_plan.decision = BrainDecision(
-                        selected_action=ExecutableActionType(candidate["action_type"]),
-                        target_id=candidate.get("target_id"),
-                        target_zone=candidate.get("target_zone"),
-                        goal_update="satisfy_build_logistics"
-                        if candidate.get("action_type") == ExecutableActionType.TRANSPORT_RESOURCES.value
-                        else "execute_build",
-                        reason_summary="Post-readiness pivot: demote repeated epistemic action in favor of productive build/logistics action.",
-                        confidence=max(0.8, float(self.current_plan.decision.confidence or 0.0)),
-                    )
-                    self._emit_event(
-                        sim_state,
-                        "post_readiness_productive_pivot",
-                        {
-                            "plan_id": self.current_plan.plan_id,
-                            "pivoted_to": candidate.get("action_type"),
-                            "previous_action": previous_action,
-                        },
-                    )
 
         self.current_action = self._translate_brain_decision_to_legacy_action(self.current_plan.decision, environment, sim_state=sim_state)
         self.current_plan.remaining_executions -= 1
@@ -3821,6 +3796,55 @@ class Agent:
             self.loop_counters["action_repeats"] = 1
         if self.loop_counters["action_repeats"] >= 3:
             self._emit_event(sim_state, "repeated_action_loop_detected", {"repetition_count": self.loop_counters["action_repeats"], "window_size": 3, "plan_id": self.current_plan.plan_id, "selected_action": self.current_plan.decision.selected_action.value})
+        return True
+
+    def _apply_policy_pivots(self, decision, environment, sim_state=None, context=None, pivot_origin="runtime"):
+        context = context or (sim_state.brain_context_builder.build(sim_state, self) if sim_state is not None else None)
+        rewritten = decision
+        handoff = dict(self.post_inspect_handoff or {})
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        if decision.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE and handoff.get("pending") and handoff.get("expires_at", 0.0) >= now_ts:
+            followup = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
+            self.post_inspect_handoff["pending"] = False
+            if followup.selected_action != ExecutableActionType.INSPECT_INFORMATION_SOURCE:
+                rewritten = followup
+                self._emit_event(sim_state, "policy_pivot_applied", {"origin": pivot_origin, "kind": "post_inspect", "previous_action": decision.selected_action.value, "pivoted_to": rewritten.selected_action.value, "reason": handoff.get("outcome")})
+        if context is not None and rewritten.selected_action in {ExecutableActionType.INSPECT_INFORMATION_SOURCE, ExecutableActionType.REQUEST_ASSISTANCE}:
+            readiness = context.individual_cognitive_state.get("build_readiness", {})
+            built_state = context.world_snapshot.get("built_state", [])
+            active_incomplete_projects = [item for item in built_state if item.get("state") in {"absent", "in_progress"} and float(item.get("progress", 0.0)) < 1.0]
+            mismatch_signals = context.history_bands.get("semantic_plan_evolution", {}).get("unresolved_contradictions", [])
+            seconds_since_dik_change = context.individual_cognitive_state.get("seconds_since_dik_change")
+            recent_meaningful_epistemic_change = seconds_since_dik_change is not None and float(seconds_since_dik_change) <= 2.0 and bool(mismatch_signals)
+            if readiness.get("ready_for_build") and active_incomplete_projects and not recent_meaningful_epistemic_change:
+                sorted_affordances = sorted(context.action_affordances, key=lambda a: float(a.get("utility", 0.0)), reverse=True)
+                candidate = next((c for c in sorted_affordances if c.get("action_type") in {ExecutableActionType.TRANSPORT_RESOURCES.value, ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value}), None)
+                if candidate is not None:
+                    rewritten = BrainDecision(
+                        selected_action=ExecutableActionType(candidate["action_type"]),
+                        target_id=candidate.get("target_id"),
+                        target_zone=candidate.get("target_zone"),
+                        goal_update="satisfy_build_logistics" if candidate.get("action_type") == ExecutableActionType.TRANSPORT_RESOURCES.value else "execute_build",
+                        reason_summary=f"Policy pivot ({pivot_origin}): readiness unlocked productive action.",
+                        confidence=max(0.8, float(decision.confidence or 0.0)),
+                    )
+                    self._emit_event(sim_state, "policy_pivot_applied", {"origin": pivot_origin, "kind": "post_readiness", "previous_action": decision.selected_action.value, "pivoted_to": rewritten.selected_action.value, "reason": "readiness_unlocked"})
+        return rewritten
+
+    def _attempt_local_rule_brain_refresh(self, sim_state, environment, planner_reason):
+        runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"provider": sim_state.brain_provider, "configured_backend": sim_state.configured_brain_backend}
+        provider = runtime.get("provider")
+        backend = runtime.get("configured_backend", sim_state.configured_brain_backend)
+        if provider is None or (provider.__class__.__name__ != "RuleBrain" and backend != "rule_brain"):
+            return False
+        context = sim_state.brain_context_builder.build(sim_state, self)
+        decision = provider.decide(context)
+        decision = self._apply_policy_pivots(decision, environment, sim_state=sim_state, context=context, pivot_origin="local_refresh")
+        updated_control_state = context.individual_cognitive_state.get("control_state", {})
+        if isinstance(updated_control_state, dict) and updated_control_state:
+            self.control_state.update(updated_control_state)
+        self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment, sim_state=sim_state)
+        self._emit_event(sim_state, "local_policy_refresh_used", {"reason": planner_reason, "backend": backend, "selected_action": decision.selected_action.value, "control_mode": self.control_state.get("mode"), "mode_dwell_steps": self.control_state.get("mode_dwell_steps")})
         return True
     def _translate_brain_decision_to_legacy_action(self, decision, environment, sim_state=None):
         # NOTE: This is still a live legacy adapter in the execution path.
@@ -3873,32 +3897,6 @@ class Agent:
             handoff = dict(self.post_inspect_handoff or {})
             now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
             if handoff.get("pending") and handoff.get("expires_at", 0.0) >= now_ts:
-                followup = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
-                if followup.selected_action != ExecutableActionType.INSPECT_INFORMATION_SOURCE:
-                    self._emit_event(
-                        sim_state,
-                        "post_inspect_action_selected",
-                        {
-                            "source_id": handoff.get("source_id"),
-                            "dik_changed": bool(handoff.get("dik_changed")),
-                            "readiness_changed": bool(handoff.get("readiness_changed")),
-                            "selected_next_action": followup.selected_action.value,
-                            "post_inspect_blocker_category": handoff.get("blocker_category"),
-                        },
-                    )
-                    self.post_inspect_handoff["pending"] = False
-                    return self._translate_brain_decision_to_legacy_action(followup, environment, sim_state=sim_state)
-                self._emit_event(
-                    sim_state,
-                    "post_inspect_reinspect_selected",
-                    {
-                        "source_id": handoff.get("source_id"),
-                        "dik_changed": bool(handoff.get("dik_changed")),
-                        "readiness_changed": bool(handoff.get("readiness_changed")),
-                        "selected_next_action": decision.selected_action.value,
-                        "post_inspect_blocker_category": handoff.get("blocker_category"),
-                    },
-                )
                 self.post_inspect_handoff["pending"] = False
             committed_source = self.inspect_pursuit.get("source_id")
             if committed_source and self._inspect_pursuit_active_for(committed_source, now_ts):
@@ -4559,6 +4557,8 @@ class Agent:
                 elif self._continue_cached_plan(sim_state, environment):
                     self.planner_state["stale_plan_reuse_count"] += 1
                     sim_state.logger.log_event(sim_state.time, "planner_skipped_due_to_cadence", {"agent": self.name, "reason": planner_reason})
+                elif self._attempt_local_rule_brain_refresh(sim_state, environment, planner_reason):
+                    sim_state.logger.log_event(sim_state.time, "planner_skipped_local_policy_refresh", {"agent": self.name, "reason": planner_reason})
                 else:
                     decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="no active cached plan while planner cadence skips", confidence=1.0)
                     self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment)

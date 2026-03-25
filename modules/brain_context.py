@@ -447,6 +447,8 @@ class BrainContextBuilder:
                 "current_target_id": getattr(agent, "current_inspect_target_id", None),
                 "session_state": (getattr(agent, "inspect_session", {}) or {}).get("state"),
                 "source_access_target": (getattr(agent, "source_access_state", {}) or {}).get("source_id"),
+                "source_exhaustion": dict(getattr(agent, "source_exhaustion_state", {}) or {}),
+                "source_inspection_state": dict(getattr(agent, "source_inspection_state", {}) or {}),
             },
         }
 
