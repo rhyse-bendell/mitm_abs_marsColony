@@ -267,6 +267,140 @@ BRAIN_RESPONSE_JSON_SCHEMA: Dict[str, Any] = {
 }
 
 
+
+
+@dataclass
+class DIKCandidateUpdate:
+    candidate_id: str
+    evidence_ids: List[str] = field(default_factory=list)
+    justification: Optional[str] = None
+    confidence: float = 0.0
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "DIKCandidateUpdate":
+        return cls(
+            candidate_id=str(payload.get("candidate_id", "")),
+            evidence_ids=[str(item) for item in payload.get("evidence_ids", []) if str(item).strip()],
+            justification=(str(payload.get("justification")).strip() if payload.get("justification") is not None else None),
+            confidence=max(0.0, min(1.0, float(payload.get("confidence", 0.0) or 0.0))),
+        )
+
+
+@dataclass
+class AgentDIKIntegrationRequest:
+    request_id: str
+    tick: int
+    sim_time: float
+    agent_id: str
+    display_name: str
+    phase: str
+    trigger_reason: str
+    held_data_ids: List[str]
+    held_information_ids: List[str]
+    held_knowledge_ids: List[str]
+    recent_new_item_ids: List[str] = field(default_factory=list)
+    recent_communication_ids: List[str] = field(default_factory=list)
+    recent_artifact_ids: List[str] = field(default_factory=list)
+    unresolved_gaps: List[str] = field(default_factory=list)
+    contradiction_signals: List[str] = field(default_factory=list)
+    candidate_information_ids: List[str] = field(default_factory=list)
+    candidate_knowledge_ids: List[str] = field(default_factory=list)
+    candidate_rule_ids: List[str] = field(default_factory=list)
+    max_candidates_per_type: int = 8
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "AgentDIKIntegrationRequest":
+        return cls(
+            request_id=str(payload.get("request_id", "")),
+            tick=int(payload.get("tick", 0)),
+            sim_time=float(payload.get("sim_time", 0.0)),
+            agent_id=str(payload.get("agent_id", "")),
+            display_name=str(payload.get("display_name", "")),
+            phase=str(payload.get("phase", "")),
+            trigger_reason=str(payload.get("trigger_reason", "")),
+            held_data_ids=[str(item) for item in payload.get("held_data_ids", [])],
+            held_information_ids=[str(item) for item in payload.get("held_information_ids", [])],
+            held_knowledge_ids=[str(item) for item in payload.get("held_knowledge_ids", [])],
+            recent_new_item_ids=[str(item) for item in payload.get("recent_new_item_ids", [])],
+            recent_communication_ids=[str(item) for item in payload.get("recent_communication_ids", [])],
+            recent_artifact_ids=[str(item) for item in payload.get("recent_artifact_ids", [])],
+            unresolved_gaps=[str(item) for item in payload.get("unresolved_gaps", [])],
+            contradiction_signals=[str(item) for item in payload.get("contradiction_signals", [])],
+            candidate_information_ids=[str(item) for item in payload.get("candidate_information_ids", [])],
+            candidate_knowledge_ids=[str(item) for item in payload.get("candidate_knowledge_ids", [])],
+            candidate_rule_ids=[str(item) for item in payload.get("candidate_rule_ids", [])],
+            max_candidates_per_type=max(1, int(payload.get("max_candidates_per_type", 8) or 8)),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "tick": self.tick,
+            "sim_time": self.sim_time,
+            "agent_id": self.agent_id,
+            "display_name": self.display_name,
+            "phase": self.phase,
+            "trigger_reason": self.trigger_reason,
+            "held_data_ids": list(self.held_data_ids),
+            "held_information_ids": list(self.held_information_ids),
+            "held_knowledge_ids": list(self.held_knowledge_ids),
+            "recent_new_item_ids": list(self.recent_new_item_ids),
+            "recent_communication_ids": list(self.recent_communication_ids),
+            "recent_artifact_ids": list(self.recent_artifact_ids),
+            "unresolved_gaps": list(self.unresolved_gaps),
+            "contradiction_signals": list(self.contradiction_signals),
+            "candidate_information_ids": list(self.candidate_information_ids),
+            "candidate_knowledge_ids": list(self.candidate_knowledge_ids),
+            "candidate_rule_ids": list(self.candidate_rule_ids),
+            "max_candidates_per_type": self.max_candidates_per_type,
+        }
+
+
+@dataclass
+class AgentDIKIntegrationResponse:
+    response_id: str
+    agent_id: str
+    candidate_information_updates: List[DIKCandidateUpdate] = field(default_factory=list)
+    candidate_knowledge_updates: List[DIKCandidateUpdate] = field(default_factory=list)
+    candidate_rule_supports: List[DIKCandidateUpdate] = field(default_factory=list)
+    unresolved_gaps: List[str] = field(default_factory=list)
+    contradictions: List[str] = field(default_factory=list)
+    summary: str = ""
+    confidence: float = 0.0
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "AgentDIKIntegrationResponse":
+        return cls(
+            response_id=str(payload.get("response_id") or f"dik-{uuid.uuid4().hex[:8]}"),
+            agent_id=str(payload.get("agent_id", "")),
+            candidate_information_updates=[DIKCandidateUpdate.from_dict(item) for item in payload.get("candidate_information_updates", []) if isinstance(item, dict)],
+            candidate_knowledge_updates=[DIKCandidateUpdate.from_dict(item) for item in payload.get("candidate_knowledge_updates", []) if isinstance(item, dict)],
+            candidate_rule_supports=[DIKCandidateUpdate.from_dict(item) for item in payload.get("candidate_rule_supports", []) if isinstance(item, dict)],
+            unresolved_gaps=[str(item) for item in payload.get("unresolved_gaps", [])],
+            contradictions=[str(item) for item in payload.get("contradictions", [])],
+            summary=str(payload.get("summary", "")),
+            confidence=max(0.0, min(1.0, float(payload.get("confidence", 0.0) or 0.0))),
+        )
+
+
+def validate_agent_dik_integration_response(response: AgentDIKIntegrationResponse) -> List[str]:
+    errors: List[str] = []
+    for bucket_name, bucket in (
+        ("candidate_information_updates", response.candidate_information_updates),
+        ("candidate_knowledge_updates", response.candidate_knowledge_updates),
+        ("candidate_rule_supports", response.candidate_rule_supports),
+    ):
+        for idx, candidate in enumerate(bucket):
+            if not str(candidate.candidate_id).strip():
+                errors.append(f"{bucket_name}[{idx}] missing candidate_id")
+            if not isinstance(candidate.evidence_ids, list):
+                errors.append(f"{bucket_name}[{idx}] evidence_ids must be list")
+            if not (0.0 <= float(candidate.confidence) <= 1.0):
+                errors.append(f"{bucket_name}[{idx}] confidence must be in [0,1]")
+    if not (0.0 <= float(response.confidence) <= 1.0):
+        errors.append("confidence must be in [0,1]")
+    return errors
+
 def validate_agent_brain_response(response: AgentBrainResponse, legal_action_ids: List[str]) -> List[str]:
     errors: List[str] = []
     if response.plan.next_action.action_type.value not in set(legal_action_ids):

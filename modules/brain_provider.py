@@ -10,7 +10,14 @@ from typing import Any, Dict
 from urllib import error, request
 
 from modules.action_schema import BrainDecision, CommunicationIntent, ExecutableActionType
-from modules.brain_contract import AgentBrainRequest, AgentBrainResponse, PlannedActionStep
+from modules.brain_contract import (
+    AgentBrainRequest,
+    AgentBrainResponse,
+    AgentDIKIntegrationRequest,
+    AgentDIKIntegrationResponse,
+    PlannedActionStep,
+    validate_agent_dik_integration_response,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -154,6 +161,16 @@ class BrainProvider(ABC):
     @abstractmethod
     def generate_plan(self, request_packet: AgentBrainRequest) -> AgentBrainResponse:
         raise NotImplementedError
+
+    def generate_dik_integration(self, request_packet: AgentDIKIntegrationRequest) -> AgentDIKIntegrationResponse:
+        return AgentDIKIntegrationResponse.from_dict(
+            {
+                "response_id": f"dik-rule-{request_packet.request_id}",
+                "agent_id": request_packet.agent_id,
+                "summary": "No DIK integration candidates from deterministic fallback.",
+                "confidence": 0.0,
+            }
+        )
 
     def decide(self, context_packet):
         decision = self.decision_from_context(context_packet)
@@ -518,6 +535,18 @@ class RuleBrain(BrainProvider):
             "confidence": 0.7,
         }
         return AgentBrainResponse.from_dict(payload)
+
+    def generate_dik_integration(self, request_packet: AgentDIKIntegrationRequest) -> AgentDIKIntegrationResponse:
+        return AgentDIKIntegrationResponse.from_dict(
+            {
+                "response_id": f"dik-rule-{request_packet.request_id}",
+                "agent_id": request_packet.agent_id,
+                "unresolved_gaps": list(request_packet.unresolved_gaps[:6]),
+                "contradictions": list(request_packet.contradiction_signals[:6]),
+                "summary": "Rule fallback: no candidate epistemic integrations proposed.",
+                "confidence": 0.0,
+            }
+        )
 
 
 class OllamaLocalBrainProvider(BrainProvider):
@@ -1067,6 +1096,118 @@ class OllamaLocalBrainProvider(BrainProvider):
             "max_tokens": min(2048, int(self.config.completion_max_tokens)),
             "response_format": {"type": "json_object"},
         }
+
+    def _build_dik_integration_payload(self, request_packet: AgentDIKIntegrationRequest) -> Dict[str, Any]:
+        contract = {
+            "request_id": request_packet.request_id,
+            "agent_id": request_packet.agent_id,
+            "display_name": request_packet.display_name,
+            "phase": request_packet.phase,
+            "tick": int(request_packet.tick),
+            "sim_time": float(request_packet.sim_time),
+            "trigger_reason": request_packet.trigger_reason,
+            "held_data_ids": list(request_packet.held_data_ids),
+            "held_information_ids": list(request_packet.held_information_ids),
+            "held_knowledge_ids": list(request_packet.held_knowledge_ids),
+            "recent_new_item_ids": list(request_packet.recent_new_item_ids[:24]),
+            "recent_communication_ids": list(request_packet.recent_communication_ids[:16]),
+            "recent_artifact_ids": list(request_packet.recent_artifact_ids[:16]),
+            "unresolved_gaps": list(request_packet.unresolved_gaps[:12]),
+            "contradiction_signals": list(request_packet.contradiction_signals[:12]),
+            "candidate_information_ids": list(request_packet.candidate_information_ids),
+            "candidate_knowledge_ids": list(request_packet.candidate_knowledge_ids),
+            "candidate_rule_ids": list(request_packet.candidate_rule_ids),
+            "max_candidates_per_type": int(request_packet.max_candidates_per_type),
+        }
+        return {
+            "model": self.config.local_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Return exactly one JSON object matching AgentDIKIntegrationResponse. "
+                        "Output JSON only with no markdown or prose. "
+                        "Use only held IDs provided. Do not invent unsupported candidates. "
+                        "Each candidate must include candidate_id and evidence_ids from held IDs. "
+                        "Keep candidate updates separate from unresolved gaps and contradictions."
+                    ),
+                },
+                {"role": "user", "content": json.dumps(contract, separators=(",", ":"), default=str)},
+            ],
+            "temperature": 0,
+            "max_tokens": min(2048, int(self.config.completion_max_tokens)),
+            "response_format": {"type": "json_object"},
+        }
+
+    def _normalize_dik_integration_payload(self, payload: Any) -> tuple[dict[str, Any] | None, list[dict[str, Any]], str]:
+        steps: list[dict[str, Any]] = []
+        if not isinstance(payload, dict):
+            return None, steps, "rejected_schema_invalid"
+        working = deepcopy(payload)
+        if "response" in working and isinstance(working.get("response"), dict):
+            working = {**working, **working["response"]}
+            steps.append({"step": "unwrapped_response_wrapper"})
+        for field in ("candidate_information_updates", "candidate_knowledge_updates", "candidate_rule_supports"):
+            value = working.get(field)
+            if value is None:
+                working[field] = []
+                continue
+            if not isinstance(value, list):
+                steps.append({"step": "coerced_candidate_bucket_to_empty", "field": field, "source_type": type(value).__name__})
+                working[field] = []
+                continue
+            cleaned = []
+            for idx, entry in enumerate(value):
+                if isinstance(entry, str):
+                    cleaned.append({"candidate_id": entry, "evidence_ids": [], "confidence": 0.2})
+                    steps.append({"step": "candidate_string_to_object", "field": field, "index": idx})
+                elif isinstance(entry, dict):
+                    item = dict(entry)
+                    if "candidate_id" not in item:
+                        for alias in ("id", "rule_id", "element_id"):
+                            if isinstance(item.get(alias), str):
+                                item["candidate_id"] = item.get(alias)
+                                steps.append({"step": "candidate_alias_promoted", "field": field, "index": idx, "alias": alias})
+                                break
+                    if "evidence_ids" not in item:
+                        aliases = item.get("evidence") or item.get("evidence_id")
+                        if isinstance(aliases, list):
+                            item["evidence_ids"] = [str(x) for x in aliases]
+                        elif isinstance(aliases, str) and aliases.strip():
+                            item["evidence_ids"] = [aliases.strip()]
+                        else:
+                            item["evidence_ids"] = []
+                    cleaned.append(item)
+            working[field] = cleaned
+        working.setdefault("unresolved_gaps", [])
+        working.setdefault("contradictions", [])
+        working.setdefault("summary", "")
+        working.setdefault("confidence", 0.0)
+        disposition = "accepted_as_is" if not steps else "accepted_after_repair"
+        return working, steps, disposition
+
+    def generate_dik_integration(self, request_packet: AgentDIKIntegrationRequest) -> AgentDIKIntegrationResponse:
+        endpoint = f"{self.config.local_base_url.rstrip('/')}{self.config.local_endpoint}"
+        payload = self._build_dik_integration_payload(request_packet)
+        req = request.Request(
+            endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with request.urlopen(req, timeout=self.config.timeout_s) as response:
+            raw = response.read().decode("utf-8")
+        parsed = json.loads(raw)
+        parsed_result = self._parse_response(parsed)
+        normalized, _steps, _disposition = self._normalize_dik_integration_payload(parsed_result.get("payload"))
+        if normalized is None:
+            return self.fallback.generate_dik_integration(request_packet)
+        normalized.setdefault("response_id", f"dik-{request_packet.request_id}")
+        normalized.setdefault("agent_id", request_packet.agent_id)
+        response_obj = AgentDIKIntegrationResponse.from_dict(normalized)
+        if validate_agent_dik_integration_response(response_obj):
+            return self.fallback.generate_dik_integration(request_packet)
+        return response_obj
 
     def generate_plan(self, request_packet: AgentBrainRequest) -> AgentBrainResponse:
         started_at = time.perf_counter()

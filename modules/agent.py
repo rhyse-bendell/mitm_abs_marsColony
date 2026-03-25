@@ -21,7 +21,12 @@ from modules.action_schema import (
     LEGACY_COMMUNICATION_TYPE_MAP,
     validate_brain_decision,
 )
-from modules.brain_contract import AgentBrainRequest, AgentBrainResponse, validate_agent_brain_response
+from modules.brain_contract import (
+    AgentBrainRequest,
+    AgentBrainResponse,
+    AgentDIKIntegrationRequest,
+    validate_agent_brain_response,
+)
 from modules.brain_provider import select_productive_fallback_action
 from modules.goal_manager import GoalManager
 from modules.goal_state import GOAL_SOURCES, GOAL_STATUSES
@@ -68,6 +73,10 @@ class PlannerCadenceConfig:
     high_latency_stale_result_grace_s: float = 0.0
     sticky_backend_demotion_enabled: bool = False
     planner_blocks_sim_time: bool | None = None
+    planner_request_policy: str = "legacy"
+    split_mode_planning_interval_steps: int = 60
+    split_mode_dik_integration_cooldown_steps: int = 12
+    split_mode_dik_batch_threshold: int = 2
 
     @classmethod
     def from_dict(cls, payload):
@@ -107,6 +116,10 @@ class PlannerCadenceConfig:
                 if payload.get("planner_blocks_sim_time") is not None
                 else None
             ),
+            planner_request_policy=str(payload.get("planner_request_policy", "legacy") or "legacy").lower(),
+            split_mode_planning_interval_steps=max(1, int(payload.get("planning_interval_steps", payload.get("split_mode_planning_interval_steps", 60)) or 60)),
+            split_mode_dik_integration_cooldown_steps=max(1, int(payload.get("dik_integration_cooldown_steps", payload.get("split_mode_dik_integration_cooldown_steps", 12)) or 12)),
+            split_mode_dik_batch_threshold=max(1, int(payload.get("dik_integration_batch_threshold", payload.get("split_mode_dik_batch_threshold", 2)) or 2)),
         )
 
 
@@ -290,6 +303,24 @@ class Agent:
         self._planner_future = None
         self._planner_future_lock = threading.Lock()
         self._timed_out_request_ids = set()
+        self.dik_integration_state = {
+            "status": "idle",
+            "request_id": None,
+            "trigger_reason": None,
+            "request_payload": None,
+            "last_completed_step": -1,
+            "total_started": 0,
+            "total_completed": 0,
+            "total_rejected": 0,
+            "last_result": None,
+            "accepted_updates": {"information": [], "knowledge": [], "rules": []},
+            "recent_candidates": {"information": [], "knowledge": [], "rules": []},
+            "last_sent_held_count": 0,
+            "last_sent_comm_count": 0,
+            "last_sent_artifact_count": 0,
+        }
+        self._dik_future = None
+        self._dik_future_lock = threading.Lock()
         self.startup_state = {
             "initial_goal_selected": False,
             "initial_plan_selected": False,
@@ -2308,6 +2339,10 @@ class Agent:
                 }
                 runtime_bootstrap["included_count"] = int(runtime_bootstrap.get("included_count", 0)) + 1
                 sim_state.bootstrap_reuse_included_count = int(getattr(sim_state, "bootstrap_reuse_included_count", 0)) + 1
+        accepted = self.dik_integration_state.get("accepted_updates", {}) if isinstance(self.dik_integration_state, dict) else {}
+        accepted_information = [item.get("candidate_id") for item in accepted.get("information", []) if isinstance(item, dict)]
+        accepted_knowledge = [item.get("candidate_id") for item in accepted.get("knowledge", []) if isinstance(item, dict)]
+        accepted_rules = [item.get("candidate_id") for item in accepted.get("rules", []) if isinstance(item, dict)]
         return AgentBrainRequest(
             request_id=f"{self.agent_id}-{uuid.uuid4().hex[:8]}",
             tick=self.sim_step_count,
@@ -2317,13 +2352,16 @@ class Agent:
             agent_label=self.agent_label,
             task_id=getattr(sim_state.task_model, "task_id", "unknown"),
             phase=str(phase),
-            local_context_summary=f"trigger={trigger_reason};build={context.individual_cognitive_state.get('build_readiness',{}).get('status')}",
+            local_context_summary=f"trigger={trigger_reason};build={context.individual_cognitive_state.get('build_readiness',{}).get('status')};accepted_dik={len(accepted_information)+len(accepted_knowledge)+len(accepted_rules)}",
             local_observations=observations,
             working_memory_summary={
                 "data": list(context.individual_cognitive_state.get("data_summary", [])[:8]),
                 "information": list(context.individual_cognitive_state.get("information_summary", [])[:8]),
                 "knowledge": list(context.individual_cognitive_state.get("knowledge_summary", [])[:8]),
                 "known_gaps": list(context.individual_cognitive_state.get("known_gaps", [])[:8]),
+                "accepted_llm_information_updates": accepted_information[:8],
+                "accepted_llm_knowledge_updates": accepted_knowledge[:8],
+                "accepted_llm_rule_supports": accepted_rules[:8],
             },
             inbox_summary=list(context.team_state.get("recent_communications", [])[-4:]),
             current_goal_stack=list(context.individual_cognitive_state.get("goal_stack", [])),
@@ -2609,6 +2647,188 @@ class Agent:
                 request_wallclock_time,
                 trace_id,
                 bool(blocking_sim_barrier),
+            )
+
+    def _build_dik_integration_request(self, sim_state, trigger_reason):
+        candidate_information_ids = []
+        candidate_knowledge_ids = []
+        candidate_rule_ids = []
+        if self.task_model is not None:
+            for element_id, element in self.task_model.dik_elements.items():
+                if not getattr(element, "enabled", True):
+                    continue
+                if element.element_type == "information":
+                    candidate_information_ids.append(element_id)
+                elif element.element_type == "knowledge":
+                    candidate_knowledge_ids.append(element_id)
+            candidate_rule_ids = [rid for rid, r in self.task_model.rules.items() if getattr(r, "enabled", True)]
+        return AgentDIKIntegrationRequest(
+            request_id=f"dik-{self.agent_id}-{uuid.uuid4().hex[:8]}",
+            tick=self.sim_step_count,
+            sim_time=float(sim_state.time),
+            agent_id=self.agent_id,
+            display_name=self.display_name,
+            phase=(sim_state.environment.get_current_phase() or {}).get("name", "default"),
+            trigger_reason=str(trigger_reason or "epistemic_change"),
+            held_data_ids=[getattr(item, "id", str(item)) for item in list(self.mental_model["data"])],
+            held_information_ids=[getattr(item, "id", str(item)) for item in list(self.mental_model["information"])],
+            held_knowledge_ids=[str(rule) for rule in list(self.mental_model["knowledge"].rules)],
+            recent_new_item_ids=[str(x) for x in self.derivation_events[-10:]],
+            recent_communication_ids=[str(x.get("id") or x.get("content") or x) for x in self.communication_log[-8:]],
+            recent_artifact_ids=[str(k) for k in list(getattr(sim_state.team_knowledge_manager, "artifacts", {}).keys())[-8:]],
+            unresolved_gaps=[str(x) for x in list(self.known_gaps)[:8]],
+            contradiction_signals=[e for e in self.activity_log[-10:] if "contradiction" in str(e).lower() or "mismatch" in str(e).lower()],
+            candidate_information_ids=candidate_information_ids,
+            candidate_knowledge_ids=candidate_knowledge_ids,
+            candidate_rule_ids=candidate_rule_ids,
+            max_candidates_per_type=8,
+        )
+
+    def _execute_dik_integration_request_sync(self, sim_state, trigger_reason, request_packet, trace_id):
+        runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"provider": sim_state.brain_provider}
+        provider = runtime["provider"]
+        response = provider.generate_dik_integration(request_packet)
+        return {
+            "request_id": request_packet.request_id,
+            "trace_id": trace_id,
+            "trigger_reason": trigger_reason,
+            "response": response,
+        }
+
+    def _accept_dik_integration_candidates(self, sim_state, request_packet, response):
+        held_ids = {getattr(item, "id", str(item)) for item in self.mental_model["data"]}
+        held_ids |= {getattr(item, "id", str(item)) for item in self.mental_model["information"]}
+        held_ids |= {str(rule) for rule in self.mental_model["knowledge"].rules}
+        valid_information = set(request_packet.candidate_information_ids)
+        valid_knowledge = set(request_packet.candidate_knowledge_ids)
+        valid_rules = set(request_packet.candidate_rule_ids)
+        accepted = {"information": [], "knowledge": [], "rules": []}
+        rejected = {"information": [], "knowledge": [], "rules": []}
+
+        def _process(bucket_name, candidates, valid_ids):
+            for item in candidates:
+                rec = {
+                    "candidate_id": item.candidate_id,
+                    "evidence_ids": list(item.evidence_ids),
+                    "justification": item.justification,
+                    "confidence": float(item.confidence),
+                }
+                id_ok = item.candidate_id in valid_ids
+                evidence_ok = all(eid in held_ids for eid in item.evidence_ids)
+                if id_ok and evidence_ok:
+                    accepted[bucket_name].append(rec)
+                else:
+                    rec["rejection_reasons"] = [reason for reason, flag in [("unknown_candidate_id", id_ok), ("evidence_not_currently_held", evidence_ok)] if not flag]
+                    rejected[bucket_name].append(rec)
+
+        _process("information", response.candidate_information_updates, valid_information)
+        _process("knowledge", response.candidate_knowledge_updates, valid_knowledge)
+        _process("rules", response.candidate_rule_supports, valid_rules)
+        return accepted, rejected
+
+    def _submit_dik_integration_request_async(self, sim_state, trigger_reason):
+        request_packet = self._build_dik_integration_request(sim_state, trigger_reason)
+        trace_id = self._make_planner_trace_id(request_packet.request_id)
+        self.dik_integration_state["status"] = "in_flight"
+        self.dik_integration_state["request_id"] = request_packet.request_id
+        self.dik_integration_state["trigger_reason"] = trigger_reason
+        self.dik_integration_state["request_payload"] = request_packet.to_dict()
+        self.dik_integration_state["total_started"] = int(self.dik_integration_state.get("total_started", 0)) + 1
+        if hasattr(sim_state, "logger") and hasattr(sim_state.logger, "record_brain_request_submitted"):
+            sim_state.logger.record_brain_request_submitted(
+                {
+                    "request_id": request_packet.request_id,
+                    "trace_id": trace_id,
+                    "request_kind": "dik_integration",
+                    "agent_id": self.agent_id,
+                    "display_name": self.display_name,
+                    "tick": self.sim_step_count,
+                    "sim_time": float(sim_state.time),
+                    "trigger_reason": trigger_reason,
+                    "request_payload": request_packet.to_dict(),
+                    "status": "in_flight",
+                }
+            )
+        with self._dik_future_lock:
+            self._dik_future = sim_state.planner_executor.submit(
+                self._execute_dik_integration_request_sync,
+                sim_state,
+                trigger_reason,
+                request_packet,
+                trace_id,
+            )
+
+    def _poll_dik_integration_request(self, sim_state):
+        with self._dik_future_lock:
+            future = self._dik_future
+        if future is None or not future.done():
+            return
+        with self._dik_future_lock:
+            self._dik_future = None
+        result = future.result()
+        response = result.get("response")
+        request_payload = self.dik_integration_state.get("request_payload") or {}
+        request_packet = AgentDIKIntegrationRequest.from_dict(request_payload)
+        accepted, rejected = self._accept_dik_integration_candidates(sim_state, request_packet, response)
+        self.dik_integration_state["status"] = "completed"
+        self.dik_integration_state["last_completed_step"] = self.sim_step_count
+        self.dik_integration_state["total_completed"] = int(self.dik_integration_state.get("total_completed", 0)) + 1
+        self.dik_integration_state["total_rejected"] = int(self.dik_integration_state.get("total_rejected", 0)) + sum(len(v) for v in rejected.values())
+        self.dik_integration_state["recent_candidates"] = {
+            "information": [{"candidate_id": c.candidate_id, "evidence_ids": list(c.evidence_ids), "confidence": float(c.confidence)} for c in response.candidate_information_updates],
+            "knowledge": [{"candidate_id": c.candidate_id, "evidence_ids": list(c.evidence_ids), "confidence": float(c.confidence)} for c in response.candidate_knowledge_updates],
+            "rules": [{"candidate_id": c.candidate_id, "evidence_ids": list(c.evidence_ids), "confidence": float(c.confidence)} for c in response.candidate_rule_supports],
+        }
+        self.dik_integration_state["accepted_updates"] = accepted
+        self.dik_integration_state["last_sent_held_count"] = len(request_packet.held_data_ids) + len(request_packet.held_information_ids) + len(request_packet.held_knowledge_ids)
+        self.dik_integration_state["last_sent_comm_count"] = len(request_packet.recent_communication_ids)
+        self.dik_integration_state["last_sent_artifact_count"] = len(request_packet.recent_artifact_ids)
+        self.dik_integration_state["last_result"] = {
+            "summary": response.summary,
+            "confidence": response.confidence,
+            "unresolved_gaps": list(response.unresolved_gaps),
+            "contradictions": list(response.contradictions),
+            "accepted": accepted,
+            "rejected": rejected,
+        }
+        self._emit_event(
+            sim_state,
+            "dik_integration_completed",
+            {
+                "request_id": result.get("request_id"),
+                "trace_id": result.get("trace_id"),
+                "trigger_reason": result.get("trigger_reason"),
+                "candidate_updates_returned": sum(len(v) for v in self.dik_integration_state["recent_candidates"].values()),
+                "candidate_updates_accepted": sum(len(v) for v in accepted.values()),
+                "candidate_updates_rejected": sum(len(v) for v in rejected.values()),
+            },
+        )
+        if hasattr(sim_state, "logger") and hasattr(sim_state.logger, "record_brain_response_phase"):
+            sim_state.logger.record_brain_response_phase(
+                result.get("request_id"),
+                {
+                    "trace_id": result.get("trace_id"),
+                    "sim_time": float(sim_state.time),
+                    "tick": self.sim_step_count,
+                    "status": "response_received",
+                    "normalized_payload_exists": True,
+                    "normalized_payload": self.dik_integration_state.get("last_result"),
+                },
+            )
+        if hasattr(sim_state, "logger") and hasattr(sim_state.logger, "record_brain_interpretation_phase"):
+            sim_state.logger.record_brain_interpretation_phase(
+                result.get("request_id"),
+                {
+                    "trace_id": result.get("trace_id"),
+                    "sim_time": float(sim_state.time),
+                    "tick": self.sim_step_count,
+                    "status": "candidate_updates_processed",
+                    "runtime_disposition": "candidate_updates_processed",
+                    "candidate_updates_returned": sum(len(v) for v in self.dik_integration_state["recent_candidates"].values()),
+                    "candidate_updates_accepted": sum(len(v) for v in accepted.values()),
+                    "candidate_updates_rejected": sum(len(v) for v in rejected.values()),
+                    "request_status": "completed",
+                },
             )
 
     def _planner_cooldown_remaining(self, sim_state):
@@ -3152,6 +3372,16 @@ class Agent:
         cfg = self.planner_cadence
         if not cfg.planner_enabled:
             return False, "planner_disabled"
+        if cfg.planner_request_policy == "cadence_with_dik_integration":
+            if trigger_reason and trigger_reason in {"no_active_plan", "plan_invalidated"}:
+                return True, trigger_reason
+            if trigger_reason == "phase_transition":
+                return True, trigger_reason
+            interval = max(1, int(cfg.split_mode_planning_interval_steps))
+            tick = max(0, int(self.sim_step_count))
+            if tick == 0 or (tick % interval == 0):
+                return True, f"split_mode_cadence:{interval}"
+            return False, "split_mode_cadence_not_due"
 
         if trigger_reason and trigger_reason in {"no_active_plan", "plan_completed", "plan_invalidated"}:
             return True, trigger_reason
@@ -3172,6 +3402,36 @@ class Agent:
                 due_bits.append("time_interval")
             return True, "+".join(due_bits)
         return False, "cadence_not_due"
+
+    def _dik_integration_trigger_reason(self, sim_state, trigger_reason):
+        if self.planner_cadence.planner_request_policy != "cadence_with_dik_integration":
+            return None
+        if trigger_reason in {"new_dik_acquired", "communication_update_received", "contradiction_detected"}:
+            return trigger_reason
+        if trigger_reason == "build_readiness_changed":
+            return "readiness_shift_with_epistemic_impact"
+        return None
+
+    def _dik_integration_allowed(self, sim_state, trigger_reason):
+        if not trigger_reason:
+            return False, "not_triggered"
+        cooldown = max(1, int(self.planner_cadence.split_mode_dik_integration_cooldown_steps))
+        last = int(self.dik_integration_state.get("last_completed_step", -1) or -1)
+        if last >= 0 and (self.sim_step_count - last) < cooldown:
+            return False, "cooldown_active"
+        state = self.dik_integration_state
+        held_count = len(self.mental_model["data"]) + len(self.mental_model["information"]) + len(self.mental_model["knowledge"].rules)
+        team_comm_count = len(getattr(sim_state.team_knowledge_manager, "recent_updates", []))
+        artifact_count = len(getattr(sim_state.team_knowledge_manager, "artifacts", {}))
+        delta = max(
+            0,
+            held_count - int(state.get("last_sent_held_count", 0)),
+            team_comm_count - int(state.get("last_sent_comm_count", 0)),
+            artifact_count - int(state.get("last_sent_artifact_count", 0)),
+        )
+        if delta < int(self.planner_cadence.split_mode_dik_batch_threshold):
+            return False, "batch_threshold_not_met"
+        return True, trigger_reason
 
     def _refresh_goal_plan_state(self, decision, sim_state, trigger_reason, response=None):
         if response and getattr(response, "plan", None) and response.plan.ordered_goals:
@@ -4113,10 +4373,16 @@ class Agent:
             if not planner_lifecycle_already_polled:
                 self._check_inflight_timeout(sim_state)
                 self._poll_planner_request(sim_state, environment)
+                self._poll_dik_integration_request(sim_state)
             if self.active_actions:
                 self._advance_active_actions(dt, sim_state=sim_state)
             else:
                 trigger_reason = self._plan_trigger_reason(sim_state, environment)
+                dik_trigger_reason = self._dik_integration_trigger_reason(sim_state, trigger_reason)
+                dik_allowed, dik_reason = self._dik_integration_allowed(sim_state, dik_trigger_reason)
+                if dik_allowed and self.dik_integration_state.get("status") != "in_flight":
+                    self._emit_event(sim_state, "dik_integration_invocation_requested", {"tick": self.sim_step_count, "trigger_reason": dik_reason})
+                    self._submit_dik_integration_request_async(sim_state, dik_reason)
                 planner_allowed, planner_reason = self._planner_decision_allowed(sim_state, trigger_reason)
                 if planner_allowed:
                     cooldown_remaining = self._planner_cooldown_remaining(sim_state)
