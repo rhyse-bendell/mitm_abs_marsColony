@@ -1,7 +1,7 @@
 """Manual diagnostic replay for one planner request against local Ollama.
 
 Example:
-    py -3.11 tests/manual_replay_planner_request.py --input planner_request_bundle.json --model qwen3.5:9b --timeout 3600
+    py -3.11 tests/manual_replay_planner_request.py --input planner_request_bundle.json --model qwen2.5:3b-instruct --timeout 3600
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ REQUEST_REQUIRED_KEYS = {
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Replay a real AgentBrainRequest against local Ollama for diagnosis.")
     parser.add_argument("--input", required=True, help="Path to lifecycle bundle JSON or raw AgentBrainRequest JSON.")
-    parser.add_argument("--model", default="qwen3.5:9b", help="Model name for local provider payload.")
+    parser.add_argument("--model", default="qwen2.5:3b-instruct", help="Model name for local provider payload.")
     parser.add_argument("--base-url", default="http://127.0.0.1:11434", help="Local Ollama base URL.")
     parser.add_argument("--endpoint", default="/v1/chat/completions", help="HTTP endpoint path.")
     parser.add_argument("--timeout", type=float, default=3600.0, help="HTTP timeout in seconds.")

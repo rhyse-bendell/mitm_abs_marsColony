@@ -37,14 +37,19 @@ class MarsColonyInterface:
     EXPERIMENT_PANEL_BORDER = "#586271"
     BACKEND_DEFAULTS = {
         "brain_backend": "ollama",
-        "local_model": "qwen3.5:9b",
+        # Default changed after manual planner replay succeeded on target hardware
+        # with provider parse + normalization; previous qwen3.5:9b default did not.
+        "local_model": "qwen2.5:3b-instruct",
         "local_base_url": "http://127.0.0.1:11434",
         "timeout_s": 240.0,
         "fallback_backend": "rule_brain",
     }
     LOCAL_MODEL_SHORTLIST = [
-        "qwen2.5:3b",
+        "qwen2.5:3b-instruct",
         "qwen2.5:7b",
+        "qwen2.5:7b-instruct",
+        "llama3.2",
+        "qwen2.5:3b",
         "gemma3:4b",
         "mistral-small3.1",
         "qwen3.5:9b",
@@ -2305,7 +2310,7 @@ class MarsColonyInterface:
         ttk.Label(settings_frame, text="Local Model").grid(row=14, column=0, sticky="w", padx=(0, 8), pady=3)
         local_model_entry = ttk.Combobox(settings_frame, textvariable=self.local_model_var, values=self.LOCAL_MODEL_SHORTLIST, width=31)
         local_model_entry.grid(row=14, column=1, sticky="w", pady=3)
-        self._add_help_text(settings_frame, 15, "Local model name to use for Ollama-backed agents.")
+        self._add_help_text(settings_frame, 15, "Local model name to use for Ollama-backed agents. Recommended default on weaker machines: qwen2.5:3b-instruct.")
 
         ttk.Label(settings_frame, text="Local Base URL").grid(row=16, column=0, sticky="w", padx=(0, 8), pady=3)
         local_base_url_entry = ttk.Entry(settings_frame, textvariable=self.local_base_url_var, width=34)

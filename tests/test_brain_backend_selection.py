@@ -12,7 +12,7 @@ class TestBrainBackendSelection(unittest.TestCase):
 
     def test_local_backend_defaults_use_real_model_and_timeout(self):
         cfg = BrainBackendConfig()
-        self.assertEqual(cfg.local_model, "qwen2.5:3b")
+        self.assertEqual(cfg.local_model, "qwen2.5:3b-instruct")
         self.assertEqual(cfg.timeout_s, 90.0)
         self.assertEqual(cfg.warmup_timeout_s, 45.0)
 
@@ -309,7 +309,7 @@ class TestExperimentTabBackendControl(unittest.TestCase):
 
         try:
             app.root.withdraw()
-            self.assertEqual(app.local_model_var.get(), "qwen2.5:3b")
+            self.assertEqual(app.local_model_var.get(), "qwen2.5:3b-instruct")
             self.assertAlmostEqual(float(app.local_timeout_var.get()), 900.0)
             app.brain_backend_var.set("rule_brain")
             app.apply_experiment_settings()
