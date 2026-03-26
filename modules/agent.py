@@ -242,6 +242,12 @@ class Agent:
         self.last_phase_stage = "early"
         self.last_build_blockers = []
         self.inventory_resources = {"bricks": 0}
+        self.transport_state = {
+            "stage": "idle",
+            "carrying": {"resource_type": None, "quantity": 0},
+            "pickup_source_id": None,
+            "bound_project_id": None,
+        }
         self.history_compaction = {
             "recent_history_summary": "",
             "plan_evolution": [],
@@ -1770,6 +1776,8 @@ class Agent:
         requested_project_id = decision.target_id or action.get("project_id")
         if requested_project_id in environment.construction.projects:
             return requested_project_id
+        if decision.selected_action in {ExecutableActionType.VALIDATE_CONSTRUCTION, ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION}:
+            return None
         build_selection = self._select_build_target(environment, require_readiness=False, include_project=True)
         if isinstance(build_selection, dict):
             return build_selection.get("project_id")
@@ -4613,6 +4621,31 @@ class Agent:
         if sim_state is None:
             return
 
+        def _build_access(project_id):
+            return environment.get_interaction_access(self.position, project_id, role=self.role)
+
+        def _build_target(project_id):
+            return environment.get_interaction_target_position(project_id, from_position=self.position)
+
+        def _pickup_candidates():
+            construction = getattr(environment, "construction", None)
+            if construction is None:
+                return []
+            nodes = []
+            for pile in construction.resource_nodes.values():
+                if int(getattr(pile, "quantity", 0) or 0) <= 0:
+                    continue
+                nodes.append((pile.pile_id, tuple(pile.position)))
+            return nodes
+
+        def _log_mutation_blocked(event_type, payload):
+            payload = dict(payload or {})
+            payload.setdefault("agent", self.name)
+            payload.setdefault("agent_position", (round(self.position[0], 3), round(self.position[1], 3)))
+            payload.setdefault("current_action_type", event_type)
+            payload.setdefault("transport_state", dict(self.transport_state))
+            self._emit_event(sim_state, event_type, payload)
+
         for action in self.active_actions:
             if action["type"] == "idle" and action.get("artifact_action") == ExecutableActionType.EXTERNALIZE_PLAN.value and action["progress"] == 0:
                 artifact_id = f"whiteboard:{self.name}:{int(sim_state.time*10)}"
@@ -4651,9 +4684,37 @@ class Agent:
                 sim_state.logger.log_event(sim_state.time, "assistance_requested", {"agent": self.name})
 
             if action["type"] == "idle" and action.get("decision_action") == ExecutableActionType.VALIDATE_CONSTRUCTION.value and action["progress"] == 0:
-                project_id = action.get("project_id") or "Build_Table_B"
+                project_id = action.get("project_id")
+                if not project_id:
+                    _log_mutation_blocked(
+                        "construction_validation_blocked",
+                        {"failure_category": "missing_project_binding", "decision_action": action.get("decision_action")},
+                    )
+                    continue
                 project = environment.construction.projects.get(project_id)
                 if project:
+                    access = _build_access(project_id)
+                    if not access.get("accessible"):
+                        _log_mutation_blocked(
+                            "construction_validation_blocked",
+                            {
+                                "project_id": project_id,
+                                "failure_category": "not_at_validation_location",
+                                "access_reason": access.get("reason"),
+                                "expected_interaction_location": _build_target(project_id),
+                            },
+                        )
+                        continue
+                    if project.get("status") not in {"ready_for_validation", "needs_repair"}:
+                        _log_mutation_blocked(
+                            "construction_validation_blocked",
+                            {
+                                "project_id": project_id,
+                                "failure_category": "illegal_project_status",
+                                "project_status": project.get("status"),
+                            },
+                        )
+                        continue
                     has_required_rules, missing_rules = self._construction_rule_match(project_id, environment=environment, sim_state=sim_state, include_team=True)
                     is_valid = bool(project.get("correct", True)) and has_required_rules and bool(project.get("resource_complete", False))
                     if has_required_rules:
@@ -4685,14 +4746,30 @@ class Agent:
                         )
 
             if action["type"] == "construct" and action["progress"] == 0:
-                project_id = action.get("project_id") or "Build_Table_B"
+                project_id = action.get("project_id")
+                if not project_id:
+                    _log_mutation_blocked(
+                        "construction_progress_blocked",
+                        {"failure_category": "missing_project_binding", "decision_action": action.get("decision_action")},
+                    )
+                    continue
                 project = environment.construction.projects.get(project_id)
                 if project:
-                    required_before = int(project.get("required_resources", {}).get("bricks", 0) or 0)
-                    delivered_before = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
-                    status_before = project.get("status", "in_progress")
                     decision_action = action.get("decision_action")
-                    legacy_direct = decision_action is None
+                    status_before = project.get("status", "in_progress")
+                    access = _build_access(project_id)
+                    if not access.get("accessible"):
+                        _log_mutation_blocked(
+                            "construction_progress_blocked",
+                            {
+                                "project_id": project_id,
+                                "failure_category": "not_at_build_location",
+                                "access_reason": access.get("reason"),
+                                "decision_action": decision_action,
+                                "expected_interaction_location": _build_target(project_id),
+                            },
+                        )
+                        continue
                     if project_id not in self._construction_attempted_projects:
                         self._construction_attempted_projects.add(project_id)
                         self._emit_event(
@@ -4715,106 +4792,23 @@ class Agent:
                             "status_before": status_before,
                         },
                     )
-                    if not legacy_direct and self.inventory_resources.get("bricks", 0) <= 0:
-                        if delivered_before < required_before:
-                            self.inventory_resources["bricks"] = self.inventory_resources.get("bricks", 0) + 1
-                            self._emit_event(
-                                sim_state,
-                                "construction_logistics_handoff",
-                                {
-                                    "agent": self.name,
-                                    "project_id": project_id,
-                                    "reason": "construction_action_auto_handoff_to_available_logistics",
-                                    "inventory_bricks": self.inventory_resources.get("bricks", 0),
-                                },
-                            )
-                        else:
-                            self.activity_log.append("Construction paused: missing transported bricks")
-                            sim_state.logger.log_event(sim_state.time, "construction_waiting_for_logistics", {"agent": self.name, "project_id": project_id})
-                            continue
-
-                    if not environment.is_interaction_target_unlocked(project_id):
-                        self._emit_event(
-                            sim_state,
-                            "construction_transport_blocked",
-                            {
-                                "agent": self.name,
-                                "project_id": project_id,
-                                "failure_category": "bridge_access_locked",
-                                "decision_action": decision_action,
-                            },
-                        )
-                        continue
-
-                    if not legacy_direct:
-                        self.inventory_resources["bricks"] = max(0, self.inventory_resources.get("bricks", 0) - 1)
                     environment.construction.assign_builder(project_id, self.name)
-                    environment.construction.deliver_resource(project_id, "bricks", quantity=1)
-
-                    delivered_after = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
-                    required_after = int(project.get("required_resources", {}).get("bricks", 0) or 0)
-                    status_after = project.get("status", "in_progress")
-                    progress_before = (delivered_before / required_before) if required_before > 0 else 0.0
-                    progress_after = (delivered_after / required_after) if required_after > 0 else 0.0
-
-                    self._emit_event(
-                        sim_state,
-                        "construction_resource_delivered",
-                        {
-                            "agent": self.name,
-                            "project_id": project_id,
-                            "resource_type": "bricks",
-                            "quantity": max(0, delivered_after - delivered_before),
-                            "delivered_before": delivered_before,
-                            "delivered_after": delivered_after,
-                            "required_total": required_after,
-                            "progress_before": round(progress_before, 4),
-                            "progress_after": round(progress_after, 4),
-                        },
-                    )
-
-                    if delivered_after != delivered_before:
-                        self._emit_event(
-                            sim_state,
-                            "construction_progress_updated",
-                            {
-                                "agent": self.name,
-                                "project_id": project_id,
-                                "delivered_before": delivered_before,
-                                "delivered_after": delivered_after,
-                                "required_total": required_after,
-                                "progress_before": round(progress_before, 4),
-                                "progress_after": round(progress_after, 4),
-                                "status_after": status_after,
-                            },
-                        )
-                    if required_after > 0 and delivered_before < required_after <= delivered_after:
-                        self._emit_event(
-                            sim_state,
-                            "construction_ready_for_validation",
-                            {
-                                "agent": self.name,
-                                "project_id": project_id,
-                                "required_total": required_after,
-                                "delivered_total": delivered_after,
-                            },
-                        )
-                    if status_before != "complete" and status_after == "complete":
-                        self._emit_event(
-                            sim_state,
-                            "construction_completed",
-                            {
-                                "agent": self.name,
-                                "project_id": project_id,
-                                "structure_type": project.get("type", "unknown"),
-                            },
-                        )
 
                     fidelity = max(self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5), self._trait_value("rule_accuracy"))
                     if random.random() > fidelity:
                         project["correct"] = False
 
                     if decision_action == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value:
+                        if project.get("status") not in {"needs_repair", "ready_for_validation", "in_progress"}:
+                            _log_mutation_blocked(
+                                "construction_repair_blocked",
+                                {
+                                    "project_id": project_id,
+                                    "failure_category": "illegal_project_status",
+                                    "project_status": project.get("status"),
+                                },
+                            )
+                            continue
                         project["correct"] = True
                         if project.get("resource_complete", False):
                             environment.construction.mark_validated(project_id, is_valid=True)
@@ -4857,7 +4851,7 @@ class Agent:
                             },
                         )
 
-            if action["type"] == "transport_resources" and action["progress"] == 0:
+            if action["type"] == "transport_resources":
                 project_id = action.get("project_id")
                 if not project_id:
                     self._emit_event(
@@ -4924,8 +4918,87 @@ class Agent:
                         },
                     )
                     continue
+
+                state = self.transport_state
+                if state.get("bound_project_id") != project_id:
+                    state.update(
+                        {
+                            "stage": "pickup",
+                            "carrying": {"resource_type": None, "quantity": 0},
+                            "pickup_source_id": None,
+                            "bound_project_id": project_id,
+                        }
+                    )
+                pickup_id = state.get("pickup_source_id")
+                pickup_lookup = dict(_pickup_candidates())
+                if state.get("stage") == "pickup":
+                    if pickup_id not in pickup_lookup:
+                        if not pickup_lookup:
+                            _log_mutation_blocked(
+                                "construction_transport_blocked",
+                                {"project_id": project_id, "failure_category": "no_pickup_resource_source", "decision_action": action.get("decision_action")},
+                            )
+                            continue
+                        pickup_id = sorted(
+                            pickup_lookup.keys(),
+                            key=lambda pid: math.hypot(self.position[0] - pickup_lookup[pid][0], self.position[1] - pickup_lookup[pid][1]),
+                        )[0]
+                        state["pickup_source_id"] = pickup_id
+                        action["target"] = pickup_lookup[pickup_id]
+                        self.target = action["target"]
+                    pickup_pos = pickup_lookup.get(pickup_id)
+                    if pickup_pos is None:
+                        continue
+                    pickup_dist = math.hypot(self.position[0] - pickup_pos[0], self.position[1] - pickup_pos[1])
+                    if pickup_dist > 0.4:
+                        continue
+                    state["carrying"] = {"resource_type": "bricks", "quantity": 1}
+                    state["stage"] = "in_transit"
+                    dropoff = _build_target(project_id)
+                    if dropoff is not None:
+                        action["target"] = dropoff
+                        self.target = dropoff
+                    self._emit_event(
+                        sim_state,
+                        "construction_transport_pickup",
+                        {"agent": self.name, "project_id": project_id, "pickup_source_id": pickup_id, "pickup_distance": round(pickup_dist, 4)},
+                    )
+                    continue
+
+                access = _build_access(project_id)
+                expected_location = _build_target(project_id)
+                if not access.get("accessible"):
+                    continue
+                carrying = state.get("carrying") or {}
+                if str(carrying.get("resource_type")) != "bricks" or int(carrying.get("quantity", 0) or 0) <= 0:
+                    _log_mutation_blocked(
+                        "construction_transport_blocked",
+                        {
+                            "project_id": project_id,
+                            "failure_category": "missing_carried_resource_state",
+                            "decision_action": action.get("decision_action"),
+                            "expected_interaction_location": expected_location,
+                        },
+                    )
+                    state["stage"] = "pickup"
+                    continue
+
                 environment.construction.assign_builder(project_id, self.name)
-                environment.construction.deliver_resource(project_id, "bricks", quantity=1)
+                delivered_ok = environment.construction.deliver_resource(project_id, "bricks", quantity=1)
+                if not delivered_ok:
+                    _log_mutation_blocked(
+                        "construction_transport_blocked",
+                        {
+                            "project_id": project_id,
+                            "failure_category": "construction_delivery_rejected",
+                            "decision_action": action.get("decision_action"),
+                            "expected_interaction_location": expected_location,
+                        },
+                    )
+                    continue
+                state["carrying"] = {"resource_type": None, "quantity": 0}
+                state["stage"] = "pickup"
+                state["pickup_source_id"] = None
 
                 delivered_after = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
                 required_after = int(project.get("required_resources", {}).get("bricks", 0) or 0)
@@ -4947,6 +5020,17 @@ class Agent:
                         "progress_before": round(progress_before, 4),
                         "progress_after": round(progress_after, 4),
                         "decision_action": action.get("decision_action"),
+                        "legality_checks_passed": True,
+                        "expected_interaction_location": expected_location,
+                        "agent_position": (round(self.position[0], 3), round(self.position[1], 3)),
+                        "distance_to_required_location": round(
+                            math.hypot(self.position[0] - expected_location[0], self.position[1] - expected_location[1])
+                            if expected_location
+                            else -1.0,
+                            4,
+                        ),
+                        "current_action_type": action.get("type"),
+                        "transport_state": dict(self.transport_state),
                     },
                 )
 
@@ -4964,6 +5048,17 @@ class Agent:
                             "progress_after": round(progress_after, 4),
                             "status_after": status_after,
                             "decision_action": action.get("decision_action"),
+                            "agent_position": (round(self.position[0], 3), round(self.position[1], 3)),
+                            "expected_interaction_location": expected_location,
+                            "distance_to_required_location": round(
+                                math.hypot(self.position[0] - expected_location[0], self.position[1] - expected_location[1])
+                                if expected_location
+                                else -1.0,
+                                4,
+                            ),
+                            "current_action_type": action.get("type"),
+                            "transport_state": dict(self.transport_state),
+                            "legality_checks_passed": True,
                         },
                     )
                 if required_after > 0 and delivered_before < required_after <= delivered_after:
@@ -5021,6 +5116,8 @@ class Agent:
                     "decision_action": action.get("decision_action"),
                     "source_target_id": action.get("source_target_id"),
                 })
+                if action.get("type") in {"move_to", "construct", "transport_resources"} and action.get("target") is not None:
+                    self.target = action.get("target")
             self.current_action = []
 
     def generate_message(self):
