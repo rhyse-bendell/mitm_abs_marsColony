@@ -69,7 +69,7 @@ class TestRuleBrainHierarchicalPolicy(unittest.TestCase):
                                     {"action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, "utility": 0.4},
                                 ])
         brain.decide(context)
-        self.assertIn(context.individual_cognitive_state["control_state"]["mode"], {"RECOVERY", "ACQUIRE_DIK"})
+        self.assertEqual(context.individual_cognitive_state["control_state"]["mode"], "RECOVERY")
 
     def test_weighting_responds_to_context(self):
         brain = RuleBrain(RuleBrainPolicyConfig(min_mode_dwell_steps=0, mode_selection_temperature=0.15))
@@ -91,6 +91,7 @@ class TestRuleBrainHierarchicalPolicy(unittest.TestCase):
         response = brain.generate_plan(request)
         self.assertIn(response.plan.next_action.action_type.value, {ExecutableActionType.TRANSPORT_RESOURCES.value, ExecutableActionType.START_CONSTRUCTION.value})
         self.assertIn(decision.selected_action.value, {ExecutableActionType.TRANSPORT_RESOURCES.value, ExecutableActionType.START_CONSTRUCTION.value})
+        self.assertTrue(any("mode=" in note for note in response.plan.notes))
 
     def test_bootstrap_exits_when_shared_source_exhausted_and_role_gap_remaining(self):
         brain = RuleBrain(RuleBrainPolicyConfig(min_mode_dwell_steps=0, mode_selection_temperature=0.1))
@@ -111,6 +112,42 @@ class TestRuleBrainHierarchicalPolicy(unittest.TestCase):
         }
         brain.decide(context)
         self.assertNotEqual(context.individual_cognitive_state["control_state"]["mode"], "BOOTSTRAP")
+
+    def test_control_state_transition_history_and_snapshot(self):
+        brain = RuleBrain(RuleBrainPolicyConfig(min_mode_dwell_steps=0))
+        context = self._context(
+            control_state={"mode": "BOOTSTRAP", "mode_dwell_steps": 4, "mode_history": [], "transition_history": []},
+            ready=True,
+            affordances=[
+                {"action_type": ExecutableActionType.TRANSPORT_RESOURCES.value, "utility": 0.8, "target_id": "resource_zone_to_work_zone"},
+                {"action_type": ExecutableActionType.START_CONSTRUCTION.value, "utility": 0.7, "target_id": "Build_Table_A"},
+            ],
+        )
+        brain.decide(context)
+        control = context.individual_cognitive_state["control_state"]
+        self.assertEqual(control["previous_mode"], "BOOTSTRAP")
+        self.assertIn(control["mode"], {"LOGISTICS", "CONSTRUCT"})
+        self.assertEqual(control["mode_dwell_steps"], 1)
+        self.assertTrue(control["last_transition_reason"])
+        self.assertTrue(control["mode_history"])
+        self.assertTrue(control["transition_history"])
+        self.assertIn("selected_action", control.get("last_policy_snapshot", {}))
+
+    def test_non_transition_tick_increments_dwell(self):
+        brain = RuleBrain(RuleBrainPolicyConfig(min_mode_dwell_steps=4))
+        context = self._context(
+            control_state={"mode": "ACQUIRE_DIK", "mode_dwell_steps": 1, "mode_history": [], "transition_history": []},
+            known_gaps=["g1", "g2", "g3"],
+            affordances=[
+                {"action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, "utility": 0.8, "target_id": "Team_Info"},
+                {"action_type": ExecutableActionType.REQUEST_ASSISTANCE.value, "utility": 0.7, "target_id": "Architect"},
+            ],
+        )
+        brain.decide(context)
+        control = context.individual_cognitive_state["control_state"]
+        self.assertEqual(control["mode"], "ACQUIRE_DIK")
+        self.assertEqual(control["mode_dwell_steps"], 2)
+        self.assertFalse(control.get("transition_history"))
 
 
 if __name__ == "__main__":

@@ -457,6 +457,66 @@ class Agent:
         if log_activity:
             self.activity_log.append(message)
 
+    def get_control_state_snapshot(self):
+        control = dict(self.control_state or {})
+        snapshot = dict(control.get("last_policy_snapshot") or {})
+        top_features = dict(snapshot.get("top_features") or control.get("last_transition_features") or {})
+        return {
+            "mode": str(control.get("mode") or "BOOTSTRAP"),
+            "previous_mode": control.get("previous_mode"),
+            "mode_dwell_steps": int(control.get("mode_dwell_steps", 0) or 0),
+            "last_transition_reason": str(control.get("last_transition_reason") or "none"),
+            "last_transition_features": dict(control.get("last_transition_features") or {}),
+            "recovery_active": bool(control.get("recovery_active")),
+            "top_features": top_features,
+            "policy_snapshot": snapshot,
+            "mode_history": list(control.get("mode_history", [])),
+            "transition_history": list(control.get("transition_history", [])),
+        }
+
+    def get_runtime_state_snapshot(self):
+        current_goals = [g for g in list(self.goal_stack or []) if isinstance(g, dict)]
+        top_goals = current_goals[:3]
+        control_snapshot = self.get_control_state_snapshot()
+        planner_last_result = dict(self.planner_state.get("last_result") or {})
+        return {
+            "agent_id": self.agent_id,
+            "display_name": self.display_name or self.name,
+            "role": self.role,
+            "control_state": control_snapshot,
+            "planner_state": dict(self.planner_state or {}),
+            "dik_integration_state": dict(self.dik_integration_state or {}),
+            "fallback_bootstrap": dict(self.fallback_bootstrap or {}),
+            "inspect_session": dict(self.inspect_session or {}),
+            "inspect_pursuit": dict(self.inspect_pursuit or {}),
+            "transport_state": dict(self.transport_state or {}),
+            "current_goal": self.goal,
+            "top_goals": top_goals,
+            "current_plan_id": getattr(self.current_plan, "plan_id", None),
+            "current_plan_method": getattr(self.current_plan, "plan_method_id", None),
+            "next_action": getattr(getattr(self.current_plan, "decision", None), "selected_action", None),
+            "current_target": self.target,
+            "last_status": self.status_last_action or (self.activity_log[-1] if self.activity_log else ""),
+            "last_action": planner_last_result.get("next_action", {}),
+        }
+
+    def get_agent_state_summary(self):
+        snapshot = self.get_runtime_state_snapshot()
+        control = snapshot["control_state"]
+        planner = snapshot["planner_state"]
+        return {
+            "identity": f"{snapshot['display_name']} ({snapshot['role']})",
+            "macro_mode": control.get("mode"),
+            "previous_mode": control.get("previous_mode"),
+            "mode_dwell_steps": control.get("mode_dwell_steps"),
+            "planner_status": planner.get("status"),
+            "dik_status": snapshot["dik_integration_state"].get("status"),
+            "transport_stage": snapshot["transport_state"].get("stage"),
+            "inspect_state": snapshot["inspect_session"].get("state"),
+            "target": snapshot.get("current_target"),
+            "last_status": snapshot.get("last_status"),
+        }
+
     def _emit_startup_once(self, sim_state, flag_name, event_type, payload=None):
         if sim_state is None:
             return

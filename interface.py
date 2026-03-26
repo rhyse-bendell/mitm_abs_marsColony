@@ -319,11 +319,19 @@ class MarsColonyInterface:
     def create_agents_tab(self):
         self.tab_agents = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_agents, text="Agent States")
+        self.agent_state_scroll = tk.Canvas(self.tab_agents, highlightthickness=0)
+        self.agent_state_scroll.pack(side="left", fill="both", expand=True)
+        scroll_y = ttk.Scrollbar(self.tab_agents, orient="vertical", command=self.agent_state_scroll.yview)
+        scroll_y.pack(side="right", fill="y")
+        self.agent_state_scroll.configure(yscrollcommand=scroll_y.set)
 
-        self.agent_state_table = ttk.Treeview(self.tab_agents, columns=("Heart Rate", "GSR", "Temp", "CO2"), show="headings")
-        for col in self.agent_state_table["columns"]:
-            self.agent_state_table.heading(col, text=col)
-        self.agent_state_table.pack(fill="both", expand=True)
+        self.agent_state_container = ttk.Frame(self.agent_state_scroll)
+        self.agent_state_scroll.create_window((0, 0), window=self.agent_state_container, anchor="nw")
+        self.agent_state_container.bind(
+            "<Configure>",
+            lambda _e: self.agent_state_scroll.configure(scrollregion=self.agent_state_scroll.bbox("all")),
+        )
+        self.agent_state_panels = {}
 
 
     def create_interaction_tab(self):
@@ -2289,23 +2297,8 @@ class MarsColonyInterface:
 
         interaction_widget.delete("1.0", tk.END)
         for agent in self.sim.agents:
-            current_states = []
-            if agent.target:
-                current_states.append("Moving")
-            if agent.goal == "share" and not agent.has_shared:
-                current_states.append("Communicating")
-            if agent.goal == "get_team_info":
-                current_states.append("Accessing Info")
-            if agent.goal == "build":
-                current_states.append("Building")
-
-            interaction_widget.insert(tk.END, f"{agent.name} ({agent.role}):\n")
-            interaction_widget.insert(tk.END, f"  Current State(s): {', '.join(current_states) or 'Idle'}\n")
-            interaction_widget.insert(tk.END, "  Transitions:\n")
-            interaction_widget.insert(tk.END, "    - Idle → Accessing Info\n")
-            interaction_widget.insert(tk.END, "    - Accessing Info → Sharing\n")
-            interaction_widget.insert(tk.END, "    - Sharing → Building\n")
-            interaction_widget.insert(tk.END, "    - Any → Moving (if target exists)\n\n")
+            snapshot = self._agent_state_snapshot(agent)
+            interaction_widget.insert(tk.END, self._format_agent_interaction_state(snapshot) + "\n\n")
 
         zone_widget.delete("1.0", tk.END)
         for agent in self.sim.agents:
@@ -2317,6 +2310,90 @@ class MarsColonyInterface:
                     current_zone = zone_name
                     break
             zone_widget.insert(tk.END, f"{agent.name} ({agent.role}): {current_zone}\n")
+
+    @staticmethod
+    def _agent_state_snapshot(agent):
+        if hasattr(agent, "get_runtime_state_snapshot"):
+            return dict(agent.get_runtime_state_snapshot() or {})
+        control = dict(getattr(agent, "control_state", {}) or {})
+        return {
+            "display_name": getattr(agent, "display_name", getattr(agent, "name", "agent")),
+            "role": getattr(agent, "role", "unknown"),
+            "control_state": control,
+            "planner_state": dict(getattr(agent, "planner_state", {}) or {}),
+            "dik_integration_state": dict(getattr(agent, "dik_integration_state", {}) or {}),
+            "inspect_session": dict(getattr(agent, "inspect_session", {}) or {}),
+            "inspect_pursuit": dict(getattr(agent, "inspect_pursuit", {}) or {}),
+            "fallback_bootstrap": dict(getattr(agent, "fallback_bootstrap", {}) or {}),
+            "transport_state": dict(getattr(agent, "transport_state", {}) or {}),
+            "top_goals": list(getattr(agent, "goal_stack", []) or [])[:3],
+            "current_plan_id": getattr(getattr(agent, "current_plan", None), "plan_id", None),
+            "current_plan_method": getattr(getattr(agent, "current_plan", None), "plan_method_id", None),
+            "next_action": {},
+            "current_target": getattr(agent, "target", None),
+            "last_status": getattr(agent, "status_last_action", ""),
+        }
+
+    @staticmethod
+    def _format_agent_interaction_state(snapshot):
+        control = dict(snapshot.get("control_state") or {})
+        planner = dict(snapshot.get("planner_state") or {})
+        dik = dict(snapshot.get("dik_integration_state") or {})
+        inspect = dict(snapshot.get("inspect_session") or {})
+        transport = dict(snapshot.get("transport_state") or {})
+        active_labels = []
+        if control.get("mode"):
+            active_labels.append(f"mode={control.get('mode')}")
+        if planner.get("status") and planner.get("status") != "idle":
+            active_labels.append(f"planner={planner.get('status')}")
+        if dik.get("status") and dik.get("status") != "idle":
+            active_labels.append(f"dik={dik.get('status')}")
+        if inspect.get("state") and inspect.get("state") != "idle":
+            active_labels.append(f"inspect={inspect.get('state')}")
+        if transport.get("stage") and transport.get("stage") != "idle":
+            active_labels.append(f"transport={transport.get('stage')}")
+        if snapshot.get("current_plan_id"):
+            active_labels.append("plan=active")
+        if snapshot.get("current_target"):
+            active_labels.append("movement=targeted")
+        return (
+            f"{snapshot.get('display_name')} ({snapshot.get('role')}):\n"
+            f"  Runtime State: {', '.join(active_labels) if active_labels else 'idle'}\n"
+            f"  Transition Hint: {control.get('previous_mode', 'none')} -> {control.get('mode', 'BOOTSTRAP')}"
+        )
+
+    @staticmethod
+    def _format_agent_state_panel(snapshot):
+        control = dict(snapshot.get("control_state") or {})
+        planner = dict(snapshot.get("planner_state") or {})
+        dik = dict(snapshot.get("dik_integration_state") or {})
+        bootstrap = dict(snapshot.get("fallback_bootstrap") or {})
+        inspect = dict(snapshot.get("inspect_session") or {})
+        inspect_pursuit = dict(snapshot.get("inspect_pursuit") or {})
+        transport = dict(snapshot.get("transport_state") or {})
+        top_goals = snapshot.get("top_goals") or []
+        policy_snapshot = dict(control.get("policy_snapshot") or control.get("last_policy_snapshot") or {})
+        top_features = dict(policy_snapshot.get("top_features") or control.get("top_features") or {})
+        next_action = snapshot.get("next_action")
+        if hasattr(next_action, "value"):
+            next_action = next_action.value
+        elif isinstance(next_action, dict):
+            next_action = next_action.get("action_type")
+        return "\n".join(
+            [
+                f"Macro mode: {control.get('mode', 'BOOTSTRAP')} (prev={control.get('previous_mode') or 'none'}, dwell={control.get('mode_dwell_steps', 0)})",
+                f"Transition reason: {control.get('last_transition_reason', 'none')}",
+                f"Planner: {planner.get('status', 'idle')} req={planner.get('request_id') or '-'} last={planner.get('last_result_request_id') or '-'}",
+                f"DIK: {dik.get('status', 'idle')} bootstrap={bootstrap.get('active', False)} stage={bootstrap.get('stage', '-')}",
+                f"Inspect: state={inspect.get('state', 'idle')} source={inspect.get('source_id') or inspect.get('target') or '-'} stalls={inspect_pursuit.get('no_progress_ticks', 0)} blocked={inspect_pursuit.get('blocked_attempts', 0)}",
+                f"Transport: stage={transport.get('stage', 'idle')} project={transport.get('bound_project_id') or '-'}",
+                f"Goals: {', '.join(str(g.get('goal_id') or g.get('goal') or g) for g in top_goals[:3]) or '(none)'}",
+                f"Plan: id={snapshot.get('current_plan_id') or '-'} method={snapshot.get('current_plan_method') or '-'} next={next_action or '-'}",
+                f"Target: {snapshot.get('current_target') or '-'}",
+                f"Last status: {snapshot.get('last_status') or '-'}",
+                f"Policy features: {top_features or {}}",
+            ]
+        )
 
     def _sync_construction_summaries(self):
         self.construction_text.delete("1.0", tk.END)
@@ -2689,10 +2766,24 @@ class MarsColonyInterface:
         self._render_environment_plot(self.ax, self.canvas)
 
     def update_agent_table(self):
-        for i in self.agent_state_table.get_children():
-            self.agent_state_table.delete(i)
+        if not hasattr(self, "agent_state_container"):
+            return
+        for child in self.agent_state_container.winfo_children():
+            child.destroy()
+        self.agent_state_panels = {}
         for agent in self.sim.agents:
-            self.agent_state_table.insert("", "end", values=(agent.heart_rate, round(agent.gsr, 3), round(agent.temperature, 2), round(agent.co2_output, 3)))
+            snapshot = self._agent_state_snapshot(agent)
+            panel = ttk.LabelFrame(
+                self.agent_state_container,
+                text=f"{snapshot.get('display_name')} ({snapshot.get('role')})",
+                padding=8,
+            )
+            panel.pack(fill="x", padx=6, pady=4, anchor="n")
+            body = tk.Text(panel, height=11, wrap="word")
+            body.pack(fill="x", expand=True)
+            body.insert("1.0", self._format_agent_state_panel(snapshot))
+            body.configure(state="disabled")
+            self.agent_state_panels[snapshot.get("agent_id") or snapshot.get("display_name")] = body
 
     def run(self):
         self.root.mainloop()

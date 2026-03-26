@@ -227,7 +227,16 @@ def _request_from_context_packet(context_packet) -> AgentBrainRequest:
         allowed_actions=list(context_packet.action_affordances),
         planning_horizon_config={"max_steps": 3},
         request_explanation=False,
-        task_context=dict(context_packet.static_task_context),
+        task_context={
+            **dict(context_packet.static_task_context),
+            "control_state": dict(cognitive.get("control_state", {})),
+            "build_readiness": dict(cognitive.get("build_readiness", {})),
+            "built_state": list(world.get("built_state", [])),
+            "loop_counters": dict(cognitive.get("loop_counters", {})),
+            "seconds_since_dik_change": cognitive.get("seconds_since_dik_change"),
+            "mismatch_signals": list(context_packet.history_bands.get("semantic_plan_evolution", {}).get("unresolved_contradictions", [])),
+            "inspect_state": dict(cognitive.get("inspect_state", {})),
+        },
         rule_context=list(cognitive.get("knowledge_summary", [])[:8]),
         derivation_context=[],
         artifact_context=list(context_packet.team_state.get("externalized_artifacts", []))[:4],
@@ -300,20 +309,21 @@ class RuleBrain(BrainProvider):
         return selected, probs
 
     def _extract_features(self, context_packet, *, is_request: bool = False) -> dict[str, float]:
-        cognitive = context_packet.individual_cognitive_state if not is_request else {}
-        world = context_packet.world_snapshot if not is_request else {}
+        request_ctx = dict(getattr(context_packet, "task_context", {}) or {}) if is_request else {}
+        cognitive = context_packet.individual_cognitive_state if not is_request else request_ctx
+        world = context_packet.world_snapshot if not is_request else {"built_state": request_ctx.get("built_state", [])}
         known_gaps = cognitive.get("known_gaps", []) if not is_request else list(context_packet.working_memory_summary.get("known_gaps", []))
-        readiness = cognitive.get("build_readiness", {}) if not is_request else {}
-        built_state = world.get("built_state", []) if not is_request else []
+        readiness = cognitive.get("build_readiness", {}) if not is_request else dict(request_ctx.get("build_readiness", {}))
+        built_state = world.get("built_state", []) if not is_request else list(request_ctx.get("built_state", []))
         active_projects = [p for p in built_state if p.get("state") in {"absent", "in_progress"} and float(p.get("progress", 0.0)) < 1.0]
-        mismatch_signals = context_packet.history_bands.get("semantic_plan_evolution", {}).get("unresolved_contradictions", []) if not is_request else []
-        loop_counters = cognitive.get("loop_counters", {}) if not is_request else {}
+        mismatch_signals = context_packet.history_bands.get("semantic_plan_evolution", {}).get("unresolved_contradictions", []) if not is_request else list(request_ctx.get("mismatch_signals", []))
+        loop_counters = cognitive.get("loop_counters", {}) if not is_request else dict(request_ctx.get("loop_counters", {}))
         repeated = max(int(loop_counters.get("action_repeats", 0) or 0), int(loop_counters.get("selected_action_repeats", 0) or 0))
         goal_stack = cognitive.get("goal_stack", []) if not is_request else list(context_packet.current_goal_stack)
         externalized = context_packet.team_state.get("externalized_artifacts", []) if not is_request else list(context_packet.artifact_context)
         validated = sum(1 for a in externalized if a.get("validation_state") == "validated")
-        seconds_since_dik_change = cognitive.get("seconds_since_dik_change") if not is_request else None
-        inspect_state = cognitive.get("inspect_state", {}) if not is_request else {}
+        seconds_since_dik_change = cognitive.get("seconds_since_dik_change") if not is_request else request_ctx.get("seconds_since_dik_change")
+        inspect_state = cognitive.get("inspect_state", {}) if not is_request else dict(request_ctx.get("inspect_state", {}))
         source_exhaustion = inspect_state.get("source_exhaustion", {}) if isinstance(inspect_state, dict) else {}
         exhausted_shared = bool((source_exhaustion.get("Team_Info", {}) or {}).get("exhausted"))
         role_name = ""
@@ -365,6 +375,177 @@ class RuleBrain(BrainProvider):
         }
         return mode_scores, mode_guards
 
+    @staticmethod
+    def _top_features(features: dict[str, float], *, limit: int = 4) -> dict[str, float]:
+        return {k: round(v, 3) for k, v in sorted(features.items(), key=lambda item: item[1], reverse=True)[:limit]}
+
+    def _apply_transition_guards(self, mode_scores: dict[str, float], mode_guards: dict[str, bool], features: dict[str, float], legal_types: set[str]) -> tuple[dict[str, float], list[str]]:
+        notes: list[str] = []
+        guarded_scores = {mode: score for mode, score in mode_scores.items() if mode_guards.get(mode, True)}
+        if features.get("build_opportunity", 0.0) > 0.0 and features.get("active_incomplete_projects", 0.0) > 0.0:
+            if ExecutableActionType.START_CONSTRUCTION.value in legal_types or ExecutableActionType.CONTINUE_CONSTRUCTION.value in legal_types:
+                guarded_scores["CONSTRUCT"] = guarded_scores.get("CONSTRUCT", mode_scores.get("CONSTRUCT", 0.0)) + 1.25
+                notes.append("build_ready_incomplete_projects_bias_construct")
+            if ExecutableActionType.TRANSPORT_RESOURCES.value in legal_types:
+                guarded_scores["LOGISTICS"] = guarded_scores.get("LOGISTICS", mode_scores.get("LOGISTICS", 0.0)) + 1.05
+                notes.append("build_ready_incomplete_projects_bias_logistics")
+            for mode in ("BOOTSTRAP", "ACQUIRE_DIK"):
+                if mode in guarded_scores:
+                    guarded_scores[mode] -= 1.1
+                    notes.append("build_ready_deprioritize_epistemic_churn")
+
+        if features.get("loop_pressure", 0.0) >= 0.75:
+            guarded_scores["RECOVERY"] = guarded_scores.get("RECOVERY", mode_scores.get("RECOVERY", 0.0)) + 1.35
+            notes.append("loop_pressure_bias_recovery")
+            for mode in ("ACQUIRE_DIK", "COORDINATE"):
+                if mode in guarded_scores:
+                    guarded_scores[mode] -= 0.8
+                    notes.append("loop_pressure_deprioritize_assistance_modes")
+
+        if features.get("contradiction_pressure", 0.0) > 0.0 or features.get("repair_pressure", 0.0) > 0.0:
+            for mode in ("REPAIR", "VALIDATE"):
+                if mode in guarded_scores:
+                    guarded_scores[mode] += 0.8
+            notes.append("contradiction_repair_bias")
+
+        if features.get("shared_source_exhausted", 0.0) > 0.0 and features.get("role_source_exhausted", 0.0) > 0.0 and features.get("dik_change_recency", 0.0) <= 0.0:
+            for mode in ("BOOTSTRAP", "ACQUIRE_DIK"):
+                if mode in guarded_scores:
+                    guarded_scores[mode] -= 1.2
+            guarded_scores["MONITOR"] = guarded_scores.get("MONITOR", mode_scores.get("MONITOR", 0.0)) + 0.5
+            notes.append("source_exhaustion_deprioritize_repeated_epistemic_requests")
+        return guarded_scores, notes
+
+    def _select_mode(
+        self,
+        *,
+        mode_scores: dict[str, float],
+        control_state: dict[str, Any],
+        context_packet,
+        features: dict[str, float],
+        is_request: bool,
+        rng: random.Random,
+    ) -> tuple[str, dict[str, float], str]:
+        current_mode = str(control_state.get("mode") or "BOOTSTRAP")
+        transition_reason = "stochastic_mode_selection"
+        if int(control_state.get("mode_dwell_steps", 0) or 0) < self.policy_config.min_mode_dwell_steps and current_mode in mode_scores:
+            selected_mode = current_mode
+            mode_probs = {k: (1.0 if k == current_mode else 0.0) for k in mode_scores}
+            transition_reason = "mode_dwell_guard_hold"
+        else:
+            selected_mode, mode_probs = self._softmax_pick(mode_scores, self.policy_config.mode_selection_temperature, rng)
+
+        force_bootstrap_exit, bootstrap_exit_reason = self._bootstrap_exit_triggered(
+            context_packet,
+            features,
+            control_state,
+            is_request=is_request,
+        )
+        if current_mode == "BOOTSTRAP" and selected_mode == "BOOTSTRAP" and force_bootstrap_exit:
+            bootstrap_candidates = [
+                ("ACQUIRE_DIK", mode_scores.get("ACQUIRE_DIK", -999.0) + 0.6),
+                ("INTEGRATE_DIK", mode_scores.get("INTEGRATE_DIK", -999.0) + 0.2),
+                ("COORDINATE", mode_scores.get("COORDINATE", -999.0)),
+                ("MONITOR", mode_scores.get("MONITOR", -999.0)),
+            ]
+            selected_mode = sorted(bootstrap_candidates, key=lambda item: item[1], reverse=True)[0][0]
+            mode_probs = {k: v for k, v in mode_probs.items() if k != "BOOTSTRAP"}
+            transition_reason = bootstrap_exit_reason
+        return selected_mode, mode_probs, transition_reason
+
+    def _score_actions_for_mode(
+        self,
+        *,
+        sorted_affordances: list[dict[str, Any]],
+        selected_mode: str,
+        features: dict[str, float],
+        traits: dict[str, float],
+    ) -> dict[str, float]:
+        action_scores: dict[str, float] = {}
+        for idx, affordance in enumerate(sorted_affordances):
+            action_type = str(affordance.get("action_type") or ExecutableActionType.WAIT.value)
+            utility = float(affordance.get("utility", 0.0))
+            score = utility + self.MODE_ACTION_PREFERENCES.get(selected_mode, {}).get(action_type, 0.0)
+            score += 0.6 * features["goal_pressure"] + 0.4 * features["build_opportunity"]
+            if action_type == ExecutableActionType.REQUEST_ASSISTANCE.value:
+                score += 0.9 * features["epistemic_deficit"] + 0.5 * float(traits.get("help_tendency", 0.5))
+                score -= 0.8 * features["loop_pressure"]
+            if (
+                features["build_opportunity"] > 0.0
+                and features["active_incomplete_projects"] > 0.0
+                and action_type == ExecutableActionType.START_CONSTRUCTION.value
+            ):
+                score += 1.15
+            if (
+                features["build_opportunity"] > 0.0
+                and features["active_incomplete_projects"] > 0.0
+                and features["dik_change_recency"] > 0.0
+                and action_type == ExecutableActionType.TRANSPORT_RESOURCES.value
+            ):
+                score += 1.25
+            if (
+                features["shared_source_exhausted"] > 0.0
+                and features["dik_change_recency"] <= 0.0
+                and action_type in {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, ExecutableActionType.REQUEST_ASSISTANCE.value}
+            ):
+                score -= 1.25
+            if action_type == ExecutableActionType.WAIT.value:
+                score -= 0.35
+            score += self.policy_config.randomness_floor * (1.0 - (idx / max(1, len(sorted_affordances))))
+            action_scores[f"{idx}:{action_type}"] = score
+        return action_scores
+
+    def _select_action(
+        self,
+        *,
+        sorted_affordances: list[dict[str, Any]],
+        action_scores: dict[str, float],
+        features: dict[str, float],
+        rng: random.Random,
+    ) -> tuple[ExecutableActionType, dict[str, Any], dict[str, float]]:
+        selected_action_key, action_probs = self._softmax_pick(
+            action_scores or {"0:wait": 0.0},
+            self.policy_config.action_selection_temperature,
+            rng,
+        )
+        selected_idx = int(selected_action_key.split(":")[0])
+        chosen = sorted_affordances[selected_idx] if sorted_affordances else {"action_type": ExecutableActionType.WAIT.value}
+        if (
+            features["build_opportunity"] > 0.0
+            and features["active_incomplete_projects"] > 0.0
+            and features["dik_change_recency"] > 0.0
+        ):
+            transport = next((a for a in sorted_affordances if a.get("action_type") == ExecutableActionType.TRANSPORT_RESOURCES.value), None)
+            if transport is not None:
+                chosen = transport
+        selected_action = ExecutableActionType(chosen.get("action_type", ExecutableActionType.WAIT.value))
+        return selected_action, chosen, action_probs
+
+    def _build_policy_snapshot(
+        self,
+        *,
+        selected_mode: str,
+        previous_mode: str,
+        selected_action: ExecutableActionType,
+        features: dict[str, float],
+        mode_probs: dict[str, float],
+        action_probs: dict[str, float],
+        transition_reason: str,
+        recovery_active: bool,
+    ) -> dict[str, Any]:
+        top_mode_probs = sorted(mode_probs.items(), key=lambda item: item[1], reverse=True)[: self.policy_config.max_logged_candidates]
+        top_action_probs = sorted(action_probs.items(), key=lambda item: item[1], reverse=True)[: self.policy_config.max_logged_candidates]
+        return {
+            "current_mode": selected_mode,
+            "previous_mode": previous_mode,
+            "top_features": self._top_features(features, limit=4),
+            "top_mode_probabilities": [(m, round(p, 4)) for m, p in top_mode_probs],
+            "top_action_probabilities": [(m, round(p, 4)) for m, p in top_action_probs],
+            "selected_action": selected_action.value,
+            "transition_reason": transition_reason,
+            "recovery_active": bool(recovery_active),
+        }
+
     def _bootstrap_exit_triggered(self, context_packet, features: dict[str, float], control_state: dict[str, Any], *, is_request: bool) -> tuple[bool, str]:
         if is_request:
             return False, ""
@@ -389,13 +570,14 @@ class RuleBrain(BrainProvider):
             return True, "bootstrap_exit_no_marginal_shared_value"
         return False, ""
 
-    def _apply_control_state_update(self, context_packet, selected_mode: str, features: dict[str, float], reason: str) -> dict[str, Any]:
+    def _apply_control_state_update(self, context_packet, selected_mode: str, features: dict[str, float], reason: str, policy_snapshot: dict[str, Any]) -> dict[str, Any]:
         control_state = context_packet.individual_cognitive_state.get("control_state", {}) if hasattr(context_packet, "individual_cognitive_state") else {}
         sim_step = int(context_packet.world_snapshot.get("sim_time", 0.0) if hasattr(context_packet, "world_snapshot") else 0)
         if not isinstance(control_state, dict):
             return {"mode": selected_mode, "mode_dwell_steps": 1}
         current_mode = str(control_state.get("mode") or "BOOTSTRAP")
-        if current_mode == selected_mode:
+        transition_applied = current_mode != selected_mode
+        if not transition_applied:
             control_state["mode_dwell_steps"] = int(control_state.get("mode_dwell_steps", 0) or 0) + 1
         else:
             control_state["previous_mode"] = current_mode
@@ -403,18 +585,18 @@ class RuleBrain(BrainProvider):
             control_state["mode_entered_step"] = sim_step
             control_state["mode_dwell_steps"] = 1
             control_state["last_transition_reason"] = reason
-            control_state["last_transition_features"] = {k: round(v, 3) for k, v in sorted(features.items(), key=lambda item: item[1], reverse=True)[:4]}
+            control_state["last_transition_features"] = self._top_features(features, limit=4)
             history = list(control_state.get("mode_history", []))
             history.append({"step": sim_step, "mode": selected_mode, "reason": reason})
             control_state["mode_history"] = history[-self.policy_config.max_history :]
             transition_history = list(control_state.get("transition_history", []))
             transition_history.append({"step": sim_step, "from_mode": current_mode, "to_mode": selected_mode, "reason": reason})
             control_state["transition_history"] = transition_history[-self.policy_config.max_history :]
-        control_state["last_policy_snapshot"] = {
-            "selected_mode": selected_mode,
-            "reason": reason,
-            "top_features": {k: round(v, 3) for k, v in sorted(features.items(), key=lambda item: item[1], reverse=True)[:4]},
-        }
+        if transition_applied:
+            control_state["last_transition_reason"] = reason
+            control_state["last_transition_features"] = self._top_features(features, limit=4)
+        control_state["recovery_active"] = bool(selected_mode == "RECOVERY" or policy_snapshot.get("recovery_active"))
+        control_state["last_policy_snapshot"] = dict(policy_snapshot)
         return control_state
 
     def _policy_core(self, context_packet, *, control_state: dict[str, Any] | None = None, is_request: bool = False) -> dict[str, Any]:
@@ -427,70 +609,47 @@ class RuleBrain(BrainProvider):
         if not control_state:
             control_state = {"mode": "BOOTSTRAP", "mode_dwell_steps": 0}
         mode_scores, mode_guards = self._compute_mode_scores(features, legal_types, control_state, traits)
-        mode_scores = {mode: score for mode, score in mode_scores.items() if mode_guards.get(mode, True)}
+        mode_scores, guard_notes = self._apply_transition_guards(mode_scores, mode_guards, features, legal_types)
         rng_seed = f"{getattr(context_packet, 'request_id', 'ctx')}-{len(affordances)}-{control_state.get('mode')}-{int(features['goal_pressure']*100)}"
         rng = random.Random(rng_seed)
-        current_mode = str(control_state.get("mode") or "BOOTSTRAP")
-        if int(control_state.get("mode_dwell_steps", 0) or 0) < self.policy_config.min_mode_dwell_steps and current_mode in mode_scores:
-            selected_mode = current_mode
-            mode_probs = {k: (1.0 if k == current_mode else 0.0) for k in mode_scores}
-        else:
-            selected_mode, mode_probs = self._softmax_pick(mode_scores, self.policy_config.mode_selection_temperature, rng)
-        force_bootstrap_exit, bootstrap_exit_reason = self._bootstrap_exit_triggered(context_packet, features, control_state, is_request=is_request)
-        if current_mode == "BOOTSTRAP" and selected_mode == "BOOTSTRAP" and force_bootstrap_exit:
-            bootstrap_candidates = [
-                ("ACQUIRE_DIK", mode_scores.get("ACQUIRE_DIK", -999.0) + 0.6),
-                ("INTEGRATE_DIK", mode_scores.get("INTEGRATE_DIK", -999.0) + 0.2),
-                ("COORDINATE", mode_scores.get("COORDINATE", -999.0)),
-            ]
-            selected_mode = sorted(bootstrap_candidates, key=lambda item: item[1], reverse=True)[0][0]
-            mode_probs = {k: v for k, v in mode_probs.items() if k != "BOOTSTRAP"}
-        action_scores: dict[str, float] = {}
-        for idx, affordance in enumerate(sorted_affordances):
-            action_type = str(affordance.get("action_type") or ExecutableActionType.WAIT.value)
-            utility = float(affordance.get("utility", 0.0))
-            score = utility + self.MODE_ACTION_PREFERENCES.get(selected_mode, {}).get(action_type, 0.0)
-            score += 0.6 * features["goal_pressure"] + 0.4 * features["build_opportunity"]
-            if action_type == ExecutableActionType.REQUEST_ASSISTANCE.value:
-                score += 0.9 * features["epistemic_deficit"] + 0.5 * float(traits.get("help_tendency", 0.5))
-            score -= 0.8 * features["loop_pressure"] if action_type == ExecutableActionType.REQUEST_ASSISTANCE.value else 0.0
-            if (
-                features["build_opportunity"] > 0.0
-                and features["active_incomplete_projects"] > 0.0
-                and action_type == ExecutableActionType.START_CONSTRUCTION.value
-            ):
-                score += 1.15
-            if (
-                features["build_opportunity"] > 0.0
-                and features["active_incomplete_projects"] > 0.0
-                and features["dik_change_recency"] > 0.0
-                and action_type == ExecutableActionType.TRANSPORT_RESOURCES.value
-            ):
-                score += 1.25
-            if action_type == ExecutableActionType.WAIT.value:
-                score -= 0.35
-            score += self.policy_config.randomness_floor * (1.0 - (idx / max(1, len(sorted_affordances))))
-            action_scores[f"{idx}:{action_type}"] = score
-        selected_action_key, action_probs = self._softmax_pick(action_scores or {"0:wait": 0.0}, self.policy_config.action_selection_temperature, rng)
-        selected_idx = int(selected_action_key.split(":")[0])
-        chosen = sorted_affordances[selected_idx] if sorted_affordances else {"action_type": ExecutableActionType.WAIT.value}
-        if (
-            features["build_opportunity"] > 0.0
-            and features["active_incomplete_projects"] > 0.0
-            and features["dik_change_recency"] > 0.0
-        ):
-            transport = next((a for a in sorted_affordances if a.get("action_type") == ExecutableActionType.TRANSPORT_RESOURCES.value), None)
-            if transport is not None:
-                chosen = transport
-        selected_action = ExecutableActionType(chosen.get("action_type", ExecutableActionType.WAIT.value))
-        reason = f"mode={selected_mode} with weighted stochastic policy"
-        if force_bootstrap_exit:
-            reason = f"{reason};{bootstrap_exit_reason}"
+        selected_mode, mode_probs, transition_reason = self._select_mode(
+            mode_scores=mode_scores,
+            control_state=control_state,
+            context_packet=context_packet,
+            features=features,
+            is_request=is_request,
+            rng=rng,
+        )
+        action_scores = self._score_actions_for_mode(
+            sorted_affordances=sorted_affordances,
+            selected_mode=selected_mode,
+            features=features,
+            traits=traits,
+        )
+        selected_action, chosen, action_probs = self._select_action(
+            sorted_affordances=sorted_affordances,
+            action_scores=action_scores,
+            features=features,
+            rng=rng,
+        )
+        reason = f"mode={selected_mode};transition={transition_reason}"
         assumptions = [f"policy_mode={selected_mode}", f"mode_dwell={control_state.get('mode_dwell_steps', 0)}"]
         if selected_action == ExecutableActionType.TRANSPORT_RESOURCES:
             assumptions.append(f"duration_s={chosen.get('duration_s', 30)}")
+        assumptions.extend([f"guard={note}" for note in guard_notes[:2]])
+        recovery_active = selected_mode == "RECOVERY" or features.get("loop_pressure", 0.0) >= 0.75
+        policy_snapshot = self._build_policy_snapshot(
+            selected_mode=selected_mode,
+            previous_mode=str(control_state.get("mode") or "BOOTSTRAP"),
+            selected_action=selected_action,
+            features=features,
+            mode_probs=mode_probs,
+            action_probs=action_probs,
+            transition_reason=transition_reason,
+            recovery_active=recovery_active,
+        )
         if not is_request:
-            updated_control = self._apply_control_state_update(context_packet, selected_mode, features, reason)
+            updated_control = self._apply_control_state_update(context_packet, selected_mode, features, reason, policy_snapshot)
             context_packet.individual_cognitive_state["control_state"] = updated_control
         else:
             updated_control = control_state
@@ -506,6 +665,7 @@ class RuleBrain(BrainProvider):
             "reason": reason,
             "assumptions": assumptions,
             "control_state": updated_control,
+            "policy_snapshot": policy_snapshot,
             "goal_update": "execute_build" if selected_mode in {"LOGISTICS", "CONSTRUCT"} else ("repair_detected_mismatch" if selected_mode == "REPAIR" else "maintain_forward_progress"),
         }
 
@@ -535,7 +695,12 @@ class RuleBrain(BrainProvider):
         )
 
     def generate_plan(self, request_packet: AgentBrainRequest) -> AgentBrainResponse:
-        result = self._policy_core(request_packet, control_state={"mode": "BOOTSTRAP", "mode_dwell_steps": 0}, is_request=True)
+        seed_control_state = dict((request_packet.task_context or {}).get("control_state") or {})
+        if not seed_control_state:
+            seed_control_state = dict((request_packet.current_plan_summary or {}).get("control_state") or {})
+        if not seed_control_state:
+            seed_control_state = {"mode": "BOOTSTRAP", "mode_dwell_steps": 0}
+        result = self._policy_core(request_packet, control_state=seed_control_state, is_request=True)
         step = PlannedActionStep(
             step_index=0,
             action_type=result["selected_action"],
@@ -566,6 +731,7 @@ class RuleBrain(BrainProvider):
                     f"mode={result['selected_mode']}",
                     f"mode_probs={[(m, round(p, 3)) for m, p in result['mode_probs']]}",
                     f"action_probs={[(a, round(p, 3)) for a, p in result['action_probs']]}",
+                    f"policy_snapshot={result.get('policy_snapshot', {})}",
                 ],
             },
             "explanation": (
