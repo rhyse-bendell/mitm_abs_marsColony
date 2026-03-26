@@ -78,6 +78,7 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         self.assertEqual(repair_action["type"], "construct")
 
         agent.inventory_resources["bricks"] = 1
+        agent.position = sim.environment.get_interaction_target_position("Build_Table_B", from_position=agent.position)
         agent.active_actions = [{**repair_action, "progress": 0.0}]
         agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.1)
         self.assertTrue(project["correct"])
@@ -90,6 +91,7 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         validate_action = agent._translate_brain_decision_to_legacy_action(validate, sim.environment, sim_state=sim)[0]
         self.assertEqual(validate_action["type"], "idle")
 
+        agent.position = sim.environment.get_interaction_target_position("Build_Table_B", from_position=agent.position)
         agent.active_actions = [{**validate_action, "progress": 0.0}]
         agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.1)
 
@@ -115,7 +117,7 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.1)
 
         after = int(project["delivered_resources"]["bricks"])
-        self.assertGreater(after, before)
+        self.assertEqual(after, before)
         sim.stop()
 
     def test_transport_does_not_false_progress_when_resources_already_satisfied(self):
@@ -138,6 +140,67 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         after = int(project["delivered_resources"]["bricks"])
 
         self.assertEqual(after, before)
+        sim.stop()
+
+    def test_transport_requires_pickup_and_dropoff_legality(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        before = int(project["delivered_resources"]["bricks"])
+        transport = {
+            "type": "transport_resources",
+            "duration": 30.0,
+            "progress": 0.0,
+            "project_id": project_id,
+            "decision_action": ExecutableActionType.TRANSPORT_RESOURCES.value,
+        }
+        agent.position = (8.0, 6.6)  # Team_Info region; not pickup and not build table
+        agent.active_actions = [transport]
+        agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.1)
+        self.assertEqual(before, int(project["delivered_resources"]["bricks"]))
+        self.assertEqual(agent.transport_state.get("stage"), "pickup")
+        sim.stop()
+
+    def test_validation_requires_location_and_status(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        self._prime_build_readiness(sim, agent)
+        project_id = "Build_Table_B"
+        validate = {
+            "type": "idle",
+            "duration": 1.0,
+            "progress": 0.0,
+            "project_id": project_id,
+            "decision_action": ExecutableActionType.VALIDATE_CONSTRUCTION.value,
+        }
+        # Wrong location and status: should not validate.
+        agent.position = (8.0, 6.6)
+        agent.active_actions = [validate]
+        agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.1)
+        self.assertFalse(sim.environment.construction.projects[project_id]["validated_complete"])
+        self.assertTrue(any(e.get("event_type") == "construction_validation_blocked" for e in sim.logger.recent_events))
+        sim.stop()
+
+    def test_inspect_context_cannot_shortcut_delivery(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        before = int(project["delivered_resources"]["bricks"])
+        # Simulate stale inspect context while a transport action exists.
+        agent.current_inspect_target_id = "Team_Info"
+        agent.position = (8.0, 6.6)
+        agent.active_actions = [{
+            "type": "transport_resources",
+            "duration": 30.0,
+            "progress": 0.0,
+            "project_id": project_id,
+            "decision_action": ExecutableActionType.TRANSPORT_RESOURCES.value,
+        }]
+        agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.1)
+        self.assertEqual(before, int(project["delivered_resources"]["bricks"]))
+        self.assertFalse(any(e.get("event_type") == "construction_resource_delivered" for e in sim.logger.recent_events))
         sim.stop()
 
     def test_construction_expected_rules_normalized_to_canonical_ids(self):
