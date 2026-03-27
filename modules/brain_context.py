@@ -434,6 +434,7 @@ class BrainContextBuilder:
                 else max(0.0, float(sim_state.time) - float(getattr(agent, "last_dik_change_time", 0.0)))
             ),
             "control_state": dict(getattr(agent, "control_state", {}) or {}),
+            "method_state": dict((getattr(agent, "control_state", {}) or {}).get("method_state") or {}),
             "planner_state": {
                 "status": getattr(agent, "planner_state", {}).get("status"),
                 "request_id": getattr(agent, "planner_state", {}).get("request_id"),

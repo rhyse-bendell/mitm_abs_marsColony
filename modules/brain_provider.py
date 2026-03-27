@@ -159,6 +159,91 @@ class RuleBrainPolicyConfig:
     max_logged_candidates: int = 6
 
 
+@dataclass(frozen=True)
+class RuleMethodDefinition:
+    method_id: str
+    applicable_modes: tuple[str, ...]
+    ordered_steps: tuple[str, ...]
+    preconditions: tuple[str, ...] = ()
+    success_conditions: tuple[str, ...] = ()
+    failure_conditions: tuple[str, ...] = ()
+    switch_conditions: tuple[str, ...] = ()
+    retry_budgets: dict[str, int] | None = None
+    role_preference: tuple[str, ...] = ()
+    source_cooldown_ticks: int = 0
+
+
+def _rule_method_library() -> dict[str, RuleMethodDefinition]:
+    return {
+        "AcquireInitialGrounding": RuleMethodDefinition(
+            method_id="AcquireInitialGrounding",
+            applicable_modes=("BOOTSTRAP", "ACQUIRE_DIK"),
+            ordered_steps=("move_to_shared_source", "inspect_shared_source", "integrate_shared_dik"),
+            success_conditions=("shared_grounding_sufficient",),
+            switch_conditions=("shared_source_exhausted_role_gap_remaining",),
+            retry_budgets={"inspect_shared_source": 2, "move_to_shared_source": 3},
+            source_cooldown_ticks=4,
+        ),
+        "AcquireRoleSpecificGrounding": RuleMethodDefinition(
+            method_id="AcquireRoleSpecificGrounding",
+            applicable_modes=("ACQUIRE_DIK",),
+            ordered_steps=("identify_role_source", "move_to_role_source", "inspect_role_source", "integrate_role_dik"),
+            success_conditions=("role_grounding_sufficient",),
+            failure_conditions=("role_source_exhausted_without_gain",),
+            retry_budgets={"inspect_role_source": 2, "move_to_role_source": 3},
+        ),
+        "ShareCriticalDIK": RuleMethodDefinition(
+            method_id="ShareCriticalDIK",
+            applicable_modes=("COORDINATE",),
+            ordered_steps=("select_teammate_or_artifact", "communicate_critical_dik"),
+            retry_budgets={"communicate_critical_dik": 2},
+        ),
+        "IntegrateColonyRules": RuleMethodDefinition(
+            method_id="IntegrateColonyRules",
+            applicable_modes=("INTEGRATE_DIK",),
+            ordered_steps=("consult_artifact", "reassess_plan_with_rules"),
+            success_conditions=("readiness_improved",),
+            retry_budgets={"consult_artifact": 2},
+        ),
+        "SelectProjectAndSite": RuleMethodDefinition(
+            method_id="SelectProjectAndSite",
+            applicable_modes=("LOGISTICS", "CONSTRUCT"),
+            ordered_steps=("identify_viable_project", "bind_project_target"),
+            success_conditions=("project_bound",),
+        ),
+        "TransportResourcesToProject": RuleMethodDefinition(
+            method_id="TransportResourcesToProject",
+            applicable_modes=("LOGISTICS",),
+            ordered_steps=("ensure_project_binding", "choose_accessible_pile", "move_to_pile", "pickup", "move_to_project", "dropoff"),
+            success_conditions=("project_resource_complete",),
+            retry_budgets={"move_to_pile": 3, "move_to_project": 3, "pickup": 2, "dropoff": 2},
+        ),
+        "ConstructProject": RuleMethodDefinition(
+            method_id="ConstructProject",
+            applicable_modes=("CONSTRUCT",),
+            ordered_steps=("ensure_build_ready", "start_or_continue_construction"),
+            success_conditions=("construction_progressed",),
+            failure_conditions=("construction_blocked",),
+            retry_budgets={"start_or_continue_construction": 3},
+        ),
+        "ValidateProject": RuleMethodDefinition(
+            method_id="ValidateProject",
+            applicable_modes=("VALIDATE",),
+            ordered_steps=("perform_validation",),
+            success_conditions=("validation_passed",),
+            failure_conditions=("validation_failed",),
+            retry_budgets={"perform_validation": 2},
+        ),
+        "RepairProject": RuleMethodDefinition(
+            method_id="RepairProject",
+            applicable_modes=("REPAIR",),
+            ordered_steps=("attempt_repair", "revalidate"),
+            success_conditions=("repair_succeeded",),
+            failure_conditions=("repair_failed_repeatedly",),
+            retry_budgets={"attempt_repair": 3},
+        ),
+    }
+
 def create_brain_provider(config: BrainBackendConfig | None = None) -> BrainProvider:
     config = config or BrainBackendConfig()
     selected = config.backend.lower()
@@ -253,6 +338,8 @@ def _request_from_context_packet(context_packet) -> AgentBrainRequest:
             "recovery_active": bool(control_state.get("recovery_active")),
             "top_features": dict((control_state.get("last_policy_snapshot", {}) or {}).get("top_features", {}) or control_state.get("last_transition_features", {})),
             "policy_snapshot": dict(control_state.get("last_policy_snapshot", {})),
+            "method_state": dict(control_state.get("method_state", {}) or {}),
+            "inspect_state": dict(cognitive.get("inspect_state", {}) or {}),
         },
     )
 
@@ -283,6 +370,45 @@ class RuleBrain(BrainProvider):
         "REPAIR": {ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value: 1.7, ExecutableActionType.VALIDATE_CONSTRUCTION.value: 0.4},
         "RECOVERY": {ExecutableActionType.REASSESS_PLAN.value: 1.0, ExecutableActionType.INSPECT_INFORMATION_SOURCE.value: 0.8, ExecutableActionType.OBSERVE_ENVIRONMENT.value: 0.5},
         "MONITOR": {ExecutableActionType.OBSERVE_ENVIRONMENT.value: 0.9, ExecutableActionType.WAIT.value: 0.3, ExecutableActionType.REASSESS_PLAN.value: 0.4},
+    }
+    METHOD_LIBRARY = _rule_method_library()
+    MODE_METHOD_PREFERENCES = {
+        "BOOTSTRAP": ("AcquireInitialGrounding",),
+        "ACQUIRE_DIK": ("AcquireRoleSpecificGrounding", "AcquireInitialGrounding"),
+        "INTEGRATE_DIK": ("IntegrateColonyRules",),
+        "COORDINATE": ("ShareCriticalDIK",),
+        "LOGISTICS": ("SelectProjectAndSite", "TransportResourcesToProject"),
+        "CONSTRUCT": ("ConstructProject", "SelectProjectAndSite"),
+        "VALIDATE": ("ValidateProject",),
+        "REPAIR": ("RepairProject",),
+        "RECOVERY": ("AcquireRoleSpecificGrounding", "IntegrateColonyRules"),
+        "MONITOR": ("ShareCriticalDIK",),
+    }
+    STEP_ACTION_MAP = {
+        "move_to_shared_source": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value},
+        "inspect_shared_source": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value},
+        "integrate_shared_dik": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.REASSESS_PLAN.value},
+        "identify_role_source": {ExecutableActionType.OBSERVE_ENVIRONMENT.value, ExecutableActionType.REASSESS_PLAN.value},
+        "move_to_role_source": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value},
+        "inspect_role_source": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value},
+        "integrate_role_dik": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.REASSESS_PLAN.value},
+        "select_teammate_or_artifact": {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.EXTERNALIZE_PLAN.value},
+        "communicate_critical_dik": {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.EXTERNALIZE_PLAN.value, ExecutableActionType.REQUEST_ASSISTANCE.value},
+        "consult_artifact": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.REASSESS_PLAN.value},
+        "reassess_plan_with_rules": {ExecutableActionType.REASSESS_PLAN.value, ExecutableActionType.EXTERNALIZE_PLAN.value},
+        "identify_viable_project": {ExecutableActionType.OBSERVE_ENVIRONMENT.value, ExecutableActionType.REASSESS_PLAN.value},
+        "bind_project_target": {ExecutableActionType.TRANSPORT_RESOURCES.value, ExecutableActionType.START_CONSTRUCTION.value},
+        "ensure_project_binding": {ExecutableActionType.TRANSPORT_RESOURCES.value, ExecutableActionType.REASSESS_PLAN.value},
+        "choose_accessible_pile": {ExecutableActionType.TRANSPORT_RESOURCES.value},
+        "move_to_pile": {ExecutableActionType.TRANSPORT_RESOURCES.value},
+        "pickup": {ExecutableActionType.TRANSPORT_RESOURCES.value},
+        "move_to_project": {ExecutableActionType.TRANSPORT_RESOURCES.value},
+        "dropoff": {ExecutableActionType.TRANSPORT_RESOURCES.value},
+        "ensure_build_ready": {ExecutableActionType.REASSESS_PLAN.value, ExecutableActionType.CONSULT_TEAM_ARTIFACT.value},
+        "start_or_continue_construction": {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value},
+        "perform_validation": {ExecutableActionType.VALIDATE_CONSTRUCTION.value, ExecutableActionType.OBSERVE_ENVIRONMENT.value},
+        "attempt_repair": {ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value, ExecutableActionType.REASSESS_PLAN.value},
+        "revalidate": {ExecutableActionType.VALIDATE_CONSTRUCTION.value},
     }
 
     def __init__(self, policy_config: RuleBrainPolicyConfig | None = None):
@@ -359,6 +485,8 @@ class RuleBrain(BrainProvider):
         role_name = ""
         if not is_request:
             role_name = str((getattr(context_packet, "static_task_context", {}) or {}).get("role", ""))
+        else:
+            role_name = str((request_ctx or {}).get("role", ""))
         exhausted_role = bool((source_exhaustion.get(f"{role_name}_Info", {}) or {}).get("exhausted"))
         return {
             "epistemic_deficit": min(1.0, len(known_gaps) / 4.0),
@@ -400,6 +528,8 @@ class RuleBrain(BrainProvider):
             normalized["top_features"] = dict(merged.get("top_features") or {})
         if merged.get("policy_snapshot"):
             normalized["last_policy_snapshot"] = dict(merged.get("policy_snapshot") or {})
+        if merged.get("method_state"):
+            normalized["method_state"] = dict(merged.get("method_state") or {})
         return normalized
 
     def _compute_mode_scores(self, features: dict[str, float], legal_types: set[str], control_state: dict[str, Any], traits: dict[str, float]) -> tuple[dict[str, float], dict[str, bool]]:
@@ -507,6 +637,129 @@ class RuleBrain(BrainProvider):
             mode_probs = {k: v for k, v in mode_probs.items() if k != "BOOTSTRAP"}
             transition_reason = bootstrap_exit_reason
         return selected_mode, mode_probs, transition_reason
+
+    @staticmethod
+    def _method_state_from_control(control_state: dict[str, Any], sim_step: int) -> dict[str, Any]:
+        state = dict(control_state.get("method_state") or {})
+        state.setdefault("active_method_id", None)
+        state.setdefault("active_method_step", None)
+        state.setdefault("active_method_instance", None)
+        state.setdefault("method_started_tick", sim_step)
+        state.setdefault("step_started_tick", sim_step)
+        state.setdefault("step_retry_count", 0)
+        state.setdefault("recent_step_outcomes", [])
+        state.setdefault("method_history", [])
+        state.setdefault("method_transition_history", [])
+        state.setdefault("abandoned_methods", [])
+        state.setdefault("method_cooldowns", {})
+        state.setdefault("source_cooldowns", {})
+        state.setdefault("source_exhaustion", {})
+        state.setdefault("last_method_switch_reason", "initialized")
+        return state
+
+    def _candidate_methods(self, selected_mode: str, method_state: dict[str, Any]) -> list[str]:
+        now = int(method_state.get("sim_step", 0) or 0)
+        candidates = []
+        for method_id in self.MODE_METHOD_PREFERENCES.get(selected_mode, ()):
+            cooldown_until = int((method_state.get("method_cooldowns", {}) or {}).get(method_id, -1) or -1)
+            if cooldown_until > now:
+                continue
+            method_def = self.METHOD_LIBRARY.get(method_id)
+            if method_def and selected_mode in method_def.applicable_modes:
+                candidates.append(method_id)
+        return candidates
+
+    def _switch_method(self, method_state: dict[str, Any], method_id: str, *, reason: str) -> None:
+        now = int(method_state.get("sim_step", 0) or 0)
+        prev_method = method_state.get("active_method_id")
+        if prev_method and prev_method != method_id:
+            transitions = list(method_state.get("method_transition_history", []))
+            transitions.append({"tick": now, "from_method": prev_method, "to_method": method_id, "reason": reason})
+            method_state["method_transition_history"] = transitions[-self.policy_config.max_history :]
+        method_state["active_method_id"] = method_id
+        method_state["active_method_instance"] = f"{method_id}-{now}"
+        method_state["method_started_tick"] = now
+        method_state["active_method_step"] = self.METHOD_LIBRARY[method_id].ordered_steps[0]
+        method_state["step_started_tick"] = now
+        method_state["step_retry_count"] = 0
+        method_state["last_method_switch_reason"] = reason
+        history = list(method_state.get("method_history", []))
+        history.append({"tick": now, "method_id": method_id, "event": "method_started", "reason": reason})
+        method_state["method_history"] = history[-self.policy_config.max_history :]
+
+    def _select_or_continue_method(self, *, selected_mode: str, method_state: dict[str, Any], features: dict[str, float], affordances: list[dict[str, Any]], is_request: bool) -> tuple[str | None, list[str]]:
+        notes: list[str] = []
+        now = int(method_state.get("sim_step", 0) or 0)
+        candidates = self._candidate_methods(selected_mode, method_state)
+        active = method_state.get("active_method_id")
+        if active in candidates:
+            return active, notes
+        if selected_mode == "ACQUIRE_DIK":
+            source_exhaustion = dict(method_state.get("source_exhaustion", {}))
+            team = dict(source_exhaustion.get("Team_Info", {}))
+            role_gap = features.get("epistemic_deficit", 0.0) > 0.0
+            if team.get("exhausted") and role_gap and "AcquireRoleSpecificGrounding" in candidates:
+                method_state.setdefault("source_cooldowns", {})["Team_Info"] = now + 4
+                self._switch_method(method_state, "AcquireRoleSpecificGrounding", reason="shared_source_exhausted_role_gap_remaining")
+                notes.append("method_switched_due_to_team_info_exhaustion")
+                return method_state.get("active_method_id"), notes
+        if candidates:
+            self._switch_method(method_state, candidates[0], reason=f"mode_method_selection:{selected_mode}")
+            notes.append(f"method_started:{candidates[0]}")
+            return candidates[0], notes
+        if not is_request:
+            method_state["last_method_switch_reason"] = f"no_method_for_mode:{selected_mode}"
+        return None, notes
+
+    def _evaluate_method_step(self, *, method_id: str | None, method_state: dict[str, Any], selected_mode: str, chosen_affordances: list[dict[str, Any]], features: dict[str, float]) -> tuple[str | None, list[str]]:
+        notes: list[str] = []
+        if method_id is None:
+            return None, notes
+        method_def = self.METHOD_LIBRARY[method_id]
+        step = method_state.get("active_method_step") or method_def.ordered_steps[0]
+        retry_budget = int((method_def.retry_budgets or {}).get(step, 2))
+        source_exhaustion = dict(method_state.get("source_exhaustion", {}))
+        team_exhausted = bool((source_exhaustion.get("Team_Info", {}) or {}).get("exhausted"))
+        role_gap = features.get("epistemic_deficit", 0.0) > 0.0
+        if method_id == "AcquireInitialGrounding" and team_exhausted and role_gap:
+            method_state["source_cooldowns"]["Team_Info"] = int(method_state.get("sim_step", 0) or 0) + int(method_def.source_cooldown_ticks or 4)
+            method_state["last_method_switch_reason"] = "team_info_exhausted_no_new_dik"
+            self._switch_method(method_state, "AcquireRoleSpecificGrounding", reason="team_info_exhausted_no_new_dik")
+            notes.append("source_marked_exhausted:Team_Info")
+            notes.append("source_cooldown_started:Team_Info")
+            return method_state.get("active_method_step"), notes
+        if int(method_state.get("step_retry_count", 0) or 0) >= retry_budget:
+            idx = list(method_def.ordered_steps).index(step)
+            if idx + 1 < len(method_def.ordered_steps):
+                new_step = method_def.ordered_steps[idx + 1]
+                method_state["active_method_step"] = new_step
+                method_state["step_started_tick"] = int(method_state.get("sim_step", 0) or 0)
+                method_state["step_retry_count"] = 0
+                notes.append(f"method_step_switched:{step}->{new_step}")
+                return new_step, notes
+            if selected_mode != "ACQUIRE_DIK":
+                method_state["abandoned_methods"] = (list(method_state.get("abandoned_methods", [])) + [{"tick": int(method_state.get("sim_step", 0) or 0), "method_id": method_id, "reason": "retry_budget_exhausted"}])[-self.policy_config.max_history :]
+            notes.append("method_abandoned_retry_budget_exhausted")
+        return step, notes
+
+    def _score_actions_for_method_step(self, *, sorted_affordances: list[dict[str, Any]], step_id: str | None, method_state: dict[str, Any]) -> dict[str, float]:
+        if not step_id:
+            return {}
+        allowed = self.STEP_ACTION_MAP.get(step_id, set())
+        scores: dict[str, float] = {}
+        source_cooldowns = dict(method_state.get("source_cooldowns", {}))
+        sim_step = int(method_state.get("sim_step", 0) or 0)
+        for idx, affordance in enumerate(sorted_affordances):
+            action_type = str(affordance.get("action_type") or ExecutableActionType.WAIT.value)
+            if allowed and action_type not in allowed:
+                continue
+            score = 1.0 + float(affordance.get("utility", 0.0))
+            if action_type == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value:
+                target_id = str(affordance.get("target_id") or "")
+                if int(source_cooldowns.get(target_id, -1) or -1) > sim_step:
+                    score -= 3.0
+            scores[f"{idx}:{action_type}"] = score
+        return scores
 
     def _score_actions_for_mode(
         self,
@@ -652,6 +905,7 @@ class RuleBrain(BrainProvider):
             control_state["last_transition_features"] = self._top_features(features, limit=4)
         control_state["recovery_active"] = bool(selected_mode == "RECOVERY" or policy_snapshot.get("recovery_active"))
         control_state["last_policy_snapshot"] = dict(policy_snapshot)
+        control_state.setdefault("method_state", dict(control_state.get("method_state") or {}))
         return control_state
 
     def _policy_core(self, context_packet, *, control_state: dict[str, Any] | None = None, is_request: bool = False) -> dict[str, Any]:
@@ -675,12 +929,42 @@ class RuleBrain(BrainProvider):
             is_request=is_request,
             rng=rng,
         )
+        sim_step = int((context_packet.world_snapshot.get("sim_time", 0.0) if not is_request else context_packet.sim_time) or 0)
+        method_state = self._method_state_from_control(control_state, sim_step)
+        method_state["sim_step"] = sim_step
+        inspect_state = (
+            dict((context_packet.individual_cognitive_state.get("inspect_state") or {}))
+            if not is_request
+            else dict((context_packet.task_context or {}).get("inspect_state") or {})
+        )
+        method_state["source_exhaustion"] = dict(inspect_state.get("source_exhaustion") or method_state.get("source_exhaustion") or {})
+        method_id, method_notes = self._select_or_continue_method(
+            selected_mode=selected_mode,
+            method_state=method_state,
+            features=features,
+            affordances=sorted_affordances,
+            is_request=is_request,
+        )
+        step_id, step_notes = self._evaluate_method_step(
+            method_id=method_id,
+            method_state=method_state,
+            selected_mode=selected_mode,
+            chosen_affordances=sorted_affordances,
+            features=features,
+        )
         action_scores = self._score_actions_for_mode(
             sorted_affordances=sorted_affordances,
             selected_mode=selected_mode,
             features=features,
             traits=traits,
         )
+        step_action_scores = self._score_actions_for_method_step(
+            sorted_affordances=sorted_affordances,
+            step_id=step_id,
+            method_state=method_state,
+        )
+        if step_action_scores:
+            action_scores.update({k: action_scores.get(k, 0.0) + (v * 1.6) for k, v in step_action_scores.items()})
         selected_action, chosen, action_probs = self._select_action(
             sorted_affordances=sorted_affordances,
             action_scores=action_scores,
@@ -689,9 +973,14 @@ class RuleBrain(BrainProvider):
         )
         reason = f"mode={selected_mode};transition={transition_reason}"
         assumptions = [f"policy_mode={selected_mode}", f"mode_dwell={control_state.get('mode_dwell_steps', 0)}"]
+        if method_id:
+            assumptions.append(f"method={method_id}")
+        if step_id:
+            assumptions.append(f"step={step_id}")
         if selected_action == ExecutableActionType.TRANSPORT_RESOURCES:
             assumptions.append(f"duration_s={chosen.get('duration_s', 30)}")
         assumptions.extend([f"guard={note}" for note in guard_notes[:2]])
+        assumptions.extend([f"method_note={note}" for note in (method_notes + step_notes)[:3]])
         recovery_active = selected_mode == "RECOVERY" or features.get("loop_pressure", 0.0) >= 0.75
         policy_snapshot = self._build_policy_snapshot(
             selected_mode=selected_mode,
@@ -708,6 +997,8 @@ class RuleBrain(BrainProvider):
             context_packet.individual_cognitive_state["control_state"] = updated_control
         else:
             updated_control = control_state
+        method_state.pop("sim_step", None)
+        updated_control["method_state"] = dict(method_state)
         top_mode_probs = sorted(mode_probs.items(), key=lambda item: item[1], reverse=True)[: self.policy_config.max_logged_candidates]
         top_action_probs = sorted(action_probs.items(), key=lambda item: item[1], reverse=True)[: self.policy_config.max_logged_candidates]
         return {
@@ -721,6 +1012,9 @@ class RuleBrain(BrainProvider):
             "assumptions": assumptions,
             "control_state": updated_control,
             "policy_snapshot": policy_snapshot,
+            "selected_method": method_id,
+            "selected_step": step_id,
+            "method_notes": method_notes + step_notes,
             "goal_update": "execute_build" if selected_mode in {"LOGISTICS", "CONSTRUCT"} else ("repair_detected_mismatch" if selected_mode == "REPAIR" else "maintain_forward_progress"),
         }
 
@@ -736,6 +1030,8 @@ class RuleBrain(BrainProvider):
             goal_update=result["goal_update"],
             plan_steps=[
                 f"macro_state:{result['selected_mode']}",
+                f"method:{result.get('selected_method') or 'none'}",
+                f"step:{result.get('selected_step') or 'none'}",
                 "execute legal action aligned with weighted affordance policy",
             ],
             reason_summary=result["reason"],
@@ -780,8 +1076,11 @@ class RuleBrain(BrainProvider):
                 "plan_method_id": "rule_brain_hierarchical_policy_v1",
                 "notes": [
                     f"mode={result['selected_mode']}",
+                    f"method={result.get('selected_method')}",
+                    f"step={result.get('selected_step')}",
                     f"mode_probs={[(m, round(p, 3)) for m, p in result['mode_probs']]}",
                     f"action_probs={[(a, round(p, 3)) for a, p in result['action_probs']]}",
+                    f"method_notes={result.get('method_notes', [])}",
                     f"policy_snapshot={result.get('policy_snapshot', {})}",
                 ],
             },
