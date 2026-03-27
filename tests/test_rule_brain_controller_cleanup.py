@@ -90,18 +90,74 @@ class TestRuleBrainControllerCleanup(unittest.TestCase):
     def test_derivation_pipeline_not_called_by_background_update_knowledge(self):
         env = Environment(phases=[])
         agent = Agent(name="Engineer", role="Engineer", position=env.objects["Team_Info"]["position"])
-        calls = {"count": 0}
+        calls = {"derivations": 0, "secondary": 0}
 
-        def _count(*_args, **_kwargs):
-            calls["count"] += 1
+        def _count_derivations(*_args, **_kwargs):
+            calls["derivations"] += 1
 
-        agent._apply_task_derivations = _count
+        def _count_secondary(*_args, **_kwargs):
+            calls["secondary"] += 1
+
+        agent._apply_task_derivations = _count_derivations
+        agent._apply_secondary_rule_inference = _count_secondary
         agent.update_knowledge(env, full_packet_sweep=False, sim_state=None)
-        self.assertEqual(calls["count"], 0)
+        self.assertEqual(calls["derivations"], 0)
+        self.assertEqual(calls["secondary"], 0)
 
         packet = env.knowledge_packets["Team_Info"]
         agent.absorb_packet(packet, accuracy=1.0, sim_state=None, source_id="Team_Info")
-        self.assertGreater(calls["count"], 0)
+        self.assertGreater(calls["derivations"], 0)
+        self.assertGreater(calls["secondary"], 0)
+
+    def test_update_knowledge_no_longer_runs_background_tag_rule_inference(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Architect", role="Architect", position=env.get_spawn_point("Architect"))
+        packet = env.knowledge_packets["Architect_Info"]
+        for info in packet.get("information", []):
+            agent.mental_model["information"].add(info)
+
+        calls = {"count": 0}
+        original_try_infer = agent.mental_model["knowledge"].try_infer_rules
+
+        def _count_try_infer(*args, **kwargs):
+            calls["count"] += 1
+            return original_try_infer(*args, **kwargs)
+
+        agent.mental_model["knowledge"].try_infer_rules = _count_try_infer
+        agent.update_knowledge(env, full_packet_sweep=False, sim_state=None)
+        self.assertEqual(calls["count"], 0)
+
+    def test_communication_transfer_still_triggers_epistemic_pipeline(self):
+        env = Environment(phases=[])
+        sender = Agent(name="Architect", role="Architect", position=(5.0, 5.0))
+        receiver = Agent(name="Engineer", role="Engineer", position=(5.05, 5.0))
+        env.agents = [sender, receiver]
+        packet = env.knowledge_packets["Team_Info"]
+        sender.absorb_packet(packet, accuracy=1.0, sim_state=None, source_id="Team_Info")
+
+        seen = {"count": 0}
+
+        def _count_trigger(*_args, **_kwargs):
+            seen["count"] += 1
+
+        receiver._trigger_epistemic_update_pipeline = _count_trigger
+        sender.communicate_with(receiver, sim_state=None)
+        self.assertGreater(seen["count"], 0)
+
+    def test_legacy_wrappers_remain_callable_as_compatibility_shims(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Architect", role="Architect", position=env.get_spawn_point("Architect"))
+        env.agents = [agent]
+
+        agent.evaluate_goals()
+        actions = agent.select_action()
+        self.assertIsInstance(actions, list)
+
+        agent.decide_next_action(env)
+        self.assertIsInstance(agent.current_action, list)
+
+        agent.decide(type("LegacySim", (), {"environment": env, "agents": [agent], "time": 0.0})())
+        self.assertIsInstance(agent.current_action, list)
 
     def test_deprecated_wrappers_not_used_in_live_simulation_update(self):
         sim = SimulationState(phases=[], brain_backend="rule_brain")
