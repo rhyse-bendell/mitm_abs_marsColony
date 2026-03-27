@@ -272,6 +272,21 @@ class Agent:
             "recovery_active": False,
             "last_policy_snapshot": {},
         }
+        # Durable fallback method/step state (simulator authoritative; bounded history).
+        self.active_method_id = None
+        self.active_method_instance = None
+        self.active_method_step = None
+        self.method_started_tick = None
+        self.step_started_tick = None
+        self.step_retry_count = 0
+        self.recent_step_outcomes = []
+        self.method_history = []
+        self.method_transition_history = []
+        self.abandoned_methods = []
+        self.method_cooldowns = {}
+        self.source_cooldowns = {}
+        self.source_exhaustion = {}
+        self.last_method_switch_reason = None
         self._planner_request_seq = 0
         self.planner_state = {
             "status": "idle",
@@ -461,6 +476,7 @@ class Agent:
         control = dict(self.control_state or {})
         snapshot = dict(control.get("last_policy_snapshot") or {})
         top_features = dict(snapshot.get("top_features") or control.get("last_transition_features") or {})
+        method_state = dict(control.get("method_state") or {})
         return {
             "mode": str(control.get("mode") or "BOOTSTRAP"),
             "previous_mode": control.get("previous_mode"),
@@ -472,7 +488,25 @@ class Agent:
             "policy_snapshot": snapshot,
             "mode_history": list(control.get("mode_history", [])),
             "transition_history": list(control.get("transition_history", [])),
+            "method_state": method_state,
         }
+
+    def _sync_method_state_from_control(self):
+        method_state = dict((self.control_state or {}).get("method_state") or {})
+        self.active_method_id = method_state.get("active_method_id")
+        self.active_method_instance = method_state.get("active_method_instance")
+        self.active_method_step = method_state.get("active_method_step")
+        self.method_started_tick = method_state.get("method_started_tick")
+        self.step_started_tick = method_state.get("step_started_tick")
+        self.step_retry_count = int(method_state.get("step_retry_count", 0) or 0)
+        self.recent_step_outcomes = list(method_state.get("recent_step_outcomes", []))[-8:]
+        self.method_history = list(method_state.get("method_history", []))[-12:]
+        self.method_transition_history = list(method_state.get("method_transition_history", []))[-12:]
+        self.abandoned_methods = list(method_state.get("abandoned_methods", []))[-8:]
+        self.method_cooldowns = dict(method_state.get("method_cooldowns", {}))
+        self.source_cooldowns = dict(method_state.get("source_cooldowns", {}))
+        self.source_exhaustion = dict(method_state.get("source_exhaustion", {}))
+        self.last_method_switch_reason = method_state.get("last_method_switch_reason")
 
     def get_runtime_state_snapshot(self):
         current_goals = [g for g in list(self.goal_stack or []) if isinstance(g, dict)]
@@ -484,6 +518,7 @@ class Agent:
             "display_name": self.display_name or self.name,
             "role": self.role,
             "control_state": control_snapshot,
+            "method_state": dict(control_snapshot.get("method_state") or {}),
             "planner_state": dict(self.planner_state or {}),
             "dik_integration_state": dict(self.dik_integration_state or {}),
             "fallback_bootstrap": dict(self.fallback_bootstrap or {}),
@@ -507,6 +542,8 @@ class Agent:
         return {
             "identity": f"{snapshot['display_name']} ({snapshot['role']})",
             "macro_mode": control.get("mode"),
+            "active_method": snapshot.get("method_state", {}).get("active_method_id"),
+            "active_step": snapshot.get("method_state", {}).get("active_method_step"),
             "previous_mode": control.get("previous_mode"),
             "mode_dwell_steps": control.get("mode_dwell_steps"),
             "planner_status": planner.get("status"),
@@ -2467,6 +2504,7 @@ class Agent:
             "recovery_active": bool(control_snapshot.get("recovery_active")),
             "top_features": dict(control_snapshot.get("top_features") or {}),
             "policy_snapshot": dict(control_snapshot.get("policy_snapshot") or {}),
+            "method_state": dict(control_snapshot.get("method_state") or {}),
         }
         return AgentBrainRequest(
             request_id=f"{self.agent_id}-{uuid.uuid4().hex[:8]}",
@@ -2580,6 +2618,7 @@ class Agent:
         updated_control_state = context.individual_cognitive_state.get("control_state", {})
         if isinstance(updated_control_state, dict) and updated_control_state:
             self.control_state.update(updated_control_state)
+            self._sync_method_state_from_control()
 
         provider_trace = getattr(provider, "last_trace", None)
         if isinstance(provider_trace, dict):
@@ -3926,6 +3965,7 @@ class Agent:
         updated_control_state = context.individual_cognitive_state.get("control_state", {})
         if isinstance(updated_control_state, dict) and updated_control_state:
             self.control_state.update(updated_control_state)
+            self._sync_method_state_from_control()
         self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment, sim_state=sim_state)
         self._emit_event(sim_state, "local_policy_refresh_used", {"reason": planner_reason, "backend": backend, "selected_action": decision.selected_action.value, "control_mode": self.control_state.get("mode"), "mode_dwell_steps": self.control_state.get("mode_dwell_steps")})
         return True

@@ -48,6 +48,7 @@ class TestInterfaceDashboardStructure(unittest.TestCase):
                 "display_name": "Architect",
                 "role": "Architect",
                 "control_state": {"mode": "CONSTRUCT", "previous_mode": "LOGISTICS"},
+                "method_state": {"active_method_id": "ConstructProject", "active_method_step": "start_or_continue_construction"},
                 "planner_state": {"status": "in_flight"},
                 "dik_integration_state": {"status": "running"},
                 "inspect_session": {"state": "inspecting"},
@@ -57,6 +58,7 @@ class TestInterfaceDashboardStructure(unittest.TestCase):
             }
         )
         self.assertIn("mode=CONSTRUCT", line)
+        self.assertIn("method=ConstructProject", line)
         self.assertIn("planner=in_flight", line)
         self.assertIn("movement=targeted", line)
 
@@ -78,6 +80,12 @@ class TestInterfaceDashboardStructure(unittest.TestCase):
                     "last_transition_reason": "loop_pressure_bias_recovery",
                     "policy_snapshot": {"top_features": {"loop_pressure": 1.0}},
                 },
+                "method_state": {
+                    "active_method_id": "RepairProject",
+                    "active_method_step": "attempt_repair",
+                    "step_retry_count": 1,
+                    "source_cooldowns": {"Team_Info": 14},
+                },
                 "planner_state": {"status": "idle", "request_id": "req-1", "last_result_request_id": "req-0"},
                 "dik_integration_state": {"status": "idle"},
                 "fallback_bootstrap": {"active": False, "stage": "complete"},
@@ -93,6 +101,7 @@ class TestInterfaceDashboardStructure(unittest.TestCase):
             }
         )
         self.assertIn("Macro mode: RECOVERY", rendered)
+        self.assertIn("Method: RepairProject", rendered)
         self.assertIn("Policy features", rendered)
 
 

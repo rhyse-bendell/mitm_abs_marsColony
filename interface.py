@@ -2320,6 +2320,7 @@ class MarsColonyInterface:
             "display_name": getattr(agent, "display_name", getattr(agent, "name", "agent")),
             "role": getattr(agent, "role", "unknown"),
             "control_state": control,
+            "method_state": dict(control.get("method_state") or {}),
             "planner_state": dict(getattr(agent, "planner_state", {}) or {}),
             "dik_integration_state": dict(getattr(agent, "dik_integration_state", {}) or {}),
             "inspect_session": dict(getattr(agent, "inspect_session", {}) or {}),
@@ -2337,6 +2338,7 @@ class MarsColonyInterface:
     @staticmethod
     def _format_agent_interaction_state(snapshot):
         control = dict(snapshot.get("control_state") or {})
+        method_state = dict(snapshot.get("method_state") or control.get("method_state") or {})
         planner = dict(snapshot.get("planner_state") or {})
         dik = dict(snapshot.get("dik_integration_state") or {})
         inspect = dict(snapshot.get("inspect_session") or {})
@@ -2344,6 +2346,10 @@ class MarsColonyInterface:
         active_labels = []
         if control.get("mode"):
             active_labels.append(f"mode={control.get('mode')}")
+        if method_state.get("active_method_id"):
+            active_labels.append(f"method={method_state.get('active_method_id')}")
+        if method_state.get("active_method_step"):
+            active_labels.append(f"step={method_state.get('active_method_step')}")
         if planner.get("status") and planner.get("status") != "idle":
             active_labels.append(f"planner={planner.get('status')}")
         if dik.get("status") and dik.get("status") != "idle":
@@ -2365,6 +2371,7 @@ class MarsColonyInterface:
     @staticmethod
     def _format_agent_state_panel(snapshot):
         control = dict(snapshot.get("control_state") or {})
+        method_state = dict(snapshot.get("method_state") or control.get("method_state") or {})
         planner = dict(snapshot.get("planner_state") or {})
         dik = dict(snapshot.get("dik_integration_state") or {})
         bootstrap = dict(snapshot.get("fallback_bootstrap") or {})
@@ -2383,6 +2390,9 @@ class MarsColonyInterface:
             [
                 f"Macro mode: {control.get('mode', 'BOOTSTRAP')} (prev={control.get('previous_mode') or 'none'}, dwell={control.get('mode_dwell_steps', 0)})",
                 f"Transition reason: {control.get('last_transition_reason', 'none')}",
+                f"Method: {method_state.get('active_method_id') or '-'} step={method_state.get('active_method_step') or '-'} retries={method_state.get('step_retry_count', 0)} switch={method_state.get('last_method_switch_reason') or '-'}",
+                f"Method cooldowns: {method_state.get('method_cooldowns') or {}}",
+                f"Source cooldowns/exhaustion: cooldowns={method_state.get('source_cooldowns') or {}} exhaustion={method_state.get('source_exhaustion') or {}}",
                 f"Planner: {planner.get('status', 'idle')} req={planner.get('request_id') or '-'} last={planner.get('last_result_request_id') or '-'}",
                 f"DIK: {dik.get('status', 'idle')} bootstrap={bootstrap.get('active', False)} stage={bootstrap.get('stage', '-')}",
                 f"Inspect: state={inspect.get('state', 'idle')} source={inspect.get('source_id') or inspect.get('target') or '-'} stalls={inspect_pursuit.get('no_progress_ticks', 0)} blocked={inspect_pursuit.get('blocked_attempts', 0)}",

@@ -183,6 +183,64 @@ class TestRuleBrainHierarchicalPolicy(unittest.TestCase):
         self.assertEqual(control["mode_dwell_steps"], 2)
         self.assertFalse(control.get("transition_history"))
 
+    def test_team_info_exhaustion_switches_to_role_specific_method_and_cooldown(self):
+        brain = RuleBrain(RuleBrainPolicyConfig(min_mode_dwell_steps=0))
+        context = self._context(
+            control_state={"mode": "ACQUIRE_DIK", "mode_dwell_steps": 2},
+            known_gaps=["missing_role_packet"],
+            affordances=[
+                {"action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, "utility": 0.9, "target_id": "Team_Info"},
+                {"action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, "utility": 0.5, "target_id": "Engineer_Info"},
+            ],
+        )
+        context.individual_cognitive_state["inspect_state"] = {
+            "source_exhaustion": {
+                "Team_Info": {"exhausted": True, "no_new_dik_streak": 3, "inspected": True},
+                "Engineer_Info": {"exhausted": False, "inspected": False},
+            }
+        }
+        brain.decide(context)
+        method_state = context.individual_cognitive_state["control_state"].get("method_state", {})
+        self.assertEqual(method_state.get("active_method_id"), "AcquireRoleSpecificGrounding")
+        self.assertIn("Team_Info", method_state.get("source_cooldowns", {}))
+
+    def test_active_method_persists_across_ticks(self):
+        brain = RuleBrain(RuleBrainPolicyConfig(min_mode_dwell_steps=0))
+        context = self._context(
+            control_state={"mode": "LOGISTICS", "mode_dwell_steps": 2},
+            ready=True,
+            affordances=[{"action_type": ExecutableActionType.TRANSPORT_RESOURCES.value, "utility": 0.8, "target_id": "resource_zone_to_work_zone"}],
+        )
+        brain.decide(context)
+        first_method = context.individual_cognitive_state["control_state"].get("method_state", {}).get("active_method_id")
+        brain.decide(context)
+        second_state = context.individual_cognitive_state["control_state"].get("method_state", {})
+        self.assertEqual(first_method, second_state.get("active_method_id"))
+        self.assertGreaterEqual(int(second_state.get("step_started_tick", 0)), 0)
+
+    def test_mode_method_consistency(self):
+        brain = RuleBrain(RuleBrainPolicyConfig(min_mode_dwell_steps=0))
+        context = self._context(
+            control_state={"mode": "VALIDATE", "mode_dwell_steps": 3},
+            affordances=[
+                {"action_type": ExecutableActionType.VALIDATE_CONSTRUCTION.value, "utility": 0.8},
+                {"action_type": ExecutableActionType.OBSERVE_ENVIRONMENT.value, "utility": 0.2},
+            ],
+        )
+        brain.decide(context)
+        control = context.individual_cognitive_state["control_state"]
+        method_id = control.get("method_state", {}).get("active_method_id")
+        self.assertIn(method_id, {"ValidateProject", None})
+
+    def test_generate_plan_carries_method_notes(self):
+        brain = RuleBrain(RuleBrainPolicyConfig(mode_selection_temperature=0.1, action_selection_temperature=0.1))
+        context = self._context(
+            control_state={"mode": "ACQUIRE_DIK", "mode_dwell_steps": 2},
+            affordances=[{"action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, "utility": 0.9, "target_id": "Engineer_Info"}],
+        )
+        response = brain.generate_plan(_request_from_context_packet(context))
+        self.assertTrue(any("method=" in note for note in response.plan.notes))
+
 
 if __name__ == "__main__":
     unittest.main()
