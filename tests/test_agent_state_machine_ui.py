@@ -53,6 +53,20 @@ class TestAgentStateMachineHelpers(unittest.TestCase):
         self.assertIn("planner:degraded", graph["warnings"])
         self.assertIn("exhausted:Team_Info", graph["warnings"])
 
+    def test_compute_state_layer_layout_reflows_with_viewport_width(self):
+        nodes = [{"key": f"m{i}", "label": f"Long Method Label {i} Needs Wrapping"} for i in range(6)]
+        narrow = self.cls._compute_state_layer_layout(nodes, 420, min_node_width=120, max_node_width=180)
+        wide = self.cls._compute_state_layer_layout(nodes, 1280, min_node_width=120, max_node_width=220)
+        self.assertLess(narrow["columns"], wide["columns"])
+        self.assertGreater(narrow["content_height"], wide["content_height"])
+        self.assertIn("\n", narrow["entries"][0]["label"])
+
+    def test_compute_canvas_scrollregion_expands_to_content_bounds(self):
+        region = self.cls._compute_canvas_scrollregion(400, 280, (0, 0, 920, 640))
+        self.assertEqual(region, (0, 0, 930, 650))
+        fallback = self.cls._compute_canvas_scrollregion(400, 280, None)
+        self.assertEqual(fallback, (0, 0, 400, 280))
+
 
 class TestUpdateAgentTableStateMachine(unittest.TestCase):
     def test_update_agent_table_renders_canvas_and_text(self):
@@ -96,6 +110,7 @@ class TestUpdateAgentTableStateMachine(unittest.TestCase):
             arch = app.agent_state_panels["architect"]
             self.assertIsInstance(arch["canvas"], tk.Canvas)
             self.assertTrue(arch["canvas"].bbox("all"))
+            self.assertIn("viewport", arch)
             panel_text = arch["body"].get("1.0", "end-1c")
             self.assertIn("Macro mode: CONSTRUCT", panel_text)
         finally:
