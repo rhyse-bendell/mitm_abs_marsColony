@@ -525,8 +525,49 @@ class Agent:
                 return True
         return False
 
+    def _apply_secondary_rule_inference(self, sim_state=None, trigger_source=None):
+        known_info = list(self.mental_model["information"])
+        if not known_info:
+            return
+
+        candidate_tags = {}
+        for info in known_info:
+            for tag in info.tags:
+                candidate_tags.setdefault(tag, []).append(info)
+
+        for tag, group in candidate_tags.items():
+            if len(group) < 2:
+                continue
+            infer_base = max(
+                self._hook_value("dik_update", "transform_information_to_knowledge", "success_probability", default=0.5),
+                self._trait_value("rule_accuracy"),
+            )
+            infer_prob = 0.35 + 0.6 * infer_base
+            if random.random() < infer_prob:
+                before_rules = len(self.mental_model["knowledge"].rules)
+                self.mental_model["knowledge"].try_infer_rules(group, agent_name=self.name)
+                after_rules = len(self.mental_model["knowledge"].rules)
+                if after_rules > before_rules:
+                    self.last_dik_change_time = getattr(self, "current_time", 0.0)
+                    self.activity_log.append(f"Inferred rule from tag [{tag}] (p={infer_prob:.2f})")
+                    if sim_state is not None:
+                        self._emit_event(
+                            sim_state,
+                            "secondary_rule_inference_succeeded",
+                            {
+                                "trigger_source": trigger_source,
+                                "tag": tag,
+                                "group_size": len(group),
+                                "inference_probability": infer_prob,
+                            },
+                        )
+
     def _trigger_epistemic_update_pipeline(self, *, sim_state=None, trigger_source=None):
+        trigger = str(trigger_source or "").strip()
+        if not trigger:
+            return
         self._apply_task_derivations(sim_state=sim_state, trigger_source=trigger_source)
+        self._apply_secondary_rule_inference(sim_state=sim_state, trigger_source=trigger_source)
 
     def get_runtime_state_snapshot(self):
         current_goals = [g for g in list(self.goal_stack or []) if isinstance(g, dict)]
@@ -2099,8 +2140,11 @@ class Agent:
                 continue
             goal.parent_goal_key = mission_goal_key
         self._refresh_goal_stack_view()
+    # ---------------------------------------------------------------------
+    # Legacy compatibility wrappers (non-authoritative runtime surfaces)
+    # ---------------------------------------------------------------------
     def decide(self, sim_state):
-        """Deprecated compatibility wrapper for legacy callers."""
+        """Legacy compatibility shim; not part of authoritative RuleBrain runtime."""
         self.perceive_environment(sim_state)
         self.update_internal_state()
         self._evaluate_goal_state(sim_state.environment)
@@ -4317,11 +4361,11 @@ class Agent:
                     self.reevaluate_knowledge()
 
     def evaluate_goals(self):
-        """Deprecated: retained for compatibility; delegates to authoritative evaluator."""
+        """Legacy compatibility shim; delegates to goal-state evaluator."""
         self._evaluate_goal_state(environment=None)
 
     def _evaluate_goal_state(self, environment):
-        """Authoritative goal-state evaluator used by the live simulation update path."""
+        """Legacy goal-state evaluator used by compatibility wrappers only."""
         if environment is None:
             return
 
@@ -4375,7 +4419,7 @@ class Agent:
             self.activity_log.append("Idling...")
 
     def _plan_actions_for_current_goal(self):
-        """Authoritative action planner from current goal state."""
+        """Legacy action planner used by compatibility wrappers only."""
         if not self.goal_stack:
             return [{"type": "idle", "duration": 1.0, "priority": 0}]
 
@@ -4396,14 +4440,14 @@ class Agent:
         return [{"type": "idle", "duration": 1.0, "priority": 0}]
 
     def _run_goal_management_pipeline(self, dt, environment):
-        """Single authoritative goal-management pipeline for agent behavior."""
+        """Legacy goal-management pipeline for non-SimulationState compatibility mode."""
         self.update_internal_state()
         self._evaluate_goal_state(environment)
         self.current_action = self._plan_actions_for_current_goal()
         self._advance_active_actions(dt, sim_state=None)
 
     def select_action(self):
-        """Deprecated: retained for compatibility; delegates to action planner."""
+        """Legacy compatibility shim; delegates to legacy action planner."""
         actions = self._plan_actions_for_current_goal()
         self.current_action = actions
         return actions
@@ -4655,6 +4699,7 @@ class Agent:
         self.co2_output = 0.04 + 0.01 * abs(self.heart_rate - 70)
 
     def update_knowledge(self, environment, full_packet_sweep=True, sim_state=None):
+        """Observational DIK/source bookkeeping; epistemic derivation is trigger-owned."""
         self._ensure_source_state(environment)
         if full_packet_sweep:
             for packet_name, packet_content in environment.knowledge_packets.items():
@@ -4677,24 +4722,8 @@ class Agent:
         if "mismatch with construction" in " ".join(self.activity_log[-6:]).lower() and self.current_inspect_target_id:
             self.mark_source_revisitable(self.current_inspect_target_id, reason="construction_mismatch")
 
-        known_info = list(self.mental_model["information"])
-        if known_info:
-            from itertools import combinations
-            candidate_tags = {}
-            for info in known_info:
-                for tag in info.tags:
-                    candidate_tags.setdefault(tag, []).append(info)
-            for tag, group in candidate_tags.items():
-                if len(group) >= 2:
-                    infer_base = max(self._hook_value("dik_update", "transform_information_to_knowledge", "success_probability", default=0.5), self._trait_value("rule_accuracy"))
-                    infer_prob = 0.35 + 0.6 * infer_base
-                    if random.random() < infer_prob:
-                        self.mental_model["knowledge"].try_infer_rules(group, agent_name=self.name)
-                        self.last_dik_change_time = getattr(self, "current_time", 0.0)
-                        self.activity_log.append(f"Inferred rule from tag [{tag}] (p={infer_prob:.2f})")
-
     def decide_next_action(self, environment):
-        """Deprecated compatibility wrapper for legacy callers."""
+        """Legacy compatibility shim; not used by authoritative controller runtime."""
         self._evaluate_goal_state(environment)
         self.current_action = self._plan_actions_for_current_goal()
 
@@ -5288,7 +5317,7 @@ class Agent:
                     )
 
     def update_active_actions(self, dt):
-        """Deprecated wrapper: use `_advance_active_actions(...)` in live path."""
+        """Legacy compatibility shim: use `_advance_active_actions(...)` in live path."""
         self._advance_active_actions(dt, sim_state=None)
 
     def _advance_active_actions(self, dt, sim_state=None):
