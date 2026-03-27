@@ -748,7 +748,18 @@ class RuleBrain(BrainProvider):
         allowed = self.STEP_ACTION_MAP.get(step_id, set())
         scores: dict[str, float] = {}
         source_cooldowns = dict(method_state.get("source_cooldowns", {}))
+        source_exhaustion = dict(method_state.get("source_exhaustion", {}))
         sim_step = int(method_state.get("sim_step", 0) or 0)
+        role_source = str(method_state.get("role_source_id") or "")
+        preferred_source: str | None = None
+        suppressed_sources: set[str] = set()
+        if step_id in {"move_to_shared_source", "inspect_shared_source"}:
+            preferred_source = "Team_Info"
+            if role_source:
+                suppressed_sources.add(role_source)
+        elif step_id in {"move_to_role_source", "inspect_role_source", "identify_role_source"} and role_source:
+            preferred_source = role_source
+            suppressed_sources.add("Team_Info")
         for idx, affordance in enumerate(sorted_affordances):
             action_type = str(affordance.get("action_type") or ExecutableActionType.WAIT.value)
             if allowed and action_type not in allowed:
@@ -757,7 +768,14 @@ class RuleBrain(BrainProvider):
             if action_type == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value:
                 target_id = str(affordance.get("target_id") or "")
                 if int(source_cooldowns.get(target_id, -1) or -1) > sim_step:
+                    score -= 6.0
+                exhausted = bool((source_exhaustion.get(target_id, {}) or {}).get("exhausted"))
+                if exhausted:
                     score -= 3.0
+                if preferred_source:
+                    score += 5.0 if target_id == preferred_source else -5.0
+                if target_id in suppressed_sources:
+                    score -= 4.0
             scores[f"{idx}:{action_type}"] = score
         return scores
 
@@ -809,6 +827,7 @@ class RuleBrain(BrainProvider):
         sorted_affordances: list[dict[str, Any]],
         action_scores: dict[str, float],
         features: dict[str, float],
+        step_allowed_actions: set[str] | None,
         rng: random.Random,
     ) -> tuple[ExecutableActionType, dict[str, Any], dict[str, float]]:
         selected_action_key, action_probs = self._softmax_pick(
@@ -822,6 +841,10 @@ class RuleBrain(BrainProvider):
             features["build_opportunity"] > 0.0
             and features["active_incomplete_projects"] > 0.0
             and features["dik_change_recency"] > 0.0
+            and (
+                not step_allowed_actions
+                or ExecutableActionType.TRANSPORT_RESOURCES.value in step_allowed_actions
+            )
         ):
             transport = next((a for a in sorted_affordances if a.get("action_type") == ExecutableActionType.TRANSPORT_RESOURCES.value), None)
             if transport is not None:
@@ -909,6 +932,10 @@ class RuleBrain(BrainProvider):
         return control_state
 
     def _policy_core(self, context_packet, *, control_state: dict[str, Any] | None = None, is_request: bool = False) -> dict[str, Any]:
+        # Authoritative fallback controller pipeline:
+        # 1) derive features, 2) select/continue macro mode, 3) select/continue method,
+        # 4) select/advance method step, 5) choose legal action for that step,
+        # 6) emit policy snapshot, 7) hand action to executor bridge (Agent).
         affordances = list(context_packet.action_affordances if not is_request else context_packet.allowed_actions)
         sorted_affordances = sorted(affordances, key=lambda a: float(a.get("utility", 0.0)), reverse=True)
         legal_types = {a.get("action_type") for a in affordances if a.get("action_type")}
@@ -932,6 +959,13 @@ class RuleBrain(BrainProvider):
         sim_step = int((context_packet.world_snapshot.get("sim_time", 0.0) if not is_request else context_packet.sim_time) or 0)
         method_state = self._method_state_from_control(control_state, sim_step)
         method_state["sim_step"] = sim_step
+        role_name = str(
+            (
+                (context_packet.static_task_context if not is_request else (context_packet.task_context or {}))
+                or {}
+            ).get("role", "")
+        )
+        method_state["role_source_id"] = f"{role_name}_Info" if role_name else ""
         inspect_state = (
             dict((context_packet.individual_cognitive_state.get("inspect_state") or {}))
             if not is_request
@@ -969,6 +1003,7 @@ class RuleBrain(BrainProvider):
             sorted_affordances=sorted_affordances,
             action_scores=action_scores,
             features=features,
+            step_allowed_actions=set(self.STEP_ACTION_MAP.get(step_id, set())) if step_id else None,
             rng=rng,
         )
         reason = f"mode={selected_mode};transition={transition_reason}"

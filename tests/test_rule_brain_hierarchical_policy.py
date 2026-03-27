@@ -241,6 +241,51 @@ class TestRuleBrainHierarchicalPolicy(unittest.TestCase):
         response = brain.generate_plan(_request_from_context_packet(context))
         self.assertTrue(any("method=" in note for note in response.plan.notes))
 
+    def test_method_authoritative_source_targeting_prefers_role_source(self):
+        brain = RuleBrain(RuleBrainPolicyConfig(min_mode_dwell_steps=0))
+        context = self._context(
+            control_state={
+                "mode": "ACQUIRE_DIK",
+                "mode_dwell_steps": 2,
+                "method_state": {
+                    "active_method_id": "AcquireRoleSpecificGrounding",
+                    "active_method_step": "move_to_role_source",
+                    "step_retry_count": 0,
+                    "source_cooldowns": {"Team_Info": 50},
+                },
+            },
+            known_gaps=["missing_role_packet"],
+            affordances=[
+                {"action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, "utility": 0.95, "target_id": "Team_Info"},
+                {"action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, "utility": 0.60, "target_id": "Engineer_Info"},
+            ],
+        )
+        decision = brain.decide(context)
+        self.assertEqual(decision.selected_action, ExecutableActionType.INSPECT_INFORMATION_SOURCE)
+        self.assertEqual(decision.target_id, "Engineer_Info")
+
+    def test_generate_plan_respects_method_state_source_targeting(self):
+        brain = RuleBrain(RuleBrainPolicyConfig(min_mode_dwell_steps=0))
+        context = self._context(
+            control_state={
+                "mode": "ACQUIRE_DIK",
+                "mode_dwell_steps": 2,
+                "method_state": {
+                    "active_method_id": "AcquireRoleSpecificGrounding",
+                    "active_method_step": "inspect_role_source",
+                    "source_cooldowns": {"Team_Info": 25},
+                },
+            },
+            known_gaps=["missing_role_packet"],
+            affordances=[
+                {"action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, "utility": 0.99, "target_id": "Team_Info"},
+                {"action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, "utility": 0.55, "target_id": "Engineer_Info"},
+            ],
+        )
+        response = brain.generate_plan(_request_from_context_packet(context))
+        self.assertEqual(response.plan.next_action.action_type.value, ExecutableActionType.INSPECT_INFORMATION_SOURCE.value)
+        self.assertEqual(response.plan.next_action.target_id, "Engineer_Info")
+
 
 if __name__ == "__main__":
     unittest.main()

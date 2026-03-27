@@ -3926,11 +3926,22 @@ class Agent:
         handoff = dict(self.post_inspect_handoff or {})
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
         if decision.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE and handoff.get("pending") and handoff.get("expires_at", 0.0) >= now_ts:
+            # Compatibility-only bootstrap when RuleBrain controller is unavailable.
             followup = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
             self.post_inspect_handoff["pending"] = False
             if followup.selected_action != ExecutableActionType.INSPECT_INFORMATION_SOURCE:
                 rewritten = followup
                 self._emit_event(sim_state, "policy_pivot_applied", {"origin": pivot_origin, "kind": "post_inspect", "previous_action": decision.selected_action.value, "pivoted_to": rewritten.selected_action.value, "reason": handoff.get("outcome")})
+            if context is not None and sim_state is not None:
+                rerouted = self._reroute_decision_through_rulebrain_controller(
+                    context,
+                    rewritten,
+                    sim_state=sim_state,
+                    pivot_origin=pivot_origin,
+                    reason=f"post_inspect:{handoff.get('outcome') or 'none'}",
+                )
+                if rerouted is not None:
+                    rewritten = rerouted
         if context is not None and rewritten.selected_action in {ExecutableActionType.INSPECT_INFORMATION_SOURCE, ExecutableActionType.REQUEST_ASSISTANCE}:
             readiness = context.individual_cognitive_state.get("build_readiness", {})
             built_state = context.world_snapshot.get("built_state", [])
@@ -3951,7 +3962,57 @@ class Agent:
                         confidence=max(0.8, float(decision.confidence or 0.0)),
                     )
                     self._emit_event(sim_state, "policy_pivot_applied", {"origin": pivot_origin, "kind": "post_readiness", "previous_action": decision.selected_action.value, "pivoted_to": rewritten.selected_action.value, "reason": "readiness_unlocked"})
+                    if sim_state is not None:
+                        rerouted = self._reroute_decision_through_rulebrain_controller(
+                            context,
+                            rewritten,
+                            sim_state=sim_state,
+                            pivot_origin=pivot_origin,
+                            reason="readiness_unlocked",
+                        )
+                        if rerouted is not None:
+                            rewritten = rerouted
         return rewritten
+
+    def _reroute_decision_through_rulebrain_controller(self, context, fallback_decision, *, sim_state, pivot_origin, reason):
+        """Route local pivots back through RuleBrain so method/step state remains authoritative."""
+        runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"provider": sim_state.brain_provider}
+        provider = runtime.get("provider")
+        if provider is None or provider.__class__.__name__ != "RuleBrain":
+            return None
+        control_state = context.individual_cognitive_state.setdefault("control_state", dict(self.control_state or {}))
+        method_state = dict(control_state.get("method_state") or {})
+        outcomes = list(method_state.get("recent_step_outcomes", []))
+        outcomes.append(
+            {
+                "tick": int(self.sim_step_count),
+                "origin": pivot_origin,
+                "reason": reason,
+                "fallback_selected_action": fallback_decision.selected_action.value,
+            }
+        )
+        method_state["recent_step_outcomes"] = outcomes[-8:]
+        method_state["last_method_switch_reason"] = f"pivot:{reason}"
+        control_state["method_state"] = method_state
+        context.individual_cognitive_state["control_state"] = control_state
+        controller_decision = provider.decide(context)
+        updated_control_state = context.individual_cognitive_state.get("control_state", {})
+        if isinstance(updated_control_state, dict) and updated_control_state:
+            self.control_state.update(updated_control_state)
+            self._sync_method_state_from_control()
+        self._emit_event(
+            sim_state,
+            "policy_pivot_rerouted_rulebrain",
+            {
+                "origin": pivot_origin,
+                "reason": reason,
+                "fallback_action": fallback_decision.selected_action.value,
+                "controller_action": controller_decision.selected_action.value,
+                "active_method": self.active_method_id,
+                "active_step": self.active_method_step,
+            },
+        )
+        return controller_decision
 
     def _attempt_local_rule_brain_refresh(self, sim_state, environment, planner_reason):
         runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"provider": sim_state.brain_provider, "configured_backend": sim_state.configured_brain_backend}
