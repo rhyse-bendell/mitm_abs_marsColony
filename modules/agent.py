@@ -2458,6 +2458,16 @@ class Agent:
         accepted_information = [item.get("candidate_id") for item in accepted.get("information", []) if isinstance(item, dict)]
         accepted_knowledge = [item.get("candidate_id") for item in accepted.get("knowledge", []) if isinstance(item, dict)]
         accepted_rules = [item.get("candidate_id") for item in accepted.get("rules", []) if isinstance(item, dict)]
+        control_snapshot = self.get_control_state_snapshot()
+        compact_control_snapshot = {
+            "mode": control_snapshot.get("mode"),
+            "previous_mode": control_snapshot.get("previous_mode"),
+            "mode_dwell_steps": control_snapshot.get("mode_dwell_steps"),
+            "last_transition_reason": control_snapshot.get("last_transition_reason"),
+            "recovery_active": bool(control_snapshot.get("recovery_active")),
+            "top_features": dict(control_snapshot.get("top_features") or {}),
+            "policy_snapshot": dict(control_snapshot.get("policy_snapshot") or {}),
+        }
         return AgentBrainRequest(
             request_id=f"{self.agent_id}-{uuid.uuid4().hex[:8]}",
             tick=self.sim_step_count,
@@ -2490,6 +2500,11 @@ class Agent:
             derivation_context=[str(e) for e in self.derivation_events[-5:]],
             artifact_context=list(context.team_state.get("externalized_artifacts", []))[:4],
             bootstrap_summary=bootstrap_summary,
+            control_mode=str(control_snapshot.get("mode") or "BOOTSTRAP"),
+            previous_control_mode=control_snapshot.get("previous_mode"),
+            mode_dwell_steps=int(control_snapshot.get("mode_dwell_steps", 0) or 0),
+            last_transition_reason=str(control_snapshot.get("last_transition_reason") or "none"),
+            control_state_snapshot=compact_control_snapshot,
         )
 
     def _is_productive_action(self, action_type):

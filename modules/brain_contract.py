@@ -134,6 +134,11 @@ class AgentBrainRequest:
     derivation_context: List[str] = field(default_factory=list)
     artifact_context: List[Dict[str, Any]] = field(default_factory=list)
     bootstrap_summary: Optional[Dict[str, Any]] = None
+    control_mode: Optional[str] = None
+    previous_control_mode: Optional[str] = None
+    mode_dwell_steps: Optional[int] = None
+    last_transition_reason: Optional[str] = None
+    control_state_snapshot: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "AgentBrainRequest":
@@ -161,6 +166,11 @@ class AgentBrainRequest:
             derivation_context=[str(item) for item in payload.get("derivation_context", [])],
             artifact_context=list(payload.get("artifact_context", [])),
             bootstrap_summary=payload.get("bootstrap_summary"),
+            control_mode=payload.get("control_mode"),
+            previous_control_mode=payload.get("previous_control_mode"),
+            mode_dwell_steps=payload.get("mode_dwell_steps"),
+            last_transition_reason=payload.get("last_transition_reason"),
+            control_state_snapshot=payload.get("control_state_snapshot"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -188,6 +198,11 @@ class AgentBrainRequest:
             "derivation_context": self.derivation_context,
             "artifact_context": self.artifact_context,
             "bootstrap_summary": self.bootstrap_summary,
+            "control_mode": self.control_mode,
+            "previous_control_mode": self.previous_control_mode,
+            "mode_dwell_steps": self.mode_dwell_steps,
+            "last_transition_reason": self.last_transition_reason,
+            "control_state_snapshot": self.control_state_snapshot,
         }
 
 
@@ -247,6 +262,11 @@ BRAIN_REQUEST_JSON_SCHEMA: Dict[str, Any] = {
         "request_explanation": {"type": "boolean"},
         "explanation_style": {"type": ["string", "null"]},
         "bootstrap_summary": {"type": ["object", "null"]},
+        "control_mode": {"type": ["string", "null"]},
+        "previous_control_mode": {"type": ["string", "null"]},
+        "mode_dwell_steps": {"type": ["integer", "null"]},
+        "last_transition_reason": {"type": ["string", "null"]},
+        "control_state_snapshot": {"type": ["object", "null"]},
     },
 }
 

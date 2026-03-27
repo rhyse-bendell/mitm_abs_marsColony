@@ -206,6 +206,7 @@ def _request_from_context_packet(context_packet) -> AgentBrainRequest:
     world = context_packet.world_snapshot
     cognitive = context_packet.individual_cognitive_state
     phase = world.get("phase_profile", {}).get("name", world.get("phase_state", {}).get("name", "default"))
+    control_state = dict(cognitive.get("control_state", {}))
     return AgentBrainRequest(
         request_id=f"ctx-{int(time.time()*1000)}",
         tick=0,
@@ -229,7 +230,7 @@ def _request_from_context_packet(context_packet) -> AgentBrainRequest:
         request_explanation=False,
         task_context={
             **dict(context_packet.static_task_context),
-            "control_state": dict(cognitive.get("control_state", {})),
+            "control_state": control_state,
             "build_readiness": dict(cognitive.get("build_readiness", {})),
             "built_state": list(world.get("built_state", [])),
             "loop_counters": dict(cognitive.get("loop_counters", {})),
@@ -240,6 +241,19 @@ def _request_from_context_packet(context_packet) -> AgentBrainRequest:
         rule_context=list(cognitive.get("knowledge_summary", [])[:8]),
         derivation_context=[],
         artifact_context=list(context_packet.team_state.get("externalized_artifacts", []))[:4],
+        control_mode=str(control_state.get("mode") or "BOOTSTRAP"),
+        previous_control_mode=control_state.get("previous_mode"),
+        mode_dwell_steps=int(control_state.get("mode_dwell_steps", 0) or 0),
+        last_transition_reason=str(control_state.get("last_transition_reason") or "none"),
+        control_state_snapshot={
+            "mode": str(control_state.get("mode") or "BOOTSTRAP"),
+            "previous_mode": control_state.get("previous_mode"),
+            "mode_dwell_steps": int(control_state.get("mode_dwell_steps", 0) or 0),
+            "last_transition_reason": str(control_state.get("last_transition_reason") or "none"),
+            "recovery_active": bool(control_state.get("recovery_active")),
+            "top_features": dict((control_state.get("last_policy_snapshot", {}) or {}).get("top_features", {}) or control_state.get("last_transition_features", {})),
+            "policy_snapshot": dict(control_state.get("last_policy_snapshot", {})),
+        },
     )
 
 
@@ -324,6 +338,22 @@ class RuleBrain(BrainProvider):
         validated = sum(1 for a in externalized if a.get("validation_state") == "validated")
         seconds_since_dik_change = cognitive.get("seconds_since_dik_change") if not is_request else request_ctx.get("seconds_since_dik_change")
         inspect_state = cognitive.get("inspect_state", {}) if not is_request else dict(request_ctx.get("inspect_state", {}))
+        if is_request:
+            request_control = dict(context_packet.control_state_snapshot or {})
+            if request_control:
+                inspect_state = dict(request_control.get("inspect_state") or inspect_state)
+            goal_stack = list(context_packet.current_goal_stack or goal_stack)
+            plan_summary = dict(context_packet.current_plan_summary or {})
+            if not goal_stack:
+                derived_goal = plan_summary.get("goal_id") or plan_summary.get("summary")
+                if derived_goal:
+                    goal_stack = [{"goal_id": str(derived_goal)}]
+            if known_gaps:
+                known_gaps = list(known_gaps)[:8]
+            elif context_packet.bootstrap_summary:
+                known_gaps = ["bootstrap_missing_details"]
+            if plan_summary.get("status") in {"blocked", "stalled"}:
+                repeated = max(repeated, 3)
         source_exhaustion = inspect_state.get("source_exhaustion", {}) if isinstance(inspect_state, dict) else {}
         exhausted_shared = bool((source_exhaustion.get("Team_Info", {}) or {}).get("exhausted"))
         role_name = ""
@@ -346,6 +376,31 @@ class RuleBrain(BrainProvider):
             "shared_source_exhausted": 1.0 if exhausted_shared else 0.0,
             "role_source_exhausted": 1.0 if exhausted_role else 0.0,
         }
+
+    @staticmethod
+    def _control_state_from_request(request_packet: AgentBrainRequest) -> dict[str, Any]:
+        snapshot = dict(request_packet.control_state_snapshot or {})
+        task_control = dict((request_packet.task_context or {}).get("control_state") or {})
+        plan_control = dict((request_packet.current_plan_summary or {}).get("control_state") or {})
+        merged = {**plan_control, **task_control, **snapshot}
+        mode = request_packet.control_mode or merged.get("mode") or "BOOTSTRAP"
+        previous = request_packet.previous_control_mode if request_packet.previous_control_mode is not None else merged.get("previous_mode")
+        dwell = request_packet.mode_dwell_steps if request_packet.mode_dwell_steps is not None else merged.get("mode_dwell_steps", 0)
+        reason = request_packet.last_transition_reason if request_packet.last_transition_reason is not None else merged.get("last_transition_reason", "none")
+        normalized = {
+            "mode": str(mode),
+            "previous_mode": previous,
+            "mode_dwell_steps": int(dwell or 0),
+            "last_transition_reason": str(reason or "none"),
+            "recovery_active": bool(merged.get("recovery_active")),
+        }
+        if merged.get("last_transition_features"):
+            normalized["last_transition_features"] = dict(merged.get("last_transition_features") or {})
+        if merged.get("top_features"):
+            normalized["top_features"] = dict(merged.get("top_features") or {})
+        if merged.get("policy_snapshot"):
+            normalized["last_policy_snapshot"] = dict(merged.get("policy_snapshot") or {})
+        return normalized
 
     def _compute_mode_scores(self, features: dict[str, float], legal_types: set[str], control_state: dict[str, Any], traits: dict[str, float]) -> tuple[dict[str, float], dict[str, bool]]:
         mode_scores = {m: 0.0 for m in self.MODES}
@@ -695,11 +750,7 @@ class RuleBrain(BrainProvider):
         )
 
     def generate_plan(self, request_packet: AgentBrainRequest) -> AgentBrainResponse:
-        seed_control_state = dict((request_packet.task_context or {}).get("control_state") or {})
-        if not seed_control_state:
-            seed_control_state = dict((request_packet.current_plan_summary or {}).get("control_state") or {})
-        if not seed_control_state:
-            seed_control_state = {"mode": "BOOTSTRAP", "mode_dwell_steps": 0}
+        seed_control_state = self._control_state_from_request(request_packet)
         result = self._policy_core(request_packet, control_state=seed_control_state, is_request=True)
         step = PlannedActionStep(
             step_index=0,

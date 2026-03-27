@@ -37,6 +37,31 @@ class _Logger:
 
 
 class TestRuleBrainRepairPatch(unittest.TestCase):
+    def test_build_brain_request_includes_compact_control_state_fields(self):
+        agent = Agent("Engineer", "Engineer")
+        agent.control_state.update(
+            {
+                "mode": "LOGISTICS",
+                "previous_mode": "COORDINATE",
+                "mode_dwell_steps": 4,
+                "last_transition_reason": "build_ready_incomplete_projects_bias_logistics",
+                "last_policy_snapshot": {"top_features": {"build_opportunity": 1.0}},
+            }
+        )
+        sim = SimpleNamespace(
+            time=1.0,
+            bootstrap_reuse_enabled=False,
+            get_agent_brain_runtime=lambda _a: {},
+            task_model=SimpleNamespace(task_id="mars_colony"),
+        )
+        context = _CtxBuilder().build(sim, agent)
+        request = agent._build_brain_request(sim, context, request_explanation=False, trigger_reason="unit_test")
+        self.assertEqual(request.control_mode, "LOGISTICS")
+        self.assertEqual(request.previous_control_mode, "COORDINATE")
+        self.assertEqual(request.mode_dwell_steps, 4)
+        self.assertEqual(request.last_transition_reason, "build_ready_incomplete_projects_bias_logistics")
+        self.assertEqual(request.control_state_snapshot.get("mode"), "LOGISTICS")
+
     def test_role_source_preferred_after_team_exhaustion(self):
         agent = Agent("Engineer", "Engineer")
         agent.goal_stack = [{"goal": "secure water connectivity", "status": "active"}]
