@@ -41,11 +41,11 @@ class TestInteractionTabResilience(unittest.TestCase):
             app.sim = _FakeSim(rows=[], time_value=25.0)
             app.update_interaction_tab()
             body = app.interaction_list.get("1.0", "end-1c")
-            self.assertIn("No interaction events are being logged yet", body)
+            self.assertIn("No interaction events logged yet.", body)
             self.assertIn("total=0", app.interaction_status_var.get())
 
             text_items = [app.interaction_canvas.itemcget(item, "text") for item in app.interaction_canvas.find_all()]
-            self.assertTrue(any("No interaction events are being logged yet" in text for text in text_items))
+            self.assertTrue(any("No interaction events logged yet." in text for text in text_items))
         finally:
             app.root.destroy()
 
@@ -62,7 +62,7 @@ class TestInteractionTabResilience(unittest.TestCase):
             app.interaction_type_filter.set("inspect")
             app.update_interaction_tab()
             body = app.interaction_list.get("1.0", "end-1c")
-            self.assertIn("No interaction events match the current filters/window", body)
+            self.assertIn("No interaction events match current filters/window.", body)
             self.assertIn("total=2", app.interaction_status_var.get())
             self.assertIn("shown=0", app.interaction_status_var.get())
         finally:
@@ -81,4 +81,3 @@ class TestInteractionTabResilience(unittest.TestCase):
         self.assertEqual("Architect", normalized["source_node"])
         self.assertEqual("-", normalized["target_node"])
         self.assertEqual("unknown", normalized["status"])
-

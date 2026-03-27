@@ -151,6 +151,48 @@ class TestInterfaceLifecycleUnit(unittest.TestCase):
         self.assertIsNone(self.app.sim)
         self.assertIn("boom", self.error_messages[0])
 
+    def test_finalize_simulation_install_populates_startup_views_in_expected_order(self):
+        calls = []
+        self.app._cancel_run_loop = lambda: calls.append("_cancel_run_loop")
+        self.app._update_control_states = lambda: calls.append("_update_control_states")
+        self.app.update_environment_plot = lambda: calls.append("update_environment_plot")
+        self.app.update_agent_table = lambda: calls.append("update_agent_table")
+        self.app.update_event_monitor = lambda: calls.append("update_event_monitor")
+        self.app.update_dashboard = lambda: calls.append("update_dashboard")
+        self.app._sync_construction_summaries = lambda: calls.append("_sync_construction_summaries")
+        self.app._update_system_log = lambda: calls.append("_update_system_log")
+        self.app._update_backend_status_display = lambda: calls.append("_update_backend_status_display")
+        self.app._update_observability_status_display = lambda: calls.append("_update_observability_status_display")
+        self.app.update_interaction_tab = lambda: calls.append("update_interaction_tab")
+        self.app.update_brain_tab = lambda: calls.append("update_brain_tab")
+        self.app.update_dik_derivations_tab = lambda: calls.append("update_dik_derivations_tab")
+        self.app.update_rule_derivations_tab = lambda: calls.append("update_rule_derivations_tab")
+        sim = _FakeSim()
+
+        MarsColonyInterface._finalize_simulation_install(self.app, sim)
+
+        self.assertIs(self.app.sim, sim)
+        self.assertEqual(self.app.run_state, self.app.STATE_IDLE)
+        self.assertEqual(
+            calls,
+            [
+                "_cancel_run_loop",
+                "_update_control_states",
+                "update_environment_plot",
+                "update_agent_table",
+                "update_event_monitor",
+                "update_dashboard",
+                "_sync_construction_summaries",
+                "_update_system_log",
+                "_update_backend_status_display",
+                "_update_observability_status_display",
+                "update_interaction_tab",
+                "update_brain_tab",
+                "update_dik_derivations_tab",
+                "update_rule_derivations_tab",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
