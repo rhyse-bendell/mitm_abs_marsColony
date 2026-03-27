@@ -116,6 +116,77 @@ class TestUpdateAgentTableStateMachine(unittest.TestCase):
         finally:
             app.root.destroy()
 
+    def test_update_agent_table_reuses_existing_panels_when_agent_set_is_stable(self):
+        try:
+            interface_mod = importlib.import_module("interface")
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"GUI dependency unavailable in test environment: {exc}")
+            return
+        MarsColonyInterface = interface_mod.MarsColonyInterface
+
+        try:
+            app = MarsColonyInterface()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk unavailable in test environment: {exc}")
+            return
+
+        snapshots = [
+            {
+                "agent_id": "architect",
+                "display_name": "Architect",
+                "role": "Architect",
+                "control_state": {"mode": "CONSTRUCT", "previous_mode": "LOGISTICS"},
+                "method_state": {"active_method_id": "ConstructProject", "active_method_step": "ensure_build_ready"},
+            }
+        ]
+
+        try:
+            app.root.withdraw()
+            app.sim = _FakeSim(snapshots)
+            app.update_agent_table()
+            first = app.agent_state_panels["architect"]
+            first_panel = first["panel"]
+            first_canvas = first["canvas"]
+            first_body = first["body"]
+
+            app.update_agent_table()
+            second = app.agent_state_panels["architect"]
+            self.assertIs(first_panel, second["panel"])
+            self.assertIs(first_canvas, second["canvas"])
+            self.assertIs(first_body, second["body"])
+            self.assertEqual(1, len(app.agent_state_panels))
+        finally:
+            app.root.destroy()
+
+    def test_agent_snapshot_signature_changes_only_when_key_fields_change(self):
+        try:
+            interface_mod = importlib.import_module("interface")
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"GUI dependency unavailable in test environment: {exc}")
+            return
+        cls = interface_mod.MarsColonyInterface
+
+        baseline = {
+            "control_state": {"mode": "CONSTRUCT", "previous_mode": "LOGISTICS", "last_transition_reason": "mode_shift"},
+            "method_state": {"active_method_id": "ConstructProject", "active_method_step": "step_a", "step_retry_count": 1},
+            "planner_state": {"status": "idle"},
+            "dik_integration_state": {"status": "idle"},
+            "transport_state": {"stage": "idle"},
+            "inspect_session": {"state": "idle"},
+            "inspect_pursuit": {"no_progress_ticks": 0, "blocked_attempts": 0},
+            "current_target": "site_a",
+        }
+        same = dict(baseline, display_name="Architect")
+        changed = dict(baseline)
+        changed["planner_state"] = {"status": "in_flight"}
+
+        sig_1 = cls._agent_snapshot_signature(baseline)
+        sig_2 = cls._agent_snapshot_signature(same)
+        sig_3 = cls._agent_snapshot_signature(changed)
+
+        self.assertEqual(sig_1, sig_2)
+        self.assertNotEqual(sig_1, sig_3)
+
 
 if __name__ == "__main__":
     unittest.main()
