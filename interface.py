@@ -1025,20 +1025,20 @@ class MarsColonyInterface:
 
         self.interaction_list.delete("1.0", tk.END)
         if not normalized_rows:
-            self._draw_interaction_empty_state("No interaction events are being logged yet.")
+            no_rows_message = "No interaction events logged yet."
+            self._draw_interaction_empty_state(no_rows_message)
             self.interaction_list.insert(
                 tk.END,
-                "No interaction events are being logged yet.\n"
-                "The interaction graph/list will populate after rows are emitted to the logger.\n",
+                f"{no_rows_message}\n",
             )
             return
 
         if not filtered:
-            self._draw_interaction_empty_state("No interaction events match the current filters/window.")
+            no_match_message = "No interaction events match current filters/window."
+            self._draw_interaction_empty_state(no_match_message)
             self.interaction_list.insert(
                 tk.END,
-                "No interaction events match the current filters/window.\n"
-                "Try widening the window, clearing type text, or selecting Agent=All.\n",
+                f"{no_match_message}\n",
             )
             return
 
@@ -2024,6 +2024,9 @@ class MarsColonyInterface:
         self._update_control_states()
 
         self.update_environment_plot()
+        self.update_agent_table()
+        self.update_event_monitor()
+        self.update_dashboard()
         self._sync_construction_summaries()
         self._update_system_log()
         self._update_backend_status_display()
