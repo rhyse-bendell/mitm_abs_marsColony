@@ -331,6 +331,7 @@ class MarsColonyInterface:
         self.agent_state_container.bind("<Configure>", self._on_agent_state_container_configure)
         self.agent_state_scroll.bind("<Configure>", self._on_agent_state_canvas_configure)
         self.agent_state_panels = {}
+        self._agent_state_min_redraw_interval_ms = 180
 
     def _on_agent_state_container_configure(self, _event=None):
         if not hasattr(self, "agent_state_scroll"):
@@ -360,6 +361,8 @@ class MarsColonyInterface:
         ttk.Label(controls, text="Window (s)").pack(side="left")
         self.interaction_window = DoubleVar(value=20.0)
         ttk.Entry(controls, textvariable=self.interaction_window, width=8).pack(side="left", padx=(4, 10))
+        self.interaction_status_var = StringVar(value="Interactions: waiting for simulation data.")
+        ttk.Label(controls, textvariable=self.interaction_status_var).pack(side="right")
 
         panes = ttk.PanedWindow(self.tab_interaction, orient="horizontal")
         panes.pack(fill="both", expand=True, padx=6, pady=6)
@@ -996,28 +999,125 @@ class MarsColonyInterface:
     def update_interaction_tab(self):
         if not self.sim or not hasattr(self.sim, "logger"):
             return
-        interactions = list(self.sim.logger.get_recent_interactions(180))
+        interactions = list(self.sim.logger.get_recent_interactions(180) or [])
         agent_filter = self.interaction_agent_filter.get()
         type_filter = self.interaction_type_filter.get().strip().lower()
         window_s = max(1.0, float(self.interaction_window.get() or 20.0))
         now_t = float(getattr(self.sim, "time", 0.0))
 
-        filtered = []
-        for row in interactions:
-            if now_t - float(row.get("time", 0.0) or 0.0) > window_s:
-                continue
-            aid = str(row.get("agent_id") or "")
-            if agent_filter != "All" and agent_filter.lower() not in aid.lower():
-                continue
-            itype = str(row.get("interaction_type") or "")
-            if type_filter and type_filter != "all" and type_filter not in itype.lower():
-                continue
-            filtered.append(row)
+        normalized_rows = [self._normalize_interaction_row(row, index=i) for i, row in enumerate(interactions)]
+        filtered = self._filter_interaction_rows(
+            normalized_rows,
+            now_t=now_t,
+            window_s=window_s,
+            agent_filter=agent_filter,
+            type_filter=type_filter,
+        )
+        self.interaction_status_var.set(
+            self._interaction_diagnostics_line(
+                total_rows=len(normalized_rows),
+                filtered_rows=len(filtered),
+                window_s=window_s,
+                agent_filter=agent_filter,
+                type_filter=type_filter,
+            )
+        )
+
+        self.interaction_list.delete("1.0", tk.END)
+        if not normalized_rows:
+            self._draw_interaction_empty_state("No interaction events are being logged yet.")
+            self.interaction_list.insert(
+                tk.END,
+                "No interaction events are being logged yet.\n"
+                "The interaction graph/list will populate after rows are emitted to the logger.\n",
+            )
+            return
+
+        if not filtered:
+            self._draw_interaction_empty_state("No interaction events match the current filters/window.")
+            self.interaction_list.insert(
+                tk.END,
+                "No interaction events match the current filters/window.\n"
+                "Try widening the window, clearing type text, or selecting Agent=All.\n",
+            )
+            return
 
         self._draw_interaction_graph(filtered)
-        self.interaction_list.delete("1.0", tk.END)
         for row in filtered[-40:]:
-            self.interaction_list.insert(tk.END, f"t={row.get('time')} {row.get('interaction_type')} {row.get('source_node')} -> {row.get('target_node')} [{row.get('status')}] {row.get('payload_summary')}\n")
+            self.interaction_list.insert(tk.END, self._format_interaction_row_line(row) + "\n")
+
+    @staticmethod
+    def _normalize_interaction_row(row, *, index=0):
+        data = dict(row or {})
+        interaction_type = str(data.get("interaction_type") or data.get("type") or data.get("event_type") or "unknown")
+        source_node = str(data.get("source_node") or data.get("source") or data.get("origin_node") or data.get("agent_id") or "-")
+        target_node = str(data.get("target_node") or data.get("target") or data.get("destination_node") or "-")
+        status = str(data.get("status") or data.get("result") or "unknown")
+        payload_summary = data.get("payload_summary")
+        if payload_summary in (None, ""):
+            payload_summary = data.get("summary") or data.get("payload") or data.get("message") or "-"
+        try:
+            parsed_time = float(data.get("time", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            parsed_time = 0.0
+        data.update(
+            {
+                "_row_index": index,
+                "time": parsed_time,
+                "interaction_type": interaction_type,
+                "source_node": source_node,
+                "target_node": target_node,
+                "status": status,
+                "payload_summary": str(payload_summary),
+            }
+        )
+        return data
+
+    @staticmethod
+    def _filter_interaction_rows(rows, *, now_t, window_s, agent_filter, type_filter):
+        filtered = []
+        filter_value = str(type_filter or "").strip().lower()
+        for row in rows:
+            if float(now_t) - float(row.get("time", 0.0) or 0.0) > float(window_s):
+                continue
+            aid = str(row.get("agent_id") or row.get("source_node") or "")
+            if agent_filter != "All" and str(agent_filter or "").lower() not in aid.lower():
+                continue
+            itype = str(row.get("interaction_type") or "").lower()
+            if filter_value and filter_value != "all" and filter_value not in itype:
+                continue
+            filtered.append(row)
+        return filtered
+
+    @staticmethod
+    def _interaction_diagnostics_line(*, total_rows, filtered_rows, window_s, agent_filter, type_filter):
+        active_type_filter = type_filter or "All"
+        return (
+            f"Interactions: total={int(total_rows)} shown={int(filtered_rows)} "
+            f"window={float(window_s):.1f}s agent={agent_filter or 'All'} type={active_type_filter}"
+        )
+
+    @staticmethod
+    def _format_interaction_row_line(row):
+        return (
+            f"t={row.get('time', 0.0):05.2f} {row.get('interaction_type', 'unknown')} "
+            f"{row.get('source_node', '-')} -> {row.get('target_node', '-')} "
+            f"[{row.get('status', 'unknown')}] {row.get('payload_summary', '-')}"
+        )
+
+    def _draw_interaction_empty_state(self, message):
+        canvas = self.interaction_canvas
+        canvas.delete("all")
+        w = max(200, canvas.winfo_width() or 900)
+        h = max(200, canvas.winfo_height() or 560)
+        canvas.create_text(
+            w / 2,
+            h / 2,
+            text=message,
+            fill="#e5e7eb",
+            font=("Arial", 11, "bold"),
+            width=max(180, int(w * 0.8)),
+        )
 
     def _draw_interaction_graph(self, interactions):
         canvas = self.interaction_canvas
@@ -3193,13 +3293,74 @@ class MarsColonyInterface:
         self._render_environment_plot(self.ax, self.canvas)
 
     def update_agent_table(self):
-        if not hasattr(self, "agent_state_container"):
+        if not hasattr(self, "agent_state_container") or not self.sim:
             return
-        for child in self.agent_state_container.winfo_children():
-            child.destroy()
-        self.agent_state_panels = {}
-        for agent in self.sim.agents:
+        snapshots_by_key = {}
+        active_keys = []
+        for index, agent in enumerate(self.sim.agents):
             snapshot = self._agent_state_snapshot(agent)
+            panel_key = self._agent_panel_key(snapshot, index=index)
+            snapshots_by_key[panel_key] = snapshot
+            active_keys.append(panel_key)
+
+        previous_scroll = self.agent_state_scroll.yview()
+        self._ensure_agent_state_panels(active_keys, snapshots_by_key)
+        for panel_key in active_keys:
+            self._update_agent_state_panel(panel_key, snapshots_by_key[panel_key])
+        self._remove_stale_agent_state_panels(set(active_keys))
+        if previous_scroll:
+            self.agent_state_scroll.update_idletasks()
+            self.agent_state_scroll.yview_moveto(previous_scroll[0])
+
+    @staticmethod
+    def _agent_panel_key(snapshot, *, index=0):
+        if snapshot.get("agent_id"):
+            return str(snapshot.get("agent_id"))
+        if snapshot.get("display_name"):
+            return f"{snapshot.get('display_name')}#{index}"
+        return f"agent_{index}"
+
+    @staticmethod
+    def _agent_snapshot_signature(snapshot):
+        control = dict(snapshot.get("control_state") or {})
+        method_state = dict(snapshot.get("method_state") or control.get("method_state") or {})
+        planner = dict(snapshot.get("planner_state") or {})
+        dik = dict(snapshot.get("dik_integration_state") or {})
+        inspect = dict(snapshot.get("inspect_session") or {})
+        inspect_pursuit = dict(snapshot.get("inspect_pursuit") or {})
+        transport = dict(snapshot.get("transport_state") or {})
+        payload = {
+            "mode": control.get("mode"),
+            "previous_mode": control.get("previous_mode"),
+            "transition_reason": control.get("last_transition_reason"),
+            "method": method_state.get("active_method_id"),
+            "step": method_state.get("active_method_step"),
+            "retries": method_state.get("step_retry_count"),
+            "switch_reason": method_state.get("last_method_switch_reason"),
+            "planner_status": planner.get("status"),
+            "dik_status": dik.get("status"),
+            "inspect_state": inspect.get("state"),
+            "inspect_no_progress_ticks": inspect_pursuit.get("no_progress_ticks"),
+            "inspect_blocked_attempts": inspect_pursuit.get("blocked_attempts"),
+            "transport_stage": transport.get("stage"),
+            "target": snapshot.get("current_target"),
+            "source_cooldowns": method_state.get("source_cooldowns") or {},
+            "source_exhaustion": method_state.get("source_exhaustion") or {},
+            "plan_id": snapshot.get("current_plan_id"),
+            "plan_method": snapshot.get("current_plan_method"),
+            "next_action": snapshot.get("next_action"),
+            "top_goals": snapshot.get("top_goals") or [],
+            "last_status": snapshot.get("last_status"),
+        }
+        return hashlib.sha1(
+            json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    def _ensure_agent_state_panels(self, active_keys, snapshots_by_key):
+        for panel_key in active_keys:
+            if panel_key in self.agent_state_panels:
+                continue
+            snapshot = snapshots_by_key.get(panel_key) or {}
             panel = ttk.LabelFrame(
                 self.agent_state_container,
                 text=f"{snapshot.get('display_name')} ({snapshot.get('role')})",
@@ -3211,7 +3372,13 @@ class MarsColonyInterface:
             graph_viewport.columnconfigure(0, weight=1)
             graph_viewport.rowconfigure(0, weight=1)
 
-            graph_canvas = tk.Canvas(graph_viewport, height=360, background="#ffffff", highlightthickness=1, highlightbackground="#d1d5db")
+            graph_canvas = tk.Canvas(
+                graph_viewport,
+                height=360,
+                background="#ffffff",
+                highlightthickness=1,
+                highlightbackground="#d1d5db",
+            )
             graph_canvas.grid(row=0, column=0, sticky="nsew")
             graph_scroll_y = ttk.Scrollbar(graph_viewport, orient="vertical", command=graph_canvas.yview)
             graph_scroll_y.grid(row=0, column=1, sticky="ns")
@@ -3221,20 +3388,63 @@ class MarsColonyInterface:
 
             body = tk.Text(panel, height=11, wrap="word")
             body.pack(fill="x", expand=True)
-            body.insert("1.0", self._format_agent_state_panel(snapshot))
             body.configure(state="disabled")
-            panel_key = snapshot.get("agent_id") or snapshot.get("display_name")
             self.agent_state_panels[panel_key] = {
+                "panel": panel,
                 "canvas": graph_canvas,
                 "viewport": graph_viewport,
                 "body": body,
-                "snapshot": snapshot,
+                "snapshot": {},
+                "signature": None,
                 "last_draw_width": 0,
+                "last_body_text": None,
                 "redraw_after_id": None,
+                "last_redraw_monotonic": 0.0,
+                "redraw_reason_force": False,
             }
             graph_viewport.bind("<Configure>", lambda _e, key=panel_key: self._schedule_agent_graph_redraw(key))
             graph_canvas.bind("<Configure>", lambda _e, key=panel_key: self._schedule_agent_graph_redraw(key))
-            self._schedule_agent_graph_redraw(panel_key, force=True)
+
+    def _update_agent_state_panel(self, panel_key, snapshot, *, force=False):
+        panel_state = self.agent_state_panels.get(panel_key)
+        if not panel_state:
+            return
+        panel = panel_state.get("panel")
+        signature = self._agent_snapshot_signature(snapshot)
+        signature_changed = force or signature != panel_state.get("signature")
+        if panel is not None:
+            panel.configure(text=f"{snapshot.get('display_name')} ({snapshot.get('role')})")
+        panel_state["snapshot"] = snapshot
+        if not signature_changed and not force:
+            return
+        panel_state["signature"] = signature
+        formatted = self._format_agent_state_panel(snapshot)
+        if formatted != panel_state.get("last_body_text"):
+            body = panel_state.get("body")
+            if body and body.winfo_exists():
+                body.configure(state="normal")
+                body.delete("1.0", tk.END)
+                body.insert("1.0", formatted)
+                body.configure(state="disabled")
+            panel_state["last_body_text"] = formatted
+        self._schedule_agent_graph_redraw(panel_key, force=force, snapshot_changed=True)
+
+    def _remove_stale_agent_state_panels(self, active_keys):
+        stale_keys = [key for key in self.agent_state_panels if key not in active_keys]
+        for panel_key in stale_keys:
+            panel_state = self.agent_state_panels.pop(panel_key, None)
+            if not panel_state:
+                continue
+            canvas = panel_state.get("canvas")
+            after_id = panel_state.get("redraw_after_id")
+            if canvas and after_id:
+                try:
+                    canvas.after_cancel(after_id)
+                except tk.TclError:
+                    pass
+            panel = panel_state.get("panel")
+            if panel and panel.winfo_exists():
+                panel.destroy()
 
     def _schedule_agent_graph_redraw(self, panel_key, *, force=False):
         panel_state = self.agent_state_panels.get(panel_key)
@@ -3244,7 +3454,9 @@ class MarsColonyInterface:
         if not canvas or not canvas.winfo_exists():
             return
         draw_width = max(320, int(canvas.winfo_width() or panel_state.get("last_draw_width") or 320))
-        if not force and abs(draw_width - int(panel_state.get("last_draw_width") or 0)) < 24:
+        width_changed = abs(draw_width - int(panel_state.get("last_draw_width") or 0)) >= 24
+        snapshot_changed = bool(panel_state.get("snapshot")) and panel_state.get("signature") != panel_state.get("last_drawn_signature")
+        if not force and not width_changed and not snapshot_changed:
             return
         after_id = panel_state.get("redraw_after_id")
         if after_id:
@@ -3252,7 +3464,14 @@ class MarsColonyInterface:
                 canvas.after_cancel(after_id)
             except tk.TclError:
                 pass
-        panel_state["redraw_after_id"] = canvas.after(60, lambda key=panel_key: self._redraw_agent_graph(key))
+        delay_ms = 60
+        if snapshot_changed and not force:
+            min_interval = int(getattr(self, "_agent_state_min_redraw_interval_ms", 0) or 0)
+            elapsed_ms = int((time.monotonic() - float(panel_state.get("last_redraw_monotonic") or 0.0)) * 1000)
+            if elapsed_ms < min_interval:
+                delay_ms = max(delay_ms, min_interval - elapsed_ms)
+        panel_state["redraw_reason_force"] = bool(force or snapshot_changed)
+        panel_state["redraw_after_id"] = canvas.after(delay_ms, lambda key=panel_key: self._redraw_agent_graph(key))
 
     def _redraw_agent_graph(self, panel_key):
         panel_state = self.agent_state_panels.get(panel_key)
@@ -3263,9 +3482,17 @@ class MarsColonyInterface:
         if not canvas or not snapshot or not canvas.winfo_exists():
             return
         draw_width = max(320, int(canvas.winfo_width() or panel_state.get("last_draw_width") or 320))
+        width_changed = abs(draw_width - int(panel_state.get("last_draw_width") or 0)) >= 24
+        snapshot_changed = panel_state.get("signature") != panel_state.get("last_drawn_signature")
+        if not panel_state.get("redraw_reason_force") and not width_changed and not snapshot_changed:
+            panel_state["redraw_after_id"] = None
+            return
         self._draw_agent_state_machine(canvas, snapshot, width=draw_width)
         panel_state["last_draw_width"] = draw_width
+        panel_state["last_drawn_signature"] = panel_state.get("signature")
+        panel_state["last_redraw_monotonic"] = time.monotonic()
         panel_state["redraw_after_id"] = None
+        panel_state["redraw_reason_force"] = False
 
     def run(self):
         self.root.mainloop()
