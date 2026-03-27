@@ -327,12 +327,22 @@ class MarsColonyInterface:
         self.agent_state_scroll.configure(yscrollcommand=scroll_y.set)
 
         self.agent_state_container = ttk.Frame(self.agent_state_scroll)
-        self.agent_state_scroll.create_window((0, 0), window=self.agent_state_container, anchor="nw")
-        self.agent_state_container.bind(
-            "<Configure>",
-            lambda _e: self.agent_state_scroll.configure(scrollregion=self.agent_state_scroll.bbox("all")),
-        )
+        self.agent_state_container_window = self.agent_state_scroll.create_window((0, 0), window=self.agent_state_container, anchor="nw")
+        self.agent_state_container.bind("<Configure>", self._on_agent_state_container_configure)
+        self.agent_state_scroll.bind("<Configure>", self._on_agent_state_canvas_configure)
         self.agent_state_panels = {}
+
+    def _on_agent_state_container_configure(self, _event=None):
+        if not hasattr(self, "agent_state_scroll"):
+            return
+        self.agent_state_scroll.configure(scrollregion=self.agent_state_scroll.bbox("all"))
+
+    def _on_agent_state_canvas_configure(self, event):
+        if not hasattr(self, "agent_state_scroll") or not hasattr(self, "agent_state_container_window"):
+            return
+        viewport_width = max(1, int(getattr(event, "width", 1) or 1))
+        self.agent_state_scroll.itemconfigure(self.agent_state_container_window, width=viewport_width)
+        self.agent_state_scroll.configure(scrollregion=self.agent_state_scroll.bbox("all"))
 
 
     def create_interaction_tab(self):
@@ -2552,7 +2562,7 @@ class MarsColonyInterface:
             width = 2
         dash = (6, 4) if dashed else None
         canvas.create_rectangle(x, y, x + w, y + h, fill=fill, outline=outline, width=width, dash=dash)
-        canvas.create_text(x + w / 2, y + h / 2, text=label, width=max(20, w - 8), font=("Arial", 9))
+        canvas.create_text(x + w / 2, y + h / 2, text=label, width=max(20, w - 10), font=("Arial", 9))
         return x + w / 2, y + h / 2
 
     @staticmethod
@@ -2579,32 +2589,126 @@ class MarsColonyInterface:
         canvas.create_text(x + 6, y + h / 2, text=f"{label}: {value}", anchor="w", font=("Arial", 8), width=w - 10)
 
     @staticmethod
+    def _wrap_state_label(label, *, max_chars=24, max_lines=3):
+        text = str(label or "-")
+        wrapped = []
+        for raw_line in text.splitlines() or ["-"]:
+            line = raw_line.strip() or "-"
+            while len(line) > max_chars:
+                split_at = line.rfind(" ", 0, max_chars + 1)
+                if split_at <= 0:
+                    split_at = max_chars
+                wrapped.append(line[:split_at].rstrip())
+                line = line[split_at:].lstrip()
+                if len(wrapped) >= max_lines:
+                    break
+            if len(wrapped) >= max_lines:
+                break
+            wrapped.append(line)
+            if len(wrapped) >= max_lines:
+                break
+        if len(wrapped) > max_lines:
+            wrapped = wrapped[:max_lines]
+        if wrapped and len(wrapped) == max_lines:
+            last = wrapped[-1]
+            if len(last) > max_chars - 1:
+                wrapped[-1] = (last[: max_chars - 1] + "…") if max_chars > 1 else "…"
+        return "\n".join(wrapped), text
+
+    @staticmethod
+    def _compute_state_layer_layout(
+        nodes,
+        viewport_width,
+        *,
+        left=16,
+        top=0,
+        min_node_width=120,
+        max_node_width=220,
+        node_height=34,
+        gap_x=12,
+        gap_y=14,
+        label_chars=24,
+    ):
+        available = max(min_node_width, int(viewport_width) - (left * 2))
+        denominator = max(1, min_node_width + gap_x)
+        columns = max(1, available // denominator)
+        while columns > 1:
+            test_width = (available - (columns - 1) * gap_x) // columns
+            if test_width >= min_node_width:
+                break
+            columns -= 1
+        node_width = max(min_node_width, min(max_node_width, (available - (columns - 1) * gap_x) // columns))
+        entries = []
+        for idx, node in enumerate(nodes):
+            row = idx // columns
+            col = idx % columns
+            x = left + col * (node_width + gap_x)
+            y = top + row * (node_height + gap_y)
+            display_label, full_label = MarsColonyInterface._wrap_state_label(node.get("label"), max_chars=label_chars)
+            entries.append(
+                {
+                    "key": node.get("key"),
+                    "x": x,
+                    "y": y,
+                    "w": node_width,
+                    "h": node_height,
+                    "label": display_label,
+                    "full_label": full_label,
+                    "center": (x + node_width / 2, y + node_height / 2),
+                }
+            )
+        rows = ((len(nodes) - 1) // columns + 1) if nodes else 1
+        content_width = left + columns * node_width + max(0, columns - 1) * gap_x + left
+        content_height = top + rows * node_height + max(0, rows - 1) * gap_y
+        return {
+            "entries": entries,
+            "columns": columns,
+            "node_width": node_width,
+            "content_width": content_width,
+            "content_height": content_height,
+        }
+
+    @staticmethod
+    def _compute_canvas_scrollregion(viewport_width, viewport_height, content_bbox, *, padding=10):
+        if not content_bbox:
+            return (0, 0, max(1, int(viewport_width or 1)), max(1, int(viewport_height or 1)))
+        _, _, x1, y1 = content_bbox
+        max_x = max(int(viewport_width or 1), int(x1 + padding))
+        max_y = max(int(viewport_height or 1), int(y1 + padding))
+        return (0, 0, max_x, max_y)
+
+    @staticmethod
     def _draw_agent_state_machine(canvas, snapshot, *, width=None):
         graph = MarsColonyInterface._state_machine_nodes_for_snapshot(snapshot)
         canvas.delete("all")
-        width = int(width or 1180)
+        width = int(width or canvas.winfo_width() or 1180)
+        viewport_height = int(canvas.winfo_height() or 320)
         left = 16
         top = 14
-        gap = 12
-        side_x = 860
 
         canvas.create_text(left, top, anchor="nw", text="State Machine Layers", font=("Arial", 10, "bold"), fill="#1f2937")
         y_modes = top + 24
-        y_methods = y_modes + 82
-        y_steps = y_methods + 84
-        y_support = y_steps + 84
 
         mode_centers = {}
-        node_w, node_h = 108, 34
-        for idx, mode in enumerate(graph["modes"]):
-            x = left + idx * (node_w + gap)
+        mode_layout = MarsColonyInterface._compute_state_layer_layout(
+            [{"key": mode, "label": mode} for mode in graph["modes"]],
+            width,
+            left=left,
+            top=y_modes,
+            min_node_width=108,
+            max_node_width=180,
+            node_height=34,
+            label_chars=20,
+        )
+        for idx, node in enumerate(mode_layout["entries"]):
+            mode = node["key"]
             center = MarsColonyInterface._draw_state_node(
                 canvas,
-                x,
-                y_modes,
-                node_w,
-                node_h,
-                mode,
+                node["x"],
+                node["y"],
+                node["w"],
+                node["h"],
+                node["label"],
                 active=mode == graph["current_mode"],
                 previous=mode == graph["previous_mode"],
             )
@@ -2612,52 +2716,78 @@ class MarsColonyInterface:
             if idx:
                 prev_mode = graph["modes"][idx - 1]
                 MarsColonyInterface._draw_state_edge(canvas, mode_centers[prev_mode], center)
+        y_methods = mode_layout["content_height"] + 22
 
         method_centers = {}
-        method_w, method_h = 176, 34
-        for idx, method_id in enumerate(graph["methods"]):
-            x = left + idx * (method_w + gap)
+        method_layout = MarsColonyInterface._compute_state_layer_layout(
+            [{"key": method_id, "label": method_id} for method_id in graph["methods"]],
+            width,
+            left=left,
+            top=y_methods,
+            min_node_width=170,
+            max_node_width=240,
+            node_height=36,
+            label_chars=30,
+        )
+        for node in method_layout["entries"]:
+            method_id = node["key"]
             dashed = method_id in graph["source_cooldowns"]
             center = MarsColonyInterface._draw_state_node(
                 canvas,
-                x,
-                y_methods,
-                method_w,
-                method_h,
-                method_id,
+                node["x"],
+                node["y"],
+                node["w"],
+                node["h"],
+                node["label"],
                 active=method_id == graph["current_method"],
                 dashed=dashed,
             )
             method_centers[method_id] = center
             if graph["current_mode"] in mode_centers:
                 MarsColonyInterface._draw_state_edge(canvas, mode_centers[graph["current_mode"]], center, color="#94a3b8")
+        y_steps = method_layout["content_height"] + 22
 
         step_centers = {}
-        step_w, step_h = 168, 30
-        for idx, step in enumerate(graph["steps"]):
-            x = left + idx * (step_w + gap)
+        step_nodes = []
+        for step in graph["steps"]:
+            is_active = step == graph["current_step"]
+            step_label = step if not is_active or graph["retry_count"] <= 0 else f"{step} (retry={graph['retry_count']})"
+            step_nodes.append({"key": step, "label": step_label})
+        step_layout = MarsColonyInterface._compute_state_layer_layout(
+            step_nodes,
+            width,
+            left=left,
+            top=y_steps,
+            min_node_width=168,
+            max_node_width=250,
+            node_height=32,
+            label_chars=34,
+        )
+        for node in step_layout["entries"]:
+            step = node["key"]
             active = step == graph["current_step"]
             warn = active and graph["retry_count"] >= 2
-            label = step if not active or graph["retry_count"] <= 0 else f"{step} (retry={graph['retry_count']})"
             center = MarsColonyInterface._draw_state_node(
                 canvas,
-                x,
-                y_steps,
-                step_w,
-                step_h,
-                label,
+                node["x"],
+                node["y"],
+                node["w"],
+                node["h"],
+                node["label"],
                 active=active,
                 warn=warn,
             )
             step_centers[step] = center
             if graph["current_method"] in method_centers:
                 MarsColonyInterface._draw_state_edge(canvas, method_centers[graph["current_method"]], center, color="#94a3b8")
+        y_support = step_layout["content_height"] + 22
 
-        badge_w, badge_h = 198, 30
+        badge_w, badge_h = 210, 32
+        badges_per_row = max(1, (max(200, width - left * 2) + 12) // (badge_w + 12))
         for idx, badge in enumerate(graph["support_badges"]):
-            row = idx // 3
-            col = idx % 3
-            x = left + col * (badge_w + gap)
+            row = idx // badges_per_row
+            col = idx % badges_per_row
+            x = left + col * (badge_w + 12)
             y = y_support + row * (badge_h + 8)
             MarsColonyInterface._draw_state_badge(
                 canvas,
@@ -2682,12 +2812,14 @@ class MarsColonyInterface:
             f"Source exhaustion: {graph['source_exhaustion'] or '-'}",
             f"Warnings: {', '.join(graph['warnings']) if graph['warnings'] else 'none'}",
         ]
-        canvas.create_rectangle(side_x, y_modes - 6, width - 18, y_support + 120, fill="#f8fafc", outline="#cbd5e1")
-        canvas.create_text(side_x + 8, y_modes + 2, anchor="nw", text="\n".join(history_lines), width=max(120, width - side_x - 32), font=("Arial", 8))
+        badges_rows = (len(graph["support_badges"]) + badges_per_row - 1) // badges_per_row
+        history_y = y_support + badges_rows * (badge_h + 8) + 10
+        history_width = max(260, width - left * 2)
+        canvas.create_rectangle(left, history_y, left + history_width, history_y + 148, fill="#f8fafc", outline="#cbd5e1")
+        canvas.create_text(left + 8, history_y + 6, anchor="nw", text="\n".join(history_lines), width=max(240, history_width - 16), font=("Arial", 8))
 
-        max_x = max(width, left + max(len(graph["modes"]) * (node_w + gap), len(graph["methods"]) * (method_w + gap), len(graph["steps"]) * (step_w + gap)) + 40)
-        max_y = y_support + 130
-        canvas.configure(scrollregion=(0, 0, max_x, max_y))
+        content_bbox = canvas.bbox("all")
+        canvas.configure(scrollregion=MarsColonyInterface._compute_canvas_scrollregion(width, viewport_height, content_bbox))
         return graph
 
     def _sync_construction_summaries(self):
@@ -3074,21 +3206,66 @@ class MarsColonyInterface:
                 padding=8,
             )
             panel.pack(fill="x", padx=6, pady=4, anchor="n")
-            graph_canvas = tk.Canvas(panel, height=410, background="#ffffff", highlightthickness=1, highlightbackground="#d1d5db")
-            graph_canvas.pack(fill="x", expand=True)
-            graph_scroll_x = ttk.Scrollbar(panel, orient="horizontal", command=graph_canvas.xview)
-            graph_scroll_x.pack(fill="x", pady=(0, 6))
-            graph_canvas.configure(xscrollcommand=graph_scroll_x.set)
-            self._draw_agent_state_machine(graph_canvas, snapshot)
+            graph_viewport = ttk.Frame(panel)
+            graph_viewport.pack(fill="both", expand=True, pady=(0, 6))
+            graph_viewport.columnconfigure(0, weight=1)
+            graph_viewport.rowconfigure(0, weight=1)
+
+            graph_canvas = tk.Canvas(graph_viewport, height=360, background="#ffffff", highlightthickness=1, highlightbackground="#d1d5db")
+            graph_canvas.grid(row=0, column=0, sticky="nsew")
+            graph_scroll_y = ttk.Scrollbar(graph_viewport, orient="vertical", command=graph_canvas.yview)
+            graph_scroll_y.grid(row=0, column=1, sticky="ns")
+            graph_scroll_x = ttk.Scrollbar(graph_viewport, orient="horizontal", command=graph_canvas.xview)
+            graph_scroll_x.grid(row=1, column=0, sticky="ew")
+            graph_canvas.configure(xscrollcommand=graph_scroll_x.set, yscrollcommand=graph_scroll_y.set)
 
             body = tk.Text(panel, height=11, wrap="word")
             body.pack(fill="x", expand=True)
             body.insert("1.0", self._format_agent_state_panel(snapshot))
             body.configure(state="disabled")
-            self.agent_state_panels[snapshot.get("agent_id") or snapshot.get("display_name")] = {
+            panel_key = snapshot.get("agent_id") or snapshot.get("display_name")
+            self.agent_state_panels[panel_key] = {
                 "canvas": graph_canvas,
+                "viewport": graph_viewport,
                 "body": body,
+                "snapshot": snapshot,
+                "last_draw_width": 0,
+                "redraw_after_id": None,
             }
+            graph_viewport.bind("<Configure>", lambda _e, key=panel_key: self._schedule_agent_graph_redraw(key))
+            graph_canvas.bind("<Configure>", lambda _e, key=panel_key: self._schedule_agent_graph_redraw(key))
+            self._schedule_agent_graph_redraw(panel_key, force=True)
+
+    def _schedule_agent_graph_redraw(self, panel_key, *, force=False):
+        panel_state = self.agent_state_panels.get(panel_key)
+        if not panel_state:
+            return
+        canvas = panel_state.get("canvas")
+        if not canvas or not canvas.winfo_exists():
+            return
+        draw_width = max(320, int(canvas.winfo_width() or panel_state.get("last_draw_width") or 320))
+        if not force and abs(draw_width - int(panel_state.get("last_draw_width") or 0)) < 24:
+            return
+        after_id = panel_state.get("redraw_after_id")
+        if after_id:
+            try:
+                canvas.after_cancel(after_id)
+            except tk.TclError:
+                pass
+        panel_state["redraw_after_id"] = canvas.after(60, lambda key=panel_key: self._redraw_agent_graph(key))
+
+    def _redraw_agent_graph(self, panel_key):
+        panel_state = self.agent_state_panels.get(panel_key)
+        if not panel_state:
+            return
+        canvas = panel_state.get("canvas")
+        snapshot = panel_state.get("snapshot")
+        if not canvas or not snapshot or not canvas.winfo_exists():
+            return
+        draw_width = max(320, int(canvas.winfo_width() or panel_state.get("last_draw_width") or 320))
+        self._draw_agent_state_machine(canvas, snapshot, width=draw_width)
+        panel_state["last_draw_width"] = draw_width
+        panel_state["redraw_after_id"] = None
 
     def run(self):
         self.root.mainloop()
