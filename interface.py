@@ -2021,10 +2021,11 @@ class MarsColonyInterface:
         self.sim = sim
         self.run_state = self.STATE_IDLE
         self._cancel_run_loop()
+        self._reset_persistent_startup_views()
         self._update_control_states()
 
         self.update_environment_plot()
-        self.update_agent_table()
+        self.update_agent_table(force=True)
         self.update_event_monitor()
         self.update_dashboard()
         self._sync_construction_summaries()
@@ -2035,6 +2036,23 @@ class MarsColonyInterface:
         self.update_brain_tab()
         self.update_dik_derivations_tab()
         self.update_rule_derivations_tab()
+
+    def _reset_persistent_startup_views(self):
+        if hasattr(self, "agent_state_panels"):
+            self._remove_stale_agent_state_panels(set())
+
+        if hasattr(self, "interaction_canvas"):
+            self._draw_interaction_empty_state("No interaction events yet.")
+        if hasattr(self, "interaction_list"):
+            self.interaction_list.delete("1.0", tk.END)
+            self.interaction_list.insert(tk.END, "No interaction events yet.\n")
+        if hasattr(self, "interaction_status_var"):
+            self.interaction_status_var.set("Interactions: waiting for simulation data.")
+
+        if hasattr(self, "_brain_visible_signature_cache"):
+            self._brain_visible_signature_cache = ()
+        if hasattr(self, "_brain_visible_rows"):
+            self._brain_visible_rows = []
 
     def _create_startup_dialog(self):
         self._close_startup_dialog()
@@ -2393,6 +2411,15 @@ class MarsColonyInterface:
         canvas.draw()
 
     def _populate_event_monitor_widgets(self, activity_widget, interaction_widget, zone_widget):
+        if not self.sim or not getattr(self.sim, "agents", None):
+            activity_widget.delete("1.0", tk.END)
+            interaction_widget.delete("1.0", tk.END)
+            zone_widget.delete("1.0", tk.END)
+            activity_widget.insert(tk.END, "No agent activities yet.\n")
+            interaction_widget.insert(tk.END, "No interaction state yet.\n")
+            zone_widget.insert(tk.END, "No zone states yet.\n")
+            return
+
         activity_widget.delete("1.0", tk.END)
         for agent in self.sim.agents:
             activity_widget.insert(tk.END, f"--- {agent.name} ({agent.role}) ---\n")
@@ -3295,7 +3322,7 @@ class MarsColonyInterface:
             return  # Don't try to update before simulation starts
         self._render_environment_plot(self.ax, self.canvas)
 
-    def update_agent_table(self):
+    def update_agent_table(self, *, force=False):
         if not hasattr(self, "agent_state_container") or not self.sim:
             return
         snapshots_by_key = {}
@@ -3309,7 +3336,7 @@ class MarsColonyInterface:
         previous_scroll = self.agent_state_scroll.yview()
         self._ensure_agent_state_panels(active_keys, snapshots_by_key)
         for panel_key in active_keys:
-            self._update_agent_state_panel(panel_key, snapshots_by_key[panel_key])
+            self._update_agent_state_panel(panel_key, snapshots_by_key[panel_key], force=force)
         self._remove_stale_agent_state_panels(set(active_keys))
         if previous_scroll:
             self.agent_state_scroll.update_idletasks()
@@ -3430,7 +3457,7 @@ class MarsColonyInterface:
                 body.insert("1.0", formatted)
                 body.configure(state="disabled")
             panel_state["last_body_text"] = formatted
-        self._schedule_agent_graph_redraw(panel_key, force=force, snapshot_changed=True)
+        self._schedule_agent_graph_redraw(panel_key, force=force)
 
     def _remove_stale_agent_state_panels(self, active_keys):
         stale_keys = [key for key in self.agent_state_panels if key not in active_keys]

@@ -28,6 +28,18 @@ class _FakeLabel:
             self.text = kwargs["text"]
 
 
+class _FakeText:
+    def __init__(self):
+        self.value = ""
+
+    def delete(self, *_args, **_kwargs):
+        self.value = ""
+
+    def insert(self, *_args):
+        if len(_args) >= 2:
+            self.value += str(_args[1])
+
+
 class _FakeSim:
     def __init__(self):
         self.time = 0.0
@@ -154,9 +166,10 @@ class TestInterfaceLifecycleUnit(unittest.TestCase):
     def test_finalize_simulation_install_populates_startup_views_in_expected_order(self):
         calls = []
         self.app._cancel_run_loop = lambda: calls.append("_cancel_run_loop")
+        self.app._reset_persistent_startup_views = lambda: calls.append("_reset_persistent_startup_views")
         self.app._update_control_states = lambda: calls.append("_update_control_states")
         self.app.update_environment_plot = lambda: calls.append("update_environment_plot")
-        self.app.update_agent_table = lambda: calls.append("update_agent_table")
+        self.app.update_agent_table = lambda **kwargs: calls.append(f"update_agent_table(force={kwargs.get('force', False)})")
         self.app.update_event_monitor = lambda: calls.append("update_event_monitor")
         self.app.update_dashboard = lambda: calls.append("update_dashboard")
         self.app._sync_construction_summaries = lambda: calls.append("_sync_construction_summaries")
@@ -177,9 +190,10 @@ class TestInterfaceLifecycleUnit(unittest.TestCase):
             calls,
             [
                 "_cancel_run_loop",
+                "_reset_persistent_startup_views",
                 "_update_control_states",
                 "update_environment_plot",
-                "update_agent_table",
+                "update_agent_table(force=True)",
                 "update_event_monitor",
                 "update_dashboard",
                 "_sync_construction_summaries",
@@ -192,6 +206,18 @@ class TestInterfaceLifecycleUnit(unittest.TestCase):
                 "update_rule_derivations_tab",
             ],
         )
+
+    def test_populate_event_monitor_widgets_uses_explicit_empty_placeholders(self):
+        self.app.sim = None
+        activity = _FakeText()
+        interaction = _FakeText()
+        zone = _FakeText()
+
+        MarsColonyInterface._populate_event_monitor_widgets(self.app, activity, interaction, zone)
+
+        self.assertIn("No agent activities yet.", activity.value)
+        self.assertIn("No interaction state yet.", interaction.value)
+        self.assertIn("No zone states yet.", zone.value)
 
 
 if __name__ == "__main__":
