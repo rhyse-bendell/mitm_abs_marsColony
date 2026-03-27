@@ -10,7 +10,6 @@ from modules.brain_context import BrainContextBuilder
 from modules.brain_provider import BrainBackendConfig, create_brain_provider
 from modules.environment import Environment
 from modules.logging_tools import SimulationLogger
-from modules.llm_sanity import StartupLLMSanityConfig, run_startup_llm_sanity_check
 from modules.interaction_graph import InteractionTelemetryBridge
 from modules.metrics import MetricsCollector
 from modules.runtime_witness_audit import RuntimeWitnessAudit
@@ -23,8 +22,6 @@ UNRESTRICTED_QWEN_DEFAULTS = {
     "planner_interval_steps": 24,
     "planner_interval_time": 20.0,
     "planner_timeout_seconds": 900.0,
-    "startup_llm_sanity_timeout_seconds": 900.0,
-    "startup_llm_sanity_completion_max_tokens": 24576,
     "planner_completion_max_tokens": 24576,
     "warmup_timeout_seconds": 600.0,
     "degraded_consecutive_failures_threshold": 24,
@@ -50,7 +47,6 @@ def _planner_defaults_with_high_latency_mode(planner_defaults, configured_backen
         defaults.setdefault("degraded_consecutive_failures_threshold", 6)
         defaults.setdefault("degraded_cooldown_seconds", 45.0)
         defaults.setdefault("degraded_step_interval_multiplier", 3.0)
-        defaults.setdefault("startup_llm_sanity_timeout_seconds", 45.0)
         defaults.setdefault("high_latency_stale_result_grace_s", 60.0)
     if unrestricted_local_qwen_mode:
         defaults["high_latency_local_llm_mode"] = True
@@ -143,31 +139,7 @@ class SimulationState:
         if planner_config:
             self.planner_defaults.update(dict(planner_config))
         self.planner_defaults = _planner_defaults_with_high_latency_mode(self.planner_defaults, brain_backend)
-        self.startup_llm_sanity_config = StartupLLMSanityConfig(
-            enabled=bool(self.planner_defaults.get("enable_startup_llm_sanity", True)),
-            timeout_s=float(self.planner_defaults.get("startup_llm_sanity_timeout_seconds", 45.0) or 45.0),
-            max_sources=max(1, int(self.planner_defaults.get("startup_llm_sanity_max_sources", 2) or 2)),
-            max_items_per_type=max(1, int(self.planner_defaults.get("startup_llm_sanity_max_items_per_type", 3) or 3)),
-            completion_max_tokens=max(256, int(self.planner_defaults.get("startup_llm_sanity_completion_max_tokens", 1024) or 1024)),
-            json_only_mode=bool(self.planner_defaults.get("startup_llm_sanity_json_only_mode", True)),
-            reasoning_suppression=bool(self.planner_defaults.get("startup_llm_sanity_reasoning_suppression", True)),
-            raw_response_max_chars=max(500, int(self.planner_defaults.get("startup_llm_sanity_raw_response_max_chars", 4000) or 4000)),
-            artifact_name=str(self.planner_defaults.get("startup_llm_sanity_artifact_name", "startup_llm_sanity.json") or "startup_llm_sanity.json"),
-        )
-        self.bootstrap_reuse_enabled = bool(self.planner_defaults.get("enable_bootstrap_summary_reuse", True))
         self.bootstrap_summary_max_chars = max(80, int(self.planner_defaults.get("bootstrap_summary_max_chars", 280) or 280))
-        self.startup_llm_sanity_summary = {
-            "startup_llm_sanity_enabled": bool(self.startup_llm_sanity_config.enabled),
-            "startup_llm_sanity_agent_count": 0,
-            "startup_llm_sanity_success_count": 0,
-            "startup_llm_sanity_failure_count": 0,
-            "startup_llm_sanity_timeout_count": 0,
-            "startup_llm_sanity_parse_failure_count": 0,
-            "startup_llm_sanity_artifact": None,
-            "bootstrap_reuse_enabled": bool(self.bootstrap_reuse_enabled),
-            "bootstrap_reuse_agent_count": 0,
-        }
-        self.bootstrap_reuse_included_count = 0
         self.startup_progress_callback = startup_progress_callback
         self.execution_metadata = dict(execution_metadata or {})
         planner_trace_enabled = bool(self.planner_defaults.get("enable_planner_trace", True))
@@ -184,13 +156,13 @@ class SimulationState:
         if "max_retries" not in backend_options and "planner_max_retries" in self.planner_defaults:
             backend_options["max_retries"] = self.planner_defaults.get("planner_max_retries")
         if "warmup_timeout_s" not in backend_options:
-            backend_options["warmup_timeout_s"] = self.planner_defaults.get("warmup_timeout_seconds", self.planner_defaults.get("startup_llm_sanity_timeout_seconds"))
+            backend_options["warmup_timeout_s"] = self.planner_defaults.get("warmup_timeout_seconds", self.planner_defaults.get("planner_timeout_seconds"))
         if "fallback_backend" not in backend_options and "planner_fallback_backend" in self.planner_defaults:
             backend_options["fallback_backend"] = self.planner_defaults.get("planner_fallback_backend")
         if "completion_max_tokens" not in backend_options:
             backend_options["completion_max_tokens"] = self.planner_defaults.get("planner_completion_max_tokens", 2048)
         if "startup_completion_max_tokens" not in backend_options:
-            backend_options["startup_completion_max_tokens"] = self.planner_defaults.get("startup_llm_sanity_completion_max_tokens", 1024)
+            backend_options["startup_completion_max_tokens"] = self.planner_defaults.get("planner_completion_max_tokens", 2048)
         if "permissive_timeout_ceiling_s" not in backend_options:
             backend_options["permissive_timeout_ceiling_s"] = self.planner_defaults.get("permissive_timeout_ceiling_s", 1200.0)
         if "permissive_completion_ceiling_tokens" not in backend_options:
@@ -200,8 +172,6 @@ class SimulationState:
         if self.brain_backend_config.unrestricted_local_qwen_mode:
             effective_timeout_ceiling = max(60.0, float(self.brain_backend_config.permissive_timeout_ceiling_s))
             effective_completion_ceiling = max(512, int(self.brain_backend_config.permissive_completion_ceiling_tokens))
-            startup_timeout_floor = float(self.planner_defaults.get("startup_llm_sanity_timeout_seconds", self.startup_llm_sanity_config.timeout_s) or self.startup_llm_sanity_config.timeout_s)
-            startup_tokens_floor = int(self.planner_defaults.get("startup_llm_sanity_completion_max_tokens", self.startup_llm_sanity_config.completion_max_tokens) or self.startup_llm_sanity_config.completion_max_tokens)
             planner_tokens_floor = int(self.planner_defaults.get("planner_completion_max_tokens", self.brain_backend_config.completion_max_tokens) or self.brain_backend_config.completion_max_tokens)
             requested_planner_timeout = max(
                 float(self.brain_backend_config.timeout_s),
@@ -213,20 +183,7 @@ class SimulationState:
             )
             effective_planner_timeout = min(requested_planner_timeout, effective_timeout_ceiling)
             effective_warmup_timeout = min(requested_warmup_timeout, effective_timeout_ceiling)
-            effective_startup_timeout = min(max(float(self.startup_llm_sanity_config.timeout_s), startup_timeout_floor), effective_timeout_ceiling)
-            effective_startup_tokens = min(max(int(self.startup_llm_sanity_config.completion_max_tokens), startup_tokens_floor), effective_completion_ceiling)
             effective_planner_tokens = min(max(int(self.brain_backend_config.completion_max_tokens), planner_tokens_floor), effective_completion_ceiling)
-            self.startup_llm_sanity_config = StartupLLMSanityConfig(
-                enabled=self.startup_llm_sanity_config.enabled,
-                timeout_s=effective_startup_timeout,
-                max_sources=self.startup_llm_sanity_config.max_sources,
-                max_items_per_type=self.startup_llm_sanity_config.max_items_per_type,
-                completion_max_tokens=effective_startup_tokens,
-                json_only_mode=self.startup_llm_sanity_config.json_only_mode,
-                reasoning_suppression=self.startup_llm_sanity_config.reasoning_suppression,
-                raw_response_max_chars=self.startup_llm_sanity_config.raw_response_max_chars,
-                artifact_name=self.startup_llm_sanity_config.artifact_name,
-            )
             self.brain_backend_config = BrainBackendConfig(
                 backend=self.brain_backend_config.backend,
                 local_base_url=self.brain_backend_config.local_base_url,
@@ -235,7 +192,7 @@ class SimulationState:
                 timeout_s=effective_planner_timeout,
                 warmup_timeout_s=effective_warmup_timeout,
                 completion_max_tokens=effective_planner_tokens,
-                startup_completion_max_tokens=effective_startup_tokens,
+                startup_completion_max_tokens=effective_planner_tokens,
                 permissive_timeout_ceiling_s=effective_timeout_ceiling,
                 permissive_completion_ceiling_tokens=effective_completion_ceiling,
                 unrestricted_local_qwen_mode=True,
@@ -247,10 +204,8 @@ class SimulationState:
                 planner_trace_max_chars=self.brain_backend_config.planner_trace_max_chars,
             )
             self.planner_defaults["planner_timeout_seconds"] = effective_planner_timeout
-            self.planner_defaults["startup_llm_sanity_timeout_seconds"] = effective_startup_timeout
             self.planner_defaults["warmup_timeout_seconds"] = effective_warmup_timeout
             self.planner_defaults["planner_completion_max_tokens"] = effective_planner_tokens
-            self.planner_defaults["startup_llm_sanity_completion_max_tokens"] = effective_startup_tokens
         self.configured_brain_backend = self.brain_backend_config.backend
         self.brain_provider = create_brain_provider(self.brain_backend_config)
         self.provider_warmup_status = None
@@ -478,7 +433,6 @@ class SimulationState:
                 **self.execution_metadata,
             },
         )
-        self.run_startup_llm_sanity_check()
         self.logger.log_event(
             self.time,
             "session_initialized",
@@ -491,61 +445,6 @@ class SimulationState:
             },
         )
 
-
-    def run_startup_llm_sanity_check(self):
-        if not self.startup_llm_sanity_config.enabled:
-            self.startup_llm_sanity_summary.update(
-                {
-                    "startup_llm_sanity_enabled": False,
-                    "bootstrap_reuse_enabled": bool(self.bootstrap_reuse_enabled),
-                    "bootstrap_reuse_agent_count": len(self.agents) if self.bootstrap_reuse_enabled else 0,
-                }
-            )
-            self.logger.log_event(self.time, "startup_llm_sanity_disabled", {"enabled": False})
-            return dict(self.startup_llm_sanity_summary)
-        try:
-            summary = run_startup_llm_sanity_check(
-                self,
-                config=self.startup_llm_sanity_config,
-                progress_callback=self.startup_progress_callback,
-            )
-            self.startup_llm_sanity_summary.update(summary)
-            results_by_agent = {
-                str(item.get("agent_id")): item
-                for item in (summary.get("startup_llm_sanity_results") or [])
-                if isinstance(item, dict) and item.get("agent_id")
-            }
-            for agent in self.agents:
-                row = results_by_agent.get(str(agent.agent_id), {})
-                validation_success = bool(row.get("validation_success"))
-                agent.fallback_bootstrap["startup_sanity_status"] = "success" if validation_success else "failed"
-                if not validation_success:
-                    if self.sticky_backend_demotion_enabled(agent):
-                        self.hard_demote_agent_backend(agent, reason="startup_sanity_failed", activate_bootstrap=False)
-                    agent.activate_fallback_bootstrap(sim_state=self, reason="startup_sanity_failed")
-            self.logger.update_session_manifest(extra_metadata=self._backend_settings_for_manifest())
-            return dict(self.startup_llm_sanity_summary)
-        except Exception as exc:  # noqa: BLE001
-            self.startup_llm_sanity_summary.update(
-                {
-                    "startup_llm_sanity_enabled": True,
-                    "startup_llm_sanity_failure_count": len(self.agents),
-                    "startup_llm_sanity_agent_count": len(self.agents),
-                    "startup_llm_sanity_error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-            for agent in self.agents:
-                agent.fallback_bootstrap["startup_sanity_status"] = "failed"
-                if self.sticky_backend_demotion_enabled(agent):
-                    self.hard_demote_agent_backend(agent, reason="startup_sanity_exception", activate_bootstrap=False)
-                agent.activate_fallback_bootstrap(sim_state=self, reason="startup_sanity_exception")
-            self.logger.log_event(
-                self.time,
-                "startup_llm_sanity_failed",
-                {"error": f"{type(exc).__name__}: {exc}", "agent_count": len(self.agents)},
-            )
-            self.logger.update_session_manifest(extra_metadata=self._backend_settings_for_manifest())
-            return dict(self.startup_llm_sanity_summary)
 
     def _agent_manifest_row(self, agent):
         runtime = self.get_agent_brain_runtime(agent)
@@ -734,9 +633,7 @@ class SimulationState:
             "unrestricted_local_qwen_mode": bool(self.planner_defaults.get("unrestricted_local_qwen_mode", False)),
             "planner_blocks_sim_time_default": self.planner_defaults.get("planner_blocks_sim_time"),
             "effective_planner_timeout_seconds": float(self.planner_defaults.get("planner_timeout_seconds", 0.0) or 0.0),
-            "effective_startup_llm_sanity_timeout_seconds": float(self.planner_defaults.get("startup_llm_sanity_timeout_seconds", 0.0) or 0.0),
             "effective_warmup_timeout_seconds": float(self.brain_backend_config.warmup_timeout_s or 0.0),
-            "effective_startup_llm_sanity_completion_max_tokens": int(self.startup_llm_sanity_config.completion_max_tokens),
             "effective_planner_completion_max_tokens": int(self.brain_backend_config.completion_max_tokens),
             "stale_result_relaxation_enabled": bool(self.planner_defaults.get("high_latency_local_llm_mode", False)) and float(self.planner_defaults.get("high_latency_stale_result_grace_s", 0.0) or 0.0) > 0.0,
             "high_latency_stale_result_grace_s": float(self.planner_defaults.get("high_latency_stale_result_grace_s", 0.0) or 0.0),
@@ -753,7 +650,6 @@ class SimulationState:
             "planner_trace_artifact": "logs/planner_trace.jsonl" if bool(self.planner_defaults.get("enable_planner_trace", True)) else None,
             "backend_warmup": self.provider_warmup_status,
             "bootstrap_summary_max_chars": self.bootstrap_summary_max_chars,
-            "bootstrap_reuse_included_count": int(getattr(self, "bootstrap_reuse_included_count", 0)),
             "planner_barrier_policy": self.planner_barrier_policy,
             "planner_barrier_active": bool(self.planner_barrier_state.get("active")),
             "planner_barrier_pause_count": int(self.planner_barrier_state.get("pause_count", 0)),
@@ -766,7 +662,6 @@ class SimulationState:
                     and bool(agent.planner_request_blocks_sim_time(sim_state=self, runtime=self.get_agent_brain_runtime(agent)))
                 }
             ),
-            **dict(self.startup_llm_sanity_summary),
         }
 
     def _collect_blocking_planner_requests(self):

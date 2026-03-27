@@ -143,9 +143,7 @@ class TestBrainBackendSelection(unittest.TestCase):
             self.assertTrue(manifest.get("high_latency_local_llm_mode"))
             self.assertTrue(manifest.get("unrestricted_local_qwen_mode"))
             self.assertGreaterEqual(float(manifest.get("effective_planner_timeout_seconds", 0.0)), 90.0)
-            self.assertGreaterEqual(float(manifest.get("effective_startup_llm_sanity_timeout_seconds", 0.0)), 60.0)
             self.assertGreaterEqual(float(manifest.get("effective_warmup_timeout_seconds", 0.0)), 45.0)
-            self.assertGreaterEqual(int(manifest.get("effective_startup_llm_sanity_completion_max_tokens", 0)), 512)
             self.assertGreaterEqual(int(manifest.get("effective_planner_completion_max_tokens", 0)), 1024)
             self.assertTrue(manifest.get("stale_result_relaxation_enabled"))
             self.assertGreaterEqual(float(manifest.get("permissive_timeout_ceiling_s", 0.0)), 1800.0)
@@ -173,9 +171,8 @@ class TestBrainBackendSelection(unittest.TestCase):
             )
             self.assertGreaterEqual(sim.brain_backend_config.timeout_s, 900.0)
             self.assertGreaterEqual(sim.brain_backend_config.warmup_timeout_s, 600.0)
-            self.assertGreaterEqual(sim.startup_llm_sanity_config.timeout_s, 900.0)
             self.assertGreaterEqual(sim.brain_backend_config.completion_max_tokens, 24576)
-            self.assertGreaterEqual(sim.startup_llm_sanity_config.completion_max_tokens, 24576)
+            self.assertGreaterEqual(sim.brain_backend_config.startup_completion_max_tokens, 24576)
             self.assertGreaterEqual(int(sim.planner_defaults.get("degraded_consecutive_failures_threshold", 0)), 24)
             self.assertGreaterEqual(float(sim.planner_defaults.get("degraded_cooldown_seconds", 0.0)), 300.0)
             self.assertGreaterEqual(float(sim.planner_defaults.get("degraded_step_interval_multiplier", 0.0)), 8.0)
@@ -206,9 +203,8 @@ class TestBrainBackendSelection(unittest.TestCase):
             )
             self.assertEqual(sim.brain_backend_config.timeout_s, 1500.0)
             self.assertEqual(sim.brain_backend_config.warmup_timeout_s, 1500.0)
-            self.assertEqual(sim.startup_llm_sanity_config.timeout_s, 1500.0)
             self.assertEqual(sim.brain_backend_config.completion_max_tokens, 20000)
-            self.assertEqual(sim.startup_llm_sanity_config.completion_max_tokens, 20000)
+            self.assertEqual(sim.brain_backend_config.startup_completion_max_tokens, 20000)
             sim.stop()
 
     def test_disabling_unrestricted_mode_preserves_explicit_normal_budgets(self):
@@ -229,10 +225,9 @@ class TestBrainBackendSelection(unittest.TestCase):
             )
             self.assertFalse(sim.planner_defaults.get("unrestricted_local_qwen_mode"))
             self.assertEqual(sim.brain_backend_config.timeout_s, 90.0)
-            self.assertEqual(sim.startup_llm_sanity_config.timeout_s, 45.0)
-            self.assertEqual(sim.startup_llm_sanity_config.completion_max_tokens, 512)
             self.assertEqual(sim.brain_backend_config.completion_max_tokens, 1024)
             self.assertEqual(sim.brain_backend_config.warmup_timeout_s, 45.0)
+            self.assertEqual(sim.brain_backend_config.startup_completion_max_tokens, 1024)
             sim.stop()
 
     def test_aggregate_outputs_include_backend_columns(self):

@@ -438,13 +438,6 @@ class TestInterfacePerAgentDefaults(unittest.TestCase):
             self.assertEqual(planner_cfg["high_latency_stale_result_grace_s"], 33.0)
 
             app.apply_experiment_settings()
-            self.assertTrue(app.sim.startup_llm_sanity_config.enabled)
-            self.assertEqual(app.sim.startup_llm_sanity_config.timeout_s, 1.7)
-            self.assertEqual(app.sim.startup_llm_sanity_config.max_sources, 1)
-            self.assertEqual(app.sim.startup_llm_sanity_config.max_items_per_type, 2)
-            self.assertEqual(app.sim.startup_llm_sanity_config.raw_response_max_chars, 1234)
-            self.assertEqual(app.sim.startup_llm_sanity_config.completion_max_tokens, 4096)
-            self.assertTrue(app.sim.bootstrap_reuse_enabled)
             self.assertEqual(app.sim.bootstrap_summary_max_chars, 140)
             self.assertTrue(app.sim.planner_defaults.get("high_latency_local_llm_mode"))
             self.assertEqual(app.sim.planner_defaults.get("planner_timeout_seconds"), 333.0)
