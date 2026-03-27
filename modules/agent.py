@@ -374,7 +374,6 @@ class Agent:
             "activated_at": None,
             "completed_at": None,
             "runtime_fallback_triggers": 0,
-            "startup_sanity_status": "unknown",
             "last_forced_action": None,
         }
         self.navigation = {
@@ -2482,15 +2481,6 @@ class Agent:
         observations = [str(e) for e in context.history_bands.get("near_preceding_events", [])[-4:]]
         runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {}
         bootstrap_summary = None
-        if bool(getattr(sim_state, "bootstrap_reuse_enabled", False)):
-            runtime_bootstrap = runtime.get("bootstrap") if isinstance(runtime, dict) else None
-            if isinstance(runtime_bootstrap, dict) and runtime_bootstrap.get("status") == "success":
-                bootstrap_summary = {
-                    "summary_text": runtime_bootstrap.get("summary_text"),
-                    "summary_structured": runtime_bootstrap.get("summary_structured"),
-                }
-                runtime_bootstrap["included_count"] = int(runtime_bootstrap.get("included_count", 0)) + 1
-                sim_state.bootstrap_reuse_included_count = int(getattr(sim_state, "bootstrap_reuse_included_count", 0)) + 1
         accepted = self.dik_integration_state.get("accepted_updates", {}) if isinstance(self.dik_integration_state, dict) else {}
         accepted_information = [item.get("candidate_id") for item in accepted.get("information", []) if isinstance(item, dict)]
         accepted_knowledge = [item.get("candidate_id") for item in accepted.get("knowledge", []) if isinstance(item, dict)]
