@@ -22,6 +22,7 @@ from modules.phase_definitions import MISSION_PHASES
 from modules.task_model import load_task_model, normalize_rule_token
 from modules.interaction_graph import CANONICAL_NODES
 from modules.headless_runner import run_batch_experiment
+from modules.brain_provider import RuleBrain
 
 
 class MarsColonyInterface:
@@ -2316,11 +2317,21 @@ class MarsColonyInterface:
         if hasattr(agent, "get_runtime_state_snapshot"):
             return dict(agent.get_runtime_state_snapshot() or {})
         control = dict(getattr(agent, "control_state", {}) or {})
+        method_state = dict(control.get("method_state") or {})
+        method_state.setdefault("active_method_id", getattr(agent, "active_method_id", None))
+        method_state.setdefault("active_method_step", getattr(agent, "active_method_step", None))
+        method_state.setdefault("step_retry_count", int(getattr(agent, "step_retry_count", 0) or 0))
+        method_state.setdefault("last_method_switch_reason", getattr(agent, "last_method_switch_reason", None))
+        method_state.setdefault("method_cooldowns", dict(getattr(agent, "method_cooldowns", {}) or {}))
+        method_state.setdefault("source_cooldowns", dict(getattr(agent, "source_cooldowns", {}) or {}))
+        method_state.setdefault("source_exhaustion", dict(getattr(agent, "source_exhaustion", {}) or {}))
+        method_state.setdefault("method_history", list(getattr(agent, "method_history", []) or []))
+        method_state.setdefault("method_transition_history", list(getattr(agent, "method_transition_history", []) or []))
         return {
             "display_name": getattr(agent, "display_name", getattr(agent, "name", "agent")),
             "role": getattr(agent, "role", "unknown"),
             "control_state": control,
-            "method_state": dict(control.get("method_state") or {}),
+            "method_state": method_state,
             "planner_state": dict(getattr(agent, "planner_state", {}) or {}),
             "dik_integration_state": dict(getattr(agent, "dik_integration_state", {}) or {}),
             "inspect_session": dict(getattr(agent, "inspect_session", {}) or {}),
@@ -2404,6 +2415,280 @@ class MarsColonyInterface:
                 f"Policy features: {top_features or {}}",
             ]
         )
+
+    @staticmethod
+    def _known_rulebrain_modes():
+        return list(getattr(RuleBrain, "MODES", ()) or [])
+
+    @staticmethod
+    def _known_methods_for_mode(mode):
+        normalized_mode = str(mode or "BOOTSTRAP")
+        ordered = list((getattr(RuleBrain, "MODE_METHOD_PREFERENCES", {}) or {}).get(normalized_mode, ()))
+        for method_id, method_def in (getattr(RuleBrain, "METHOD_LIBRARY", {}) or {}).items():
+            if normalized_mode in tuple(getattr(method_def, "applicable_modes", ()) or ()) and method_id not in ordered:
+                ordered.append(method_id)
+        return ordered
+
+    @staticmethod
+    def _known_steps_for_method(method_id):
+        method_def = (getattr(RuleBrain, "METHOD_LIBRARY", {}) or {}).get(method_id)
+        if not method_def:
+            return []
+        return list(tuple(getattr(method_def, "ordered_steps", ()) or ()))
+
+    @staticmethod
+    def _state_machine_nodes_for_snapshot(snapshot, sim=None):
+        control = dict(snapshot.get("control_state") or {})
+        method_state = dict(snapshot.get("method_state") or control.get("method_state") or {})
+        planner = dict(snapshot.get("planner_state") or {})
+        dik = dict(snapshot.get("dik_integration_state") or {})
+        bootstrap = dict(snapshot.get("fallback_bootstrap") or {})
+        inspect = dict(snapshot.get("inspect_session") or {})
+        inspect_pursuit = dict(snapshot.get("inspect_pursuit") or {})
+        transport = dict(snapshot.get("transport_state") or {})
+
+        current_mode = str(control.get("mode") or "BOOTSTRAP")
+        previous_mode = control.get("previous_mode")
+        modes = MarsColonyInterface._known_rulebrain_modes()
+        if current_mode not in modes:
+            modes.append(current_mode)
+        if previous_mode and previous_mode not in modes:
+            modes.append(previous_mode)
+
+        current_method = method_state.get("active_method_id")
+        methods = MarsColonyInterface._known_methods_for_mode(current_mode)
+        if current_method and current_method not in methods:
+            methods.append(current_method)
+
+        steps = MarsColonyInterface._known_steps_for_method(current_method)
+        current_step = method_state.get("active_method_step")
+        if current_step and current_step not in steps:
+            steps.append(current_step)
+
+        mode_history = list(control.get("mode_history", []))[-6:]
+        transition_history = list(control.get("transition_history", []))[-5:]
+        method_history = list(method_state.get("method_history", []))[-5:]
+        method_transitions = list(method_state.get("method_transition_history", []))[-5:]
+        recent_transition = transition_history[-1] if transition_history else {}
+
+        source_cooldowns = dict(method_state.get("source_cooldowns") or {})
+        source_exhaustion = dict(method_state.get("source_exhaustion") or {})
+        exhausted_sources = sorted([key for key, info in source_exhaustion.items() if (info or {}).get("exhausted")])
+        retry_count = int(method_state.get("step_retry_count", 0) or 0)
+
+        warnings = []
+        if exhausted_sources:
+            warnings.append(f"exhausted:{', '.join(exhausted_sources[:3])}")
+        if source_cooldowns:
+            warnings.append(f"cooldowns:{len(source_cooldowns)}")
+        if retry_count >= 2:
+            warnings.append(f"retries:{retry_count}")
+        no_progress_ticks = int(inspect_pursuit.get("no_progress_ticks", 0) or 0)
+        blocked_attempts = int(inspect_pursuit.get("blocked_attempts", 0) or 0)
+        if no_progress_ticks > 0:
+            warnings.append(f"inspect_stall:{no_progress_ticks}")
+        if blocked_attempts > 0:
+            warnings.append(f"blocked:{blocked_attempts}")
+        planner_status = str(planner.get("status") or "idle")
+        if planner_status in {"in_flight", "degraded"}:
+            warnings.append(f"planner:{planner_status}")
+        if snapshot.get("current_target") and no_progress_ticks > 0:
+            warnings.append("target_no_progress")
+
+        next_action = snapshot.get("next_action")
+        if hasattr(next_action, "value"):
+            next_action = next_action.value
+        elif isinstance(next_action, dict):
+            next_action = next_action.get("action_type")
+
+        return {
+            "modes": modes,
+            "current_mode": current_mode,
+            "previous_mode": previous_mode,
+            "methods": methods,
+            "current_method": current_method,
+            "steps": steps,
+            "current_step": current_step,
+            "retry_count": retry_count,
+            "support_badges": [
+                {"label": "planner", "value": planner_status, "active": planner_status != "idle", "warn": planner_status == "degraded"},
+                {"label": "dik", "value": str(dik.get("status") or "idle"), "active": str(dik.get("status") or "idle") != "idle"},
+                {"label": "inspect", "value": str(inspect.get("state") or "idle"), "active": str(inspect.get("state") or "idle") != "idle"},
+                {"label": "pursuit", "value": f"stall={no_progress_ticks} blocked={blocked_attempts}", "active": no_progress_ticks > 0 or blocked_attempts > 0, "warn": blocked_attempts > 0},
+                {"label": "transport", "value": str(transport.get("stage") or "idle"), "active": str(transport.get("stage") or "idle") != "idle"},
+                {"label": "bootstrap", "value": str(bootstrap.get("stage") or ("active" if bootstrap.get("active") else "idle")), "active": bool(bootstrap.get("active"))},
+                {"label": "target", "value": str(snapshot.get("current_target") or "-"), "active": bool(snapshot.get("current_target"))},
+                {"label": "plan", "value": f"{snapshot.get('current_plan_id') or '-'} / {snapshot.get('current_plan_method') or '-'}", "active": bool(snapshot.get("current_plan_id"))},
+                {"label": "next", "value": str(next_action or "-"), "active": bool(next_action)},
+            ],
+            "transition_caption": f"{previous_mode or 'none'} -> {current_mode}",
+            "transition_reason": control.get("last_transition_reason") or "none",
+            "recent_transition": recent_transition,
+            "mode_history": mode_history,
+            "transition_history": transition_history,
+            "method_history": method_history,
+            "method_transitions": method_transitions,
+            "source_cooldowns": source_cooldowns,
+            "source_exhaustion": source_exhaustion,
+            "warnings": warnings,
+            "last_method_switch_reason": method_state.get("last_method_switch_reason") or "none",
+        }
+
+    @staticmethod
+    def _draw_state_node(canvas, x, y, w, h, label, *, active=False, previous=False, warn=False, dashed=False):
+        fill = "#f6f7fa"
+        outline = "#97a3b6"
+        width = 1
+        if previous:
+            fill = "#eef4ff"
+            outline = "#7796d6"
+        if active:
+            fill = "#c6f6d5"
+            outline = "#2f855a"
+            width = 2
+        if warn:
+            fill = "#fff3cd"
+            outline = "#c05621"
+            width = 2
+        dash = (6, 4) if dashed else None
+        canvas.create_rectangle(x, y, x + w, y + h, fill=fill, outline=outline, width=width, dash=dash)
+        canvas.create_text(x + w / 2, y + h / 2, text=label, width=max(20, w - 8), font=("Arial", 9))
+        return x + w / 2, y + h / 2
+
+    @staticmethod
+    def _draw_state_edge(canvas, start, end, *, label=None, color="#6b7280"):
+        sx, sy = start
+        ex, ey = end
+        canvas.create_line(sx, sy, ex, ey, arrow=tk.LAST, fill=color, width=1.4)
+        if label:
+            mx = (sx + ex) / 2
+            my = (sy + ey) / 2 - 8
+            canvas.create_text(mx, my, text=label, fill="#4b5563", font=("Arial", 8))
+
+    @staticmethod
+    def _draw_state_badge(canvas, x, y, w, h, label, value, *, active=False, warn=False):
+        fill = "#f8fafc"
+        outline = "#94a3b8"
+        if active:
+            fill = "#dbeafe"
+            outline = "#2563eb"
+        if warn:
+            fill = "#fee2e2"
+            outline = "#dc2626"
+        canvas.create_rectangle(x, y, x + w, y + h, fill=fill, outline=outline, width=1.4)
+        canvas.create_text(x + 6, y + h / 2, text=f"{label}: {value}", anchor="w", font=("Arial", 8), width=w - 10)
+
+    @staticmethod
+    def _draw_agent_state_machine(canvas, snapshot, *, width=None):
+        graph = MarsColonyInterface._state_machine_nodes_for_snapshot(snapshot)
+        canvas.delete("all")
+        width = int(width or 1180)
+        left = 16
+        top = 14
+        gap = 12
+        side_x = 860
+
+        canvas.create_text(left, top, anchor="nw", text="State Machine Layers", font=("Arial", 10, "bold"), fill="#1f2937")
+        y_modes = top + 24
+        y_methods = y_modes + 82
+        y_steps = y_methods + 84
+        y_support = y_steps + 84
+
+        mode_centers = {}
+        node_w, node_h = 108, 34
+        for idx, mode in enumerate(graph["modes"]):
+            x = left + idx * (node_w + gap)
+            center = MarsColonyInterface._draw_state_node(
+                canvas,
+                x,
+                y_modes,
+                node_w,
+                node_h,
+                mode,
+                active=mode == graph["current_mode"],
+                previous=mode == graph["previous_mode"],
+            )
+            mode_centers[mode] = center
+            if idx:
+                prev_mode = graph["modes"][idx - 1]
+                MarsColonyInterface._draw_state_edge(canvas, mode_centers[prev_mode], center)
+
+        method_centers = {}
+        method_w, method_h = 176, 34
+        for idx, method_id in enumerate(graph["methods"]):
+            x = left + idx * (method_w + gap)
+            dashed = method_id in graph["source_cooldowns"]
+            center = MarsColonyInterface._draw_state_node(
+                canvas,
+                x,
+                y_methods,
+                method_w,
+                method_h,
+                method_id,
+                active=method_id == graph["current_method"],
+                dashed=dashed,
+            )
+            method_centers[method_id] = center
+            if graph["current_mode"] in mode_centers:
+                MarsColonyInterface._draw_state_edge(canvas, mode_centers[graph["current_mode"]], center, color="#94a3b8")
+
+        step_centers = {}
+        step_w, step_h = 168, 30
+        for idx, step in enumerate(graph["steps"]):
+            x = left + idx * (step_w + gap)
+            active = step == graph["current_step"]
+            warn = active and graph["retry_count"] >= 2
+            label = step if not active or graph["retry_count"] <= 0 else f"{step} (retry={graph['retry_count']})"
+            center = MarsColonyInterface._draw_state_node(
+                canvas,
+                x,
+                y_steps,
+                step_w,
+                step_h,
+                label,
+                active=active,
+                warn=warn,
+            )
+            step_centers[step] = center
+            if graph["current_method"] in method_centers:
+                MarsColonyInterface._draw_state_edge(canvas, method_centers[graph["current_method"]], center, color="#94a3b8")
+
+        badge_w, badge_h = 198, 30
+        for idx, badge in enumerate(graph["support_badges"]):
+            row = idx // 3
+            col = idx % 3
+            x = left + col * (badge_w + gap)
+            y = y_support + row * (badge_h + 8)
+            MarsColonyInterface._draw_state_badge(
+                canvas,
+                x,
+                y,
+                badge_w,
+                badge_h,
+                badge["label"],
+                badge["value"],
+                active=badge.get("active", False),
+                warn=badge.get("warn", False),
+            )
+
+        history_lines = [
+            f"Transition: {graph['transition_caption']}",
+            f"Reason: {graph['transition_reason']}",
+            f"Method switch reason: {graph['last_method_switch_reason']}",
+            f"Recent modes: {graph['mode_history'] or '-'}",
+            f"Recent transitions: {graph['transition_history'][-3:] or '-'}",
+            f"Recent method transitions: {graph['method_transitions'][-3:] or '-'}",
+            f"Source cooldowns: {graph['source_cooldowns'] or '-'}",
+            f"Source exhaustion: {graph['source_exhaustion'] or '-'}",
+            f"Warnings: {', '.join(graph['warnings']) if graph['warnings'] else 'none'}",
+        ]
+        canvas.create_rectangle(side_x, y_modes - 6, width - 18, y_support + 120, fill="#f8fafc", outline="#cbd5e1")
+        canvas.create_text(side_x + 8, y_modes + 2, anchor="nw", text="\n".join(history_lines), width=max(120, width - side_x - 32), font=("Arial", 8))
+
+        max_x = max(width, left + max(len(graph["modes"]) * (node_w + gap), len(graph["methods"]) * (method_w + gap), len(graph["steps"]) * (step_w + gap)) + 40)
+        max_y = y_support + 130
+        canvas.configure(scrollregion=(0, 0, max_x, max_y))
+        return graph
 
     def _sync_construction_summaries(self):
         self.construction_text.delete("1.0", tk.END)
@@ -2789,11 +3074,21 @@ class MarsColonyInterface:
                 padding=8,
             )
             panel.pack(fill="x", padx=6, pady=4, anchor="n")
+            graph_canvas = tk.Canvas(panel, height=410, background="#ffffff", highlightthickness=1, highlightbackground="#d1d5db")
+            graph_canvas.pack(fill="x", expand=True)
+            graph_scroll_x = ttk.Scrollbar(panel, orient="horizontal", command=graph_canvas.xview)
+            graph_scroll_x.pack(fill="x", pady=(0, 6))
+            graph_canvas.configure(xscrollcommand=graph_scroll_x.set)
+            self._draw_agent_state_machine(graph_canvas, snapshot)
+
             body = tk.Text(panel, height=11, wrap="word")
             body.pack(fill="x", expand=True)
             body.insert("1.0", self._format_agent_state_panel(snapshot))
             body.configure(state="disabled")
-            self.agent_state_panels[snapshot.get("agent_id") or snapshot.get("display_name")] = body
+            self.agent_state_panels[snapshot.get("agent_id") or snapshot.get("display_name")] = {
+                "canvas": graph_canvas,
+                "body": body,
+            }
 
     def run(self):
         self.root.mainloop()
