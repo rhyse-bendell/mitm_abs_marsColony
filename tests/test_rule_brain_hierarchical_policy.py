@@ -92,6 +92,40 @@ class TestRuleBrainHierarchicalPolicy(unittest.TestCase):
         self.assertIn(response.plan.next_action.action_type.value, {ExecutableActionType.TRANSPORT_RESOURCES.value, ExecutableActionType.START_CONSTRUCTION.value})
         self.assertIn(decision.selected_action.value, {ExecutableActionType.TRANSPORT_RESOURCES.value, ExecutableActionType.START_CONSTRUCTION.value})
         self.assertTrue(any("mode=" in note for note in response.plan.notes))
+        self.assertTrue(any("policy_snapshot=" in note for note in response.plan.notes))
+
+    def test_request_from_context_carries_control_state_snapshot(self):
+        context = self._context(control_state={
+            "mode": "REPAIR",
+            "previous_mode": "VALIDATE",
+            "mode_dwell_steps": 3,
+            "last_transition_reason": "contradiction_repair_bias",
+            "recovery_active": True,
+            "last_policy_snapshot": {"top_features": {"repair_pressure": 0.8}},
+        })
+        request = _request_from_context_packet(context)
+        self.assertEqual(request.control_mode, "REPAIR")
+        self.assertEqual(request.previous_control_mode, "VALIDATE")
+        self.assertEqual(request.mode_dwell_steps, 3)
+        self.assertEqual(request.last_transition_reason, "contradiction_repair_bias")
+        self.assertEqual(request.control_state_snapshot.get("mode"), "REPAIR")
+
+    def test_generate_plan_prefers_request_control_state_over_bootstrap_default(self):
+        brain = RuleBrain(RuleBrainPolicyConfig(min_mode_dwell_steps=3, mode_selection_temperature=0.1))
+        context = self._context(
+            control_state={"mode": "CONSTRUCT", "mode_dwell_steps": 1},
+            ready=False,
+            affordances=[
+                {"action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, "utility": 0.9, "target_id": "Team_Info"},
+                {"action_type": ExecutableActionType.WAIT.value, "utility": 0.1},
+            ],
+        )
+        request = _request_from_context_packet(context)
+        request.control_mode = "CONSTRUCT"
+        request.mode_dwell_steps = 1
+        request.control_state_snapshot = {"mode": "CONSTRUCT", "mode_dwell_steps": 1}
+        response = brain.generate_plan(request)
+        self.assertTrue(any("'previous_mode': 'CONSTRUCT'" in note for note in response.plan.notes))
 
     def test_bootstrap_exits_when_shared_source_exhausted_and_role_gap_remaining(self):
         brain = RuleBrain(RuleBrainPolicyConfig(min_mode_dwell_steps=0, mode_selection_temperature=0.1))
