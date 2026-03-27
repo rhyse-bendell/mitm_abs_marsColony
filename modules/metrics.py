@@ -865,6 +865,7 @@ class MetricsCollector:
             "responses_discarded_as_stale": int(sum(int(s.get("total_stale_discarded", 0) or 0) for s in planner_states)),
             "requests_completed_with_llm": int(sum(int(s.get("requests_completed_with_llm", 0) or 0) for s in planner_states)),
             "requests_completed_with_fallback": int(sum(int(s.get("requests_completed_with_fallback", 0) or 0) for s in planner_states)),
+            "deterministic_rulebrain_decision_count": int(sum(int(s.get("deterministic_rulebrain_decision_count", 0) or 0) for s in planner_states)),
             "llm_success_count": int(sum(int(s.get("llm_success_count", 0) or 0) for s in planner_states)),
             "llm_timeout_count": int(sum(int(s.get("llm_timeout_count", 0) or 0) for s in planner_states)),
             "llm_invalid_count": int(sum(int(s.get("llm_invalid_count", 0) or 0) for s in planner_states)),
