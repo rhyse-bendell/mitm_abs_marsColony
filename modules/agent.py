@@ -317,6 +317,7 @@ class Agent:
             "consecutive_failure_samples": 0,
             "requests_completed_with_llm": 0,
             "requests_completed_with_fallback": 0,
+            "deterministic_rulebrain_decision_count": 0,
             "llm_success_count": 0,
             "llm_timeout_count": 0,
             "llm_invalid_count": 0,
@@ -506,6 +507,26 @@ class Agent:
         self.source_cooldowns = dict(method_state.get("source_cooldowns", {}))
         self.source_exhaustion = dict(method_state.get("source_exhaustion", {}))
         self.last_method_switch_reason = method_state.get("last_method_switch_reason")
+
+    def _is_rule_brain_runtime(self, sim_state=None):
+        if sim_state is None:
+            return False
+        runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {}
+        configured = str(runtime.get("configured_backend", getattr(sim_state, "configured_brain_backend", "rule_brain")) or "rule_brain").lower()
+        effective = str(runtime.get("effective_backend", getattr(sim_state, "effective_brain_backend", configured)) or configured).lower()
+        return configured == "rule_brain" or effective == "rule_brain"
+
+    def _controller_allows_inspect_execution(self):
+        step = str(self.active_method_step or "")
+        if step in {"inspect_shared_source", "inspect_role_source"}:
+            return True
+        for action in self.active_actions:
+            if action.get("decision_action") == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value:
+                return True
+        return False
+
+    def _trigger_epistemic_update_pipeline(self, *, sim_state=None, trigger_source=None):
+        self._apply_task_derivations(sim_state=sim_state, trigger_source=trigger_source)
 
     def get_runtime_state_snapshot(self):
         current_goals = [g for g in list(self.goal_stack or []) if isinstance(g, dict)]
@@ -866,6 +887,8 @@ class Agent:
 
     def _clear_inspect_pursuit(self, reason=None, sim_state=None, release_slot=False, environment=None):
         source_id = self.inspect_pursuit.get("source_id")
+        if self.current_inspect_target_id == source_id:
+            self.current_inspect_target_id = None
         if release_slot and source_id and environment is not None:
             self._release_source_slot(environment, source_id=source_id, emit=True, sim_state=sim_state, reason=reason or "pursuit_cleared")
         self.inspect_pursuit = {
@@ -1363,7 +1386,7 @@ class Agent:
         packet_data_ids = {d.id for d in packet.get("data", [])}
         held_data_ids = {d.id for d in self.mental_model["data"]}
         new_data_ids = sorted(packet_data_ids & held_data_ids)
-        self._apply_task_derivations(sim_state=sim_state, trigger_source=source_id)
+        self._trigger_epistemic_update_pipeline(sim_state=sim_state, trigger_source=source_id)
         derivation_ids_triggered = sorted(set(self.executed_derivations) - derivations_before)
         after_rules = set(self.mental_model["knowledge"].rules)
         new_rule_ids = sorted(after_rules - before_rules)
@@ -3915,14 +3938,15 @@ class Agent:
         rewritten = decision
         handoff = dict(self.post_inspect_handoff or {})
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        rule_brain_runtime = self._is_rule_brain_runtime(sim_state)
         if decision.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE and handoff.get("pending") and handoff.get("expires_at", 0.0) >= now_ts:
-            # Compatibility-only bootstrap when RuleBrain controller is unavailable.
-            followup = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
             self.post_inspect_handoff["pending"] = False
-            if followup.selected_action != ExecutableActionType.INSPECT_INFORMATION_SOURCE:
-                rewritten = followup
-                self._emit_event(sim_state, "policy_pivot_applied", {"origin": pivot_origin, "kind": "post_inspect", "previous_action": decision.selected_action.value, "pivoted_to": rewritten.selected_action.value, "reason": handoff.get("outcome")})
             if context is not None and sim_state is not None:
+                if not rule_brain_runtime:
+                    followup = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
+                    if followup.selected_action != ExecutableActionType.INSPECT_INFORMATION_SOURCE:
+                        rewritten = followup
+                        self._emit_event(sim_state, "policy_pivot_applied", {"origin": pivot_origin, "kind": "post_inspect", "previous_action": decision.selected_action.value, "pivoted_to": rewritten.selected_action.value, "reason": handoff.get("outcome")})
                 rerouted = self._reroute_decision_through_rulebrain_controller(
                     context,
                     rewritten,
@@ -3943,15 +3967,16 @@ class Agent:
                 sorted_affordances = sorted(context.action_affordances, key=lambda a: float(a.get("utility", 0.0)), reverse=True)
                 candidate = next((c for c in sorted_affordances if c.get("action_type") in {ExecutableActionType.TRANSPORT_RESOURCES.value, ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value}), None)
                 if candidate is not None:
-                    rewritten = BrainDecision(
-                        selected_action=ExecutableActionType(candidate["action_type"]),
-                        target_id=candidate.get("target_id"),
-                        target_zone=candidate.get("target_zone"),
-                        goal_update="satisfy_build_logistics" if candidate.get("action_type") == ExecutableActionType.TRANSPORT_RESOURCES.value else "execute_build",
-                        reason_summary=f"Policy pivot ({pivot_origin}): readiness unlocked productive action.",
-                        confidence=max(0.8, float(decision.confidence or 0.0)),
-                    )
-                    self._emit_event(sim_state, "policy_pivot_applied", {"origin": pivot_origin, "kind": "post_readiness", "previous_action": decision.selected_action.value, "pivoted_to": rewritten.selected_action.value, "reason": "readiness_unlocked"})
+                    if not rule_brain_runtime:
+                        rewritten = BrainDecision(
+                            selected_action=ExecutableActionType(candidate["action_type"]),
+                            target_id=candidate.get("target_id"),
+                            target_zone=candidate.get("target_zone"),
+                            goal_update="satisfy_build_logistics" if candidate.get("action_type") == ExecutableActionType.TRANSPORT_RESOURCES.value else "execute_build",
+                            reason_summary=f"Policy pivot ({pivot_origin}): readiness unlocked productive action.",
+                            confidence=max(0.8, float(decision.confidence or 0.0)),
+                        )
+                        self._emit_event(sim_state, "policy_pivot_applied", {"origin": pivot_origin, "kind": "post_readiness", "previous_action": decision.selected_action.value, "pivoted_to": rewritten.selected_action.value, "reason": "readiness_unlocked"})
                     if sim_state is not None:
                         rerouted = self._reroute_decision_through_rulebrain_controller(
                             context,
@@ -4004,7 +4029,7 @@ class Agent:
         )
         return controller_decision
 
-    def _attempt_local_rule_brain_refresh(self, sim_state, environment, planner_reason):
+    def _run_rule_brain_controller(self, sim_state, environment, planner_reason):
         runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"provider": sim_state.brain_provider, "configured_backend": sim_state.configured_brain_backend}
         provider = runtime.get("provider")
         backend = runtime.get("configured_backend", sim_state.configured_brain_backend)
@@ -4018,8 +4043,13 @@ class Agent:
             self.control_state.update(updated_control_state)
             self._sync_method_state_from_control()
         self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment, sim_state=sim_state)
+        self.planner_state["deterministic_rulebrain_decision_count"] = int(self.planner_state.get("deterministic_rulebrain_decision_count", 0) or 0) + 1
         self._emit_event(sim_state, "local_policy_refresh_used", {"reason": planner_reason, "backend": backend, "selected_action": decision.selected_action.value, "control_mode": self.control_state.get("mode"), "mode_dwell_steps": self.control_state.get("mode_dwell_steps")})
         return True
+
+    def _attempt_local_rule_brain_refresh(self, sim_state, environment, planner_reason):
+        """Backward-compatible alias for deterministic RuleBrain controller path."""
+        return self._run_rule_brain_controller(sim_state, environment, planner_reason)
     def _translate_brain_decision_to_legacy_action(self, decision, environment, sim_state=None):
         # NOTE: This is still a live legacy adapter in the execution path.
         # Planner outputs are normalized to action-dict records consumed by the
@@ -4252,6 +4282,8 @@ class Agent:
                 release_slot=True,
                 environment=environment,
             )
+        if decision.selected_action != ExecutableActionType.INSPECT_INFORMATION_SOURCE:
+            self.current_inspect_target_id = None
         if action.get("type") in {"move_to", "communicate", "construct", "transport_resources"}:
             self._emit_startup_once(sim_state, "first_productive_action_started", "first_productive_action_started", {"planner_action_type": decision.selected_action.value, "translated_action_type": action.get("type")})
         return [action]
@@ -4404,6 +4436,7 @@ class Agent:
     def absorb_packet(self, packet, accuracy=1.0, sim_state=None, source_id=None):
         source_ref = source_id or packet.get("source_id") or "unknown_source"
         accuracy_modifier = max(-0.2, min(0.2, (float(accuracy) - 1.0) * 0.35))
+        dik_changed = False
         for d in packet.get("data", []):
             success, _ = self._attempt_epistemic_transition(
                 hook_target="absorb_packet",
@@ -4433,6 +4466,7 @@ class Agent:
                     })
                     self.activity_log.append(f"Absorbed data: {d.id} (from {d.source})")
                     self.last_dik_change_time = getattr(self, "current_time", 0.0)
+                    dik_changed = True
 
         for info in packet.get("information", []):
             success, _ = self._attempt_epistemic_transition(
@@ -4463,6 +4497,9 @@ class Agent:
                     })
                     self.activity_log.append(f"Absorbed info: {info.id} (from {info.source})")
                     self.last_dik_change_time = getattr(self, "current_time", 0.0)
+                    dik_changed = True
+        if dik_changed:
+            self._trigger_epistemic_update_pipeline(sim_state=sim_state, trigger_source=source_ref)
 
     def move_toward(self, target, dt, environment, sim_state=None):
         nav = self.navigation
@@ -4640,8 +4677,6 @@ class Agent:
         if "mismatch with construction" in " ".join(self.activity_log[-6:]).lower() and self.current_inspect_target_id:
             self.mark_source_revisitable(self.current_inspect_target_id, reason="construction_mismatch")
 
-        self._apply_task_derivations(sim_state=sim_state)
-
         known_info = list(self.mental_model["information"])
         if known_info:
             from itertools import combinations
@@ -4672,9 +4707,11 @@ class Agent:
         else:
             self.perceive_environment(sim_state)
             self.sim_step_count += 1
+            rule_brain_runtime = self._is_rule_brain_runtime(sim_state)
             if not planner_lifecycle_already_polled:
                 self._check_inflight_timeout(sim_state)
-                self._poll_planner_request(sim_state, environment)
+                if not rule_brain_runtime:
+                    self._poll_planner_request(sim_state, environment)
                 self._poll_dik_integration_request(sim_state)
             if self.active_actions:
                 self._advance_active_actions(dt, sim_state=sim_state)
@@ -4686,7 +4723,13 @@ class Agent:
                     self._emit_event(sim_state, "dik_integration_invocation_requested", {"tick": self.sim_step_count, "trigger_reason": dik_reason})
                     self._submit_dik_integration_request_async(sim_state, dik_reason)
                 planner_allowed, planner_reason = self._planner_decision_allowed(sim_state, trigger_reason)
-                if planner_allowed:
+                if rule_brain_runtime:
+                    if self.planner_state.get("status") == "in_flight":
+                        self.clear_planner_inflight_state(sim_state=sim_state, reason="rule_brain_authoritative_controller")
+                    if not self._run_rule_brain_controller(sim_state, environment, planner_reason or trigger_reason or "rule_brain_tick"):
+                        decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="rule_brain controller unavailable", confidence=1.0)
+                        self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment)
+                elif planner_allowed:
                     cooldown_remaining = self._planner_cooldown_remaining(sim_state)
                     if cooldown_remaining > 0.0:
                         self.planner_state["total_skipped_cooldown"] += 1
@@ -4731,7 +4774,7 @@ class Agent:
                 elif self._continue_cached_plan(sim_state, environment):
                     self.planner_state["stale_plan_reuse_count"] += 1
                     sim_state.logger.log_event(sim_state.time, "planner_skipped_due_to_cadence", {"agent": self.name, "reason": planner_reason})
-                elif self._attempt_local_rule_brain_refresh(sim_state, environment, planner_reason):
+                elif self._run_rule_brain_controller(sim_state, environment, planner_reason):
                     sim_state.logger.log_event(sim_state.time, "planner_skipped_local_policy_refresh", {"agent": self.name, "reason": planner_reason})
                 else:
                     decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="no active cached plan while planner cadence skips", confidence=1.0)
@@ -4740,18 +4783,19 @@ class Agent:
                     runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend}
                     self._emit_event(sim_state, "ui_safe_fallback_used", {"reason": planner_reason, "request_state": self.planner_state.get("status"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
                     sim_state.logger.log_event(sim_state.time, "planner_skipped_without_plan", {"agent": self.name, "reason": planner_reason})
-                bootstrap_decision = self._bootstrap_override_decision(environment, sim_state=sim_state)
-                if bootstrap_decision is not None:
-                    self.current_action = self._translate_brain_decision_to_legacy_action(bootstrap_decision, environment, sim_state=sim_state)
-                    self._emit_event(
-                        sim_state,
-                        "fallback_bootstrap_action_forced",
-                        {
-                            "action_type": bootstrap_decision.selected_action.value,
-                            "target_id": bootstrap_decision.target_id,
-                            "activation_reason": self.fallback_bootstrap.get("activation_reason"),
-                        },
-                    )
+                if not rule_brain_runtime:
+                    bootstrap_decision = self._bootstrap_override_decision(environment, sim_state=sim_state)
+                    if bootstrap_decision is not None:
+                        self.current_action = self._translate_brain_decision_to_legacy_action(bootstrap_decision, environment, sim_state=sim_state)
+                        self._emit_event(
+                            sim_state,
+                            "fallback_bootstrap_action_forced",
+                            {
+                                "action_type": bootstrap_decision.selected_action.value,
+                                "target_id": bootstrap_decision.target_id,
+                                "activation_reason": self.fallback_bootstrap.get("activation_reason"),
+                            },
+                        )
                 self._advance_active_actions(dt, sim_state=sim_state)
 
             self._apply_externalization_and_construction_effects(environment, sim_state, dt)
@@ -4764,24 +4808,16 @@ class Agent:
         if self.target:
             self.move_toward(self.target, dt, environment, sim_state=sim_state)
 
-        if self.current_inspect_target_id:
+        if self.current_inspect_target_id and self._controller_allows_inspect_execution():
             self._inspect_source(environment, self.current_inspect_target_id, sim_state=sim_state)
+        elif self.current_inspect_target_id:
+            self.current_inspect_target_id = None
 
         if sim_state is not None and not self.startup_state.get("left_spawn"):
             moved = math.hypot(self.position[0] - self.spawn_position[0], self.position[1] - self.spawn_position[1])
             if moved > 0.2:
                 self._emit_startup_once(sim_state, "left_spawn", "agent_left_spawn", {"distance": round(moved, 3)})
 
-
-        # Communication attempt (talk while walking or standing still)
-        for agent in environment.agents:
-            if agent.name == self.name:
-                continue
-            dist = math.hypot(agent.position[0] - self.position[0], agent.position[1] - self.position[1])
-            if dist <= COMMUNICATION_RADIUS:
-                if any(a["type"] == "communicate" for a in self.active_actions) or \
-                   any(a["type"] == "communicate" for a in agent.active_actions):
-                    self.communicate_with(agent, sim_state=sim_state)
 
     def _apply_externalization_and_construction_effects(self, environment, sim_state, dt):
         if sim_state is None:
@@ -5303,6 +5339,7 @@ class Agent:
     def communicate_with(self, other_agent, sim_state=None):
         messages = self.generate_message()
         message_types = []
+        receiver_dik_changed = False
         for msg in messages:
             message_types.append(msg.get("type"))
             other_agent.receive_message(msg, from_agent=self.name)
@@ -5311,6 +5348,7 @@ class Agent:
         for data in self.mental_model["data"]:
             if data not in other_agent.mental_model["data"]:
                 other_agent.mental_model["data"].add(data)
+                receiver_dik_changed = True
                 if other_agent.name not in data.acquired_by:
                     data.acquired_by[other_agent.name] = {
                         "mode": "shared",
@@ -5330,6 +5368,7 @@ class Agent:
         for info in self.mental_model["information"]:
             if info not in other_agent.mental_model["information"]:
                 other_agent.mental_model["information"].add(info)
+                receiver_dik_changed = True
                 if other_agent.name not in info.acquired_by:
                     info.acquired_by[other_agent.name] = {
                         "mode": "shared",
@@ -5350,6 +5389,7 @@ class Agent:
             if rule not in other_agent.mental_model["knowledge"].rules:
                 info_ids = self.mental_model["knowledge"].built_from.get(rule, [])
                 other_agent.mental_model["knowledge"].add_rule(rule, info_ids)
+                receiver_dik_changed = True
                 other_agent.activity_log.append(f"Received rule from {self.name}")
                 DIK_LOG.append({
                     "time": getattr(self, "current_time", 0.0),
@@ -5380,6 +5420,8 @@ class Agent:
                 "communication_exchange",
                 {"sender": self.name, "receiver": other_agent.name, "message_types": message_types},
             )
+        if receiver_dik_changed:
+            other_agent._trigger_epistemic_update_pipeline(sim_state=sim_state, trigger_source=f"communication:{self.name}")
 
     def receive_message(self, message, from_agent=None):
         sender = message.get("sender")
@@ -5392,11 +5434,13 @@ class Agent:
         mtype = message.get("type")
         mtype = LEGACY_COMMUNICATION_TYPE_MAP.get(mtype, mtype)
         content = message.get("content", [])
+        dik_changed = False
 
         if mtype == "TDP":
             for d in content:
                 if d not in self.mental_model["data"]:
                     self.mental_model["data"].add(d)
+                    dik_changed = True
                     if self.name not in d.acquired_by:
                         d.acquired_by[self.name] = {"mode": "shared", "from": sender}
                     DIK_LOG.append({
@@ -5412,6 +5456,7 @@ class Agent:
             for info in content:
                 if info not in self.mental_model["information"]:
                     self.mental_model["information"].add(info)
+                    dik_changed = True
                     if self.name not in info.acquired_by:
                         info.acquired_by[self.name] = {"mode": "shared", "from": sender}
                     DIK_LOG.append({
@@ -5428,6 +5473,7 @@ class Agent:
                 if rule not in self.mental_model["knowledge"].rules:
                     inferred_from = self.theory_of_mind[sender].get("knowledge_ids", [])
                     self.mental_model["knowledge"].add_rule(rule, inferred_from)
+                    dik_changed = True
                     DIK_LOG.append({
                         "time": getattr(self, "current_time", 0.0),
                         "agent": self.name,
@@ -5447,6 +5493,8 @@ class Agent:
             self.reevaluate_knowledge()
 
         self.activity_log.append(f"Received {mtype} from {sender}")
+        if dik_changed:
+            self._trigger_epistemic_update_pipeline(sim_state=None, trigger_source=f"message:{sender}")
 
     def reevaluate_knowledge(self):
         # Recombine info to try and re-infer

@@ -877,10 +877,12 @@ class SimulationState:
 
     def update(self, base_dt):
         dt = base_dt * self.speed_multiplier
+        rule_brain_runtime = str(self.effective_brain_backend or self.configured_brain_backend).lower() == "rule_brain"
         for agent in self.agents:
             agent.current_time = self.time
-            agent._check_inflight_timeout(self)
-            agent._poll_planner_request(self, self.environment)
+            if not rule_brain_runtime:
+                agent._check_inflight_timeout(self)
+                agent._poll_planner_request(self, self.environment)
             if hasattr(agent, "_poll_dik_integration_request"):
                 agent._poll_dik_integration_request(self)
         self._refresh_planner_barrier_state()
@@ -907,12 +909,6 @@ class SimulationState:
         for project in self.environment.construction.projects.values():
             if isinstance(project, dict):
                 self.team_knowledge_manager.upsert_construction_artifact(project, self.time)
-
-        for i, agent in enumerate(self.agents):
-            for j in range(i + 1, len(self.agents)):
-                other = self.agents[j]
-                if self._distance(agent.position, other.position) < 1.5:
-                    agent.communicate_with(other, sim_state=self)
 
         for agent in self.agents:
             agent.current_time = self.time
