@@ -93,12 +93,26 @@ class TeamKnowledgeManager:
         summary = f"{structure_type} progress={delivered}/{required} status={status}"
         knowledge_summary = list(project.get("expected_rules", []))
         contributors = sorted(project.get("builders", set())) if isinstance(project.get("builders"), set) else []
+        provenance = dict(project.get("provenance") or {})
+        held_rule_ids = list(provenance.get("held_rule_ids_at_build", []))
+        held_information_ids = list(provenance.get("held_information_ids_at_build", []))
+        held_data_ids = list(provenance.get("held_data_ids_at_build", []))
         content = {
             "project_id": project_id,
             "structure_type": structure_type,
             "status": status,
             "correct": project.get("correct", True),
             "expected_rules": knowledge_summary,
+            "held_rule_ids_at_build": held_rule_ids,
+            "held_information_ids_at_build": held_information_ids,
+            "held_data_ids_at_build": held_data_ids,
+            "held_expected_rules_locally": bool(provenance.get("held_expected_rules_locally", False)),
+            "missing_expected_rules": list(provenance.get("missing_expected_rules", [])),
+            "team_rule_snapshot_ids": list(provenance.get("team_rule_snapshot_ids", [])),
+            "acting_agent": provenance.get("last_actor") or project.get("last_actor"),
+            "contributors": list(provenance.get("contributors", contributors)),
+            "last_update_time": provenance.get("last_update_time", sim_time),
+            "provenance_timeline": list(provenance.get("timeline", [])),
             "delivered_resources": dict(project.get("delivered_resources", {})),
             "required_resources": dict(project.get("required_resources", {})),
         }
@@ -139,6 +153,7 @@ class TeamKnowledgeManager:
         artifact.contributors = contributors
         if changed:
             self.recent_updates.append({"event": "construction_artifact_updated", "artifact_id": artifact_id, "time": sim_time})
+            self.recent_updates.append({"event": "construction_artifact_provenance_updated", "artifact_id": artifact_id, "time": sim_time})
         return artifact
 
     def summarize(self) -> Dict[str, Any]:

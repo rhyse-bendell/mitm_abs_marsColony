@@ -144,12 +144,25 @@ class BrainContextBuilder:
         readiness_ok = bool(build_readiness.get("ready_for_build"))
         mismatch_pressure = any("mismatch" in e.lower() for e in (agent.activity_log[-6:] if agent.activity_log else []))
         has_artifacts = bool((team_state or {}).get("externalized_artifacts"))
+        nearby_teammates = sum(
+            1
+            for other in getattr(environment, "agents", [])
+            if other is not agent and ((agent.position[0] - other.position[0]) ** 2 + (agent.position[1] - other.position[1]) ** 2) ** 0.5 <= 20.0
+        )
+        teammate_help_signals = dict((team_state or {}).get("teammate_help_signals", {}))
+        productive_coordination = bool(nearby_teammates > 0 and (agent.known_gaps or any(teammate_help_signals.values()) or has_artifacts))
+        communication_no_effect_streak = int((getattr(agent, "communication_state", {}) or {}).get("no_effect_streak", 0) or 0)
 
         def utility_for(action: ExecutableActionType, target_kind: str | None = None):
             if action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
                 return 0.95 if stage == "early" else (0.55 if not readiness_ok else 0.25)
             if action in {ExecutableActionType.COMMUNICATE, ExecutableActionType.REQUEST_ASSISTANCE}:
-                return 0.75 if stage in {"early", "late"} else 0.45
+                base = 0.7 if productive_coordination else 0.08
+                if stage == "execution":
+                    base -= 0.15
+                if communication_no_effect_streak > 0:
+                    base -= min(0.5, 0.15 * communication_no_effect_streak)
+                return max(0.01, base)
             if action == ExecutableActionType.EXTERNALIZE_PLAN:
                 return 0.8 if stage in {"early", "execution"} else 0.45
             if action == ExecutableActionType.CONSULT_TEAM_ARTIFACT:
@@ -177,6 +190,11 @@ class BrainContextBuilder:
             {"action_type": ExecutableActionType.VALIDATE_CONSTRUCTION.value, "target_id": "active_construction", "target_class": "build", "utility": utility_for(ExecutableActionType.VALIDATE_CONSTRUCTION, target_kind="build")},
             {"action_type": ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value, "target_id": "active_construction", "target_class": "build", "utility": utility_for(ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, target_kind="build")},
         ]
+        for item in legal:
+            if item.get("action_type") in {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.REQUEST_ASSISTANCE.value}:
+                item["reachable"] = nearby_teammates > 0
+                item["productive"] = productive_coordination
+                item["no_effect_streak"] = communication_no_effect_streak
 
         for target_name, target in environment.interaction_targets.items():
             accessible_point = environment.get_interaction_target_position(target_name, from_position=agent.position)

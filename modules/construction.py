@@ -138,8 +138,73 @@ class ConstructionManager:
                 "author": "system",
                 "artifact_type": conf["artifact_type"],
                 "target_id": project_id,
+                "last_actor": None,
+                "last_event_time": None,
+                "provenance": {
+                    "last_actor": None,
+                    "contributors": [],
+                    "last_update_time": None,
+                    "timeline": [],
+                    "expected_rules": list(conf["expected_rules"]),
+                    "held_rule_ids_at_build": [],
+                    "held_information_ids_at_build": [],
+                    "held_data_ids_at_build": [],
+                    "held_expected_rules_locally": False,
+                    "missing_expected_rules": list(conf["expected_rules"]),
+                    "team_rule_snapshot_ids": [],
+                },
             }
         return projects
+
+    def update_project_provenance(self, project_id, *, event, actor=None, sim_time=None, held_data_ids=None, held_information_ids=None, held_rule_ids=None, team_rule_snapshot_ids=None):
+        project = self.projects.get(project_id)
+        if not project:
+            return
+        prov = project.setdefault("provenance", {})
+        expected = [
+            normalize_rule_token(r)
+            for r in (project.get("expected_rules") or prov.get("expected_rules") or [])
+            if normalize_rule_token(r)
+        ]
+        held_rules = sorted({normalize_rule_token(r) for r in (held_rule_ids or prov.get("held_rule_ids_at_build") or []) if normalize_rule_token(r)})
+        held_info = sorted({str(i) for i in (held_information_ids or prov.get("held_information_ids_at_build") or []) if str(i)})
+        held_data = sorted({str(d) for d in (held_data_ids or prov.get("held_data_ids_at_build") or []) if str(d)})
+        team_rules = sorted({normalize_rule_token(r) for r in (team_rule_snapshot_ids or prov.get("team_rule_snapshot_ids") or []) if normalize_rule_token(r)})
+        expected_set = set(expected)
+        held_expected_locally = bool(expected_set.issubset(set(held_rules))) if expected_set else True
+        missing_expected = sorted(expected_set - set(held_rules))
+        contributors = sorted(set(list(prov.get("contributors", [])) + ([actor] if actor else [])))
+        prov.update(
+            {
+                "last_actor": actor or prov.get("last_actor"),
+                "contributors": contributors,
+                "last_update_time": sim_time,
+                "expected_rules": expected,
+                "held_rule_ids_at_build": held_rules,
+                "held_information_ids_at_build": held_info,
+                "held_data_ids_at_build": held_data,
+                "held_expected_rules_locally": held_expected_locally,
+                "missing_expected_rules": missing_expected,
+                "team_rule_snapshot_ids": team_rules,
+            }
+        )
+        timeline = list(prov.get("timeline", []))
+        timeline.append(
+            {
+                "event": str(event),
+                "actor": actor,
+                "time": sim_time,
+                "status": project.get("status"),
+                "correct": bool(project.get("correct", True)),
+                "delivered_resources": dict(project.get("delivered_resources", {})),
+                "required_resources": dict(project.get("required_resources", {})),
+                "held_expected_rules_locally": held_expected_locally,
+                "missing_expected_rules": missing_expected,
+            }
+        )
+        prov["timeline"] = timeline[-20:]
+        project["last_actor"] = actor or project.get("last_actor")
+        project["last_event_time"] = sim_time
 
     def _project_progress(self, project):
         req = float(project.get("required_resources", {}).get("bricks", 0) or 0)
@@ -273,6 +338,7 @@ class ConstructionManager:
             if project_id not in self.sites[site_id].started_structures:
                 self.sites[site_id].started_structures.append(project_id)
         self.update()
+        self.update_project_provenance(project_id, event="project_started", sim_time=None)
         return True, "started"
 
     def deliver_resource(self, project_id, resource_type, quantity=1):
@@ -288,6 +354,7 @@ class ConstructionManager:
         current = int(project["delivered_resources"].get(resource_type, 0) or 0)
         project["delivered_resources"][resource_type] = min(required, current + int(quantity))
         self.update()
+        self.update_project_provenance(project_id, event="resource_delivered", sim_time=None)
         return True
 
     def mark_validated(self, project_id, is_valid=True):
@@ -301,6 +368,7 @@ class ConstructionManager:
             project["validated_complete"] = False
             project["status"] = "needs_repair"
             project["in_progress"] = True
+            self.update_project_provenance(project_id, event="validation_failed", sim_time=None)
             return
         if project.get("resource_complete"):
             project["validated_complete"] = True
@@ -310,6 +378,7 @@ class ConstructionManager:
             project["validated_complete"] = False
             project["status"] = "in_progress"
             project["in_progress"] = True
+        self.update_project_provenance(project_id, event="validation_passed" if is_valid else "validation_failed", sim_time=None)
 
     def assign_builder(self, project_id, agent_name):
         project = self.projects.get(project_id)
@@ -317,6 +386,7 @@ class ConstructionManager:
             return
         project["builders"].add(agent_name)
         self.start_project(project_id)
+        self.update_project_provenance(project_id, event="builder_assigned", actor=agent_name, sim_time=None)
 
     def build_bridge_bc(self, quantity=1):
         bridge = self.bridges["bridge_bc"]
