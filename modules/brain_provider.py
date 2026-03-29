@@ -319,6 +319,7 @@ def _request_from_context_packet(context_packet) -> AgentBrainRequest:
             "build_readiness": dict(cognitive.get("build_readiness", {})),
             "built_state": list(world.get("built_state", [])),
             "loop_counters": dict(cognitive.get("loop_counters", {})),
+            "progress_state": dict(cognitive.get("progress_state", {})),
             "seconds_since_dik_change": cognitive.get("seconds_since_dik_change"),
             "mismatch_signals": list(context_packet.history_bands.get("semantic_plan_evolution", {}).get("unresolved_contradictions", [])),
             "inspect_state": dict(cognitive.get("inspect_state", {})),
@@ -458,7 +459,11 @@ class RuleBrain(BrainProvider):
         active_projects = [p for p in built_state if p.get("state") in {"absent", "in_progress"} and float(p.get("progress", 0.0)) < 1.0]
         mismatch_signals = context_packet.history_bands.get("semantic_plan_evolution", {}).get("unresolved_contradictions", []) if not is_request else list(request_ctx.get("mismatch_signals", []))
         loop_counters = cognitive.get("loop_counters", {}) if not is_request else dict(request_ctx.get("loop_counters", {}))
+        progress_state = cognitive.get("progress_state", {}) if not is_request else dict(request_ctx.get("progress_state", {}))
         repeated = max(int(loop_counters.get("action_repeats", 0) or 0), int(loop_counters.get("selected_action_repeats", 0) or 0))
+        no_progress_streak = max(int(loop_counters.get("no_progress_streak", 0) or 0), int(progress_state.get("no_progress_streak", 0) or 0))
+        observe_no_effect = int(loop_counters.get("observe_no_effect", 0) or 0)
+        communication_no_effect = int(loop_counters.get("communication_no_effect", 0) or 0)
         goal_stack = cognitive.get("goal_stack", []) if not is_request else list(context_packet.current_goal_stack)
         externalized = context_packet.team_state.get("externalized_artifacts", []) if not is_request else list(context_packet.artifact_context)
         validated = sum(1 for a in externalized if a.get("validation_state") == "validated")
@@ -494,6 +499,9 @@ class RuleBrain(BrainProvider):
             "coordination_need": min(1.0, (len(known_gaps) + len(context_packet.team_state.get("teammate_help_signals", {}))) / 6.0) if not is_request else min(1.0, len(known_gaps) / 4.0),
             "repair_pressure": min(1.0, (len(mismatch_signals) / 3.0) + (0.5 if any(p.get("needs_repair") for p in built_state) else 0.0)),
             "loop_pressure": min(1.0, repeated / 4.0),
+            "no_progress_pressure": min(1.0, no_progress_streak / 4.0),
+            "observe_ineffective_pressure": min(1.0, observe_no_effect / 4.0),
+            "communication_ineffective_pressure": min(1.0, communication_no_effect / 4.0),
             "readiness_blocked": 0.0 if readiness.get("ready_for_build") else 1.0,
             "contradiction_pressure": min(1.0, len(mismatch_signals) / 3.0),
             "active_incomplete_projects": min(1.0, len(active_projects) / 3.0),
@@ -543,6 +551,7 @@ class RuleBrain(BrainProvider):
         mode_scores["VALIDATE"] = 0.2 + 1.4 * features["artifact_validation_available"] + 0.5 * features["goal_pressure"]
         mode_scores["REPAIR"] = 0.2 + 1.8 * features["repair_pressure"]
         mode_scores["RECOVERY"] = 0.2 + 1.8 * features["loop_pressure"] + self.policy_config.recovery_bonus * features["contradiction_pressure"]
+        mode_scores["LOGISTICS"] += 1.3 * features.get("no_progress_pressure", 0.0)
         mode_scores["MONITOR"] = 0.35 + 0.2 * (1.0 - features["goal_pressure"])
         current_mode = str(control_state.get("mode") or "BOOTSTRAP")
         if current_mode in mode_scores:
@@ -586,6 +595,13 @@ class RuleBrain(BrainProvider):
                 if mode in guarded_scores:
                     guarded_scores[mode] -= 0.8
                     notes.append("loop_pressure_deprioritize_assistance_modes")
+        if features.get("no_progress_pressure", 0.0) >= 0.5:
+            guarded_scores["LOGISTICS"] = guarded_scores.get("LOGISTICS", mode_scores.get("LOGISTICS", 0.0)) + 1.2
+            guarded_scores["RECOVERY"] = guarded_scores.get("RECOVERY", mode_scores.get("RECOVERY", 0.0)) + 0.8
+            for mode in ("MONITOR", "COORDINATE"):
+                if mode in guarded_scores:
+                    guarded_scores[mode] -= 0.9
+            notes.append("no_progress_pressure_bias_logistics_recovery")
 
         if features.get("contradiction_pressure", 0.0) > 0.0 or features.get("repair_pressure", 0.0) > 0.0:
             for mode in ("REPAIR", "VALIDATE"):
@@ -804,6 +820,7 @@ class RuleBrain(BrainProvider):
                 no_effect_streak = int(affordance.get("no_effect_streak", 0) or 0)
                 if no_effect_streak > 0:
                     score -= min(2.2, 0.6 * no_effect_streak)
+                score -= 1.4 * features.get("communication_ineffective_pressure", 0.0)
             if (
                 features["build_opportunity"] > 0.0
                 and features["active_incomplete_projects"] > 0.0
@@ -825,6 +842,12 @@ class RuleBrain(BrainProvider):
                 score -= 1.25
             if action_type == ExecutableActionType.WAIT.value:
                 score -= 0.35
+            if action_type == ExecutableActionType.OBSERVE_ENVIRONMENT.value:
+                score -= 1.2 * features.get("observe_ineffective_pressure", 0.0)
+            if action_type in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value} and features.get("readiness_blocked", 0.0) > 0.0:
+                score -= 1.6
+            if action_type == ExecutableActionType.TRANSPORT_RESOURCES.value and features.get("readiness_blocked", 0.0) > 0.0:
+                score += 1.25
             score += self.policy_config.randomness_floor * (1.0 - (idx / max(1, len(sorted_affordances))))
             action_scores[f"{idx}:{action_type}"] = score
         return action_scores

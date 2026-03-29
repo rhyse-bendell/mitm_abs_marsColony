@@ -414,6 +414,23 @@ class Agent:
             "no_effect_streak": 0,
             "last_signature": None,
         }
+        self.progress_tracker = {
+            "last_progress_time": -1.0,
+            "last_progress_kind": None,
+            "no_progress_streak": 0,
+            "recent_events": [],
+            "counts": {},
+            "cooldowns": {},
+            "forced_pivot": None,
+            "forced_pivot_until": 0.0,
+            "last_action_signature": None,
+            "last_target_signature": None,
+            "target_arrival_no_effect": {},
+            "project_no_progress": {},
+            "source_no_progress": {},
+            "communication_no_effect": 0,
+            "observe_no_effect": 0,
+        }
         self.task_model = None
 
 
@@ -422,6 +439,67 @@ class Agent:
             return
         enriched = {"agent_id": self.agent_id, "agent": self.name, **dict(payload or {})}
         sim_state.logger.log_event(sim_state.time, event_type, enriched)
+
+    def _tracker_now(self, sim_state=None):
+        return float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+
+    def _tracker_key(self, category, key):
+        return f"{category}:{key}"
+
+    def _in_cooldown(self, category, key, sim_state=None):
+        now_ts = self._tracker_now(sim_state)
+        until = float(self.progress_tracker.get("cooldowns", {}).get(self._tracker_key(category, key), -1.0) or -1.0)
+        return until > now_ts
+
+    def _set_cooldown(self, category, key, duration_s, sim_state=None, reason=""):
+        now_ts = self._tracker_now(sim_state)
+        self.progress_tracker.setdefault("cooldowns", {})[self._tracker_key(category, key)] = now_ts + max(0.0, float(duration_s))
+        self._emit_event(
+            sim_state,
+            "path_cooldown_started",
+            {"category": category, "key": key, "duration_s": duration_s, "reason": reason},
+        )
+
+    def _register_progress(self, sim_state=None, *, kind, detail=None):
+        now_ts = self._tracker_now(sim_state)
+        tracker = self.progress_tracker
+        tracker["last_progress_time"] = now_ts
+        tracker["last_progress_kind"] = str(kind)
+        tracker["no_progress_streak"] = 0
+        tracker["forced_pivot"] = None
+        tracker["forced_pivot_until"] = 0.0
+        counts = tracker.setdefault("counts", {})
+        counts[str(kind)] = int(counts.get(str(kind), 0) or 0) + 1
+        events = list(tracker.get("recent_events", []))
+        events.append({"time": now_ts, "kind": str(kind), "progress": True, "detail": dict(detail or {})})
+        tracker["recent_events"] = events[-24:]
+        self._emit_event(sim_state, "progress_registered", {"kind": str(kind), "detail": dict(detail or {}), "no_progress_streak": 0})
+
+    def _register_no_progress(self, sim_state=None, *, kind, detail=None, category=None, key=None):
+        now_ts = self._tracker_now(sim_state)
+        tracker = self.progress_tracker
+        tracker["no_progress_streak"] = int(tracker.get("no_progress_streak", 0) or 0) + 1
+        counts = tracker.setdefault("counts", {})
+        count_key = f"no_progress::{kind}"
+        counts[count_key] = int(counts.get(count_key, 0) or 0) + 1
+        streak = tracker["no_progress_streak"]
+        if category and key:
+            bucket = tracker.setdefault(f"{category}_no_progress", {})
+            bucket[str(key)] = int(bucket.get(str(key), 0) or 0) + 1
+        events = list(tracker.get("recent_events", []))
+        events.append({"time": now_ts, "kind": str(kind), "progress": False, "detail": dict(detail or {}), "streak": streak})
+        tracker["recent_events"] = events[-24:]
+        payload = {"kind": str(kind), "detail": dict(detail or {}), "no_progress_streak": streak}
+        if category and key:
+            payload.update({"category": category, "key": str(key)})
+        self._emit_event(sim_state, "no_progress_registered", payload)
+        return streak
+
+    def _force_recovery_pivot(self, sim_state=None, *, to_action, reason, ttl_s=12.0):
+        now_ts = self._tracker_now(sim_state)
+        self.progress_tracker["forced_pivot"] = str(to_action)
+        self.progress_tracker["forced_pivot_until"] = now_ts + max(1.0, float(ttl_s))
+        self._emit_event(sim_state, "recovery_pivot_applied", {"to_action": str(to_action), "reason": str(reason), "ttl_s": ttl_s})
 
     def _normalize_packet_name(self, packet_name):
         """Map UI packet labels and aliases to canonical environment packet keys."""
@@ -2293,7 +2371,9 @@ class Agent:
             return False, "missing_goal"
         label = str(goal.label or "").strip().lower()
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
-        nonexec = int(self.support_goal_nonexec_counts.get(goal.goal_id, 0) or 0)
+        nonexec = max(
+            [int(v or 0) for k, v in self.support_goal_nonexec_counts.items() if str(k).startswith(f"{goal.goal_id}:")] or [0]
+        )
         if label == "acquire_missing_dik":
             if nonexec >= 4:
                 return False, "repeated_non_executable_support_goal"
@@ -2444,8 +2524,9 @@ class Agent:
             if executable:
                 self.support_goal_nonexec_counts[goal.goal_id] = 0
                 continue
-            nonexec_count = int(self.support_goal_nonexec_counts.get(goal.goal_id, 0)) + 1
-            self.support_goal_nonexec_counts[goal.goal_id] = nonexec_count
+            recurrence_key = f"{goal.goal_id}:{reason}"
+            nonexec_count = int(self.support_goal_nonexec_counts.get(recurrence_key, 0) or 0) + 1
+            self.support_goal_nonexec_counts[recurrence_key] = nonexec_count
             next_status = "inactive" if nonexec_count >= 3 else "candidate"
             if goal.status != next_status:
                 goal.status = next_status
@@ -2458,8 +2539,13 @@ class Agent:
                 )
             self._emit_event(
                 sim_state,
-                "support_goal_suppressed_non_executable_recurrence",
-                {"goal_id": goal.goal_id, "label": goal.label, "reason": reason, "nonexec_count": nonexec_count},
+                "support_goal_suppressed",
+                {"goal_id": goal.goal_id, "label": goal.label, "reason": reason, "nonexec_count": nonexec_count, "recurrence_key": recurrence_key},
+            )
+            self._register_no_progress(
+                sim_state,
+                kind="support_goal_non_executable",
+                detail={"goal_id": goal.goal_id, "reason": reason, "nonexec_count": nonexec_count},
             )
 
         if info_pressure > 0:
@@ -4016,8 +4102,20 @@ class Agent:
     def _apply_policy_pivots(self, decision, environment, sim_state=None, context=None, pivot_origin="runtime"):
         context = context or (sim_state.brain_context_builder.build(sim_state, self) if sim_state is not None else None)
         rewritten = decision
-        handoff = dict(self.post_inspect_handoff or {})
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        forced_pivot = str(self.progress_tracker.get("forced_pivot") or "")
+        if forced_pivot and float(self.progress_tracker.get("forced_pivot_until", 0.0) or 0.0) >= now_ts:
+            if decision.selected_action.value != forced_pivot:
+                rewritten = BrainDecision(
+                    selected_action=ExecutableActionType(forced_pivot),
+                    target_id=decision.target_id,
+                    target_zone=decision.target_zone,
+                    goal_update="maintain_forward_progress",
+                    reason_summary=f"Forced recovery pivot: {forced_pivot}",
+                    confidence=max(0.7, float(decision.confidence or 0.0)),
+                )
+                self._emit_event(sim_state, "recovery_pivot_applied", {"origin": pivot_origin, "forced_action": forced_pivot, "from_action": decision.selected_action.value})
+        handoff = dict(self.post_inspect_handoff or {})
         rule_brain_runtime = self._is_rule_brain_runtime(sim_state)
         if decision.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE and handoff.get("pending") and handoff.get("expires_at", 0.0) >= now_ts:
             self.post_inspect_handoff["pending"] = False
@@ -4067,6 +4165,24 @@ class Agent:
                         )
                         if rerouted is not None:
                             rewritten = rerouted
+        if context is not None and rewritten.selected_action in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION}:
+            project_id = rewritten.target_id or self._construction_project_for_action(rewritten, {"project_id": None}, environment)
+            if project_id in getattr(environment.construction, "projects", {}):
+                project = environment.construction.projects.get(project_id) or {}
+                required = int(project.get("required_resources", {}).get("bricks", 0) or 0)
+                delivered = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
+                stalled = int(self.progress_tracker.get("project_no_progress", {}).get(project_id, 0) or 0)
+                if required > delivered and stalled >= 2:
+                    rewritten = BrainDecision(
+                        selected_action=ExecutableActionType.TRANSPORT_RESOURCES,
+                        target_id=project_id,
+                        target_zone=rewritten.target_zone,
+                        goal_update="satisfy_build_logistics",
+                        reason_summary="Logistics handoff forced: construction missing delivered resources.",
+                        confidence=max(0.85, float(rewritten.confidence or 0.0)),
+                    )
+                    self._emit_event(sim_state, "logistics_handoff_forced", {"project_id": project_id, "required": required, "delivered": delivered, "project_no_progress_streak": stalled})
+                    self._emit_event(sim_state, "construct_suppressed_due_to_missing_material_progress", {"project_id": project_id, "required": required, "delivered": delivered})
         if (
             sim_state is not None
             and rewritten.selected_action in {ExecutableActionType.COMMUNICATE, ExecutableActionType.REQUEST_ASSISTANCE}
@@ -4085,6 +4201,14 @@ class Agent:
                             "no_effect_streak": no_effect_streak,
                         },
                     )
+                    rewritten = fallback
+                    self._register_no_progress(sim_state, kind="communication_loop_detected", detail={"no_effect_streak": no_effect_streak})
+        if sim_state is not None and rewritten.selected_action == ExecutableActionType.OBSERVE_ENVIRONMENT:
+            observe_streak = int(self.progress_tracker.get("observe_no_effect", 0) or 0)
+            if observe_streak >= 3:
+                fallback = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
+                if fallback.selected_action != ExecutableActionType.OBSERVE_ENVIRONMENT:
+                    self._emit_event(sim_state, "observe_suppressed_due_to_no_effect_streak", {"observe_no_effect_streak": observe_streak, "pivot_to": fallback.selected_action.value})
                     rewritten = fallback
         return rewritten
 
@@ -4656,6 +4780,20 @@ class Agent:
                 self._emit_event(sim_state, "movement_failed", {"failure_category": "zero_distance_retarget", "path_mode": path_mode})
             else:
                 _emit("movement_arrived", {"distance": 0.0})
+                target_sig = f"{round(target[0],2)}:{round(target[1],2)}"
+                arrivals = self.progress_tracker.setdefault("target_arrival_no_effect", {})
+                arrivals[target_sig] = int(arrivals.get(target_sig, 0) or 0) + 1
+                count = arrivals[target_sig]
+                self._register_no_progress(
+                    sim_state,
+                    kind="movement_arrived_no_effect",
+                    detail={"target": target, "arrival_count": count},
+                    category="target",
+                    key=target_sig,
+                )
+                if count >= 3:
+                    self._emit_event(sim_state, "target_stale", {"target": target, "arrival_count": count})
+                    self.target = None
             nav["last_target"] = tuple(target)
             return
 
@@ -4699,6 +4837,20 @@ class Agent:
             if nav["path_index"] >= len(nav["active_path"]):
                 nav["last_arrival_position"] = tuple(self.position)
                 _emit("movement_arrived", {"destination": target, "path_mode": path_mode, "path_length": len(nav["active_path"])})
+                target_sig = f"{round(target[0],2)}:{round(target[1],2)}"
+                arrivals = self.progress_tracker.setdefault("target_arrival_no_effect", {})
+                arrivals[target_sig] = int(arrivals.get(target_sig, 0) or 0) + 1
+                count = arrivals[target_sig]
+                self._register_no_progress(
+                    sim_state,
+                    kind="movement_arrived_no_effect",
+                    detail={"target": target, "arrival_count": count},
+                    category="target",
+                    key=target_sig,
+                )
+                if count >= 3:
+                    self._emit_event(sim_state, "target_stale", {"target": target, "arrival_count": count})
+                    self.target = None
                 return
             waypoint = nav["active_path"][nav["path_index"]]
             dx, dy = waypoint[0] - self.position[0], waypoint[1] - self.position[1]
@@ -4719,6 +4871,8 @@ class Agent:
             self.position = (new_x, new_y)
             nav["last_position"] = tuple(self.position)
             nav["last_target"] = tuple(target)
+            target_sig = f"{round(target[0],2)}:{round(target[1],2)}"
+            self.progress_tracker.setdefault("target_arrival_no_effect", {}).pop(target_sig, None)
             _emit("movement_progressed", {"remaining_distance": round(max(0.0, dist - step), 3), "waypoint_index": nav.get("path_index", 0)})
             self._emit_event(sim_state, "movement_progress", {"destination": target, "remaining_distance": round(max(0.0, dist - step), 3), "path_mode": path_mode})
         else:
@@ -5108,6 +5262,7 @@ class Agent:
                     )
                     environment.construction.assign_builder(project_id, self.name)
                     self._refresh_construction_provenance(environment, project_id, sim_state=sim_state, event="build_attempt")
+                    delivered_before = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
 
                     fidelity = max(self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5), self._trait_value("rule_accuracy"))
                     if random.random() > fidelity:
@@ -5168,6 +5323,33 @@ class Agent:
                                 "decision_action": decision_action,
                             },
                         )
+                    delivered_after = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
+                    if delivered_after > delivered_before:
+                        self.progress_tracker.setdefault("project_no_progress", {})[project_id] = 0
+                        self._register_progress(
+                            sim_state,
+                            kind="construction_progress_updated",
+                            detail={"project_id": project_id, "delivered_before": delivered_before, "delivered_after": delivered_after},
+                        )
+                    else:
+                        project_streaks = self.progress_tracker.setdefault("project_no_progress", {})
+                        project_streaks[project_id] = int(project_streaks.get(project_id, 0) or 0) + 1
+                        streak = project_streaks[project_id]
+                        self._emit_event(sim_state, "project_stalled", {"project_id": project_id, "no_progress_count": streak, "status": project.get("status")})
+                        self._register_no_progress(
+                            sim_state,
+                            kind="construct_no_material_progress",
+                            detail={"project_id": project_id, "no_progress_count": streak, "status": project.get("status")},
+                            category="project",
+                            key=project_id,
+                        )
+                        if streak >= 2:
+                            self._force_recovery_pivot(
+                                sim_state,
+                                to_action=ExecutableActionType.TRANSPORT_RESOURCES.value,
+                                reason=f"construct_stalled:{project_id}",
+                                ttl_s=15.0,
+                            )
 
             if action["type"] == "transport_resources":
                 project_id = action.get("project_id")
@@ -5181,6 +5363,7 @@ class Agent:
                             "decision_action": action.get("decision_action"),
                         },
                     )
+                    self._register_no_progress(sim_state, kind="transport_blocked", detail={"failure_category": "missing_project_binding"})
                     continue
                 project = environment.construction.projects.get(project_id)
                 if not project:
@@ -5194,6 +5377,7 @@ class Agent:
                             "decision_action": action.get("decision_action"),
                         },
                     )
+                    self._register_no_progress(sim_state, kind="transport_blocked", detail={"project_id": project_id, "failure_category": "unknown_project"}, category="project", key=project_id)
                     continue
                 if project.get("status") == "complete":
                     self._emit_event(
@@ -5206,6 +5390,7 @@ class Agent:
                             "decision_action": action.get("decision_action"),
                         },
                     )
+                    self._register_no_progress(sim_state, kind="transport_blocked", detail={"project_id": project_id, "failure_category": "project_already_complete"}, category="project", key=project_id)
                     continue
 
                 if not environment.is_interaction_target_unlocked(project_id):
@@ -5219,6 +5404,7 @@ class Agent:
                             "decision_action": action.get("decision_action"),
                         },
                     )
+                    self._register_no_progress(sim_state, kind="transport_blocked", detail={"project_id": project_id, "failure_category": "bridge_access_locked"}, category="project", key=project_id)
                     continue
 
                 required_before = int(project.get("required_resources", {}).get("bricks", 0) or 0)
@@ -5235,6 +5421,7 @@ class Agent:
                             "decision_action": action.get("decision_action"),
                         },
                     )
+                    self._register_no_progress(sim_state, kind="transport_blocked", detail={"project_id": project_id, "failure_category": "resources_already_satisfied"}, category="project", key=project_id)
                     continue
 
                 state = self.transport_state
@@ -5316,6 +5503,7 @@ class Agent:
                             "expected_interaction_location": expected_location,
                         },
                     )
+                    self._register_no_progress(sim_state, kind="transport_delivery_rejected", detail={"project_id": project_id}, category="project", key=project_id)
                     continue
                 state["carrying"] = {"resource_type": None, "quantity": 0}
                 state["stage"] = "pickup"
@@ -5360,6 +5548,12 @@ class Agent:
                 )
 
                 if delivered_after != delivered_before:
+                    self.progress_tracker.setdefault("project_no_progress", {})[project_id] = 0
+                    self._register_progress(
+                        sim_state,
+                        kind="construction_resource_delivered",
+                        detail={"project_id": project_id, "delivered_before": delivered_before, "delivered_after": delivered_after},
+                    )
                     self._emit_event(
                         sim_state,
                         "construction_progress_updated",
@@ -5385,6 +5579,14 @@ class Agent:
                             "transport_state": dict(self.transport_state),
                             "legality_checks_passed": True,
                         },
+                    )
+                else:
+                    self._register_no_progress(
+                        sim_state,
+                        kind="transport_no_delivery_delta",
+                        detail={"project_id": project_id, "delivered_before": delivered_before, "delivered_after": delivered_after},
+                        category="project",
+                        key=project_id,
                     )
                 if required_after > 0 and delivered_before < required_after <= delivered_after:
                     self._emit_event(
@@ -5430,9 +5632,15 @@ class Agent:
                             nearby.append((dist, other))
                 if not nearby:
                     self.communication_state["no_effect_streak"] = int(self.communication_state.get("no_effect_streak", 0) or 0) + 1
+                    self.progress_tracker["communication_no_effect"] = int(self.progress_tracker.get("communication_no_effect", 0) or 0) + 1
+                    self._register_no_progress(
+                        sim_state,
+                        kind="communication_ineffective",
+                        detail={"failure_category": "no_receiver", "no_effect_streak": self.communication_state["no_effect_streak"]},
+                    )
                     self._emit_event(
                         sim_state,
-                        "communication_selected_no_eligible_receiver",
+                        "communication_ineffective",
                         {"decision_action": action.get("decision_action"), "no_effect_streak": self.communication_state["no_effect_streak"]},
                     )
                 else:
@@ -5449,6 +5657,8 @@ class Agent:
                     if changed:
                         self.communication_state["last_exchange_tick"] = int(getattr(self, "sim_step_count", 0))
                         self.communication_state["no_effect_streak"] = 0
+                        self.progress_tracker["communication_no_effect"] = 0
+                        self._register_progress(sim_state, kind="communication_exchange_succeeded", detail={"receiver": receiver.name})
                         self._emit_event(
                             sim_state,
                             "communication_exchange_succeeded",
@@ -5456,9 +5666,15 @@ class Agent:
                         )
                     else:
                         self.communication_state["no_effect_streak"] = int(self.communication_state.get("no_effect_streak", 0) or 0) + 1
+                        self.progress_tracker["communication_no_effect"] = int(self.progress_tracker.get("communication_no_effect", 0) or 0) + 1
+                        self._register_no_progress(
+                            sim_state,
+                            kind="communication_ineffective",
+                            detail={"receiver": receiver.name, "no_effect_streak": self.communication_state["no_effect_streak"]},
+                        )
                         self._emit_event(
                             sim_state,
-                            "communication_exchange_no_effect",
+                            "communication_ineffective",
                             {"receiver": receiver.name, "decision_action": action.get("decision_action"), "no_effect_streak": self.communication_state["no_effect_streak"]},
                         )
             action["progress"] += dt
@@ -5467,6 +5683,20 @@ class Agent:
 
         for action in completed:
             self.perform_action([action])
+            if action.get("decision_action") == ExecutableActionType.OBSERVE_ENVIRONMENT.value:
+                self.progress_tracker["observe_no_effect"] = int(self.progress_tracker.get("observe_no_effect", 0) or 0) + 1
+                streak = self.progress_tracker["observe_no_effect"]
+                self._register_no_progress(sim_state, kind="observe_no_effect", detail={"streak": streak})
+                if streak >= 3:
+                    self._emit_event(sim_state, "observe_suppressed_due_to_no_effect_streak", {"streak": streak})
+            elif action.get("decision_action") in {
+                ExecutableActionType.TRANSPORT_RESOURCES.value,
+                ExecutableActionType.START_CONSTRUCTION.value,
+                ExecutableActionType.CONTINUE_CONSTRUCTION.value,
+                ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value,
+                ExecutableActionType.VALIDATE_CONSTRUCTION.value,
+            }:
+                self.progress_tracker["observe_no_effect"] = 0
             self._emit_event(sim_state, "executable_action_completed", {"action_type": action.get("type"), "decision_action": action.get("decision_action"), "project_id": action.get("project_id")})
             self.active_actions.remove(action)
 
