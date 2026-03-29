@@ -2605,10 +2605,11 @@ class MarsColonyInterface:
         if current_step and current_step not in steps:
             steps.append(current_step)
 
-        mode_history = list(control.get("mode_history", []))[-6:]
-        transition_history = list(control.get("transition_history", []))[-5:]
+        mode_history = list(control.get("mode_history", []))[-8:]
+        transition_history = list(control.get("transition_history", []))[-8:]
         method_history = list(method_state.get("method_history", []))[-5:]
-        method_transitions = list(method_state.get("method_transition_history", []))[-5:]
+        method_transitions = list(method_state.get("method_transition_history", []))[-8:]
+        recent_step_outcomes = list(method_state.get("recent_step_outcomes", []))[-8:]
         recent_transition = transition_history[-1] if transition_history else {}
 
         source_cooldowns = dict(method_state.get("source_cooldowns") or {})
@@ -2634,6 +2635,15 @@ class MarsColonyInterface:
             warnings.append(f"planner:{planner_status}")
         if snapshot.get("current_target") and no_progress_ticks > 0:
             warnings.append("target_no_progress")
+        health = "healthy"
+        if blocked_attempts > 0:
+            health = "blocked"
+        elif retry_count >= 2 or no_progress_ticks > 0:
+            health = "degraded"
+        if planner_status == "degraded":
+            health = "degraded"
+        if planner_status == "in_flight" and health == "healthy":
+            health = "active"
 
         next_action = snapshot.get("next_action")
         if hasattr(next_action, "value"):
@@ -2641,15 +2651,62 @@ class MarsColonyInterface:
         elif isinstance(next_action, dict):
             next_action = next_action.get("action_type")
 
+        previous_method = None
+        previous_step = None
+        if method_transitions:
+            latest_method_transition = method_transitions[-1]
+            if isinstance(latest_method_transition, dict):
+                previous_method = latest_method_transition.get("from") or latest_method_transition.get("previous_method_id")
+                previous_step = latest_method_transition.get("from_step") or latest_method_transition.get("previous_step")
+        if not previous_method and len(method_history) >= 2:
+            previous_method = method_history[-2]
+
+        event_strip = []
+        for transition in transition_history[-3:]:
+            if not isinstance(transition, dict):
+                continue
+            event_strip.append(
+                f"{transition.get('from') or 'none'} -> {transition.get('to') or current_mode}"
+                f" ({transition.get('reason') or 'none'})"
+            )
+        for transition in method_transitions[-2:]:
+            if not isinstance(transition, dict):
+                continue
+            event_strip.append(
+                f"method: {transition.get('from') or '-'} -> {transition.get('to') or '-'}"
+                f" ({transition.get('reason') or 'none'})"
+            )
+        if current_step and previous_step and previous_step != current_step:
+            event_strip.append(f"step: {previous_step} -> {current_step}")
+        for outcome in recent_step_outcomes[-2:]:
+            if not isinstance(outcome, dict):
+                continue
+            event_strip.append(
+                f"step:{outcome.get('step') or '-'} result:{outcome.get('result') or 'unknown'}"
+                f" reason:{outcome.get('reason') or '-'}"
+            )
+        if blocked_attempts > 0:
+            event_strip.append(f"blocked: inspect blocked attempts={blocked_attempts}")
+        if no_progress_ticks > 0:
+            event_strip.append(f"stalled: pursuit no_progress_ticks={no_progress_ticks}")
+
         return {
             "modes": modes,
             "current_mode": current_mode,
             "previous_mode": previous_mode,
             "methods": methods,
             "current_method": current_method,
+            "previous_method": previous_method,
             "steps": steps,
             "current_step": current_step,
+            "previous_step": previous_step,
             "retry_count": retry_count,
+            "mode_dwell_steps": int(control.get("mode_dwell_steps", 0) or 0),
+            "method_dwell_steps": int(method_state.get("method_dwell_steps", 0) or 0),
+            "step_dwell_steps": int(method_state.get("step_dwell_steps", 0) or 0),
+            "step_started_tick": method_state.get("step_started_tick"),
+            "method_started_tick": method_state.get("method_started_tick"),
+            "health": health,
             "support_badges": [
                 {"label": "planner", "value": planner_status, "active": planner_status != "idle", "warn": planner_status == "degraded"},
                 {"label": "dik", "value": str(dik.get("status") or "idle"), "active": str(dik.get("status") or "idle") != "idle"},
@@ -2668,14 +2725,35 @@ class MarsColonyInterface:
             "transition_history": transition_history,
             "method_history": method_history,
             "method_transitions": method_transitions,
+            "recent_step_outcomes": recent_step_outcomes,
             "source_cooldowns": source_cooldowns,
             "source_exhaustion": source_exhaustion,
             "warnings": warnings,
             "last_method_switch_reason": method_state.get("last_method_switch_reason") or "none",
+            "event_strip": event_strip[-8:],
+            "summary_counters": [
+                ("mode_dwell", int(control.get("mode_dwell_steps", 0) or 0)),
+                ("method_dwell", int(method_state.get("method_dwell_steps", 0) or 0)),
+                ("step_dwell", int(method_state.get("step_dwell_steps", 0) or 0)),
+                ("transitions", len(transition_history)),
+                ("retries", retry_count),
+                ("stalls", no_progress_ticks),
+                ("blocked", blocked_attempts),
+            ],
         }
 
     @staticmethod
-    def _draw_state_node(canvas, x, y, w, h, label, *, active=False, previous=False, warn=False, dashed=False):
+    def _draw_rounded_box(canvas, x, y, w, h, radius, *, fill, outline, width=1, dash=None):
+        radius = max(0, min(radius, int(w / 2), int(h / 2)))
+        points = [
+            x + radius, y, x + w - radius, y, x + w, y, x + w, y + radius, x + w, y + h - radius,
+            x + w, y + h, x + w - radius, y + h, x + radius, y + h, x, y + h, x, y + h - radius,
+            x, y + radius, x, y, x + radius, y,
+        ]
+        return canvas.create_polygon(points, smooth=True, fill=fill, outline=outline, width=width, dash=dash)
+
+    @staticmethod
+    def _draw_state_node(canvas, x, y, w, h, label, *, active=False, previous=False, warn=False, dashed=False, phase="inactive"):
         fill = "#f6f7fa"
         outline = "#97a3b6"
         width = 1
@@ -2690,16 +2768,23 @@ class MarsColonyInterface:
             fill = "#fff3cd"
             outline = "#c05621"
             width = 2
+        if phase == "completed":
+            fill = "#e2e8f0"
+            outline = "#64748b"
+        elif phase == "pending":
+            fill = "#f8fafc"
+            outline = "#cbd5e1"
         dash = (6, 4) if dashed else None
-        canvas.create_rectangle(x, y, x + w, y + h, fill=fill, outline=outline, width=width, dash=dash)
-        canvas.create_text(x + w / 2, y + h / 2, text=label, width=max(20, w - 10), font=("Arial", 9))
+        MarsColonyInterface._draw_rounded_box(canvas, x, y, w, h, 10, fill=fill, outline=outline, width=width, dash=dash)
+        font = ("Arial", 9, "bold") if active else ("Arial", 9)
+        canvas.create_text(x + w / 2, y + h / 2, text=label, width=max(20, w - 10), font=font)
         return x + w / 2, y + h / 2
 
     @staticmethod
-    def _draw_state_edge(canvas, start, end, *, label=None, color="#6b7280"):
+    def _draw_state_edge(canvas, start, end, *, label=None, color="#6b7280", width=1.4, dash=None):
         sx, sy = start
         ex, ey = end
-        canvas.create_line(sx, sy, ex, ey, arrow=tk.LAST, fill=color, width=1.4)
+        canvas.create_line(sx, sy, ex, ey, arrow=tk.LAST, fill=color, width=width, dash=dash)
         if label:
             mx = (sx + ex) / 2
             my = (sy + ey) / 2 - 8
@@ -2815,9 +2900,25 @@ class MarsColonyInterface:
         viewport_height = int(canvas.winfo_height() or 320)
         left = 16
         top = 14
+        mode = str(canvas.getvar(name=str(getattr(canvas, "_detail_mode_var_name", ""))) if getattr(canvas, "_detail_mode_var_name", None) else "focused").lower()
+        focused_view = mode != "full"
 
-        canvas.create_text(left, top, anchor="nw", text="State Machine Layers", font=("Arial", 10, "bold"), fill="#1f2937")
-        y_modes = top + 24
+        header_h = 48
+        MarsColonyInterface._draw_rounded_box(canvas, left, top, width - left * 2, header_h, 12, fill="#f8fafc", outline="#cbd5e1", width=1)
+        title = f"{snapshot.get('display_name', 'Agent')} ({snapshot.get('role', 'unknown')})"
+        canvas.create_text(left + 10, top + 10, anchor="nw", text=title, font=("Arial", 10, "bold"), fill="#0f172a")
+        canvas.create_text(
+            left + 10,
+            top + 28,
+            anchor="nw",
+            text=f"Mode: {graph['current_mode']}  |  Method: {graph.get('current_method') or '-'}  |  Step: {graph.get('current_step') or '-'}",
+            font=("Arial", 8, "bold"),
+            fill="#1f2937",
+        )
+        health_color = {"healthy": "#16a34a", "active": "#2563eb", "degraded": "#d97706", "blocked": "#dc2626"}.get(graph["health"], "#64748b")
+        canvas.create_text(width - left - 10, top + 18, anchor="ne", text=f"Health: {graph['health']}", font=("Arial", 9, "bold"), fill=health_color)
+        canvas.create_text(width - left - 10, top + 33, anchor="ne", text=f"View: {'Focused' if focused_view else 'Full'}", font=("Arial", 8), fill="#475569")
+        y_modes = top + header_h + 12
 
         mode_centers = {}
         mode_layout = MarsColonyInterface._compute_state_layer_layout(
@@ -2845,7 +2946,14 @@ class MarsColonyInterface:
             mode_centers[mode] = center
             if idx:
                 prev_mode = graph["modes"][idx - 1]
-                MarsColonyInterface._draw_state_edge(canvas, mode_centers[prev_mode], center)
+                active_edge = prev_mode == graph["current_mode"] or mode == graph["current_mode"]
+                MarsColonyInterface._draw_state_edge(
+                    canvas,
+                    mode_centers[prev_mode],
+                    center,
+                    color="#64748b" if active_edge or not focused_view else "#cbd5e1",
+                    width=1.8 if active_edge else 1.0,
+                )
         y_methods = mode_layout["content_height"] + 22
 
         method_centers = {}
@@ -2858,6 +2966,19 @@ class MarsColonyInterface:
             max_node_width=240,
             node_height=36,
             label_chars=30,
+        )
+        method_to_draw = graph["methods"] if not focused_view else [m for m in graph["methods"] if m == graph["current_method"] or m == graph["previous_method"]]
+        if not method_to_draw and graph["current_method"]:
+            method_to_draw = [graph["current_method"]]
+        method_layout = MarsColonyInterface._compute_state_layer_layout(
+            [{"key": method_id, "label": f"{method_id} | retries={graph['retry_count'] if method_id == graph['current_method'] else 0}"} for method_id in method_to_draw],
+            width,
+            left=left,
+            top=y_methods,
+            min_node_width=220,
+            max_node_width=320,
+            node_height=40,
+            label_chars=36,
         )
         for node in method_layout["entries"]:
             method_id = node["key"]
@@ -2874,14 +2995,22 @@ class MarsColonyInterface:
             )
             method_centers[method_id] = center
             if graph["current_mode"] in mode_centers:
-                MarsColonyInterface._draw_state_edge(canvas, mode_centers[graph["current_mode"]], center, color="#94a3b8")
+                MarsColonyInterface._draw_state_edge(
+                    canvas,
+                    mode_centers[graph["current_mode"]],
+                    center,
+                    color="#334155" if method_id == graph["current_method"] else "#cbd5e1",
+                    width=2.0 if method_id == graph["current_method"] else 1.0,
+                )
         y_steps = method_layout["content_height"] + 22
 
         step_centers = {}
         step_nodes = []
-        for step in graph["steps"]:
+        for step_idx, step in enumerate(graph["steps"]):
             is_active = step == graph["current_step"]
+            duration_suffix = f" | dwell={graph['step_dwell_steps']}" if is_active else ""
             step_label = step if not is_active or graph["retry_count"] <= 0 else f"{step} (retry={graph['retry_count']})"
+            step_label = f"{step_idx + 1}. {step_label}{duration_suffix}"
             step_nodes.append({"key": step, "label": step_label})
         step_layout = MarsColonyInterface._compute_state_layer_layout(
             step_nodes,
@@ -2893,10 +3022,16 @@ class MarsColonyInterface:
             node_height=32,
             label_chars=34,
         )
-        for node in step_layout["entries"]:
+        for index, node in enumerate(step_layout["entries"]):
             step = node["key"]
             active = step == graph["current_step"]
             warn = active and graph["retry_count"] >= 2
+            current_index = graph["steps"].index(graph["current_step"]) if graph.get("current_step") in graph["steps"] else -1
+            phase = "pending"
+            if index < current_index:
+                phase = "completed"
+            if active:
+                phase = "active"
             center = MarsColonyInterface._draw_state_node(
                 canvas,
                 node["x"],
@@ -2906,18 +3041,37 @@ class MarsColonyInterface:
                 node["label"],
                 active=active,
                 warn=warn,
+                previous=step == graph.get("previous_step"),
+                phase=phase,
             )
             step_centers[step] = center
             if graph["current_method"] in method_centers:
-                MarsColonyInterface._draw_state_edge(canvas, method_centers[graph["current_method"]], center, color="#94a3b8")
+                MarsColonyInterface._draw_state_edge(
+                    canvas,
+                    method_centers[graph["current_method"]],
+                    center,
+                    color="#334155" if active else "#cbd5e1",
+                    width=2.0 if active else 1.0,
+                )
+            if index and graph["steps"][index - 1] in step_centers:
+                MarsColonyInterface._draw_state_edge(
+                    canvas,
+                    step_centers[graph["steps"][index - 1]],
+                    center,
+                    color="#64748b" if not focused_view or index <= current_index + 1 else "#cbd5e1",
+                    width=1.6 if index <= current_index + 1 else 1.0,
+                )
         y_support = step_layout["content_height"] + 22
 
-        badge_w, badge_h = 210, 32
-        badges_per_row = max(1, (max(200, width - left * 2) + 12) // (badge_w + 12))
+        graph_panel_width = int((width - left * 3) * 0.68)
+        diag_x = left + graph_panel_width + 10
+        diag_w = max(230, width - diag_x - left)
+        badge_w, badge_h = max(200, diag_w - 8), 30
+        badges_per_row = 1
         for idx, badge in enumerate(graph["support_badges"]):
             row = idx // badges_per_row
             col = idx % badges_per_row
-            x = left + col * (badge_w + 12)
+            x = diag_x + col * (badge_w + 12)
             y = y_support + row * (badge_h + 8)
             MarsColonyInterface._draw_state_badge(
                 canvas,
@@ -2931,22 +3085,23 @@ class MarsColonyInterface:
                 warn=badge.get("warn", False),
             )
 
-        history_lines = [
-            f"Transition: {graph['transition_caption']}",
-            f"Reason: {graph['transition_reason']}",
-            f"Method switch reason: {graph['last_method_switch_reason']}",
-            f"Recent modes: {graph['mode_history'] or '-'}",
-            f"Recent transitions: {graph['transition_history'][-3:] or '-'}",
-            f"Recent method transitions: {graph['method_transitions'][-3:] or '-'}",
-            f"Source cooldowns: {graph['source_cooldowns'] or '-'}",
-            f"Source exhaustion: {graph['source_exhaustion'] or '-'}",
-            f"Warnings: {', '.join(graph['warnings']) if graph['warnings'] else 'none'}",
-        ]
+        counter_labels = " | ".join([f"{k}={v}" for k, v in graph["summary_counters"]])
+        history_lines = [f"Current path: {graph['current_mode']} -> {graph.get('current_method') or '-'} -> {graph.get('current_step') or '-'}"]
+        history_lines.append(f"Previous: mode={graph.get('previous_mode') or 'none'} method={graph.get('previous_method') or '-'} step={graph.get('previous_step') or '-'}")
+        history_lines.append(f"Reason: {graph['transition_reason']} | method_switch={graph['last_method_switch_reason']}")
+        history_lines.append(f"Counters: {counter_labels}")
+        history_lines.append(f"Warnings: {', '.join(graph['warnings']) if graph['warnings'] else 'none'}")
+        events = graph.get("event_strip") or ["(no recent events)"]
         badges_rows = (len(graph["support_badges"]) + badges_per_row - 1) // badges_per_row
         history_y = y_support + badges_rows * (badge_h + 8) + 10
         history_width = max(260, width - left * 2)
-        canvas.create_rectangle(left, history_y, left + history_width, history_y + 148, fill="#f8fafc", outline="#cbd5e1")
+        MarsColonyInterface._draw_rounded_box(canvas, left, history_y, history_width, 66, 10, fill="#f8fafc", outline="#cbd5e1", width=1)
         canvas.create_text(left + 8, history_y + 6, anchor="nw", text="\n".join(history_lines), width=max(240, history_width - 16), font=("Arial", 8))
+        events_y = history_y + 72
+        MarsColonyInterface._draw_rounded_box(canvas, left, events_y, history_width, 22 + (len(events[:6]) * 18), 10, fill="#f8fafc", outline="#cbd5e1", width=1)
+        canvas.create_text(left + 8, events_y + 6, anchor="nw", text="Recent transitions/events", font=("Arial", 8, "bold"), fill="#1e293b")
+        for idx, event in enumerate(events[:6]):
+            canvas.create_text(left + 12, events_y + 24 + (idx * 16), anchor="nw", text=f"• {event}", font=("Arial", 8), fill="#334155")
 
         content_bbox = canvas.bbox("all")
         canvas.configure(scrollregion=MarsColonyInterface._compute_canvas_scrollregion(width, viewport_height, content_bbox))
@@ -3397,6 +3552,19 @@ class MarsColonyInterface:
                 padding=8,
             )
             panel.pack(fill="x", padx=6, pady=4, anchor="n")
+            controls = ttk.Frame(panel)
+            controls.pack(fill="x", pady=(0, 4))
+            ttk.Label(controls, text="State View:").pack(side="left")
+            detail_mode_var = StringVar(value="focused")
+            detail_toggle = ttk.Checkbutton(
+                controls,
+                text="Full View",
+                command=lambda key=panel_key: self._schedule_agent_graph_redraw(key, force=True),
+                variable=detail_mode_var,
+                onvalue="full",
+                offvalue="focused",
+            )
+            detail_toggle.pack(side="left", padx=(6, 0))
             graph_viewport = ttk.Frame(panel)
             graph_viewport.pack(fill="both", expand=True, pady=(0, 6))
             graph_viewport.columnconfigure(0, weight=1)
@@ -3410,6 +3578,7 @@ class MarsColonyInterface:
                 highlightbackground="#d1d5db",
             )
             graph_canvas.grid(row=0, column=0, sticky="nsew")
+            graph_canvas._detail_mode_var_name = str(detail_mode_var)
             graph_scroll_y = ttk.Scrollbar(graph_viewport, orient="vertical", command=graph_canvas.yview)
             graph_scroll_y.grid(row=0, column=1, sticky="ns")
             graph_scroll_x = ttk.Scrollbar(graph_viewport, orient="horizontal", command=graph_canvas.xview)
@@ -3426,6 +3595,7 @@ class MarsColonyInterface:
                 "body": body,
                 "snapshot": {},
                 "signature": None,
+                "detail_mode_var": detail_mode_var,
                 "last_draw_width": 0,
                 "last_body_text": None,
                 "redraw_after_id": None,
