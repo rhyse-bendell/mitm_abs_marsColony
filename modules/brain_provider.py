@@ -796,6 +796,14 @@ class RuleBrain(BrainProvider):
             if action_type == ExecutableActionType.REQUEST_ASSISTANCE.value:
                 score += 0.9 * features["epistemic_deficit"] + 0.5 * float(traits.get("help_tendency", 0.5))
                 score -= 0.8 * features["loop_pressure"]
+            if action_type in {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.REQUEST_ASSISTANCE.value}:
+                if not bool(affordance.get("reachable", True)):
+                    score -= 2.5
+                if not bool(affordance.get("productive", True)):
+                    score -= 1.8
+                no_effect_streak = int(affordance.get("no_effect_streak", 0) or 0)
+                if no_effect_streak > 0:
+                    score -= min(2.2, 0.6 * no_effect_streak)
             if (
                 features["build_opportunity"] > 0.0
                 and features["active_incomplete_projects"] > 0.0

@@ -409,6 +409,11 @@ class Agent:
         self._construction_attempted_projects = set()
         self.support_goal_activation_state = {}
         self.support_goal_nonexec_counts = {}
+        self.communication_state = {
+            "last_exchange_tick": -1,
+            "no_effect_streak": 0,
+            "last_signature": None,
+        }
         self.task_model = None
 
 
@@ -1709,6 +1714,32 @@ class Agent:
         knowledge_ids = {normalize_rule_token(r) for r in self.mental_model["knowledge"].rules}
         return data_ids, info_ids, knowledge_ids
 
+    def _snapshot_dik_provenance(self, sim_state=None):
+        held_data_ids, held_information_ids, held_rule_ids = self._held_dik_ids()
+        _, _, team_rule_ids = self._team_validated_ids(sim_state=sim_state)
+        return {
+            "held_data_ids_at_build": sorted(held_data_ids),
+            "held_information_ids_at_build": sorted(held_information_ids),
+            "held_rule_ids_at_build": sorted(held_rule_ids),
+            "team_rule_snapshot_ids": sorted(normalize_rule_token(r) for r in team_rule_ids if normalize_rule_token(r)),
+        }
+
+    def _refresh_construction_provenance(self, environment, project_id, *, sim_state=None, event="construction_update"):
+        construction = getattr(environment, "construction", None)
+        if construction is None or not hasattr(construction, "update_project_provenance"):
+            return
+        snapshot = self._snapshot_dik_provenance(sim_state=sim_state)
+        construction.update_project_provenance(
+            project_id,
+            event=event,
+            actor=self.name,
+            sim_time=float(getattr(sim_state, "time", getattr(self, "current_time", 0.0))),
+            held_data_ids=snapshot["held_data_ids_at_build"],
+            held_information_ids=snapshot["held_information_ids_at_build"],
+            held_rule_ids=snapshot["held_rule_ids_at_build"],
+            team_rule_snapshot_ids=snapshot["team_rule_snapshot_ids"],
+        )
+
     def _team_validated_ids(self, sim_state=None):
         if sim_state is None or not hasattr(sim_state, "team_knowledge_manager"):
             return set(), set(), set()
@@ -2262,9 +2293,14 @@ class Agent:
             return False, "missing_goal"
         label = str(goal.label or "").strip().lower()
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        nonexec = int(self.support_goal_nonexec_counts.get(goal.goal_id, 0) or 0)
         if label == "acquire_missing_dik":
+            if nonexec >= 4:
+                return False, "repeated_non_executable_support_goal"
             return bool(self._candidate_information_sources(environment, sim_state=sim_state)), "missing_accessible_information_source"
         if label == "unblock_inspection":
+            if nonexec >= 4:
+                return False, "repeated_non_executable_support_goal"
             repeated_stall = any(v >= 3 for v in self.inspect_stall_counts.values())
             return (
                 repeated_stall and bool(self._candidate_information_sources(environment, sim_state=sim_state)),
@@ -2410,7 +2446,7 @@ class Agent:
                 continue
             nonexec_count = int(self.support_goal_nonexec_counts.get(goal.goal_id, 0)) + 1
             self.support_goal_nonexec_counts[goal.goal_id] = nonexec_count
-            next_status = "inactive" if nonexec_count >= 2 else "candidate"
+            next_status = "inactive" if nonexec_count >= 3 else "candidate"
             if goal.status != next_status:
                 goal.status = next_status
                 goal.last_transition_reason = "support_goal_demoted_non_executable"
@@ -2422,7 +2458,7 @@ class Agent:
                 )
             self._emit_event(
                 sim_state,
-                "support_goal_suppressed",
+                "support_goal_suppressed_non_executable_recurrence",
                 {"goal_id": goal.goal_id, "label": goal.label, "reason": reason, "nonexec_count": nonexec_count},
             )
 
@@ -4031,6 +4067,25 @@ class Agent:
                         )
                         if rerouted is not None:
                             rewritten = rerouted
+        if (
+            sim_state is not None
+            and rewritten.selected_action in {ExecutableActionType.COMMUNICATE, ExecutableActionType.REQUEST_ASSISTANCE}
+        ):
+            no_effect_streak = int((self.communication_state or {}).get("no_effect_streak", 0) or 0)
+            if no_effect_streak >= 3:
+                fallback = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
+                if fallback.selected_action not in {ExecutableActionType.COMMUNICATE, ExecutableActionType.REQUEST_ASSISTANCE}:
+                    self._emit_event(
+                        sim_state,
+                        "controller_pivoted_no_progress_loop",
+                        {
+                            "origin": pivot_origin,
+                            "from_action": rewritten.selected_action.value,
+                            "to_action": fallback.selected_action.value,
+                            "no_effect_streak": no_effect_streak,
+                        },
+                    )
+                    rewritten = fallback
         return rewritten
 
     def _reroute_decision_through_rulebrain_controller(self, context, fallback_decision, *, sim_state, pivot_origin, reason):
@@ -4877,8 +4932,41 @@ class Agent:
             payload.setdefault("transport_state", dict(self.transport_state))
             self._emit_event(sim_state, event_type, payload)
 
+        def _set_action_stage(action, stage, extra=None):
+            action["execution_stage"] = stage
+            payload = {
+                "action_type": action.get("type"),
+                "decision_action": action.get("decision_action"),
+                "project_id": action.get("project_id"),
+                "execution_stage": stage,
+                "target_bound": action.get("target"),
+            }
+            if extra:
+                payload.update(extra)
+            self._emit_event(sim_state, "action_execution_stage", payload)
+
+        def _location_ready(action, target_id):
+            if not target_id:
+                return True, {"accessible": True, "reason": "no_target_binding"}
+            access = environment.get_interaction_access(self.position, target_id, role=self.role)
+            if access.get("accessible"):
+                if action.get("execution_stage") != "arrived":
+                    _set_action_stage(action, "arrived", {"target_id": target_id})
+                    self._emit_event(sim_state, "arrived_at_interaction_location", {"target_id": target_id, "decision_action": action.get("decision_action")})
+                return True, access
+            _set_action_stage(action, "en_route", {"target_id": target_id, "access_reason": access.get("reason")})
+            return False, access
+
         for action in self.active_actions:
-            if action["type"] == "idle" and action.get("artifact_action") == ExecutableActionType.EXTERNALIZE_PLAN.value and action["progress"] == 0:
+            if action["progress"] == 0 and action.get("execution_stage") is None:
+                _set_action_stage(action, "selected")
+
+            if action["type"] == "idle" and action.get("artifact_action") == ExecutableActionType.EXTERNALIZE_PLAN.value:
+                ready, access = _location_ready(action, "whiteboard")
+                if not ready:
+                    self._emit_event(sim_state, "externalization_en_route", {"target_id": "whiteboard", "access_reason": access.get("reason")})
+                    continue
+                _set_action_stage(action, "mutation_execution_started", {"target_id": "whiteboard"})
                 artifact_id = f"whiteboard:{self.name}:{int(sim_state.time*10)}"
                 rules = list(self.mental_model["knowledge"].rules)[-3:]
                 fidelity = max(self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5), self._trait_value("rule_accuracy"))
@@ -4895,9 +4983,15 @@ class Agent:
                     knowledge_summary=rules,
                     validation_state="validated" if fidelity >= 0.7 else "tentative",
                 )
+                _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": artifact_id})
                 sim_state.logger.log_event(sim_state.time, "externalization_created", {"agent": self.name, "artifact_id": artifact_id, "type": "whiteboard_plan"})
 
-            if action["type"] == "idle" and action.get("artifact_action") == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value and action["progress"] == 0:
+            if action["type"] == "idle" and action.get("artifact_action") == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value:
+                ready, access = _location_ready(action, "whiteboard")
+                if not ready:
+                    self._emit_event(sim_state, "artifact_consult_en_route", {"target_id": "whiteboard", "access_reason": access.get("reason")})
+                    continue
+                _set_action_stage(action, "mutation_execution_started", {"target_id": "whiteboard"})
                 artifacts = sim_state.team_knowledge_manager.artifacts
                 if artifacts:
                     preferred = sorted(
@@ -4910,11 +5004,12 @@ class Agent:
                         sim_state.team_knowledge_manager.adopt_artifact(preferred.artifact_id, self.name, sim_state.time)
                     self.activity_log.append(f"Consulted shared artifact {preferred.artifact_id}")
                     sim_state.logger.log_event(sim_state.time, "artifact_consulted", {"agent": self.name, "artifact_id": preferred.artifact_id})
+                    _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": preferred.artifact_id})
 
             if action["type"] == "communicate" and action.get("assist_action") == ExecutableActionType.REQUEST_ASSISTANCE.value and action["progress"] == 0:
                 sim_state.logger.log_event(sim_state.time, "assistance_requested", {"agent": self.name})
 
-            if action["type"] == "idle" and action.get("decision_action") == ExecutableActionType.VALIDATE_CONSTRUCTION.value and action["progress"] == 0:
+            if action["type"] == "idle" and action.get("decision_action") == ExecutableActionType.VALIDATE_CONSTRUCTION.value:
                 project_id = action.get("project_id")
                 if not project_id:
                     _log_mutation_blocked(
@@ -4924,18 +5019,11 @@ class Agent:
                     continue
                 project = environment.construction.projects.get(project_id)
                 if project:
-                    access = _build_access(project_id)
-                    if not access.get("accessible"):
-                        _log_mutation_blocked(
-                            "construction_validation_blocked",
-                            {
-                                "project_id": project_id,
-                                "failure_category": "not_at_validation_location",
-                                "access_reason": access.get("reason"),
-                                "expected_interaction_location": _build_target(project_id),
-                            },
-                        )
+                    ready, access = _location_ready(action, project_id)
+                    if not ready:
+                        self._emit_event(sim_state, "construction_validation_en_route", {"project_id": project_id, "access_reason": access.get("reason"), "expected_interaction_location": _build_target(project_id)})
                         continue
+                    _set_action_stage(action, "mutation_execution_started", {"project_id": project_id})
                     if project.get("status") not in {"ready_for_validation", "needs_repair"}:
                         _log_mutation_blocked(
                             "construction_validation_blocked",
@@ -4952,7 +5040,10 @@ class Agent:
                         environment.construction.mark_validated(project_id, is_valid=is_valid)
                     else:
                         environment.construction.mark_validated(project_id, is_valid=False)
+                    self._refresh_construction_provenance(environment, project_id, sim_state=sim_state, event="validation")
                     sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
+                    self._emit_event(sim_state, "construction_artifact_provenance_updated", {"project_id": project_id, "event": "validation"})
+                    _set_action_stage(action, "mutation_execution_succeeded", {"project_id": project_id, "is_valid": is_valid})
                     self._emit_event(
                         sim_state,
                         "construction_validated_correct" if is_valid else "construction_validated_incorrect",
@@ -4976,7 +5067,7 @@ class Agent:
                             },
                         )
 
-            if action["type"] == "construct" and action["progress"] == 0:
+            if action["type"] == "construct":
                 project_id = action.get("project_id")
                 if not project_id:
                     _log_mutation_blocked(
@@ -4988,19 +5079,11 @@ class Agent:
                 if project:
                     decision_action = action.get("decision_action")
                     status_before = project.get("status", "in_progress")
-                    access = _build_access(project_id)
-                    if not access.get("accessible"):
-                        _log_mutation_blocked(
-                            "construction_progress_blocked",
-                            {
-                                "project_id": project_id,
-                                "failure_category": "not_at_build_location",
-                                "access_reason": access.get("reason"),
-                                "decision_action": decision_action,
-                                "expected_interaction_location": _build_target(project_id),
-                            },
-                        )
+                    ready, access = _location_ready(action, project_id)
+                    if not ready:
+                        self._emit_event(sim_state, "construction_progress_en_route", {"project_id": project_id, "access_reason": access.get("reason"), "decision_action": decision_action, "expected_interaction_location": _build_target(project_id)})
                         continue
+                    _set_action_stage(action, "mutation_execution_started", {"project_id": project_id})
                     if project_id not in self._construction_attempted_projects:
                         self._construction_attempted_projects.add(project_id)
                         self._emit_event(
@@ -5024,6 +5107,7 @@ class Agent:
                         },
                     )
                     environment.construction.assign_builder(project_id, self.name)
+                    self._refresh_construction_provenance(environment, project_id, sim_state=sim_state, event="build_attempt")
 
                     fidelity = max(self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5), self._trait_value("rule_accuracy"))
                     if random.random() > fidelity:
@@ -5043,7 +5127,10 @@ class Agent:
                         project["correct"] = True
                         if project.get("resource_complete", False):
                             environment.construction.mark_validated(project_id, is_valid=True)
+                        self._refresh_construction_provenance(environment, project_id, sim_state=sim_state, event="repair")
                     sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
+                    self._emit_event(sim_state, "construction_artifact_provenance_updated", {"project_id": project_id, "event": "build_or_repair"})
+                    _set_action_stage(action, "mutation_execution_succeeded", {"project_id": project_id})
                     self._emit_event(
                         sim_state,
                         "construction_externalization_updated",
@@ -5182,7 +5269,9 @@ class Agent:
                         continue
                     pickup_dist = math.hypot(self.position[0] - pickup_pos[0], self.position[1] - pickup_pos[1])
                     if pickup_dist > 0.4:
+                        _set_action_stage(action, "en_route", {"target_id": pickup_id, "target_kind": "pickup"})
                         continue
+                    _set_action_stage(action, "arrived", {"target_id": pickup_id, "target_kind": "pickup"})
                     state["carrying"] = {"resource_type": "bricks", "quantity": 1}
                     state["stage"] = "in_transit"
                     dropoff = _build_target(project_id)
@@ -5196,10 +5285,11 @@ class Agent:
                     )
                     continue
 
-                access = _build_access(project_id)
+                ready, access = _location_ready(action, project_id)
                 expected_location = _build_target(project_id)
-                if not access.get("accessible"):
+                if not ready:
                     continue
+                _set_action_stage(action, "mutation_execution_started", {"project_id": project_id, "target_kind": "dropoff"})
                 carrying = state.get("carrying") or {}
                 if str(carrying.get("resource_type")) != "bricks" or int(carrying.get("quantity", 0) or 0) <= 0:
                     _log_mutation_blocked(
@@ -5230,6 +5320,10 @@ class Agent:
                 state["carrying"] = {"resource_type": None, "quantity": 0}
                 state["stage"] = "pickup"
                 state["pickup_source_id"] = None
+                self._refresh_construction_provenance(environment, project_id, sim_state=sim_state, event="resource_delivered")
+                sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
+                self._emit_event(sim_state, "construction_artifact_provenance_updated", {"project_id": project_id, "event": "resource_delivered"})
+                _set_action_stage(action, "mutation_execution_succeeded", {"project_id": project_id, "target_kind": "dropoff"})
 
                 delivered_after = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
                 required_after = int(project.get("required_resources", {}).get("bricks", 0) or 0)
@@ -5324,6 +5418,49 @@ class Agent:
         completed = []
 
         for action in self.active_actions:
+            if action.get("type") == "communicate" and not action.get("communication_attempted"):
+                action["communication_attempted"] = True
+                nearby = []
+                if sim_state is not None:
+                    for other in sim_state.agents:
+                        if other is self:
+                            continue
+                        dist = math.hypot(other.position[0] - self.position[0], other.position[1] - self.position[1])
+                        if dist <= COMMUNICATION_RADIUS:
+                            nearby.append((dist, other))
+                if not nearby:
+                    self.communication_state["no_effect_streak"] = int(self.communication_state.get("no_effect_streak", 0) or 0) + 1
+                    self._emit_event(
+                        sim_state,
+                        "communication_selected_no_eligible_receiver",
+                        {"decision_action": action.get("decision_action"), "no_effect_streak": self.communication_state["no_effect_streak"]},
+                    )
+                else:
+                    _, receiver = sorted(nearby, key=lambda row: row[0])[0]
+                    data_before = len(receiver.mental_model["data"])
+                    info_before = len(receiver.mental_model["information"])
+                    rules_before = len(receiver.mental_model["knowledge"].rules)
+                    self.communicate_with(receiver, sim_state=sim_state)
+                    changed = (
+                        len(receiver.mental_model["data"]) != data_before
+                        or len(receiver.mental_model["information"]) != info_before
+                        or len(receiver.mental_model["knowledge"].rules) != rules_before
+                    )
+                    if changed:
+                        self.communication_state["last_exchange_tick"] = int(getattr(self, "sim_step_count", 0))
+                        self.communication_state["no_effect_streak"] = 0
+                        self._emit_event(
+                            sim_state,
+                            "communication_exchange_succeeded",
+                            {"receiver": receiver.name, "decision_action": action.get("decision_action")},
+                        )
+                    else:
+                        self.communication_state["no_effect_streak"] = int(self.communication_state.get("no_effect_streak", 0) or 0) + 1
+                        self._emit_event(
+                            sim_state,
+                            "communication_exchange_no_effect",
+                            {"receiver": receiver.name, "decision_action": action.get("decision_action"), "no_effect_streak": self.communication_state["no_effect_streak"]},
+                        )
             action["progress"] += dt
             if action["progress"] >= action["duration"]:
                 completed.append(action)
