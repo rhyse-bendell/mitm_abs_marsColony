@@ -445,6 +445,16 @@ class BrainContextBuilder:
                 "action_repeats": int(getattr(agent, "loop_counters", {}).get("action_repeats", 0) or 0),
                 "plan_repeats": int(getattr(agent, "loop_counters", {}).get("plan_repeats", 0) or 0),
                 "selected_action_repeats": int(getattr(agent, "selection_loop_guard", {}).get("consecutive_count", 0) or 0),
+                "no_progress_streak": int((getattr(agent, "progress_tracker", {}) or {}).get("no_progress_streak", 0) or 0),
+                "observe_no_effect": int((getattr(agent, "progress_tracker", {}) or {}).get("observe_no_effect", 0) or 0),
+                "communication_no_effect": int((getattr(agent, "progress_tracker", {}) or {}).get("communication_no_effect", 0) or 0),
+            },
+            "progress_state": {
+                "last_progress_time": (getattr(agent, "progress_tracker", {}) or {}).get("last_progress_time"),
+                "last_progress_kind": (getattr(agent, "progress_tracker", {}) or {}).get("last_progress_kind"),
+                "no_progress_streak": int((getattr(agent, "progress_tracker", {}) or {}).get("no_progress_streak", 0) or 0),
+                "forced_pivot": (getattr(agent, "progress_tracker", {}) or {}).get("forced_pivot"),
+                "forced_pivot_until": (getattr(agent, "progress_tracker", {}) or {}).get("forced_pivot_until"),
             },
             "seconds_since_dik_change": (
                 None
