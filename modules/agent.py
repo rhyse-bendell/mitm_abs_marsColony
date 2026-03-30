@@ -1347,11 +1347,13 @@ class Agent:
             return {}
         role_source = f"{self.role}_Info"
         role_memory = self.source_memory_state.get(role_source, {})
+        team_memory = self.source_memory_state.get("Team_Info", {})
         role_missing = (
             role_source in environment.knowledge_packets
             and self._has_packet_access(role_source)
             and not bool(role_memory.get("ever_inspected"))
         )
+        team_already_inspected = bool(team_memory.get("ever_inspected"))
         priorities = {}
         for target in getattr(audit, "targets", {}).values():
             steps = target.get("ordered_witness_steps", [])
@@ -1365,8 +1367,9 @@ class Agent:
             if (
                 packet_name == "Team_Info"
                 and role_missing
-                and bool(self.source_memory_state.get("Team_Info", {}).get("ever_inspected"))
+                and team_already_inspected
             ):
+                # Treat shared-source verification revisits as lower urgency while role grounding is still missing.
                 continue
             priorities[packet_name] = max(priorities.get(packet_name, 0), 1)
         return priorities
@@ -1513,6 +1516,26 @@ class Agent:
         if not non_stalled:
             non_stalled = [c for c in candidates if c[4] < 3]
         chosen = non_stalled[0] if non_stalled else candidates[0]
+        role_source = f"{self.role}_Info"
+        role_missing = bool(self._epistemic_sufficiency(environment, sim_state=sim_state).get("role_missing"))
+        role_never_inspected = not bool(self.source_memory_state.get(role_source, {}).get("ever_inspected"))
+        if explicit_target == "Team_Info" and (role_missing or role_never_inspected):
+            role_candidate = next((c for c in candidates if c[1] == role_source), None)
+            if role_candidate is not None:
+                role_mem = self.source_memory_state.get(role_source, {})
+                role_cooldown_ready = float(role_mem.get("revisit_cooldown_until", 0.0) or 0.0) <= now_ts
+                if role_cooldown_ready:
+                    chosen = role_candidate
+                    rerank_explicit_target = True
+                    self._emit_event(
+                        sim_state,
+                        "source_retargeted_due_to_missing_role_grounding",
+                        {
+                            "current_source_target": explicit_target,
+                            "preferred_source_target": role_source,
+                            "reason": "role_grounding_prioritized_over_shared_verification",
+                        },
+                    )
         if chosen[6]:
             self._emit_event(sim_state, "source_revisit_required", {"source_id": chosen[1], "reason": "all_sources_exhausted_or_stalled"})
         if explicit_target is None:
@@ -1788,6 +1811,7 @@ class Agent:
         packet_data_ids = {d.id for d in packet.get("data", [])}
         held_data_ids = {d.id for d in self.mental_model["data"]}
         verified_data_ids = sorted(packet_data_ids & held_data_ids)
+        verified_information_ids = sorted(packet_info_ids & after_ids)
         self._trigger_epistemic_update_pipeline(sim_state=sim_state, trigger_source=source_id)
         derivation_ids_triggered = sorted(set(self.executed_derivations) - derivations_before)
         after_rules = set(self.mental_model["knowledge"].rules)
@@ -1835,6 +1859,7 @@ class Agent:
             self._emit_event(sim_state, "source_exhausted_for_agent", {"source_id": source_id, "inspect_count": source_state["inspect_count"]})
             if shared_source:
                 self._emit_event(sim_state, "shared_source_exhausted_for_team", {"source_id": source_id, "inspect_count": source_state["inspect_count"]})
+        witness_step_satisfied = bool(verification_completed)
         if sim_state is not None:
             self._emit_event(
                 sim_state,
@@ -1892,14 +1917,14 @@ class Agent:
                         {
                             "source_id": source_id,
                             "verification_completed": verification_completed,
-                            "witness_step_satisfied": bool(verification_completed),
+                            "witness_step_satisfied": witness_step_satisfied,
                         },
                     )
             if not net_dik_changed and verification_completed:
                 self._emit_event(
                     sim_state,
                     "source_verification_succeeded",
-                    {"source_id": source_id, "verification_completed": True, "witness_step_satisfied": True},
+                    {"source_id": source_id, "verification_completed": True, "witness_step_satisfied": witness_step_satisfied},
                 )
         if dik_changed:
             self.inspect_session["state"] = "dik_acquired"
@@ -1993,10 +2018,13 @@ class Agent:
                 "new_information_ids": sorted(new_ids),
                 "new_data_ids": sorted(new_data_from_source),
                 "new_rule_ids": new_rule_ids,
-                "verified_information_ids": sorted(packet_info_ids & after_ids),
+                "verified_information_ids": verified_information_ids,
                 "verified_data_ids": verified_data_ids,
                 "team_dik_added_ids": shared_team_delta["added"],
                 "team_dik_adopted_ids": shared_team_delta["adopted"],
+                "source_access_mode": "acquisition" if net_dik_changed else "verification",
+                "verification_completed": bool(verification_completed),
+                "witness_step_satisfied": witness_step_satisfied,
                 "source_access_classification": source_access_classification.get("classification"),
                 "is_shared_source": bool(source_access_classification.get("is_shared_source")),
                 "is_private_source": bool(source_access_classification.get("is_private_source")),
@@ -2018,7 +2046,7 @@ class Agent:
                     "new_rule_ids": new_rule_ids,
                     "team_dik_added_ids": shared_team_delta["added"],
                     "team_dik_adopted_ids": shared_team_delta["adopted"],
-                    "witness_step_satisfied": bool(net_dik_changed or verification_completed),
+                    "witness_step_satisfied": witness_step_satisfied,
                     "verification_completed": bool(verification_completed),
                     "source_access_classification": source_access_classification.get("classification"),
                 },
@@ -2078,6 +2106,9 @@ class Agent:
         role_missing = bool(epistemic.get("role_missing"))
         role_unseen = not bool(self.source_memory_state.get(role_source, {}).get("ever_inspected"))
         team_seen = bool(self.source_memory_state.get("Team_Info", {}).get("ever_inspected"))
+        if role_missing and role_unseen and "Team_Info" in critical_sources and team_seen:
+            critical_sources = dict(critical_sources)
+            critical_sources.pop("Team_Info", None)
         if role_source in environment.knowledge_packets and (role_missing or role_unseen):
             role_mem = self.source_memory_state.get(role_source, {})
             role_cooldown_ready = float(role_mem.get("revisit_cooldown_until", 0.0) or 0.0) <= now_ts
@@ -5223,6 +5254,16 @@ class Agent:
                 "last_updated_at": now_ts_local,
                 "restarts": 0,
             }
+            self.current_inspect_target_id = None
+            for action in self.active_actions:
+                if action.get("source_target_id") == source_id:
+                    action["source_target_id"] = None
+                    action["target"] = None
+            if isinstance(self.current_action, list):
+                for action in self.current_action:
+                    if isinstance(action, dict) and action.get("source_target_id") == source_id:
+                        action["source_target_id"] = None
+                        action["target"] = None
             self._release_source_slot(environment, source_id=source_id, emit=True, sim_state=sim_state, reason="target_stale_inspect_recovery")
             self._clear_inspect_pursuit(reason="target_stale_inspect_recovery", sim_state=sim_state, release_slot=False, environment=environment)
             self._emit_event(
