@@ -148,13 +148,21 @@ class BrainBackendConfig:
 
 @dataclass(frozen=True)
 class RuleBrainPolicyConfig:
-    mode_selection_temperature: float = 0.45
+    mode_selection_temperature: float = 0.2
     action_selection_temperature: float = 0.55
-    dwell_bonus: float = 0.3
-    switch_penalty: float = 0.25
+    dwell_bonus: float = 0.9
+    switch_penalty: float = 0.85
     recovery_bonus: float = 0.75
     randomness_floor: float = 0.02
-    min_mode_dwell_steps: int = 2
+    min_mode_dwell_steps: int = 6
+    min_method_dwell_steps: int = 5
+    min_step_dwell_steps: int = 4
+    mode_switch_margin: float = 0.7
+    inspect_commit_window_steps: int = 10
+    logistics_commit_window_steps: int = 12
+    construction_commit_window_steps: int = 12
+    method_retry_interval_steps: int = 3
+    max_meta_action_streak: int = 2
     max_history: int = 12
     max_logged_candidates: int = 6
 
@@ -363,14 +371,14 @@ class RuleBrain(BrainProvider):
     MODE_ACTION_PREFERENCES = {
         "BOOTSTRAP": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value: 1.3, ExecutableActionType.OBSERVE_ENVIRONMENT.value: 0.5},
         "ACQUIRE_DIK": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value: 1.6, ExecutableActionType.CONSULT_TEAM_ARTIFACT.value: 0.4, ExecutableActionType.REQUEST_ASSISTANCE.value: 0.4},
-        "INTEGRATE_DIK": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value: 1.1, ExecutableActionType.REASSESS_PLAN.value: 0.9, ExecutableActionType.EXTERNALIZE_PLAN.value: 0.5},
+        "INTEGRATE_DIK": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value: 1.1, ExecutableActionType.REASSESS_PLAN.value: 0.2, ExecutableActionType.EXTERNALIZE_PLAN.value: 0.5},
         "COORDINATE": {ExecutableActionType.COMMUNICATE.value: 1.2, ExecutableActionType.EXTERNALIZE_PLAN.value: 1.0, ExecutableActionType.REQUEST_ASSISTANCE.value: 0.8},
         "LOGISTICS": {ExecutableActionType.TRANSPORT_RESOURCES.value: 1.5, ExecutableActionType.COMMUNICATE.value: 0.3},
         "CONSTRUCT": {ExecutableActionType.START_CONSTRUCTION.value: 1.4, ExecutableActionType.CONTINUE_CONSTRUCTION.value: 1.5},
         "VALIDATE": {ExecutableActionType.VALIDATE_CONSTRUCTION.value: 1.6, ExecutableActionType.OBSERVE_ENVIRONMENT.value: 0.3},
         "REPAIR": {ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value: 1.7, ExecutableActionType.VALIDATE_CONSTRUCTION.value: 0.4},
-        "RECOVERY": {ExecutableActionType.REASSESS_PLAN.value: 1.0, ExecutableActionType.INSPECT_INFORMATION_SOURCE.value: 0.8, ExecutableActionType.OBSERVE_ENVIRONMENT.value: 0.5},
-        "MONITOR": {ExecutableActionType.OBSERVE_ENVIRONMENT.value: 0.9, ExecutableActionType.WAIT.value: 0.3, ExecutableActionType.REASSESS_PLAN.value: 0.4},
+        "RECOVERY": {ExecutableActionType.REASSESS_PLAN.value: 0.5, ExecutableActionType.INSPECT_INFORMATION_SOURCE.value: 0.9, ExecutableActionType.OBSERVE_ENVIRONMENT.value: 0.2},
+        "MONITOR": {ExecutableActionType.OBSERVE_ENVIRONMENT.value: 0.3, ExecutableActionType.WAIT.value: 0.3, ExecutableActionType.REASSESS_PLAN.value: 0.1},
     }
     METHOD_LIBRARY = _rule_method_library()
     MODE_METHOD_PREFERENCES = {
@@ -389,26 +397,26 @@ class RuleBrain(BrainProvider):
         "move_to_shared_source": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value},
         "inspect_shared_source": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value},
         "integrate_shared_dik": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.REASSESS_PLAN.value},
-        "identify_role_source": {ExecutableActionType.OBSERVE_ENVIRONMENT.value, ExecutableActionType.REASSESS_PLAN.value},
+        "identify_role_source": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, ExecutableActionType.OBSERVE_ENVIRONMENT.value},
         "move_to_role_source": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value},
         "inspect_role_source": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value},
-        "integrate_role_dik": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.REASSESS_PLAN.value},
+        "integrate_role_dik": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.EXTERNALIZE_PLAN.value},
         "select_teammate_or_artifact": {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.EXTERNALIZE_PLAN.value},
         "communicate_critical_dik": {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.EXTERNALIZE_PLAN.value, ExecutableActionType.REQUEST_ASSISTANCE.value},
-        "consult_artifact": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.REASSESS_PLAN.value},
-        "reassess_plan_with_rules": {ExecutableActionType.REASSESS_PLAN.value, ExecutableActionType.EXTERNALIZE_PLAN.value},
-        "identify_viable_project": {ExecutableActionType.OBSERVE_ENVIRONMENT.value, ExecutableActionType.REASSESS_PLAN.value},
+        "consult_artifact": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.EXTERNALIZE_PLAN.value},
+        "reassess_plan_with_rules": {ExecutableActionType.REASSESS_PLAN.value},
+        "identify_viable_project": {ExecutableActionType.TRANSPORT_RESOURCES.value, ExecutableActionType.OBSERVE_ENVIRONMENT.value},
         "bind_project_target": {ExecutableActionType.TRANSPORT_RESOURCES.value, ExecutableActionType.START_CONSTRUCTION.value},
-        "ensure_project_binding": {ExecutableActionType.TRANSPORT_RESOURCES.value, ExecutableActionType.REASSESS_PLAN.value},
+        "ensure_project_binding": {ExecutableActionType.TRANSPORT_RESOURCES.value},
         "choose_accessible_pile": {ExecutableActionType.TRANSPORT_RESOURCES.value},
         "move_to_pile": {ExecutableActionType.TRANSPORT_RESOURCES.value},
         "pickup": {ExecutableActionType.TRANSPORT_RESOURCES.value},
         "move_to_project": {ExecutableActionType.TRANSPORT_RESOURCES.value},
         "dropoff": {ExecutableActionType.TRANSPORT_RESOURCES.value},
-        "ensure_build_ready": {ExecutableActionType.REASSESS_PLAN.value, ExecutableActionType.CONSULT_TEAM_ARTIFACT.value},
+        "ensure_build_ready": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.TRANSPORT_RESOURCES.value},
         "start_or_continue_construction": {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value},
         "perform_validation": {ExecutableActionType.VALIDATE_CONSTRUCTION.value, ExecutableActionType.OBSERVE_ENVIRONMENT.value},
-        "attempt_repair": {ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value, ExecutableActionType.REASSESS_PLAN.value},
+        "attempt_repair": {ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value},
         "revalidate": {ExecutableActionType.VALIDATE_CONSTRUCTION.value},
     }
 
@@ -656,12 +664,24 @@ class RuleBrain(BrainProvider):
     ) -> tuple[str, dict[str, float], str]:
         current_mode = str(control_state.get("mode") or "BOOTSTRAP")
         transition_reason = "stochastic_mode_selection"
+        sim_step = int(control_state.get("sim_step", 0) or 0)
+        post_acquisition_until = int(control_state.get("post_acquisition_until", -1) or -1)
+        if current_mode in mode_scores and post_acquisition_until > sim_step:
+            selected_mode = current_mode
+            mode_probs = {k: (1.0 if k == current_mode else 0.0) for k in mode_scores}
+            transition_reason = "post_acquisition_stabilization_hold"
+            return selected_mode, mode_probs, transition_reason
         if int(control_state.get("mode_dwell_steps", 0) or 0) < self.policy_config.min_mode_dwell_steps and current_mode in mode_scores:
             selected_mode = current_mode
             mode_probs = {k: (1.0 if k == current_mode else 0.0) for k in mode_scores}
             transition_reason = "mode_dwell_guard_hold"
         else:
             selected_mode, mode_probs = self._softmax_pick(mode_scores, self.policy_config.mode_selection_temperature, rng)
+            if selected_mode != current_mode and current_mode in mode_scores:
+                if (mode_scores.get(selected_mode, -999.0) - mode_scores.get(current_mode, -999.0)) < self.policy_config.mode_switch_margin:
+                    selected_mode = current_mode
+                    mode_probs = {k: (1.0 if k == current_mode else 0.0) for k in mode_scores}
+                    transition_reason = "mode_switch_margin_hold"
 
         force_bootstrap_exit, bootstrap_exit_reason = self._bootstrap_exit_triggered(
             context_packet,
@@ -681,6 +701,26 @@ class RuleBrain(BrainProvider):
             transition_reason = bootstrap_exit_reason
         return selected_mode, mode_probs, transition_reason
 
+    def _is_emergency_switch(self, *, features: dict[str, float], selected_mode: str, current_mode: str) -> bool:
+        if selected_mode == current_mode:
+            return False
+        return bool(
+            features.get("loop_pressure", 0.0) >= 0.85
+            or features.get("contradiction_pressure", 0.0) >= 0.8
+            or features.get("repair_pressure", 0.0) >= 0.85
+        )
+
+    def _method_commit_window(self, method_id: str | None) -> int:
+        if not method_id:
+            return self.policy_config.min_method_dwell_steps
+        if "Acquire" in method_id or "Integrate" in method_id:
+            return max(self.policy_config.min_method_dwell_steps, self.policy_config.inspect_commit_window_steps)
+        if "Transport" in method_id or "Logistics" in method_id:
+            return max(self.policy_config.min_method_dwell_steps, self.policy_config.logistics_commit_window_steps)
+        if method_id in {"ConstructProject", "ValidateProject", "RepairProject"}:
+            return max(self.policy_config.min_method_dwell_steps, self.policy_config.construction_commit_window_steps)
+        return self.policy_config.min_method_dwell_steps
+
     @staticmethod
     def _method_state_from_control(control_state: dict[str, Any], sim_step: int) -> dict[str, Any]:
         state = dict(control_state.get("method_state") or {})
@@ -698,6 +738,11 @@ class RuleBrain(BrainProvider):
         state.setdefault("source_cooldowns", {})
         state.setdefault("source_exhaustion", {})
         state.setdefault("last_method_switch_reason", "initialized")
+        state.setdefault("method_commit_until", sim_step)
+        state.setdefault("step_commit_until", sim_step)
+        state.setdefault("last_step_progress_tick", sim_step)
+        state.setdefault("last_retry_tick", sim_step)
+        state.setdefault("meta_action_streak", 0)
         return state
 
     def _candidate_methods(self, selected_mode: str, method_state: dict[str, Any]) -> list[str]:
@@ -724,6 +769,10 @@ class RuleBrain(BrainProvider):
         method_state["method_started_tick"] = now
         method_state["active_method_step"] = self.METHOD_LIBRARY[method_id].ordered_steps[0]
         method_state["step_started_tick"] = now
+        method_state["method_commit_until"] = now + self._method_commit_window(method_id)
+        method_state["step_commit_until"] = now + self.policy_config.min_step_dwell_steps
+        method_state["last_step_progress_tick"] = now
+        method_state["last_retry_tick"] = now
         method_state["step_retry_count"] = 0
         method_state["last_method_switch_reason"] = reason
         history = list(method_state.get("method_history", []))
@@ -735,7 +784,16 @@ class RuleBrain(BrainProvider):
         now = int(method_state.get("sim_step", 0) or 0)
         candidates = self._candidate_methods(selected_mode, method_state)
         active = method_state.get("active_method_id")
+        method_commit_until = int(method_state.get("method_commit_until", now) or now)
+        emergency_switch = self._is_emergency_switch(
+            features=features,
+            selected_mode=selected_mode,
+            current_mode=str(method_state.get("current_mode") or selected_mode),
+        )
         if active in candidates:
+            return active, notes
+        if active and now < method_commit_until and not emergency_switch:
+            notes.append("method_switch_denied_due_to_min_commit_window")
             return active, notes
         if selected_mode == "ACQUIRE_DIK":
             source_exhaustion = dict(method_state.get("source_exhaustion", {}))
@@ -759,8 +817,12 @@ class RuleBrain(BrainProvider):
         if method_id is None:
             return None, notes
         method_def = self.METHOD_LIBRARY[method_id]
+        now = int(method_state.get("sim_step", 0) or 0)
         step = method_state.get("active_method_step") or method_def.ordered_steps[0]
         retry_budget = int((method_def.retry_budgets or {}).get(step, 2))
+        retry_budget = max(retry_budget, 3)
+        step_commit_until = int(method_state.get("step_commit_until", now) or now)
+        last_retry_tick = int(method_state.get("last_retry_tick", now) or now)
         source_exhaustion = dict(method_state.get("source_exhaustion", {}))
         team_exhausted = bool((source_exhaustion.get("Team_Info", {}) or {}).get("exhausted"))
         role_gap = features.get("epistemic_deficit", 0.0) > 0.0
@@ -772,11 +834,20 @@ class RuleBrain(BrainProvider):
             notes.append("source_cooldown_started:Team_Info")
             return method_state.get("active_method_step"), notes
         if int(method_state.get("step_retry_count", 0) or 0) >= retry_budget:
+            if now < step_commit_until:
+                notes.append("step_switch_denied_due_to_min_commit_window")
+                return step, notes
+            if (now - last_retry_tick) < self.policy_config.method_retry_interval_steps:
+                notes.append("step_retry_interval_guard_hold")
+                return step, notes
             idx = list(method_def.ordered_steps).index(step)
             if idx + 1 < len(method_def.ordered_steps):
                 new_step = method_def.ordered_steps[idx + 1]
                 method_state["active_method_step"] = new_step
-                method_state["step_started_tick"] = int(method_state.get("sim_step", 0) or 0)
+                method_state["step_started_tick"] = now
+                method_state["step_commit_until"] = now + self.policy_config.min_step_dwell_steps
+                method_state["last_step_progress_tick"] = now
+                method_state["last_retry_tick"] = now
                 method_state["step_retry_count"] = 0
                 notes.append(f"method_step_switched:{step}->{new_step}")
                 return new_step, notes
@@ -835,6 +906,19 @@ class RuleBrain(BrainProvider):
         traits: dict[str, float],
     ) -> dict[str, float]:
         action_scores: dict[str, float] = {}
+        concrete_actions = {
+            ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
+            ExecutableActionType.TRANSPORT_RESOURCES.value,
+            ExecutableActionType.START_CONSTRUCTION.value,
+            ExecutableActionType.CONTINUE_CONSTRUCTION.value,
+            ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value,
+            ExecutableActionType.VALIDATE_CONSTRUCTION.value,
+            ExecutableActionType.CONSULT_TEAM_ARTIFACT.value,
+            ExecutableActionType.COMMUNICATE.value,
+            ExecutableActionType.EXTERNALIZE_PLAN.value,
+            ExecutableActionType.REQUEST_ASSISTANCE.value,
+        }
+        has_concrete_reachable = any(a.get("action_type") in concrete_actions and bool(a.get("reachable", True)) for a in sorted_affordances)
         for idx, affordance in enumerate(sorted_affordances):
             action_type = str(affordance.get("action_type") or ExecutableActionType.WAIT.value)
             utility = float(affordance.get("utility", 0.0))
@@ -875,6 +959,12 @@ class RuleBrain(BrainProvider):
                 score -= 0.35
             if action_type == ExecutableActionType.OBSERVE_ENVIRONMENT.value:
                 score -= 1.2 * features.get("observe_ineffective_pressure", 0.0)
+            if action_type in {ExecutableActionType.REASSESS_PLAN.value, ExecutableActionType.OBSERVE_ENVIRONMENT.value}:
+                score -= 0.9
+                if has_concrete_reachable:
+                    score -= 2.2
+                if features.get("need_to_refresh_assumptions", 0.0) > 0.0:
+                    score -= 0.6
             if action_type in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value} and features.get("readiness_blocked", 0.0) > 0.0:
                 score -= 1.6
             if action_type in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value, ExecutableActionType.TRANSPORT_RESOURCES.value}:
@@ -906,6 +996,22 @@ class RuleBrain(BrainProvider):
         )
         selected_idx = int(selected_action_key.split(":")[0])
         chosen = sorted_affordances[selected_idx] if sorted_affordances else {"action_type": ExecutableActionType.WAIT.value}
+        concrete_actions = {
+            ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
+            ExecutableActionType.TRANSPORT_RESOURCES.value,
+            ExecutableActionType.START_CONSTRUCTION.value,
+            ExecutableActionType.CONTINUE_CONSTRUCTION.value,
+            ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value,
+            ExecutableActionType.VALIDATE_CONSTRUCTION.value,
+            ExecutableActionType.CONSULT_TEAM_ARTIFACT.value,
+            ExecutableActionType.COMMUNICATE.value,
+            ExecutableActionType.EXTERNALIZE_PLAN.value,
+            ExecutableActionType.REQUEST_ASSISTANCE.value,
+        }
+        if chosen.get("action_type") in {ExecutableActionType.REASSESS_PLAN.value, ExecutableActionType.OBSERVE_ENVIRONMENT.value}:
+            concrete = next((a for a in sorted_affordances if a.get("action_type") in concrete_actions and bool(a.get("reachable", True))), None)
+            if concrete is not None:
+                chosen = concrete
         if (
             features["build_opportunity"] > 0.0
             and features["active_incomplete_projects"] > 0.0
@@ -1013,6 +1119,7 @@ class RuleBrain(BrainProvider):
         control_state = dict(control_state or (context_packet.individual_cognitive_state.get("control_state", {}) if not is_request else {}))
         if not control_state:
             control_state = {"mode": "BOOTSTRAP", "mode_dwell_steps": 0}
+        control_state["sim_step"] = int((context_packet.world_snapshot.get("sim_time", 0.0) if not is_request else context_packet.sim_time) or 0)
         mode_scores, mode_guards = self._compute_mode_scores(features, legal_types, control_state, traits)
         mode_scores, guard_notes = self._apply_transition_guards(mode_scores, mode_guards, features, legal_types)
         rng_seed = f"{getattr(context_packet, 'request_id', 'ctx')}-{len(affordances)}-{control_state.get('mode')}-{int(features['goal_pressure']*100)}"
@@ -1028,6 +1135,7 @@ class RuleBrain(BrainProvider):
         sim_step = int((context_packet.world_snapshot.get("sim_time", 0.0) if not is_request else context_packet.sim_time) or 0)
         method_state = self._method_state_from_control(control_state, sim_step)
         method_state["sim_step"] = sim_step
+        method_state["current_mode"] = str(control_state.get("mode") or "BOOTSTRAP")
         role_name = str(
             (
                 (context_packet.static_task_context if not is_request else (context_packet.task_context or {}))
@@ -1075,6 +1183,26 @@ class RuleBrain(BrainProvider):
             step_allowed_actions=set(self.STEP_ACTION_MAP.get(step_id, set())) if step_id else None,
             rng=rng,
         )
+        if selected_action in {ExecutableActionType.REASSESS_PLAN, ExecutableActionType.OBSERVE_ENVIRONMENT}:
+            method_state["meta_action_streak"] = int(method_state.get("meta_action_streak", 0) or 0) + 1
+        else:
+            method_state["meta_action_streak"] = 0
+            method_state["last_step_progress_tick"] = sim_step
+        if int(method_state.get("meta_action_streak", 0) or 0) > self.policy_config.max_meta_action_streak:
+            concrete = next(
+                (a for a in sorted_affordances if a.get("action_type") not in {ExecutableActionType.REASSESS_PLAN.value, ExecutableActionType.OBSERVE_ENVIRONMENT.value, ExecutableActionType.WAIT.value}),
+                None,
+            )
+            if concrete is not None:
+                chosen = concrete
+                selected_action = ExecutableActionType(concrete.get("action_type", ExecutableActionType.WAIT.value))
+                method_state["meta_action_streak"] = 0
+                step_notes.append("meta_action_streak_suppressed")
+        available_meta = {a.get("action_type") for a in sorted_affordances if a.get("action_type") in {ExecutableActionType.REASSESS_PLAN.value, ExecutableActionType.OBSERVE_ENVIRONMENT.value}}
+        if available_meta and selected_action != ExecutableActionType.REASSESS_PLAN:
+            step_notes.append("reassess_suppressed_due_to_available_concrete_action")
+        if available_meta and selected_action != ExecutableActionType.OBSERVE_ENVIRONMENT:
+            step_notes.append("observe_suppressed_due_to_available_concrete_action")
         reason = f"mode={selected_mode};transition={transition_reason}"
         assumptions = [f"policy_mode={selected_mode}", f"mode_dwell={control_state.get('mode_dwell_steps', 0)}"]
         if method_id:
@@ -1102,6 +1230,8 @@ class RuleBrain(BrainProvider):
         else:
             updated_control = control_state
         method_state.pop("sim_step", None)
+        method_state.pop("current_mode", None)
+        control_state.pop("sim_step", None)
         updated_control["method_state"] = dict(method_state)
         top_mode_probs = sorted(mode_probs.items(), key=lambda item: item[1], reverse=True)[: self.policy_config.max_logged_candidates]
         top_action_probs = sorted(action_probs.items(), key=lambda item: item[1], reverse=True)[: self.policy_config.max_logged_candidates]

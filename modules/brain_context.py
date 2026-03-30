@@ -190,12 +190,13 @@ class BrainContextBuilder:
                 penalty = 0.55 if epistemic_suff < 0.62 else 0.0
                 return max(0.05, (0.9 if mismatch_pressure or stage == "late" or target_kind == "build" else 0.3) - penalty)
             if action in {ExecutableActionType.REASSESS_PLAN, ExecutableActionType.OBSERVE_ENVIRONMENT}:
-                return 0.4 if stage == "early" else 0.3
+                contradiction = float((build_readiness or {}).get("epistemic_refresh_pressure", 0.0) or 0.0)
+                if readiness_ok:
+                    return 0.04 if contradiction < 0.65 else 0.18
+                return 0.1 if stage == "early" else 0.06
             return 0.2
 
         legal = [
-            {"action_type": ExecutableActionType.OBSERVE_ENVIRONMENT.value, "target_id": None, "target_class": "self", "utility": utility_for(ExecutableActionType.OBSERVE_ENVIRONMENT)},
-            {"action_type": ExecutableActionType.REASSESS_PLAN.value, "target_id": None, "target_class": "self", "utility": utility_for(ExecutableActionType.REASSESS_PLAN)},
             {"action_type": ExecutableActionType.WAIT.value, "target_id": None, "target_class": "self", "utility": 0.1},
             {"action_type": ExecutableActionType.COMMUNICATE.value, "target_id": "nearby_agent", "target_class": "team", "utility": utility_for(ExecutableActionType.COMMUNICATE)},
             {"action_type": ExecutableActionType.REQUEST_ASSISTANCE.value, "target_id": "nearby_agent", "target_class": "team", "utility": utility_for(ExecutableActionType.REQUEST_ASSISTANCE)},
@@ -241,6 +242,23 @@ class BrainContextBuilder:
                     "utility": utility_for(action_type, target_kind=target.get("kind")),
                 }
             )
+
+        has_productive_target = any(
+            item.get("action_type")
+            in {
+                ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
+                ExecutableActionType.START_CONSTRUCTION.value,
+                ExecutableActionType.TRANSPORT_RESOURCES.value,
+                ExecutableActionType.CONTINUE_CONSTRUCTION.value,
+                ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value,
+                ExecutableActionType.VALIDATE_CONSTRUCTION.value,
+            }
+            and bool(item.get("reachable", True))
+            for item in legal
+        )
+        if not has_productive_target or refresh_pressure >= 0.72:
+            legal.append({"action_type": ExecutableActionType.OBSERVE_ENVIRONMENT.value, "target_id": None, "target_class": "self", "utility": utility_for(ExecutableActionType.OBSERVE_ENVIRONMENT)})
+            legal.append({"action_type": ExecutableActionType.REASSESS_PLAN.value, "target_id": None, "target_class": "self", "utility": utility_for(ExecutableActionType.REASSESS_PLAN)})
 
         legal.append(
             {
