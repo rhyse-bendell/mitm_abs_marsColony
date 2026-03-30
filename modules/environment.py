@@ -355,6 +355,43 @@ class Environment:
             out.append((nx, ny))
         return out
 
+    def _planner_proxy_for_target(self, target, grid_step=0.35, max_rings=1):
+        target = (float(target[0]), float(target[1]))
+        q_target = self._quantize_point(target, step=grid_step)
+        candidates = []
+        for ring in range(0, max(0, int(max_rings)) + 1):
+            for dx in range(-ring, ring + 1):
+                for dy in range(-ring, ring + 1):
+                    if ring > 0 and max(abs(dx), abs(dy)) != ring:
+                        continue
+                    probe = (
+                        target[0] + (dx * grid_step),
+                        target[1] + (dy * grid_step),
+                    )
+                    q_probe = self._quantize_point(probe, step=grid_step)
+                    if q_probe in candidates:
+                        continue
+                    candidates.append(q_probe)
+        if q_target not in candidates:
+            candidates.insert(0, q_target)
+
+        best = None
+        for proxy in candidates:
+            if not self.is_point_navigable(proxy):
+                continue
+            dist_to_target = self._heuristic(proxy, target)
+            if dist_to_target > (grid_step * 1.25):
+                continue
+            if not self._segment_is_navigable(proxy, target, samples=6):
+                continue
+            rank = (
+                dist_to_target,
+                0 if proxy == q_target else 1,
+            )
+            if best is None or rank < best[0]:
+                best = (rank, proxy)
+        return best[1] if best else None
+
     def plan_path(self, start, target, mode="grid_astar", grid_step=0.35):
         start = (float(start[0]), float(start[1]))
         target = (float(target[0]), float(target[1]))
@@ -377,6 +414,19 @@ class Environment:
 
         q_start = self._quantize_point(start, step=grid_step)
         q_target = self._quantize_point(target, step=grid_step)
+
+        if not self.is_point_navigable(q_target):
+            proxy_target = self._planner_proxy_for_target(target, grid_step=grid_step, max_rings=1)
+            if proxy_target is not None:
+                q_target = proxy_target
+            else:
+                return {
+                    "status": "failed",
+                    "waypoints": [],
+                    "from_cache": False,
+                    "path_mode": mode,
+                    "blocker_category": "target_unreachable",
+                }
 
         if not self.is_point_navigable(q_target):
             return {
@@ -578,16 +628,52 @@ class Environment:
                     if obj.get("type") == "blocked"
                 )
             ] or candidates
+            candidates = [
+                p for p in candidates
+                if self.get_interaction_access(p, target_name).get("accessible")
+            ]
 
         if not candidates:
             return None
 
         if from_position is None:
+            if target.get("kind") == "build":
+                scored = []
+                for p in candidates:
+                    q = self._quantize_point(p, step=0.35)
+                    proxy = self._planner_proxy_for_target(p, grid_step=0.35, max_rings=1)
+                    if proxy is None:
+                        continue
+                    scored.append((
+                        0 if self.is_point_navigable(q) else 1,
+                        self._heuristic(proxy, p),
+                        p,
+                    ))
+                if scored:
+                    scored.sort(key=lambda row: (row[0], row[1]))
+                    return scored[0][2]
             return candidates[0]
 
         clear_candidates = [p for p in candidates if self._segment_is_navigable(from_position, p)]
         if clear_candidates:
             candidates = clear_candidates
+
+        if target.get("kind") == "build":
+            scored = []
+            for p in candidates:
+                q = self._quantize_point(p, step=0.35)
+                proxy = self._planner_proxy_for_target(p, grid_step=0.35, max_rings=1)
+                if proxy is None:
+                    continue
+                scored.append((
+                    0 if self.is_point_navigable(q) else 1,
+                    self._heuristic(proxy, p),
+                    math.hypot(p[0] - from_position[0], p[1] - from_position[1]),
+                    p,
+                ))
+            if scored:
+                scored.sort(key=lambda row: (row[0], row[1], row[2]))
+                return scored[0][3]
 
         return min(candidates, key=lambda p: math.hypot(p[0] - from_position[0], p[1] - from_position[1]))
 

@@ -4728,6 +4728,47 @@ class Agent:
         nav = self.navigation
         path_mode = nav.get("path_mode", "grid_astar")
         origin = tuple(self.position)
+        rounded_target = (round(float(target[0]), 4), round(float(target[1]), 4))
+
+        def _is_active_build_target(point):
+            point_key = (round(float(point[0]), 4), round(float(point[1]), 4))
+            for action in self.active_actions:
+                if action.get("type") not in {"construct", "transport_resources"}:
+                    continue
+                project_id = action.get("project_id")
+                if not project_id:
+                    continue
+                meta = environment.interaction_targets.get(project_id, {})
+                if meta.get("kind") != "build":
+                    continue
+                action_target = action.get("target")
+                if action_target is None:
+                    continue
+                action_key = (round(float(action_target[0]), 4), round(float(action_target[1]), 4))
+                if action_key == point_key:
+                    return project_id
+            return None
+
+        def _clear_build_target_binding(project_id, point):
+            point_key = (round(float(point[0]), 4), round(float(point[1]), 4))
+            for action in self.active_actions:
+                if action.get("project_id") != project_id:
+                    continue
+                action_target = action.get("target")
+                if action_target is None:
+                    continue
+                action_key = (round(float(action_target[0]), 4), round(float(action_target[1]), 4))
+                if action_key == point_key:
+                    action["target"] = None
+            for action in self.current_action if isinstance(self.current_action, list) else []:
+                if not isinstance(action, dict) or action.get("project_id") != project_id:
+                    continue
+                action_target = action.get("target")
+                if action_target is None:
+                    continue
+                action_key = (round(float(action_target[0]), 4), round(float(action_target[1]), 4))
+                if action_key == point_key:
+                    action["target"] = None
 
         def _emit(stage, extra=None):
             payload = {
@@ -4804,6 +4845,37 @@ class Agent:
             plan = environment.plan_path(self.position, target, mode=path_mode)
             if plan.get("status") != "ok" or not plan.get("waypoints"):
                 blocker = plan.get("blocker_category", "unknown")
+                build_project_id = _is_active_build_target(target)
+                if blocker == "target_unreachable" and build_project_id:
+                    nav["active_path"] = []
+                    nav["path_target"] = None
+                    nav["path_index"] = 0
+                    nav["last_blocker_category"] = "planner_incompatible_target"
+                    nav["retry_count"] = 0
+                    nav["last_rejected_target"] = rounded_target
+                    _clear_build_target_binding(build_project_id, target)
+                    self.target = None
+                    self.activity_log.append(
+                        f"Rejected build target {target} for {build_project_id} (planner-incompatible quantized target); forcing retarget."
+                    )
+                    _emit(
+                        "movement_blocked",
+                        {
+                            "blocker_category": "planner_incompatible_target",
+                            "project_id": build_project_id,
+                            "rejected_target": target,
+                        },
+                    )
+                    self._emit_event(
+                        sim_state,
+                        "movement_failed",
+                        {
+                            "failure_category": "planner_incompatible_target",
+                            "path_mode": path_mode,
+                            "project_id": build_project_id,
+                        },
+                    )
+                    return
                 nav["retry_count"] = int(nav.get("retry_count", 0)) + 1
                 if nav["retry_count"] > 1:
                     blocker = "repeated_move_retry"
