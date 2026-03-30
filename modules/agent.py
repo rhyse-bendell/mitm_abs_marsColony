@@ -412,6 +412,22 @@ class Agent:
         self._construction_attempted_projects = set()
         self.support_goal_activation_state = {}
         self.support_goal_nonexec_counts = {}
+        self.support_goal_update_interval_s = 4.0
+        self.last_support_goal_update_time = -999.0
+        self.rulebrain_recalc_interval_s = 1.6
+        self.next_rulebrain_recalc_time = -1.0
+        self.active_intent = {
+            "intent_id": None,
+            "target": None,
+            "started_at": 0.0,
+            "min_commit_until": 0.0,
+            "success_condition": None,
+            "abort_conditions": [],
+            "blocker_count": 0,
+            "last_meaningful_progress_time": 0.0,
+            "category": None,
+        }
+        self.post_acquisition_stabilization_until = 0.0
         self.communication_state = {
             "last_exchange_tick": -1,
             "no_effect_streak": 0,
@@ -476,6 +492,11 @@ class Agent:
         events = list(tracker.get("recent_events", []))
         events.append({"time": now_ts, "kind": str(kind), "progress": True, "detail": dict(detail or {})})
         tracker["recent_events"] = events[-24:]
+        if self.active_intent.get("intent_id"):
+            self.active_intent["last_meaningful_progress_time"] = now_ts
+            if str(kind) in {"inspection_success", "construction_progress", "transport_dropoff", "project_validated"}:
+                self._emit_event(sim_state, "intent_completed", {"intent_id": self.active_intent.get("intent_id"), "target": self.active_intent.get("target"), "progress_kind": str(kind)})
+                self.active_intent["intent_id"] = None
         self._emit_event(sim_state, "progress_registered", {"kind": str(kind), "detail": dict(detail or {}), "no_progress_streak": 0})
 
     def _register_no_progress(self, sim_state=None, *, kind, detail=None, category=None, key=None):
@@ -503,6 +524,46 @@ class Agent:
         self.progress_tracker["forced_pivot"] = str(to_action)
         self.progress_tracker["forced_pivot_until"] = now_ts + max(1.0, float(ttl_s))
         self._emit_event(sim_state, "recovery_pivot_applied", {"to_action": str(to_action), "reason": str(reason), "ttl_s": ttl_s})
+
+    def _intent_window_for_action(self, action_type):
+        if action_type == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value:
+            return 10.0, "inspect_sequence"
+        if action_type == ExecutableActionType.TRANSPORT_RESOURCES.value:
+            return 12.0, "logistics_sequence"
+        if action_type in {
+            ExecutableActionType.START_CONSTRUCTION.value,
+            ExecutableActionType.CONTINUE_CONSTRUCTION.value,
+            ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value,
+            ExecutableActionType.VALIDATE_CONSTRUCTION.value,
+        }:
+            return 12.0, "construction_sequence"
+        return 6.0, "general_sequence"
+
+    def _sync_active_intent(self, sim_state, *, action_type, target):
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        if action_type in {ExecutableActionType.WAIT.value, ExecutableActionType.REASSESS_PLAN.value, ExecutableActionType.OBSERVE_ENVIRONMENT.value}:
+            return
+        intent_id = f"{action_type}:{target or 'none'}"
+        window_s, category = self._intent_window_for_action(action_type)
+        prior = dict(self.active_intent or {})
+        if prior.get("intent_id") == intent_id and now_ts < float(prior.get("min_commit_until", 0.0) or 0.0):
+            self.active_intent["min_commit_until"] = max(float(prior.get("min_commit_until", 0.0) or 0.0), now_ts + (window_s * 0.35))
+            self._emit_event(sim_state, "intent_extended", {"intent_id": intent_id, "target": target, "min_commit_until": self.active_intent["min_commit_until"]})
+            return
+        if prior.get("intent_id") and prior.get("intent_id") != intent_id and now_ts < float(prior.get("min_commit_until", 0.0) or 0.0):
+            self._emit_event(sim_state, "intent_aborted", {"intent_id": prior.get("intent_id"), "target": prior.get("target"), "reason": "intent_replaced_before_commit_expired"})
+        self.active_intent = {
+            "intent_id": intent_id,
+            "target": target,
+            "started_at": now_ts,
+            "min_commit_until": now_ts + window_s,
+            "success_condition": "meaningful_progress_or_completion",
+            "abort_conditions": ["blocker_threshold_exceeded", "target_impossible", "emergency_override"],
+            "blocker_count": 0,
+            "last_meaningful_progress_time": now_ts,
+            "category": category,
+        }
+        self._emit_event(sim_state, "intent_committed", {"intent_id": intent_id, "target": target, "category": category, "min_commit_until": now_ts + window_s})
 
     def _normalize_packet_name(self, packet_name):
         """Map UI packet labels and aliases to canonical environment packet keys."""
@@ -1894,6 +1955,13 @@ class Agent:
             )
         self.inspect_session["state"] = "post_inspect_derivation_attempted"
         self.inspect_session["last_updated_at"] = now_ts
+        if net_dik_changed:
+            self.post_acquisition_stabilization_until = float(now_ts) + 8.0
+            self._emit_event(
+                sim_state,
+                "post_acquisition_stabilization_started",
+                {"source_id": source_id, "until": self.post_acquisition_stabilization_until},
+            )
         self._release_source_slot(environment, source_id=source_id, emit=True, sim_state=sim_state, reason="inspection_completed")
         self._clear_inspect_pursuit(reason="inspection_succeeded", sim_state=sim_state, release_slot=False, environment=environment)
         return bool(net_dik_changed)
@@ -2522,7 +2590,7 @@ class Agent:
             existing_goal is not None
             and existing_goal.status in {"active", "queued", "candidate"}
             and str(activation_state.get("last_reason")) == str(reason)
-            and (now_ts - float(activation_state.get("last_time", -999.0))) <= 1.0
+            and (now_ts - float(activation_state.get("last_time", -999.0))) <= max(1.0, self.support_goal_update_interval_s)
         )
         if duplicate_reason:
             self._emit_event(
@@ -4498,7 +4566,24 @@ class Agent:
         backend = runtime.get("configured_backend", sim_state.configured_brain_backend)
         if provider is None or (provider.__class__.__name__ != "RuleBrain" and backend != "rule_brain"):
             return False
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        if self.post_acquisition_stabilization_until and now_ts > self.post_acquisition_stabilization_until:
+            self._emit_event(sim_state, "post_acquisition_stabilization_expired", {"expired_at": now_ts})
+            self.post_acquisition_stabilization_until = 0.0
+        intent_locked = bool(
+            self.active_intent.get("intent_id")
+            and now_ts < float(self.active_intent.get("min_commit_until", 0.0) or 0.0)
+            and int(self.progress_tracker.get("no_progress_streak", 0) or 0) < 4
+        )
+        if intent_locked and self.current_action:
+            self._emit_event(sim_state, "controller_recalculation_skipped_due_to_commitment", {"intent_id": self.active_intent.get("intent_id"), "planner_reason": planner_reason})
+            return True
+        if now_ts < float(self.next_rulebrain_recalc_time or 0.0) and self.current_action:
+            self._emit_event(sim_state, "controller_recalculation_skipped_due_to_commitment", {"intent_id": self.active_intent.get("intent_id"), "planner_reason": "cadence_hold"})
+            return True
         context = sim_state.brain_context_builder.build(sim_state, self)
+        context.individual_cognitive_state.setdefault("control_state", dict(self.control_state or {}))
+        context.individual_cognitive_state["control_state"]["post_acquisition_until"] = int(self.post_acquisition_stabilization_until)
         decision = provider.decide(context)
         decision = self._apply_policy_pivots(decision, environment, sim_state=sim_state, context=context, pivot_origin="local_refresh")
         updated_control_state = context.individual_cognitive_state.get("control_state", {})
@@ -4506,6 +4591,7 @@ class Agent:
             self.control_state.update(updated_control_state)
             self._sync_method_state_from_control()
         self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment, sim_state=sim_state)
+        self.next_rulebrain_recalc_time = now_ts + float(self.rulebrain_recalc_interval_s)
         self.planner_state["deterministic_rulebrain_decision_count"] = int(self.planner_state.get("deterministic_rulebrain_decision_count", 0) or 0) + 1
         self._emit_event(sim_state, "local_policy_refresh_used", {"reason": planner_reason, "backend": backend, "selected_action": decision.selected_action.value, "control_mode": self.control_state.get("mode"), "mode_dwell_steps": self.control_state.get("mode_dwell_steps")})
         return True
@@ -4666,6 +4752,7 @@ class Agent:
                 )
             if self.source_inspection_state.get(source_id) == "inspected":
                 self._set_status(f"Source skipped due to completion: {source_id}")
+            self._sync_active_intent(sim_state, action_type=decision.selected_action.value, target=source_id)
             self._emit_startup_once(sim_state, "first_productive_action_started", "first_productive_action_started", {"planner_action_type": decision.selected_action.value, "translated_action_type": action.get("type")})
             return [action]
 
@@ -4731,6 +4818,7 @@ class Agent:
             self._emit_event(sim_state, "moving_to_externalization_site", {"selected_next_action": decision.selected_action.value, "current_location": self.position})
         if decision.selected_action == ExecutableActionType.REQUEST_ASSISTANCE:
             action["assist_action"] = decision.selected_action.value
+        self._sync_active_intent(sim_state, action_type=decision.selected_action.value, target=decision.target_id or action.get("project_id") or action.get("source_target_id"))
 
         self._emit_event(sim_state, "action_translation_succeeded", {"planner_action_type": decision.selected_action.value, "translated_action_type": action.get("type"), "target_id": decision.target_id, "target_zone": decision.target_zone})
         if decision.selected_action != ExecutableActionType.INSPECT_INFORMATION_SOURCE and isinstance(getattr(self, "post_inspect_handoff", None), dict):
@@ -5349,7 +5437,21 @@ class Agent:
                 self._advance_active_actions(dt, sim_state=sim_state)
 
             self._apply_externalization_and_construction_effects(environment, sim_state, dt)
-            self._update_goal_states_from_runtime(sim_state, environment)
+            now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+            if (now_ts - float(self.last_support_goal_update_time)) >= float(self.support_goal_update_interval_s):
+                self._update_goal_states_from_runtime(sim_state, environment)
+                self.last_support_goal_update_time = now_ts
+            else:
+                self._emit_event(
+                    sim_state,
+                    "support_goal_update_skipped_due_to_cadence",
+                    {
+                        "next_update_in_s": round(
+                            max(0.0, float(self.support_goal_update_interval_s) - (now_ts - float(self.last_support_goal_update_time))),
+                            3,
+                        ),
+                    },
+                )
             if not self.startup_state.get("initial_goal_selected"):
                 current = self.current_goal()
                 if current:
