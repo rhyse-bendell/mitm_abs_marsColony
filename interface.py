@@ -233,8 +233,12 @@ class MarsColonyInterface:
         self.dashboard_agent_state.pack(fill="both", expand=True)
 
         construction_frame = ttk.LabelFrame(summary_pane, text="Construction Summary", padding=6)
+        construction_header = ttk.Frame(construction_frame)
+        construction_header.pack(fill="x", pady=(0, 4))
+        ttk.Label(construction_header, text="Latest updates").pack(side="left")
         self.dashboard_construction_text = tk.Text(construction_frame, height=8, wrap="word")
         self.dashboard_construction_text.pack(side="left", fill="both", expand=True)
+        self._add_copy_button(construction_header, self.dashboard_construction_text)
         cons_scroll = ttk.Scrollbar(construction_frame, orient="vertical", command=self.dashboard_construction_text.yview)
         cons_scroll.pack(side="right", fill="y")
         self.dashboard_construction_text.configure(yscrollcommand=cons_scroll.set)
@@ -252,9 +256,20 @@ class MarsColonyInterface:
         self.dashboard_interaction_state_text = tk.Text(event_frame, wrap="word", height=8)
         self.dashboard_zone_state_text = tk.Text(event_frame, wrap="word", height=6)
 
-        ttk.Label(event_frame, text="Agent Activities").grid(row=0, column=0, sticky="w")
-        ttk.Label(event_frame, text="Interaction State Machine").grid(row=2, column=0, sticky="w", pady=(4, 0))
-        ttk.Label(event_frame, text="Agent Zone States").grid(row=4, column=0, sticky="w", pady=(4, 0))
+        agent_header = ttk.Frame(event_frame)
+        agent_header.grid(row=0, column=0, sticky="ew")
+        ttk.Label(agent_header, text="Agent Activities").pack(side="left")
+        self._add_copy_button(agent_header, self.dashboard_agent_activity_text)
+
+        interaction_header = ttk.Frame(event_frame)
+        interaction_header.grid(row=2, column=0, sticky="ew", pady=(4, 0))
+        ttk.Label(interaction_header, text="Interaction State Machine").pack(side="left")
+        self._add_copy_button(interaction_header, self.dashboard_interaction_state_text)
+
+        zone_header = ttk.Frame(event_frame)
+        zone_header.grid(row=4, column=0, sticky="ew", pady=(4, 0))
+        ttk.Label(zone_header, text="Agent Zone States").pack(side="left")
+        self._add_copy_button(zone_header, self.dashboard_zone_state_text)
 
         self.dashboard_agent_activity_text.grid(row=1, column=0, sticky="nsew")
         self.dashboard_interaction_state_text.grid(row=3, column=0, sticky="nsew")
@@ -272,8 +287,12 @@ class MarsColonyInterface:
 
         system_log_frame = ttk.LabelFrame(right_frame, text="Simulator / System Log", padding=6)
         system_log_frame.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        system_log_header = ttk.Frame(system_log_frame)
+        system_log_header.pack(fill="x", pady=(0, 4))
+        ttk.Label(system_log_header, text="Live output").pack(side="left")
         self.system_log_text = tk.Text(system_log_frame, wrap="word", height=10)
         self.system_log_text.pack(side="left", fill="both", expand=True)
+        self._add_copy_button(system_log_header, self.system_log_text)
         log_scroll = ttk.Scrollbar(system_log_frame, orient="vertical", command=self.system_log_text.yview)
         log_scroll.pack(side="right", fill="y")
         self.system_log_text.configure(yscrollcommand=log_scroll.set)
@@ -308,8 +327,12 @@ class MarsColonyInterface:
 
         self.construction_fig, self.construction_ax, self.construction_canvas = self._build_construction_canvas(visual_frame)
 
+        construction_header = ttk.Frame(text_frame)
+        construction_header.pack(fill="x", pady=(0, 4))
+        ttk.Label(construction_header, text="Live summary").pack(side="left")
         self.construction_text = tk.Text(text_frame, wrap="word")
         self.construction_text.pack(side="left", fill="both", expand=True)
+        self._add_copy_button(construction_header, self.construction_text)
         cons_scroll = ttk.Scrollbar(text_frame, orient="vertical", command=self.construction_text.yview)
         cons_scroll.pack(side="right", fill="y")
         self.construction_text.configure(yscrollcommand=cons_scroll.set)
@@ -375,8 +398,12 @@ class MarsColonyInterface:
         self.interaction_canvas = tk.Canvas(left, bg="#10141b", height=560)
         self.interaction_canvas.pack(fill="both", expand=True)
 
+        interaction_header = ttk.Frame(right)
+        interaction_header.pack(fill="x", pady=(0, 4))
+        ttk.Label(interaction_header, text="Interaction Log").pack(side="left")
         self.interaction_list = tk.Text(right, wrap="word", height=30)
         self.interaction_list.pack(fill="both", expand=True)
+        self._add_copy_button(interaction_header, self.interaction_list)
 
     @staticmethod
     def _safe_pretty_json(value):
@@ -916,6 +943,39 @@ class MarsColonyInterface:
     def _copy_brain_trace_bundle(self):
         """Backward-compatible alias for older tests/callers."""
         self._copy_brain_lifecycle_bundle()
+
+    def _copy_text_widget_contents(self, text_widget, *, feedback_button=None):
+        if text_widget is None or not text_widget.winfo_exists():
+            return
+        try:
+            content = text_widget.get("1.0", "end-1c")
+        except tk.TclError:
+            content = ""
+        self.root.clipboard_clear()
+        self.root.clipboard_append(content)
+        self.root.update_idletasks()
+        self._set_copy_button_feedback(feedback_button, copied_text=bool(content))
+
+    def _set_copy_button_feedback(self, button, *, copied_text):
+        if button is None or not button.winfo_exists():
+            return
+        original_text = str(getattr(button, "_copy_original_text", button.cget("text")))
+        if not hasattr(button, "_copy_original_text"):
+            button._copy_original_text = original_text
+        prior_after_id = getattr(button, "_copy_feedback_after_id", None)
+        if prior_after_id:
+            try:
+                button.after_cancel(prior_after_id)
+            except tk.TclError:
+                pass
+        button.configure(text="Copied" if copied_text else "Empty")
+        button._copy_feedback_after_id = button.after(1200, lambda btn=button, text=original_text: btn.winfo_exists() and btn.configure(text=text))
+
+    def _add_copy_button(self, parent, text_widget, *, pack_side="right", padx=(4, 0), pady=0):
+        button = ttk.Button(parent, text="Copy", takefocus=False)
+        button.configure(command=lambda widget=text_widget, btn=button: self._copy_text_widget_contents(widget, feedback_button=btn))
+        button.pack(side=pack_side, padx=padx, pady=pady)
+        return button
 
     def update_brain_tab(self, *, force=False):
         if not hasattr(self, "brain_request_list"):
@@ -1608,20 +1668,32 @@ class MarsColonyInterface:
         # Section 1: Agent Activities
         frame_agent_activities = ttk.LabelFrame(self.tab_event, text="Agent Activities", padding=10)
         frame_agent_activities.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        agent_header = ttk.Frame(frame_agent_activities)
+        agent_header.pack(fill="x", pady=(0, 4))
+        ttk.Label(agent_header, text="Live agent activity").pack(side="left")
         self.agent_activity_text = tk.Text(frame_agent_activities, width=45, height=20, wrap="word")
         self.agent_activity_text.pack(expand=True, fill="both")
+        self._add_copy_button(agent_header, self.agent_activity_text)
 
         # Section 2: Interaction State Machines
         frame_interaction_states = ttk.LabelFrame(self.tab_event, text="Interaction State Machine", padding=10)
         frame_interaction_states.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
+        interaction_header = ttk.Frame(frame_interaction_states)
+        interaction_header.pack(fill="x", pady=(0, 4))
+        ttk.Label(interaction_header, text="Live interaction state").pack(side="left")
         self.interaction_state_text = tk.Text(frame_interaction_states, width=45, height=20, wrap="word")
         self.interaction_state_text.pack(expand=True, fill="both")
+        self._add_copy_button(interaction_header, self.interaction_state_text)
 
         # Section 3: Spatial Location States
         frame_location_states = ttk.LabelFrame(self.tab_event, text="Agent Zone States", padding=10)
         frame_location_states.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
+        zone_header = ttk.Frame(frame_location_states)
+        zone_header.pack(fill="x", pady=(0, 4))
+        ttk.Label(zone_header, text="Live zone state").pack(side="left")
         self.zone_state_text = tk.Text(frame_location_states, width=92, height=10, wrap="word")
         self.zone_state_text.pack(expand=True, fill="both")
+        self._add_copy_button(zone_header, self.zone_state_text)
 
         self.tab_event.rowconfigure(0, weight=3)
         self.tab_event.rowconfigure(1, weight=1)
@@ -3565,6 +3637,8 @@ class MarsColonyInterface:
                 offvalue="focused",
             )
             detail_toggle.pack(side="left", padx=(6, 0))
+            body = tk.Text(panel, height=11, wrap="word")
+            self._add_copy_button(controls, body)
             graph_viewport = ttk.Frame(panel)
             graph_viewport.pack(fill="both", expand=True, pady=(0, 6))
             graph_viewport.columnconfigure(0, weight=1)
@@ -3585,7 +3659,6 @@ class MarsColonyInterface:
             graph_scroll_x.grid(row=1, column=0, sticky="ew")
             graph_canvas.configure(xscrollcommand=graph_scroll_x.set, yscrollcommand=graph_scroll_y.set)
 
-            body = tk.Text(panel, height=11, wrap="word")
             body.pack(fill="x", expand=True)
             body.configure(state="disabled")
             self.agent_state_panels[panel_key] = {
