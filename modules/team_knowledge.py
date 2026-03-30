@@ -84,9 +84,12 @@ class TeamKnowledgeManager:
             return None
         artifact_id = f"construction:{project_id}"
         structure_type = project.get("type", "unknown")
-        delivered = project.get("delivered_resources", {}).get("bricks", 0)
-        required = project.get("required_resources", {}).get("bricks", 0)
+        delivered = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
+        required = int(project.get("required_resources", {}).get("bricks", 0) or 0)
         status = project.get("status", "in_progress")
+        resource_complete = bool(project.get("resource_complete", False)) or (required > 0 and delivered >= required)
+        progress_ratio = min(1.0, (delivered / required)) if required > 0 else 0.0
+        validated = bool(project.get("validated_complete", False))
         validation_state = "validated" if project.get("correct", True) and status == "complete" else (
             "mismatch" if project.get("correct") is False else "in_progress"
         )
@@ -101,6 +104,9 @@ class TeamKnowledgeManager:
             "project_id": project_id,
             "structure_type": structure_type,
             "status": status,
+            "resource_complete": resource_complete,
+            "progress_ratio": round(progress_ratio, 4),
+            "validated": validated,
             "correct": project.get("correct", True),
             "expected_rules": knowledge_summary,
             "held_rule_ids_at_build": held_rule_ids,
@@ -115,6 +121,8 @@ class TeamKnowledgeManager:
             "provenance_timeline": list(provenance.get("timeline", [])),
             "delivered_resources": dict(project.get("delivered_resources", {})),
             "required_resources": dict(project.get("required_resources", {})),
+            "last_status_event": "construction_externalized",
+            "status_changed_at": sim_time,
         }
 
         artifact = self.artifacts.get(artifact_id)
@@ -134,10 +142,77 @@ class TeamKnowledgeManager:
                 knowledge_summary=knowledge_summary,
                 validation_state=validation_state,
             )
+            initial_event = (
+                "construction_completed"
+                if status == "complete"
+                else "construction_ready_for_validation"
+                if status == "ready_for_validation"
+                else "construction_materials_satisfied"
+                if resource_complete
+                else "construction_status_changed"
+            )
+            artifact.content["last_status_event"] = initial_event
             self.recent_updates.append(
-                {"event": "construction_externalized", "artifact_id": artifact_id, "time": sim_time}
+                {"event": "construction_externalized", "artifact_id": artifact_id, "project_id": project_id, "time": sim_time}
+            )
+            self.recent_updates.append(
+                {"event": initial_event, "artifact_id": artifact_id, "project_id": project_id, "status": status, "resource_complete": resource_complete, "time": sim_time}
+            )
+            self.recent_updates.append(
+                {"event": "project_state_published_to_team_knowledge", "artifact_id": artifact_id, "project_id": project_id, "status": status, "resource_complete": resource_complete, "time": sim_time}
             )
             return artifact
+
+        previous = dict(artifact.content or {})
+        previous_status = str(previous.get("status", "") or "")
+        previous_resource_complete = bool(previous.get("resource_complete", False))
+        previous_correct = bool(previous.get("correct", True))
+        status_event = "construction_artifact_updated"
+
+        if previous_status != status:
+            status_event = "construction_status_changed"
+            self.recent_updates.append(
+                {
+                    "event": "construction_status_changed",
+                    "artifact_id": artifact_id,
+                    "project_id": project_id,
+                    "status_before": previous_status,
+                    "status_after": status,
+                    "time": sim_time,
+                }
+            )
+        if (not previous_resource_complete) and resource_complete:
+            status_event = "construction_materials_satisfied"
+            self.recent_updates.append(
+                {"event": "construction_materials_satisfied", "artifact_id": artifact_id, "project_id": project_id, "status": status, "time": sim_time}
+            )
+            self.recent_updates.append(
+                {"event": "project_marked_materially_satisfied", "artifact_id": artifact_id, "project_id": project_id, "status": status, "time": sim_time}
+            )
+        if previous_status != "ready_for_validation" and status == "ready_for_validation":
+            status_event = "construction_ready_for_validation"
+            self.recent_updates.append(
+                {"event": "construction_ready_for_validation", "artifact_id": artifact_id, "project_id": project_id, "time": sim_time}
+            )
+            self.recent_updates.append(
+                {"event": "project_marked_ready_for_validation", "artifact_id": artifact_id, "project_id": project_id, "time": sim_time}
+            )
+        if previous_status != "complete" and status == "complete":
+            status_event = "construction_completed"
+            self.recent_updates.append(
+                {"event": "construction_completed", "artifact_id": artifact_id, "project_id": project_id, "time": sim_time}
+            )
+        if previous_correct is False and bool(project.get("correct", True)):
+            self.recent_updates.append(
+                {"event": "construction_corrected", "artifact_id": artifact_id, "project_id": project_id, "time": sim_time}
+            )
+
+        content["last_status_event"] = status_event
+        content["status_changed_at"] = sim_time if (
+            previous_status != status
+            or previous_resource_complete != resource_complete
+            or previous_correct != bool(project.get("correct", True))
+        ) else previous.get("status_changed_at", sim_time)
 
         changed = (
             artifact.summary != summary
@@ -152,8 +227,19 @@ class TeamKnowledgeManager:
         artifact.knowledge_summary = knowledge_summary
         artifact.contributors = contributors
         if changed:
-            self.recent_updates.append({"event": "construction_artifact_updated", "artifact_id": artifact_id, "time": sim_time})
-            self.recent_updates.append({"event": "construction_artifact_provenance_updated", "artifact_id": artifact_id, "time": sim_time})
+            self.recent_updates.append({"event": "construction_artifact_updated", "artifact_id": artifact_id, "project_id": project_id, "time": sim_time})
+            self.recent_updates.append({"event": "construction_artifact_provenance_updated", "artifact_id": artifact_id, "project_id": project_id, "time": sim_time})
+            self.recent_updates.append(
+                {
+                    "event": "project_state_published_to_team_knowledge",
+                    "artifact_id": artifact_id,
+                    "project_id": project_id,
+                    "status": status,
+                    "resource_complete": resource_complete,
+                    "last_status_event": status_event,
+                    "time": sim_time,
+                }
+            )
         return artifact
 
     def summarize(self) -> Dict[str, Any]:
