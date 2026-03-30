@@ -52,6 +52,12 @@ class BrainContextBuilder:
                 validated_correctness = bool(project.get("correct", True))
                 needs_repair = project.get("correct", True) is False
                 overloaded = bool(project.get("overloaded", False))
+                resource_complete = bool(project.get("resource_complete", False)) or (required > 0 and delivered >= required)
+            else:
+                raw_status = "absent"
+                required = 0
+                delivered = 0
+                resource_complete = False
 
             summaries.append(
                 {
@@ -63,6 +69,11 @@ class BrainContextBuilder:
                     "validated_correctness": validated_correctness,
                     "usable": usable,
                     "progress": round(progress, 2),
+                    "project_status": raw_status,
+                    "resource_complete": resource_complete,
+                    "required_resources": int(required or 0),
+                    "delivered_resources": int(delivered or 0),
+                    "ready_for_validation": raw_status == "ready_for_validation",
                     "needs_repair": needs_repair,
                     "overloaded": overloaded,
                     "functional_connections": [f"zone_link:{target.get('zone')}"] if target.get("zone") else [],
@@ -395,6 +406,32 @@ class BrainContextBuilder:
         }
 
         task_model = getattr(sim_state, "task_model", None)
+        recent_updates = list(sim_state.team_knowledge_manager.recent_updates[-24:])
+        recent_construction_updates = [
+            update
+            for update in recent_updates
+            if str(update.get("event", "")).startswith("construction_")
+            or str(update.get("event", "")).startswith("project_marked_")
+            or str(update.get("event", "")) == "project_state_published_to_team_knowledge"
+        ][-8:]
+        construction_artifacts = [
+            {
+                "artifact_id": aid,
+                "project_id": artifact.content.get("project_id"),
+                "structure_type": artifact.content.get("structure_type"),
+                "status": artifact.content.get("status"),
+                "resource_complete": bool(artifact.content.get("resource_complete", False)),
+                "required_resources": dict(artifact.content.get("required_resources", {})),
+                "delivered_resources": dict(artifact.content.get("delivered_resources", {})),
+                "progress_ratio": float(artifact.content.get("progress_ratio", 0.0) or 0.0),
+                "correct": bool(artifact.content.get("correct", True)),
+                "validated": bool(artifact.content.get("validated", False)),
+                "last_status_event": artifact.content.get("last_status_event"),
+                "status_changed_at": artifact.content.get("status_changed_at"),
+            }
+            for aid, artifact in sim_state.team_knowledge_manager.artifacts.items()
+            if isinstance(getattr(artifact, "content", None), dict) and str(artifact.artifact_id).startswith("construction:")
+        ]
         team_state = {
             "team_shared_knowledge": sim_state.team_knowledge_manager.summarize(),
             "teammate_roles": {other.name: other.role for other in sim_state.agents if other.name != agent.name},
@@ -402,9 +439,11 @@ class BrainContextBuilder:
                 teammate: model.get("goals", []) for teammate, model in agent.theory_of_mind.items()
             },
             "tom_summary": agent.theory_of_mind,
-            "recent_shared_updates": sim_state.team_knowledge_manager.recent_updates[-5:],
+            "recent_shared_updates": recent_updates[-5:],
+            "recent_construction_updates": recent_construction_updates,
             "plan_readiness": "validated_shared_plan" if validated_plan_exists else "partial_or_fragmentary_plan",
             "externalized_artifacts": artifact_summaries,
+            "construction_artifacts": construction_artifacts,
             "teammate_help_signals": teammate_help_signals,
             "derivation_events": list(getattr(agent, "derivation_events", [])[-5:]),
             "task_rules": [r.rule_id for r in task_model.rules.values() if r.enabled] if task_model else [],

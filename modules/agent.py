@@ -2528,8 +2528,33 @@ class Agent:
     def _is_build_eligible(self, environment, sim_state=None):
         return self._build_readiness_score() >= self._readiness_threshold() and not self._build_readiness_blockers(environment, sim_state=sim_state)
 
-    def _select_build_target(self, environment, require_readiness=False, include_project=False):
+    def _project_needs_transport(self, project):
+        if not isinstance(project, dict):
+            return False
+        status = str(project.get("status", "") or "")
+        if status in {"ready_for_validation", "complete"}:
+            return False
+        required = int(project.get("required_resources", {}).get("bricks", 0) or 0)
+        delivered = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
+        if bool(project.get("resource_complete", False)):
+            return False
+        if required > 0 and delivered >= required:
+            return False
+        return True
+
+    def _select_build_target(self, environment, require_readiness=False, include_project=False, action_type=None, requested_project_id=None, sim_state=None):
         candidates = []
+        decision_action = str(action_type or "")
+        transport_selection = decision_action == ExecutableActionType.TRANSPORT_RESOURCES.value
+        if transport_selection and requested_project_id:
+            requested_project = environment.construction.projects.get(requested_project_id)
+            if isinstance(requested_project, dict) and self._project_needs_transport(requested_project):
+                point = environment.get_interaction_target_position(requested_project_id, from_position=self.position)
+                if point is not None:
+                    if include_project:
+                        return {"project_id": requested_project_id, "target": point}
+                    return point
+
         for target_name, target in environment.interaction_targets.items():
             if target.get("kind") != "build":
                 continue
@@ -2537,6 +2562,19 @@ class Agent:
             if point is None:
                 continue
             project = environment.construction.projects.get(target_name, {})
+            if transport_selection and not self._project_needs_transport(project):
+                self._emit_event(
+                    sim_state,
+                    "project_transport_target_suppressed",
+                    {
+                        "project_id": target_name,
+                        "status": project.get("status"),
+                        "resource_complete": bool(project.get("resource_complete", False)),
+                        "required_resources": int(project.get("required_resources", {}).get("bricks", 0) or 0),
+                        "delivered_resources": int(project.get("delivered_resources", {}).get("bricks", 0) or 0),
+                    },
+                )
+                continue
             required = project.get("required_resources", {}).get("bricks", 0)
             delivered = project.get("delivered_resources", {}).get("bricks", 0)
             remaining = max(0, required - delivered)
@@ -4594,6 +4632,42 @@ class Agent:
                 if fallback.selected_action in {ExecutableActionType.INSPECT_INFORMATION_SOURCE, ExecutableActionType.VALIDATE_CONSTRUCTION}:
                     rewritten = fallback
                     self._emit_event(sim_state, "policy_pivot_applied", {"origin": pivot_origin, "kind": "stale_grounding_pressure", "previous_action": decision.selected_action.value, "pivoted_to": rewritten.selected_action.value, "reason": "refresh_assumptions_needed"})
+            if rewritten.selected_action == ExecutableActionType.TRANSPORT_RESOURCES:
+                project_id = rewritten.target_id
+                if not project_id or project_id not in getattr(environment.construction, "projects", {}):
+                    selected = self._select_build_target(
+                        environment,
+                        require_readiness=False,
+                        include_project=True,
+                        action_type=ExecutableActionType.TRANSPORT_RESOURCES.value,
+                        requested_project_id=project_id,
+                        sim_state=sim_state,
+                    )
+                    project_id = selected.get("project_id") if isinstance(selected, dict) else None
+                project = environment.construction.projects.get(project_id) if project_id else None
+                if not self._project_needs_transport(project):
+                    next_action = ExecutableActionType.VALIDATE_CONSTRUCTION if isinstance(project, dict) and str(project.get("status")) == "ready_for_validation" else ExecutableActionType.REASSESS_PLAN
+                    rewritten = BrainDecision(
+                        selected_action=next_action,
+                        target_id=project_id if next_action == ExecutableActionType.VALIDATE_CONSTRUCTION else None,
+                        target_zone=decision.target_zone,
+                        goal_update="maintain_forward_progress",
+                        reason_summary="Policy pivot: suppress transport to materially satisfied or complete project.",
+                        confidence=max(0.75, float(decision.confidence or 0.0)),
+                    )
+                    self._emit_event(
+                        sim_state,
+                        "project_transport_target_suppressed",
+                        {
+                            "origin": pivot_origin,
+                            "project_id": project_id,
+                            "status": project.get("status") if isinstance(project, dict) else None,
+                            "resource_complete": bool(project.get("resource_complete", False)) if isinstance(project, dict) else None,
+                            "required_resources": int(project.get("required_resources", {}).get("bricks", 0) or 0) if isinstance(project, dict) else 0,
+                            "delivered_resources": int(project.get("delivered_resources", {}).get("bricks", 0) or 0) if isinstance(project, dict) else 0,
+                            "next_action_hint": next_action.value,
+                        },
+                    )
         if context is not None and rewritten.selected_action in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION}:
             project_id = rewritten.target_id or self._construction_project_for_action(rewritten, {"project_id": None}, environment)
             if project_id in getattr(environment.construction, "projects", {}):
@@ -4890,7 +4964,14 @@ class Agent:
                 action["project_id"] = decision.target_id
         if decision.selected_action == ExecutableActionType.TRANSPORT_RESOURCES:
             action["duration"] = self._scaled_duration(action.get("duration", 30.0)) * self._duration_scale("transport_resources")
-            build_selection = self._select_build_target(environment, require_readiness=False, include_project=True)
+            build_selection = self._select_build_target(
+                environment,
+                require_readiness=False,
+                include_project=True,
+                action_type=decision.selected_action.value,
+                requested_project_id=decision.target_id,
+                sim_state=sim_state,
+            )
             if isinstance(build_selection, dict):
                 action["project_id"] = build_selection.get("project_id")
                 action["target"] = build_selection.get("target")
@@ -5694,7 +5775,7 @@ class Agent:
             _set_action_stage(action, "en_route", {"target_id": target_id, "access_reason": access.get("reason")})
             return False, access
 
-        for action in self.active_actions:
+        for action in list(self.active_actions):
             if action["progress"] == 0 and action.get("execution_stage") is None:
                 _set_action_stage(action, "selected")
 
@@ -5935,6 +6016,117 @@ class Agent:
                             )
 
             if action["type"] == "transport_resources":
+                def _reset_transport_episode():
+                    self.transport_state.update(
+                        {
+                            "stage": "idle",
+                            "carrying": {"resource_type": None, "quantity": 0},
+                            "pickup_source_id": None,
+                            "bound_project_id": None,
+                        }
+                    )
+
+                def _terminal_transport_abort(
+                    *,
+                    project_id,
+                    failure_category,
+                    status_before=None,
+                    status_after=None,
+                    required_before=None,
+                    delivered_before=None,
+                    publish_project_state=False,
+                ):
+                    project = environment.construction.projects.get(project_id) if project_id else None
+                    if publish_project_state and isinstance(project, dict):
+                        sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
+                        self._emit_event(
+                            sim_state,
+                            "project_state_published_to_team_knowledge",
+                            {
+                                "project_id": project_id,
+                                "status": project.get("status"),
+                                "resource_complete": bool(project.get("resource_complete", False)),
+                                "required_resources": int(project.get("required_resources", {}).get("bricks", 0) or 0),
+                                "delivered_resources": int(project.get("delivered_resources", {}).get("bricks", 0) or 0),
+                            },
+                        )
+
+                    _set_action_stage(
+                        action,
+                        "terminally_blocked",
+                        {
+                            "project_id": project_id,
+                            "failure_category": failure_category,
+                        },
+                    )
+                    _reset_transport_episode()
+                    if project_id:
+                        self.progress_tracker.setdefault("project_no_progress", {})[project_id] = 0
+                    self._register_progress(
+                        sim_state,
+                        kind="transport_terminal_abort",
+                        detail={"project_id": project_id, "failure_category": failure_category},
+                    )
+
+                    next_action = ExecutableActionType.REASSESS_PLAN.value
+                    if isinstance(project, dict) and str(project.get("status")) == "ready_for_validation":
+                        next_action = ExecutableActionType.VALIDATE_CONSTRUCTION.value
+                    else:
+                        next_transport_target = self._select_build_target(
+                            environment,
+                            require_readiness=False,
+                            include_project=True,
+                            action_type=ExecutableActionType.TRANSPORT_RESOURCES.value,
+                        )
+                        if isinstance(next_transport_target, dict) and next_transport_target.get("project_id"):
+                            next_action = ExecutableActionType.TRANSPORT_RESOURCES.value
+                        else:
+                            epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
+                            if bool(epistemic.get("stale_grounding")) or bool(epistemic.get("role_missing")):
+                                next_action = ExecutableActionType.INSPECT_INFORMATION_SOURCE.value
+
+                    self._force_recovery_pivot(
+                        sim_state,
+                        to_action=next_action,
+                        reason=f"transport_terminal_block:{failure_category}:{project_id}",
+                        ttl_s=8.0,
+                    )
+                    self._emit_event(
+                        sim_state,
+                        "transport_terminal_block_project_satisfied" if failure_category == "resources_already_satisfied" else "transport_terminal_blocked",
+                        {
+                            "project_id": project_id,
+                            "failure_category": failure_category,
+                            "required_before": required_before,
+                            "delivered_before": delivered_before,
+                            "status_before": status_before,
+                            "status_after": status_after or (project.get("status") if isinstance(project, dict) else None),
+                            "resource_complete": bool(project.get("resource_complete", False)) if isinstance(project, dict) else None,
+                            "next_action_hint": next_action,
+                        },
+                    )
+                    self._emit_event(
+                        sim_state,
+                        "transport_action_aborted_project_satisfied" if failure_category == "resources_already_satisfied" else "transport_action_aborted_terminal_block",
+                        {
+                            "project_id": project_id,
+                            "failure_category": failure_category,
+                            "next_action_hint": next_action,
+                        },
+                    )
+                    self._emit_event(
+                        sim_state,
+                        "transport_rerouted_after_project_satisfied" if failure_category == "resources_already_satisfied" else "transport_rerouted_after_terminal_block",
+                        {
+                            "project_id": project_id,
+                            "failure_category": failure_category,
+                            "next_action_hint": next_action,
+                        },
+                    )
+                    if action in self.active_actions:
+                        self.active_actions.remove(action)
+                    return
+
                 project_id = action.get("project_id")
                 if not project_id:
                     self._emit_event(
@@ -5946,7 +6138,11 @@ class Agent:
                             "decision_action": action.get("decision_action"),
                         },
                     )
-                    self._register_no_progress(sim_state, kind="transport_blocked", detail={"failure_category": "missing_project_binding"})
+                    _terminal_transport_abort(
+                        project_id=None,
+                        failure_category="missing_project_binding",
+                        publish_project_state=False,
+                    )
                     continue
                 project = environment.construction.projects.get(project_id)
                 if not project:
@@ -5960,7 +6156,11 @@ class Agent:
                             "decision_action": action.get("decision_action"),
                         },
                     )
-                    self._register_no_progress(sim_state, kind="transport_blocked", detail={"project_id": project_id, "failure_category": "unknown_project"}, category="project", key=project_id)
+                    _terminal_transport_abort(
+                        project_id=project_id,
+                        failure_category="unknown_project",
+                        publish_project_state=False,
+                    )
                     continue
                 if project.get("status") == "complete":
                     self._emit_event(
@@ -5973,7 +6173,12 @@ class Agent:
                             "decision_action": action.get("decision_action"),
                         },
                     )
-                    self._register_no_progress(sim_state, kind="transport_blocked", detail={"project_id": project_id, "failure_category": "project_already_complete"}, category="project", key=project_id)
+                    _terminal_transport_abort(
+                        project_id=project_id,
+                        failure_category="project_already_complete",
+                        status_before=project.get("status"),
+                        publish_project_state=True,
+                    )
                     continue
 
                 if not environment.is_interaction_target_unlocked(project_id):
@@ -6004,7 +6209,14 @@ class Agent:
                             "decision_action": action.get("decision_action"),
                         },
                     )
-                    self._register_no_progress(sim_state, kind="transport_blocked", detail={"project_id": project_id, "failure_category": "resources_already_satisfied"}, category="project", key=project_id)
+                    _terminal_transport_abort(
+                        project_id=project_id,
+                        failure_category="resources_already_satisfied",
+                        status_before=status_before,
+                        required_before=required_before,
+                        delivered_before=delivered_before,
+                        publish_project_state=True,
+                    )
                     continue
 
                 state = self.transport_state
