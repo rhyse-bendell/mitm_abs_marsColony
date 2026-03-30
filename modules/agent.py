@@ -170,6 +170,7 @@ class Agent:
         self.source_inspection_state = {}
         self.source_exhaustion_state = {}
         self.source_memory_state = {}
+        self.source_filter_event_state = {}
         self.inspect_stall_counts = {}
         self.current_inspect_target_id = None
         self.inspect_session = {
@@ -586,6 +587,72 @@ class Agent:
         normalized_allowed = {self._normalize_packet_name(p) for p in allowed}
         return packet_name in normalized_allowed
 
+    @staticmethod
+    def _private_role_for_packet(source_id):
+        source = str(source_id or "")
+        if source in {"Architect_Info", "Engineer_Info", "Botanist_Info"}:
+            return source.replace("_Info", "")
+        return None
+
+    def _agent_can_target_information_source(self, source_id, environment, allow_cross_role: bool = False):
+        source_id = self._normalize_packet_name(source_id)
+        if not source_id:
+            return False, "missing_source_id"
+        if source_id not in getattr(environment, "knowledge_packets", {}):
+            return False, "unknown_source"
+
+        role_source = f"{self.role}_Info"
+        if source_id == "Team_Info":
+            if not self._has_packet_access(source_id):
+                return False, "packet_not_in_allowed_set"
+            return True, "shared_packet"
+        if source_id == role_source:
+            if not self._has_packet_access(source_id):
+                return False, "packet_not_in_allowed_set"
+            return True, "own_role_packet"
+
+        private_role = self._private_role_for_packet(source_id)
+        if private_role is not None:
+            source_meta = environment.source_metadata_for_packet(source_id) if hasattr(environment, "source_metadata_for_packet") else {}
+            access_scope = str(source_meta.get("access_scope") or "").strip().lower()
+            role_scope = {str(r).strip().lower() for r in (source_meta.get("role_scope") or []) if str(r).strip()}
+            explicit_cross_role_allowed = bool(
+                access_scope in {"all", "team", str(self.role).lower()}
+                or role_scope.intersection({"all", "team", str(self.role).lower()})
+                or bool(source_meta.get("allow_cross_role"))
+                or bool(source_meta.get("cross_role_allowed"))
+                or bool(source_meta.get("cross_role_access"))
+            )
+            cross_role_allowed = bool(allow_cross_role or explicit_cross_role_allowed)
+            if cross_role_allowed:
+                if not self._has_packet_access(source_id):
+                    return False, "packet_not_in_allowed_set"
+                return True, "explicit_cross_role_allowed"
+            return False, "role_private_mismatch"
+
+        if not self._has_packet_access(source_id):
+            return False, "packet_not_in_allowed_set"
+        return True, "non_private_packet"
+
+    def _emit_source_filter_event_once(self, sim_state, event_name, source_id, reason, *, min_interval_s=8.0):
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        key = (str(event_name), str(source_id), str(reason))
+        last_ts = float(self.source_filter_event_state.get(key, -9999.0) or -9999.0)
+        if (now_ts - last_ts) < float(min_interval_s):
+            return
+        self.source_filter_event_state[key] = now_ts
+        self._emit_event(
+            sim_state,
+            event_name,
+            {
+                "agent": self.name,
+                "agent_role": self.role,
+                "source_id": source_id,
+                "reason": reason,
+                "cross_role_allowed": False,
+            },
+        )
+
     def _choose_info_target(self, environment):
         """Select an information interaction target using soft role-aware scoring."""
         candidates = []
@@ -882,8 +949,11 @@ class Agent:
             if self._is_source_bootstrap_satisfied(team_source):
                 self.fallback_bootstrap["stage"] = "role"
                 stage = "role"
-            elif team_source and self._has_packet_access(team_source) and team_source in environment.knowledge_packets:
-                return team_source
+            elif team_source:
+                legal, _ = self._agent_can_target_information_source(team_source, environment)
+                if legal:
+                    return team_source
+                return None
             else:
                 return None
 
@@ -894,7 +964,8 @@ class Agent:
             if self._is_source_bootstrap_satisfied(role_source):
                 self.fallback_bootstrap["stage"] = "complete"
                 return None
-            if self._has_packet_access(role_source) and role_source in environment.knowledge_packets:
+            legal, _ = self._agent_can_target_information_source(role_source, environment)
+            if legal:
                 return role_source
             return None
         if stage == "complete":
@@ -902,7 +973,8 @@ class Agent:
 
         required_sources = list(self.fallback_bootstrap.get("required_sources", []))
         for source_id in required_sources:
-            if not self._has_packet_access(source_id):
+            legal, _ = self._agent_can_target_information_source(source_id, environment)
+            if not legal:
                 continue
             status = self.source_inspection_state.get(source_id)
             if status == "inspected":
@@ -1236,6 +1308,52 @@ class Agent:
         if source_id and sim_state is not None:
             self._emit_event(sim_state, "pursuit_abandoned", {"source_id": source_id, "reason": reason or "cleared"})
 
+    def _reject_illegal_source_target(self, source_id, environment, sim_state=None, *, reason="role_private_mismatch", event_name="illegal_source_target_rejected_pre_execution"):
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        if self.current_inspect_target_id == source_id:
+            self.current_inspect_target_id = None
+        if self.inspect_session.get("source_id") == source_id:
+            self.inspect_session = {
+                "source_id": None,
+                "target": None,
+                "state": "idle",
+                "started_at": None,
+                "last_updated_at": now_ts,
+                "restarts": 0,
+            }
+        if self.inspect_pursuit.get("source_id") == source_id:
+            self._clear_inspect_pursuit(
+                reason=f"illegal_source:{reason}",
+                sim_state=sim_state,
+                release_slot=True,
+                environment=environment,
+            )
+        elif self.source_access_state.get("source_id") == source_id:
+            self._release_source_slot(environment, source_id=source_id, emit=True, sim_state=sim_state, reason="illegal_source_target")
+        for action in self.active_actions:
+            if action.get("source_target_id") == source_id:
+                action["source_target_id"] = None
+                action["target"] = None
+        if isinstance(self.current_action, list):
+            for action in self.current_action:
+                if isinstance(action, dict) and action.get("source_target_id") == source_id:
+                    action["source_target_id"] = None
+                    action["target"] = None
+        memory = self.source_memory_state.setdefault(source_id, {})
+        memory["revisit_cooldown_until"] = max(float(memory.get("revisit_cooldown_until", 0.0) or 0.0), now_ts + 20.0)
+        if event_name:
+            self._emit_event(
+                sim_state,
+                event_name,
+                {
+                    "agent": self.name,
+                    "agent_role": self.role,
+                    "source_id": source_id,
+                    "reason": reason,
+                    "cross_role_allowed": False,
+                },
+            )
+
     def _inspect_pursuit_active_for(self, source_id, now_ts):
         if self.inspect_pursuit.get("action_type") != ExecutableActionType.INSPECT_INFORMATION_SOURCE.value:
             return False
@@ -1364,6 +1482,15 @@ class Agent:
             packet_name = environment.source_packet_name_map.get(source_ref, source_ref)
             if packet_name not in environment.knowledge_packets:
                 continue
+            allowed, reason = self._agent_can_target_information_source(packet_name, environment)
+            if not allowed:
+                self._emit_source_filter_event_once(
+                    sim_state,
+                    "critical_source_filtered_role_private",
+                    packet_name,
+                    reason,
+                )
+                continue
             if (
                 packet_name == "Team_Info"
                 and role_missing
@@ -1392,7 +1519,14 @@ class Agent:
         candidates = []
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
         for packet_name in environment.knowledge_packets.keys():
-            if not self._has_packet_access(packet_name):
+            allowed, reason = self._agent_can_target_information_source(packet_name, environment)
+            if not allowed:
+                self._emit_source_filter_event_once(
+                    sim_state,
+                    "information_source_candidate_filtered",
+                    packet_name,
+                    reason,
+                )
                 continue
             point = environment.get_interaction_target_position(packet_name, from_position=self.position)
             if point is None:
@@ -1451,55 +1585,64 @@ class Agent:
     def _resolve_inspect_target(self, decision, environment, sim_state=None):
         self._ensure_source_state(environment)
         explicit_target = decision.target_id
+        requested_target_id = explicit_target
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
         self._emit_event(sim_state, "target_resolution_started", {"target_type": "information_source", "requested_target_id": explicit_target})
         rerank_explicit_target = False
+        explicit_retarget_reason = None
         if explicit_target:
-            source_mem = self.source_memory_state.get(explicit_target, {})
-            exhausted = bool(
-                self.source_exhaustion_state.get(explicit_target, {}).get(
-                    "exhausted_for_acquisition",
-                    self.source_exhaustion_state.get(explicit_target, {}).get("exhausted"),
-                )
-            )
-            revisitable = bool(source_mem.get("revisitable_for_verification", True))
-            cooldown_ready = float(source_mem.get("revisit_cooldown_until", 0.0) or 0.0) <= now_ts
-            role_source = f"{self.role}_Info"
-            role_missing = bool(self._epistemic_sufficiency(environment, sim_state=sim_state).get("role_missing"))
-            role_never_inspected = not bool(self.source_memory_state.get(role_source, {}).get("ever_inspected"))
-            explicit_team_exhausted_verification = (
-                explicit_target == "Team_Info"
-                and exhausted
-                and revisitable
-                and (role_missing or role_never_inspected)
-            )
-            if explicit_team_exhausted_verification:
+            explicit_allowed, explicit_reason = self._agent_can_target_information_source(explicit_target, environment)
+            if not explicit_allowed:
                 rerank_explicit_target = True
-                self._emit_event(
-                    sim_state,
-                    "source_retargeted_due_to_missing_role_grounding",
-                    {
-                        "current_source_target": explicit_target,
-                        "preferred_source_target": role_source,
-                        "reason": "shared_source_verification_only_while_role_grounding_missing",
-                    },
-                )
-            elif not cooldown_ready:
-                rerank_explicit_target = True
-                self._emit_event(
-                    sim_state,
-                    "source_revisit_deferred",
-                    {"current_source_target": explicit_target, "reason": "revisit_cooldown_active", "cooldown_until": float(source_mem.get("revisit_cooldown_until", 0.0) or 0.0)},
-                )
+                explicit_retarget_reason = explicit_reason
+                self._reject_illegal_source_target(explicit_target, environment, sim_state=sim_state, reason=explicit_reason, event_name=None)
+                explicit_target = None
             else:
-                selection = self._select_source_access_target(environment, explicit_target, sim_state=sim_state)
-                if selection is not None and selection.get("position") is not None:
-                    if exhausted and not revisitable:
-                        self._emit_event(sim_state, "source_revisit_deferred", {"current_source_target": explicit_target, "reason": "source_exhausted_for_agent"})
-                    else:
-                        self._set_status(f"Inspect target selected: {explicit_target}")
-                        self._emit_event(sim_state, "target_resolved", {"target_type": "information_source", "target_id": explicit_target, "candidate_count": 1})
-                        return explicit_target, selection.get("position")
+                source_mem = self.source_memory_state.get(explicit_target, {})
+                exhausted = bool(
+                    self.source_exhaustion_state.get(explicit_target, {}).get(
+                        "exhausted_for_acquisition",
+                        self.source_exhaustion_state.get(explicit_target, {}).get("exhausted"),
+                    )
+                )
+                revisitable = bool(source_mem.get("revisitable_for_verification", True))
+                cooldown_ready = float(source_mem.get("revisit_cooldown_until", 0.0) or 0.0) <= now_ts
+                role_source = f"{self.role}_Info"
+                role_missing = bool(self._epistemic_sufficiency(environment, sim_state=sim_state).get("role_missing"))
+                role_never_inspected = not bool(self.source_memory_state.get(role_source, {}).get("ever_inspected"))
+                explicit_team_exhausted_verification = (
+                    explicit_target == "Team_Info"
+                    and exhausted
+                    and revisitable
+                    and (role_missing or role_never_inspected)
+                )
+                if explicit_team_exhausted_verification:
+                    rerank_explicit_target = True
+                    self._emit_event(
+                        sim_state,
+                        "source_retargeted_due_to_missing_role_grounding",
+                        {
+                            "current_source_target": explicit_target,
+                            "preferred_source_target": role_source,
+                            "reason": "shared_source_verification_only_while_role_grounding_missing",
+                        },
+                    )
+                elif not cooldown_ready:
+                    rerank_explicit_target = True
+                    self._emit_event(
+                        sim_state,
+                        "source_revisit_deferred",
+                        {"current_source_target": explicit_target, "reason": "revisit_cooldown_active", "cooldown_until": float(source_mem.get("revisit_cooldown_until", 0.0) or 0.0)},
+                    )
+                else:
+                    selection = self._select_source_access_target(environment, explicit_target, sim_state=sim_state)
+                    if selection is not None and selection.get("position") is not None:
+                        if exhausted and not revisitable:
+                            self._emit_event(sim_state, "source_revisit_deferred", {"current_source_target": explicit_target, "reason": "source_exhausted_for_agent"})
+                        else:
+                            self._set_status(f"Inspect target selected: {explicit_target}")
+                            self._emit_event(sim_state, "target_resolved", {"target_type": "information_source", "target_id": explicit_target, "candidate_count": 1})
+                            return explicit_target, selection.get("position")
 
         candidates = self._candidate_information_sources(environment, sim_state=sim_state)
         if not candidates:
@@ -1516,6 +1659,26 @@ class Agent:
         if not non_stalled:
             non_stalled = [c for c in candidates if c[4] < 3]
         chosen = non_stalled[0] if non_stalled else candidates[0]
+        if requested_target_id and explicit_retarget_reason:
+            role_source = f"{self.role}_Info"
+            preferred_order = [role_source, "Team_Info"]
+            for preferred_source in preferred_order:
+                pref_candidate = next((c for c in candidates if c[1] == preferred_source), None)
+                if pref_candidate is not None:
+                    chosen = pref_candidate
+                    break
+            self._emit_event(
+                sim_state,
+                "source_retargeted_due_to_role_private_mismatch",
+                {
+                    "agent": self.name,
+                    "agent_role": self.role,
+                    "requested_target_id": requested_target_id,
+                    "rerouted_to": chosen[1],
+                    "reason": explicit_retarget_reason,
+                    "cross_role_allowed": False,
+                },
+            )
         role_source = f"{self.role}_Info"
         role_missing = bool(self._epistemic_sufficiency(environment, sim_state=sim_state).get("role_missing"))
         role_never_inspected = not bool(self.source_memory_state.get(role_source, {}).get("ever_inspected"))
@@ -1622,6 +1785,17 @@ class Agent:
         return {"added": sorted(set(added)), "adopted": sorted(set(adopted))}
 
     def _inspect_source(self, environment, source_id, sim_state=None):
+        allowed, legality_reason = self._agent_can_target_information_source(source_id, environment)
+        if not allowed and legality_reason != "unknown_source":
+            self._set_status(f"Inspect rejected: illegal source target {source_id} ({legality_reason})")
+            self._reject_illegal_source_target(
+                source_id,
+                environment,
+                sim_state=sim_state,
+                reason=legality_reason,
+                event_name="illegal_source_target_rejected_pre_execution",
+            )
+            return False
         packet = environment.knowledge_packets.get(source_id)
         source_meta = environment.source_metadata_for_packet(source_id) if hasattr(environment, "source_metadata_for_packet") else {}
         source_access_classification = (
@@ -2100,6 +2274,11 @@ class Agent:
 
     def _choose_post_inspect_followup_decision(self, environment, sim_state=None):
         critical_sources = self._critical_unmet_source_targets(sim_state, environment)
+        critical_sources = {
+            source_id: priority
+            for source_id, priority in critical_sources.items()
+            if self._agent_can_target_information_source(source_id, environment)[0]
+        }
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
         role_source = f"{self.role}_Info"
         epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
@@ -2130,7 +2309,8 @@ class Agent:
             preferred_mem = self.source_memory_state.get(preferred, {})
             cooldown_ready = float(preferred_mem.get("revisit_cooldown_until", 0.0) or 0.0) <= now_ts
             revisitable = bool(preferred_mem.get("revisitable_for_verification", True))
-            if preferred in environment.knowledge_packets and (cooldown_ready or revisitable):
+            preferred_allowed, _ = self._agent_can_target_information_source(preferred, environment)
+            if preferred in environment.knowledge_packets and preferred_allowed and (cooldown_ready or revisitable):
                 return BrainDecision(
                     selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
                     target_id=preferred,
