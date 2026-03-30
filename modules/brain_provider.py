@@ -486,13 +486,23 @@ class RuleBrain(BrainProvider):
             if plan_summary.get("status") in {"blocked", "stalled"}:
                 repeated = max(repeated, 3)
         source_exhaustion = inspect_state.get("source_exhaustion", {}) if isinstance(inspect_state, dict) else {}
-        exhausted_shared = bool((source_exhaustion.get("Team_Info", {}) or {}).get("exhausted"))
+        source_memory = inspect_state.get("source_memory", {}) if isinstance(inspect_state, dict) else {}
+        exhausted_shared = bool((source_exhaustion.get("Team_Info", {}) or {}).get("exhausted_for_acquisition", (source_exhaustion.get("Team_Info", {}) or {}).get("exhausted")))
         role_name = ""
         if not is_request:
             role_name = str((getattr(context_packet, "static_task_context", {}) or {}).get("role", ""))
         else:
             role_name = str((request_ctx or {}).get("role", ""))
-        exhausted_role = bool((source_exhaustion.get(f"{role_name}_Info", {}) or {}).get("exhausted"))
+        role_source_id = f"{role_name}_Info"
+        exhausted_role = bool((source_exhaustion.get(role_source_id, {}) or {}).get("exhausted_for_acquisition", (source_exhaustion.get(role_source_id, {}) or {}).get("exhausted")))
+        role_mem = dict(source_memory.get(role_source_id, {}) or {})
+        team_mem = dict(source_memory.get("Team_Info", {}) or {})
+        role_inspected = 1.0 if bool(role_mem.get("ever_inspected")) else 0.0
+        team_freshness = max(0.0, min(1.0, float(team_mem.get("memory_confidence", 0.0) or 0.0)))
+        role_freshness = max(0.0, min(1.0, float(role_mem.get("memory_confidence", 0.0) or 0.0)))
+        epistemic_suff = cognitive.get("epistemic_sufficiency", {}) if not is_request else dict(request_ctx.get("epistemic_sufficiency", {}))
+        refresh_pressure = float(epistemic_suff.get("refresh_pressure", 0.0) or 0.0)
+        stale_grounding_pressure = max(0.0, min(1.0, (1.0 - ((team_freshness + role_freshness) / 2.0)) + refresh_pressure))
         return {
             "epistemic_deficit": min(1.0, len(known_gaps) / 4.0),
             "build_opportunity": 1.0 if readiness.get("ready_for_build") else 0.0,
@@ -511,6 +521,13 @@ class RuleBrain(BrainProvider):
             "teammate_relevance": min(1.0, len(context_packet.team_state.get("tom_summary", {})) / 3.0) if not is_request else 0.0,
             "shared_source_exhausted": 1.0 if exhausted_shared else 0.0,
             "role_source_exhausted": 1.0 if exhausted_role else 0.0,
+            "role_packet_inspected": role_inspected,
+            "team_packet_freshness": team_freshness,
+            "role_packet_freshness": role_freshness,
+            "epistemic_sufficiency": float(epistemic_suff.get("score", 0.0) or 0.0),
+            "need_to_refresh_assumptions": refresh_pressure,
+            "construction_state_needs_recheck": 1.0 if bool(epistemic_suff.get("construction_state_needs_recheck")) else 0.0,
+            "stale_grounding_pressure": stale_grounding_pressure,
         }
 
     @staticmethod
@@ -543,7 +560,7 @@ class RuleBrain(BrainProvider):
     def _compute_mode_scores(self, features: dict[str, float], legal_types: set[str], control_state: dict[str, Any], traits: dict[str, float]) -> tuple[dict[str, float], dict[str, bool]]:
         mode_scores = {m: 0.0 for m in self.MODES}
         mode_scores["BOOTSTRAP"] = 0.3 + 1.4 * features["epistemic_deficit"] + 0.4 * features["readiness_blocked"] - 1.25 * features["shared_source_exhausted"]
-        mode_scores["ACQUIRE_DIK"] = 0.4 + 1.5 * features["epistemic_deficit"] + 0.3 * features["coordination_need"]
+        mode_scores["ACQUIRE_DIK"] = 0.4 + 1.5 * features["epistemic_deficit"] + 0.3 * features["coordination_need"] + 0.95 * features.get("need_to_refresh_assumptions", 0.0)
         mode_scores["INTEGRATE_DIK"] = 0.3 + 1.2 * features["dik_change_recency"] + 0.8 * features["artifact_validation_available"]
         mode_scores["COORDINATE"] = 0.3 + 1.0 * features["coordination_need"] + 0.4 * float(traits.get("communication_propensity", 0.5))
         mode_scores["LOGISTICS"] = 0.35 + 1.5 * features["build_opportunity"] + 0.9 * features["active_incomplete_projects"]
@@ -552,7 +569,10 @@ class RuleBrain(BrainProvider):
         mode_scores["REPAIR"] = 0.2 + 1.8 * features["repair_pressure"]
         mode_scores["RECOVERY"] = 0.2 + 1.8 * features["loop_pressure"] + self.policy_config.recovery_bonus * features["contradiction_pressure"]
         mode_scores["LOGISTICS"] += 1.3 * features.get("no_progress_pressure", 0.0)
-        mode_scores["MONITOR"] = 0.35 + 0.2 * (1.0 - features["goal_pressure"])
+        mode_scores["LOGISTICS"] -= 0.95 * features.get("stale_grounding_pressure", 0.0)
+        mode_scores["CONSTRUCT"] -= 1.15 * features.get("stale_grounding_pressure", 0.0)
+        mode_scores["VALIDATE"] -= 1.3 * max(0.0, 0.8 - features.get("epistemic_sufficiency", 0.0))
+        mode_scores["MONITOR"] = 0.35 + 0.2 * (1.0 - features["goal_pressure"]) + 0.55 * features.get("construction_state_needs_recheck", 0.0)
         current_mode = str(control_state.get("mode") or "BOOTSTRAP")
         if current_mode in mode_scores:
             mode_scores[current_mode] += self.policy_config.dwell_bonus
@@ -577,6 +597,12 @@ class RuleBrain(BrainProvider):
         notes: list[str] = []
         guarded_scores = {mode: score for mode, score in mode_scores.items() if mode_guards.get(mode, True)}
         if features.get("build_opportunity", 0.0) > 0.0 and features.get("active_incomplete_projects", 0.0) > 0.0:
+            if features.get("stale_grounding_pressure", 0.0) >= 0.45:
+                for mode in ("LOGISTICS", "CONSTRUCT"):
+                    if mode in guarded_scores:
+                        guarded_scores[mode] -= 0.95
+                guarded_scores["ACQUIRE_DIK"] = guarded_scores.get("ACQUIRE_DIK", mode_scores.get("ACQUIRE_DIK", 0.0)) + 0.85
+                notes.append("stale_grounding_bias_refresh")
             if ExecutableActionType.START_CONSTRUCTION.value in legal_types or ExecutableActionType.CONTINUE_CONSTRUCTION.value in legal_types:
                 guarded_scores["CONSTRUCT"] = guarded_scores.get("CONSTRUCT", mode_scores.get("CONSTRUCT", 0.0)) + 1.25
                 notes.append("build_ready_incomplete_projects_bias_construct")
@@ -598,6 +624,7 @@ class RuleBrain(BrainProvider):
         if features.get("no_progress_pressure", 0.0) >= 0.5:
             guarded_scores["LOGISTICS"] = guarded_scores.get("LOGISTICS", mode_scores.get("LOGISTICS", 0.0)) + 1.2
             guarded_scores["RECOVERY"] = guarded_scores.get("RECOVERY", mode_scores.get("RECOVERY", 0.0)) + 0.8
+            guarded_scores["ACQUIRE_DIK"] = guarded_scores.get("ACQUIRE_DIK", mode_scores.get("ACQUIRE_DIK", 0.0)) + 0.6 * features.get("need_to_refresh_assumptions", 0.0)
             for mode in ("MONITOR", "COORDINATE"):
                 if mode in guarded_scores:
                     guarded_scores[mode] -= 0.9
@@ -785,9 +812,13 @@ class RuleBrain(BrainProvider):
                 target_id = str(affordance.get("target_id") or "")
                 if int(source_cooldowns.get(target_id, -1) or -1) > sim_step:
                     score -= 6.0
-                exhausted = bool((source_exhaustion.get(target_id, {}) or {}).get("exhausted"))
-                if exhausted:
+                source_state = source_exhaustion.get(target_id, {}) or {}
+                exhausted = bool(source_state.get("exhausted_for_acquisition", source_state.get("exhausted")))
+                revisitable = bool(source_state.get("revisitable_for_verification", True))
+                if exhausted and not revisitable:
                     score -= 3.0
+                elif exhausted and revisitable:
+                    score -= 0.8
                 if preferred_source:
                     score += 5.0 if target_id == preferred_source else -5.0
                 if target_id in suppressed_sources:
@@ -846,8 +877,15 @@ class RuleBrain(BrainProvider):
                 score -= 1.2 * features.get("observe_ineffective_pressure", 0.0)
             if action_type in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value} and features.get("readiness_blocked", 0.0) > 0.0:
                 score -= 1.6
+            if action_type in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value, ExecutableActionType.TRANSPORT_RESOURCES.value}:
+                score -= 1.4 * features.get("stale_grounding_pressure", 0.0)
             if action_type == ExecutableActionType.TRANSPORT_RESOURCES.value and features.get("readiness_blocked", 0.0) > 0.0:
                 score += 1.25
+            if action_type == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value:
+                score += 1.45 * features.get("need_to_refresh_assumptions", 0.0)
+                score += 0.55 * (1.0 - features.get("role_packet_inspected", 0.0))
+            if action_type in {ExecutableActionType.VALIDATE_CONSTRUCTION.value, ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value}:
+                score -= 1.2 * max(0.0, 0.75 - features.get("epistemic_sufficiency", 0.0))
             score += self.policy_config.randomness_floor * (1.0 - (idx / max(1, len(sorted_affordances))))
             action_scores[f"{idx}:{action_type}"] = score
         return action_scores

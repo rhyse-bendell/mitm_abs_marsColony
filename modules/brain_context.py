@@ -106,6 +106,7 @@ class BrainContextBuilder:
         in_progress = sum(1 for s in structure_summary if s["state"] == "in_progress")
         absent = sum(1 for s in structure_summary if s["state"] == "absent")
         blockers = []
+        epistemic = agent._epistemic_sufficiency(environment) if hasattr(agent, "_epistemic_sufficiency") else {}
 
         if info_count < 2:
             blockers.append("insufficient_information_inspection")
@@ -115,6 +116,10 @@ class BrainContextBuilder:
             blockers.append("no_inspected_information_source")
         if not available_build_targets:
             blockers.append("no_navigable_build_target")
+        if epistemic and bool(epistemic.get("role_missing")):
+            blockers.append("missing_role_grounding")
+        if epistemic and bool(epistemic.get("stale_grounding")):
+            blockers.append("stale_epistemic_grounding")
 
         if score < 4 or blockers:
             status = "premature"
@@ -133,6 +138,8 @@ class BrainContextBuilder:
             "ready_for_build": status == "plausible",
             "inspected_sources": inspected_sources,
             "build_targets_available": len(available_build_targets),
+            "epistemic_sufficiency_score": float(epistemic.get("score", 0.0) or 0.0),
+            "epistemic_refresh_pressure": float(epistemic.get("refresh_pressure", 0.0) or 0.0),
         }
 
     def _affordances(self, agent, environment, build_readiness: Dict[str, Any] | None = None, phase_profile: Dict[str, Any] | None = None, team_state: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
@@ -142,6 +149,8 @@ class BrainContextBuilder:
             build_readiness = self._build_readiness(agent, self._summarize_structures(environment), environment, team_state=team_state or {})
         stage = phase_profile.get("stage", "execution")
         readiness_ok = bool(build_readiness.get("ready_for_build"))
+        epistemic_suff = float(build_readiness.get("epistemic_sufficiency_score", 0.0) or 0.0)
+        refresh_pressure = float(build_readiness.get("epistemic_refresh_pressure", 0.0) or 0.0)
         mismatch_pressure = any("mismatch" in e.lower() for e in (agent.activity_log[-6:] if agent.activity_log else []))
         has_artifacts = bool((team_state or {}).get("externalized_artifacts"))
         nearby_teammates = sum(
@@ -155,7 +164,9 @@ class BrainContextBuilder:
 
         def utility_for(action: ExecutableActionType, target_kind: str | None = None):
             if action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
-                return 0.95 if stage == "early" else (0.55 if not readiness_ok else 0.25)
+                base = 0.95 if stage == "early" else (0.55 if not readiness_ok else 0.25)
+                base += min(0.45, 0.55 * refresh_pressure)
+                return min(1.0, base)
             if action in {ExecutableActionType.COMMUNICATE, ExecutableActionType.REQUEST_ASSISTANCE}:
                 base = 0.7 if productive_coordination else 0.08
                 if stage == "execution":
@@ -168,13 +179,16 @@ class BrainContextBuilder:
             if action == ExecutableActionType.CONSULT_TEAM_ARTIFACT:
                 return 0.6 if has_artifacts else 0.2
             if action == ExecutableActionType.TRANSPORT_RESOURCES:
-                return 0.75 if readiness_ok and stage != "early" else 0.25
+                penalty = 0.35 if epistemic_suff < 0.45 else (0.15 if epistemic_suff < 0.6 else 0.0)
+                return max(0.08, (0.75 if readiness_ok and stage != "early" else 0.25) - penalty)
             if action in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION}:
                 if not readiness_ok:
                     return 0.05
-                return 0.85 if stage in {"execution", "late"} else 0.3
+                penalty = 0.4 if epistemic_suff < 0.5 else (0.2 if epistemic_suff < 0.65 else 0.0)
+                return max(0.08, (0.85 if stage in {"execution", "late"} else 0.3) - penalty)
             if action in {ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, ExecutableActionType.VALIDATE_CONSTRUCTION}:
-                return 0.9 if mismatch_pressure or stage == "late" or target_kind == "build" else 0.3
+                penalty = 0.55 if epistemic_suff < 0.62 else 0.0
+                return max(0.05, (0.9 if mismatch_pressure or stage == "late" or target_kind == "build" else 0.3) - penalty)
             if action in {ExecutableActionType.REASSESS_PLAN, ExecutableActionType.OBSERVE_ENVIRONMENT}:
                 return 0.4 if stage == "early" else 0.3
             return 0.2
@@ -209,8 +223,12 @@ class BrainContextBuilder:
             source_state = None
             if target.get("kind") == "information":
                 source_state = getattr(agent, "source_inspection_state", {}).get(target_name, "unseen")
+                source_memory = dict((getattr(agent, "source_memory_state", {}) or {}).get(target_name, {}) or {})
                 if source_state == "inspected":
-                    continue
+                    refresh_pressure = float((build_readiness or {}).get("epistemic_refresh_pressure", 0.0) or 0.0)
+                    confidence = float(source_memory.get("memory_confidence", 1.0) or 1.0)
+                    if refresh_pressure < 0.28 and confidence >= 0.62:
+                        continue
             legal.append(
                 {
                     "action_type": action_type.value,
@@ -478,7 +496,9 @@ class BrainContextBuilder:
                 "source_access_target": (getattr(agent, "source_access_state", {}) or {}).get("source_id"),
                 "source_exhaustion": dict(getattr(agent, "source_exhaustion_state", {}) or {}),
                 "source_inspection_state": dict(getattr(agent, "source_inspection_state", {}) or {}),
+                "source_memory": dict(getattr(agent, "source_memory_state", {}) or {}),
             },
+            "epistemic_sufficiency": agent._epistemic_sufficiency(environment) if hasattr(agent, "_epistemic_sufficiency") else {},
         }
 
         history_bands["semantic_plan_evolution"] = {

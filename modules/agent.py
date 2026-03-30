@@ -169,6 +169,7 @@ class Agent:
         self.memory_seen_packets = set()
         self.source_inspection_state = {}
         self.source_exhaustion_state = {}
+        self.source_memory_state = {}
         self.inspect_stall_counts = {}
         self.current_inspect_target_id = None
         self.inspect_session = {
@@ -212,6 +213,8 @@ class Agent:
         }
         self.status_last_action = ""
         self.construction_validation_state = {"mismatch_last_ts": {}, "repair_last_ts": {}}
+        self.last_construction_state_check_time = 0.0
+        self.last_observed_construction_signature = None
 
         # Team dynamics
         self.shared_knowledge = set()
@@ -750,7 +753,7 @@ class Agent:
             return True
         if self.source_inspection_state.get(source_id) == "inspected":
             return True
-        if bool(self.source_exhaustion_state.get(source_id, {}).get("exhausted")):
+        if bool(self.source_exhaustion_state.get(source_id, {}).get("exhausted_for_acquisition", self.source_exhaustion_state.get(source_id, {}).get("exhausted"))):
             return True
         return False
 
@@ -990,8 +993,151 @@ class Agent:
             self.source_inspection_state.setdefault(packet_name, "unseen")
             self.source_exhaustion_state.setdefault(
                 packet_name,
-                {"inspect_count": 0, "last_dik_changed": None, "no_new_dik_streak": 0, "inspected": False, "exhausted": False},
+                {
+                    "inspect_count": 0,
+                    "last_dik_changed": None,
+                    "no_new_dik_streak": 0,
+                    "inspected": False,
+                    "exhausted": False,
+                    "exhausted_for_acquisition": False,
+                    "revisitable_for_verification": True,
+                    "last_inspected_time": None,
+                },
             )
+            self.source_memory_state.setdefault(
+                packet_name,
+                {
+                    "ever_inspected": False,
+                    "last_inspected_time": None,
+                    "last_verified_time": None,
+                    "memory_confidence": 0.0,
+                    "revisit_cooldown_until": 0.0,
+                    "relevant_to_current_goal": False,
+                    "exhausted_for_acquisition": False,
+                    "revisitable_for_verification": True,
+                },
+            )
+
+    def _construction_state_signature(self, environment):
+        projects = []
+        for project_id, project in sorted((getattr(environment.construction, "projects", {}) or {}).items()):
+            projects.append(
+                (
+                    project_id,
+                    project.get("status"),
+                    int(project.get("required_resources", {}).get("bricks", 0) or 0),
+                    int(project.get("delivered_resources", {}).get("bricks", 0) or 0),
+                    bool(project.get("correct", True)),
+                )
+            )
+        return tuple(projects)
+
+    def _refresh_source_memory_state(self, environment, sim_state=None):
+        self._ensure_source_state(environment)
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        role_source = f"{self.role}_Info"
+        project_changed = False
+        current_signature = self._construction_state_signature(environment)
+        if self.last_observed_construction_signature is None:
+            self.last_observed_construction_signature = current_signature
+        elif current_signature != self.last_observed_construction_signature:
+            project_changed = True
+            self.last_observed_construction_signature = current_signature
+
+        no_progress_streak = int((getattr(self, "progress_tracker", {}) or {}).get("no_progress_streak", 0) or 0)
+        contradiction_recent = any("mismatch with construction" in str(e).lower() for e in self.activity_log[-8:])
+        repeated_replans = int(self.loop_counters.get("plan_repeats", 0) or 0)
+
+        for source_id, memory in self.source_memory_state.items():
+            exhaustion = self.source_exhaustion_state.get(source_id, {})
+            memory["ever_inspected"] = bool(memory.get("ever_inspected") or self.source_inspection_state.get(source_id) == "inspected")
+            memory["exhausted_for_acquisition"] = bool(exhaustion.get("exhausted_for_acquisition", exhaustion.get("exhausted")))
+            memory["revisitable_for_verification"] = bool(
+                exhaustion.get("revisitable_for_verification", True)
+            )
+            memory["relevant_to_current_goal"] = bool(
+                source_id in {"Team_Info", role_source}
+                or (source_id == role_source and self.goal)
+            )
+            last_checked = memory.get("last_verified_time") or memory.get("last_inspected_time")
+            if last_checked is None:
+                memory["memory_confidence"] = max(0.0, min(0.45, float(memory.get("memory_confidence", 0.0))))
+                continue
+            elapsed = max(0.0, now_ts - float(last_checked))
+            decay = 0.0
+            if elapsed > 90.0:
+                decay += min(0.33, ((elapsed - 90.0) / 90.0) * 0.22)
+            if elapsed > 150.0:
+                decay += min(0.2, ((elapsed - 150.0) / 180.0) * 0.15)
+            if no_progress_streak >= 3:
+                decay += min(0.16, 0.03 * (no_progress_streak - 2))
+            if contradiction_recent:
+                decay += 0.16
+            if repeated_replans >= 2:
+                decay += min(0.12, 0.04 * repeated_replans)
+            if project_changed and elapsed >= 45.0 and source_id in {"Team_Info", role_source}:
+                decay += 0.12
+            memory["memory_confidence"] = max(0.08, float(memory.get("memory_confidence", 0.8)) - min(0.62, decay))
+
+    def _epistemic_sufficiency(self, environment, sim_state=None):
+        self._refresh_source_memory_state(environment, sim_state=sim_state)
+        role_source = f"{self.role}_Info"
+        team_mem = dict(self.source_memory_state.get("Team_Info", {}))
+        role_mem = dict(self.source_memory_state.get(role_source, {}))
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        no_progress_streak = int((getattr(self, "progress_tracker", {}) or {}).get("no_progress_streak", 0) or 0)
+        last_progress_time = (getattr(self, "progress_tracker", {}) or {}).get("last_progress_time")
+        poor_progress = bool(no_progress_streak >= 3) or (
+            last_progress_time is not None and (now_ts - float(last_progress_time)) >= 120.0
+        )
+        team_conf = float(team_mem.get("memory_confidence", 0.0) or 0.0)
+        role_conf = float(role_mem.get("memory_confidence", 0.0) or 0.0)
+        team_ever = bool(team_mem.get("ever_inspected"))
+        role_ever = bool(role_mem.get("ever_inspected"))
+        team_elapsed = None if not team_mem.get("last_verified_time") else max(0.0, now_ts - float(team_mem.get("last_verified_time")))
+        role_elapsed = None if not role_mem.get("last_verified_time") else max(0.0, now_ts - float(role_mem.get("last_verified_time")))
+        stale_grounding = bool(
+            (team_elapsed is not None and team_elapsed >= 130.0)
+            or (role_elapsed is not None and role_elapsed >= 120.0)
+            or (team_conf <= 0.38)
+            or (role_conf <= 0.4)
+        )
+        role_missing = not role_ever
+        current_project = self._select_build_target(environment, require_readiness=False, include_project=True)
+        construction_state_needs_recheck = bool(
+            current_project
+            and (
+                (self.last_construction_state_check_time and (now_ts - float(self.last_construction_state_check_time)) >= 95.0)
+                or poor_progress
+            )
+        )
+        refresh_pressure = 0.0
+        if role_missing:
+            refresh_pressure += 0.48
+        if stale_grounding:
+            refresh_pressure += 0.3
+        if poor_progress:
+            refresh_pressure += 0.18
+        if construction_state_needs_recheck:
+            refresh_pressure += 0.16
+        refresh_pressure = max(0.0, min(1.0, refresh_pressure))
+        score = max(0.0, min(1.0, (0.3 * team_conf) + (0.45 * role_conf) + (0.25 * (0.0 if role_missing else 1.0)) - (0.25 * refresh_pressure)))
+        return {
+            "team_confidence": round(team_conf, 3),
+            "role_confidence": round(role_conf, 3),
+            "team_inspected": team_ever,
+            "role_inspected": role_ever,
+            "team_staleness_s": None if team_elapsed is None else round(team_elapsed, 2),
+            "role_staleness_s": None if role_elapsed is None else round(role_elapsed, 2),
+            "role_missing": role_missing,
+            "stale_grounding": stale_grounding,
+            "poor_progress": poor_progress,
+            "construction_state_needs_recheck": construction_state_needs_recheck,
+            "refresh_pressure": round(refresh_pressure, 3),
+            "score": round(score, 3),
+            "sufficient_for_construction": score >= 0.55,
+            "sufficient_for_validation": score >= 0.68 and not role_missing,
+        }
 
     def _release_source_slot(self, environment, source_id=None, emit=False, sim_state=None, reason="released"):
         source = source_id or self.source_access_state.get("source_id")
@@ -1152,21 +1298,22 @@ class Agent:
         return priorities
 
     def _candidate_information_sources(self, environment, sim_state=None):
-        self._ensure_source_state(environment)
+        self._refresh_source_memory_state(environment, sim_state=sim_state)
         critical_needs = self._critical_unmet_source_targets(sim_state, environment)
         top_goal = next((g for g in self.goal_stack if g.get("status") in {"active", "queued", "candidate"}), self.goal_stack[0] if self.goal_stack else {})
         goal_text = str(top_goal.get("goal") or top_goal.get("goal_id") or "").lower()
         role_source = f"{self.role}_Info"
+        epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
         missing_baseline_sources = {
             source_id
             for source_id in ("Team_Info", role_source)
             if source_id in environment.knowledge_packets
             and self._has_packet_access(source_id)
-            and self.source_inspection_state.get(source_id) != "inspected"
-            and not bool(self.source_exhaustion_state.get(source_id, {}).get("exhausted"))
+            and not bool(self.source_memory_state.get(source_id, {}).get("ever_inspected"))
         }
         info_pressure = float(min(3.0, len(critical_needs) + len(missing_baseline_sources)))
         candidates = []
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
         for packet_name in environment.knowledge_packets.keys():
             if not self._has_packet_access(packet_name):
                 continue
@@ -1186,20 +1333,31 @@ class Agent:
             elif status == "inspected":
                 score -= 4.0
             exhaustion = self.source_exhaustion_state.get(packet_name, {})
-            if exhaustion.get("exhausted"):
+            memory = self.source_memory_state.get(packet_name, {})
+            exhausted_for_acquisition = bool(exhaustion.get("exhausted_for_acquisition", exhaustion.get("exhausted")))
+            if exhausted_for_acquisition and not memory.get("revisitable_for_verification", True):
                 score -= 6.0
             no_new_streak = int(exhaustion.get("no_new_dik_streak", 0) or 0)
-            score -= min(4.5, 1.5 * no_new_streak)
+            score -= min(2.0, 0.7 * no_new_streak)
             if packet_name in critical_needs:
                 score += 5.0 + (0.85 * info_pressure)
             if packet_name in missing_baseline_sources:
                 score += 2.6 + (0.65 * info_pressure)
+            if packet_name == role_source and not memory.get("ever_inspected"):
+                score += 4.4
+            last_verified = memory.get("last_verified_time") or memory.get("last_inspected_time")
+            staleness = 0.0 if last_verified is None else max(0.0, now_ts - float(last_verified))
+            if staleness >= 95.0 and memory.get("revisitable_for_verification", True):
+                score += min(3.2, 1.1 + ((staleness - 95.0) / 120.0))
+            score += 2.2 * float(epistemic.get("refresh_pressure", 0.0))
+            if packet_name in {"Team_Info", role_source} and epistemic.get("construction_state_needs_recheck"):
+                score += 0.85
             if packet_name == f"{self.role}_Info":
                 score += 1.5
             if packet_name == "Team_Info":
                 score += 1.0
-            if packet_name == "Team_Info" and (bool(exhaustion.get("exhausted")) or no_new_streak >= 2):
-                score -= 3.5
+            if packet_name == "Team_Info" and exhausted_for_acquisition and no_new_streak >= 2:
+                score -= 1.2
             if self.role == "Architect" and packet_name == "Architect_Info" and any(k in goal_text for k in {"shelter", "build", "construction"}):
                 score += 2.2
             if self.role == "Engineer" and packet_name == "Engineer_Info" and any(k in goal_text for k in {"water", "power", "connectivity", "logistics"}):
@@ -1208,7 +1366,7 @@ class Agent:
                 score += 2.2
             score -= stalled * 1.5
             score -= math.hypot(point[0] - self.position[0], point[1] - self.position[1]) * 0.2
-            candidates.append((score, packet_name, point, status, stalled, bool(packet_name in critical_needs), bool(exhaustion.get("exhausted")), no_new_streak))
+            candidates.append((score, packet_name, point, status, stalled, bool(packet_name in critical_needs), exhausted_for_acquisition, no_new_streak))
 
         candidates.sort(key=lambda c: c[0], reverse=True)
         return candidates
@@ -1220,8 +1378,9 @@ class Agent:
         if explicit_target:
             selection = self._select_source_access_target(environment, explicit_target, sim_state=sim_state)
             if selection is not None and selection.get("position") is not None:
-                exhausted = bool(self.source_exhaustion_state.get(explicit_target, {}).get("exhausted"))
-                if exhausted:
+                source_mem = self.source_memory_state.get(explicit_target, {})
+                exhausted = bool(self.source_exhaustion_state.get(explicit_target, {}).get("exhausted_for_acquisition", self.source_exhaustion_state.get(explicit_target, {}).get("exhausted")))
+                if exhausted and not bool(source_mem.get("revisitable_for_verification", True)):
                     self._emit_event(sim_state, "source_revisit_deferred", {"current_source_target": explicit_target, "reason": "source_exhausted_for_agent"})
                 else:
                     self._set_status(f"Inspect target selected: {explicit_target}")
@@ -1235,7 +1394,11 @@ class Agent:
             return None, None
 
         # Conservative retargeting away from repeatedly stalled targets when alternatives exist.
-        non_stalled = [c for c in candidates if c[4] < 3 and not c[6]]
+        non_stalled = [
+            c
+            for c in candidates
+            if c[4] < 3 and (not c[6] or bool(self.source_memory_state.get(c[1], {}).get("revisitable_for_verification", True)))
+        ]
         if not non_stalled:
             non_stalled = [c for c in candidates if c[4] < 3]
         chosen = non_stalled[0] if non_stalled else candidates[0]
@@ -1279,6 +1442,10 @@ class Agent:
 
     def mark_source_revisitable(self, source_id, reason="identified_gap"):
         self.source_inspection_state[source_id] = "revisitable_due_to_gap"
+        memory = self.source_memory_state.setdefault(source_id, {})
+        memory["revisitable_for_verification"] = True
+        memory["revisit_cooldown_until"] = 0.0
+        memory["memory_confidence"] = min(float(memory.get("memory_confidence", 0.5) or 0.5), 0.45)
         self._set_status(f"Source marked revisitable due to gap: {source_id} ({reason})")
 
     @staticmethod
@@ -1530,13 +1697,28 @@ class Agent:
         source_state = self.source_exhaustion_state.setdefault(source_id, {"inspect_count": 0, "last_dik_changed": None, "exhausted": False})
         source_state["inspect_count"] = int(source_state.get("inspect_count", 0)) + 1
         source_state["last_dik_changed"] = bool(net_dik_changed)
+        source_state["last_inspected_time"] = now_ts
         if net_dik_changed:
             source_state["no_new_dik_streak"] = 0
         else:
             source_state["no_new_dik_streak"] = int(source_state.get("no_new_dik_streak", 0) or 0) + 1
         source_state["inspected"] = bool(self.source_inspection_state.get(source_id) == "inspected")
-        source_state["exhausted"] = bool((not net_dik_changed) and self.source_inspection_state.get(source_id) == "inspected")
-        if sim_state is not None and source_state["exhausted"]:
+        exhausted_for_acquisition = bool((not net_dik_changed) and self.source_inspection_state.get(source_id) == "inspected")
+        source_state["exhausted"] = exhausted_for_acquisition
+        source_state["exhausted_for_acquisition"] = exhausted_for_acquisition
+        source_state["revisitable_for_verification"] = True
+        memory = self.source_memory_state.setdefault(source_id, {})
+        memory["ever_inspected"] = True
+        memory["last_inspected_time"] = now_ts
+        memory["last_verified_time"] = now_ts
+        baseline_conf = float(memory.get("memory_confidence", 0.6) or 0.6)
+        refresh_boost = 0.2 if net_dik_changed else 0.12
+        memory["memory_confidence"] = max(0.25, min(0.96, baseline_conf + refresh_boost))
+        memory["exhausted_for_acquisition"] = exhausted_for_acquisition
+        memory["revisitable_for_verification"] = True
+        cooldown = 18.0 if net_dik_changed else 26.0
+        memory["revisit_cooldown_until"] = now_ts + cooldown
+        if sim_state is not None and exhausted_for_acquisition:
             self._emit_event(sim_state, "source_already_inspected_no_new_dik", {"source_id": source_id, "inspect_count": source_state["inspect_count"]})
             self._emit_event(sim_state, "source_exhausted_for_agent", {"source_id": source_id, "inspect_count": source_state["inspect_count"]})
             if shared_source:
@@ -1752,15 +1934,27 @@ class Agent:
 
     def _choose_post_inspect_followup_decision(self, environment, sim_state=None):
         critical_sources = self._critical_unmet_source_targets(sim_state, environment)
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
         if critical_sources:
             preferred = "Team_Info" if "Team_Info" in critical_sources else sorted(critical_sources.keys())[0]
-            if preferred in environment.knowledge_packets and not self.source_exhaustion_state.get(preferred, {}).get("exhausted"):
+            preferred_mem = self.source_memory_state.get(preferred, {})
+            cooldown_ready = float(preferred_mem.get("revisit_cooldown_until", 0.0) or 0.0) <= now_ts
+            revisitable = bool(preferred_mem.get("revisitable_for_verification", True))
+            if preferred in environment.knowledge_packets and (cooldown_ready or revisitable):
                 return BrainDecision(
                     selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
                     target_id=preferred,
                     reason_summary="Post-inspect pivot to unmet critical witness source access.",
                     confidence=0.84,
                 )
+        epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
+        if epistemic.get("construction_state_needs_recheck"):
+            self.last_construction_state_check_time = now_ts
+            return BrainDecision(
+                selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION,
+                reason_summary="Post-inspect verification pivot: re-check project material state and assumptions.",
+                confidence=0.77,
+            )
         if self._is_build_eligible(environment):
             build_selection = self._select_build_target(environment, require_readiness=True, include_project=True)
             if isinstance(build_selection, dict):
@@ -2076,6 +2270,7 @@ class Agent:
 
     def _construction_action_blockers(self, decision, action, environment, sim_state=None):
         blockers = []
+        epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
         project_id = self._construction_project_for_action(decision, action, environment)
         if project_id is None:
             blockers.append("no_navigable_build_target")
@@ -2088,6 +2283,8 @@ class Agent:
         action_type = decision.selected_action
         if action_type in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION}:
             blockers.extend(self._build_readiness_blockers(environment, sim_state=sim_state))
+            if not epistemic.get("sufficient_for_construction", False):
+                blockers.append("epistemic_sufficiency_low_for_construction")
             if self.current_plan is not None and self.current_plan.plan_method_status == "low_trust":
                 notes = set(self.current_plan.validation_notes or [])
                 if any(n.startswith("missing_") for n in notes):
@@ -2096,12 +2293,16 @@ class Agent:
                 blockers.append("project_already_complete")
         elif action_type == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION:
             blockers.extend(self._build_readiness_blockers(environment, sim_state=sim_state))
+            if not epistemic.get("sufficient_for_validation", False):
+                blockers.append("epistemic_sufficiency_low_for_repair")
             mismatch_detected = (project.get("correct", True) is False) or any(
                 "mismatch with construction" in str(e).lower() for e in self.activity_log[-8:]
             )
             if not mismatch_detected:
                 blockers.append("no_detected_mismatch")
         elif action_type == ExecutableActionType.VALIDATE_CONSTRUCTION:
+            if not epistemic.get("sufficient_for_validation", False):
+                blockers.append("epistemic_sufficiency_low_for_validation")
             has_match, missing_rules = self._construction_rule_match(project_id, environment=environment, sim_state=sim_state, include_team=True)
             if not has_match:
                 blockers.append("missing_validation_rule_knowledge")
@@ -2112,10 +2313,15 @@ class Agent:
     def _build_readiness_blockers(self, environment, sim_state=None):
         blockers = []
         info_ids, rule_ids = self._effective_knowledge_for_readiness(sim_state=sim_state)
+        epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
         if len(info_ids) < 2:
             blockers.append("insufficient_information_inspection")
         if len(rule_ids) < 1:
             blockers.append("insufficient_rule_knowledge")
+        if epistemic.get("role_missing"):
+            blockers.append("missing_role_grounding")
+        if epistemic.get("stale_grounding"):
+            blockers.append("stale_epistemic_grounding")
 
         if getattr(self, "task_model", None):
             role_rules = [
@@ -2389,6 +2595,15 @@ class Agent:
         if label == "consult_artifact":
             executable = self._baseline_epistemic_sources_completed() and self._has_meaningful_consultable_artifact(sim_state)
             return executable, "artifact_not_grounded"
+        if label == "refresh_assumptions":
+            epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
+            needs_refresh = bool(
+                epistemic.get("role_missing")
+                or epistemic.get("stale_grounding")
+                or epistemic.get("poor_progress")
+                or epistemic.get("construction_state_needs_recheck")
+            )
+            return needs_refresh and bool(self._candidate_information_sources(environment, sim_state=sim_state)), "assumptions_currently_fresh"
         if label == "integrate_new_derivation":
             if not self.derivation_events:
                 return False, "no_recent_derivation"
@@ -2409,6 +2624,7 @@ class Agent:
         if not self.task_model:
             self._refresh_goal_stack_view()
             return
+        self._refresh_source_memory_state(environment, sim_state=sim_state)
         phase_name = (environment.get_current_phase() or {}).get("name", "")
         data_ids, info_ids, knowledge_ids = self._held_dik_ids()
         phase_changed = bool(self.last_phase_name and self.last_phase_name != phase_name)
@@ -2475,10 +2691,10 @@ class Agent:
             for source_id in ("Team_Info", role_source)
             if source_id in environment.knowledge_packets
             and self._has_packet_access(source_id)
-            and self.source_inspection_state.get(source_id) != "inspected"
-            and not bool(self.source_exhaustion_state.get(source_id, {}).get("exhausted"))
+            and not bool(self.source_memory_state.get(source_id, {}).get("ever_inspected"))
         }
         critical_needs = self._critical_unmet_source_targets(sim_state, environment)
+        epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
         info_pressure = float(min(3.0, len(critical_needs) + len(missing_baseline_sources)))
         missing_dik = len(self.known_gaps) > 0 or (len(info_ids) + len(knowledge_ids)) < 2 or bool(missing_baseline_sources) or bool(critical_needs)
         if missing_dik:
@@ -2516,6 +2732,15 @@ class Agent:
         repeated_stall = any(v >= 3 for v in self.inspect_stall_counts.values())
         if repeated_stall:
             self._activate_support_goal("unblock_inspection", "repeated_inspection_stall", sim_state=sim_state, priority=0.75, source="derived_from_rule")
+        if epistemic.get("refresh_pressure", 0.0) >= 0.42:
+            refresh_priority = min(0.9, 0.64 + (0.22 * float(epistemic.get("refresh_pressure", 0.0))))
+            self._activate_support_goal(
+                "refresh_assumptions",
+                "epistemic_grounding_stale_or_low_confidence",
+                sim_state=sim_state,
+                priority=refresh_priority,
+                source="derived_from_rule",
+            )
 
         for goal in self.goal_registry.values():
             if goal.goal_level != "support" or goal.status not in {"active", "candidate", "queued"}:
@@ -4136,12 +4361,13 @@ class Agent:
                     rewritten = rerouted
         if context is not None and rewritten.selected_action in {ExecutableActionType.INSPECT_INFORMATION_SOURCE, ExecutableActionType.REQUEST_ASSISTANCE}:
             readiness = context.individual_cognitive_state.get("build_readiness", {})
+            epistemic = context.individual_cognitive_state.get("epistemic_sufficiency", {})
             built_state = context.world_snapshot.get("built_state", [])
             active_incomplete_projects = [item for item in built_state if item.get("state") in {"absent", "in_progress"} and float(item.get("progress", 0.0)) < 1.0]
             mismatch_signals = context.history_bands.get("semantic_plan_evolution", {}).get("unresolved_contradictions", [])
             seconds_since_dik_change = context.individual_cognitive_state.get("seconds_since_dik_change")
             recent_meaningful_epistemic_change = seconds_since_dik_change is not None and float(seconds_since_dik_change) <= 2.0 and bool(mismatch_signals)
-            if readiness.get("ready_for_build") and active_incomplete_projects and not recent_meaningful_epistemic_change:
+            if readiness.get("ready_for_build") and active_incomplete_projects and not recent_meaningful_epistemic_change and float(epistemic.get("refresh_pressure", 0.0) or 0.0) < 0.45:
                 sorted_affordances = sorted(context.action_affordances, key=lambda a: float(a.get("utility", 0.0)), reverse=True)
                 candidate = next((c for c in sorted_affordances if c.get("action_type") in {ExecutableActionType.TRANSPORT_RESOURCES.value, ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value}), None)
                 if candidate is not None:
@@ -4165,6 +4391,20 @@ class Agent:
                         )
                         if rerouted is not None:
                             rewritten = rerouted
+        if context is not None and rewritten.selected_action in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION, ExecutableActionType.TRANSPORT_RESOURCES, ExecutableActionType.VALIDATE_CONSTRUCTION, ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION}:
+            epistemic = context.individual_cognitive_state.get("epistemic_sufficiency", {})
+            refresh_pressure = float(epistemic.get("refresh_pressure", 0.0) or 0.0)
+            role_missing = bool(epistemic.get("role_missing"))
+            if rewritten.selected_action in {ExecutableActionType.VALIDATE_CONSTRUCTION, ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION} and (role_missing or refresh_pressure >= 0.58):
+                fallback = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
+                if fallback.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
+                    rewritten = fallback
+                    self._emit_event(sim_state, "policy_pivot_applied", {"origin": pivot_origin, "kind": "epistemic_refresh_guard", "previous_action": decision.selected_action.value, "pivoted_to": rewritten.selected_action.value, "reason": "validation_requires_fresher_grounding"})
+            elif rewritten.selected_action in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION, ExecutableActionType.TRANSPORT_RESOURCES} and refresh_pressure >= 0.72:
+                fallback = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
+                if fallback.selected_action in {ExecutableActionType.INSPECT_INFORMATION_SOURCE, ExecutableActionType.VALIDATE_CONSTRUCTION}:
+                    rewritten = fallback
+                    self._emit_event(sim_state, "policy_pivot_applied", {"origin": pivot_origin, "kind": "stale_grounding_pressure", "previous_action": decision.selected_action.value, "pivoted_to": rewritten.selected_action.value, "reason": "refresh_assumptions_needed"})
         if context is not None and rewritten.selected_action in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION}:
             project_id = rewritten.target_id or self._construction_project_for_action(rewritten, {"project_id": None}, environment)
             if project_id in getattr(environment.construction, "projects", {}):
