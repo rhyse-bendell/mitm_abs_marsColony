@@ -300,7 +300,7 @@ class SplitDIKPlanningTests(unittest.TestCase):
         self.assertIn("R2", agent.mental_model["knowledge"].rules)
         self.assertEqual(len(projected["information"]), 1)
 
-    def test_update_calls_task_derivations_once_per_tick(self):
+    def test_update_knowledge_does_not_call_task_derivations(self):
         agent = self._agent(policy="cadence_with_dik_integration")
         calls = {"count": 0}
 
@@ -309,8 +309,8 @@ class SplitDIKPlanningTests(unittest.TestCase):
 
         agent._apply_task_derivations = _count
         environment = SimpleNamespace(knowledge_packets={})
-        agent.update_knowledge(environment=environment, full_packet_sweep=False, sim_state=None)
-        self.assertEqual(calls["count"], 1)
+        agent.update_knowledge(environment=environment, sim_state=None)
+        self.assertEqual(calls["count"], 0)
 
 
 if __name__ == "__main__":

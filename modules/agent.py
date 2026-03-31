@@ -3180,14 +3180,6 @@ class Agent:
                 continue
             goal.parent_goal_key = mission_goal_key
         self._refresh_goal_stack_view()
-    # ---------------------------------------------------------------------
-    # Legacy compatibility wrappers (non-authoritative runtime surfaces)
-    # ---------------------------------------------------------------------
-    def decide(self, sim_state):
-        """Compatibility shim for legacy call sites; not used by authoritative runtime."""
-        self.perceive_environment(sim_state)
-        self._legacy_run_goal_management_pipeline(dt=1.0, environment=sim_state.environment)
-
     def _should_request_explanation(self):
         mode = (self.planner_cadence.explanation_mode or "never").lower()
         next_call = self.planner_call_count + 1
@@ -5551,127 +5543,6 @@ class Agent:
                     "last_seen": sim_state.time
                 }
 
-    def update_internal_state(self):
-        """Compatibility shim that delegates to the legacy internal-state updater."""
-        self._legacy_update_internal_state()
-
-    def _legacy_update_internal_state(self):
-        for name, model in self.theory_of_mind.items():
-            if not model["knowledge_ids"]:
-                self.activity_log.append(f"ToM: {name} may need assistance")
-
-        # Detect conflicts between rules and construction
-        known_rules = self.mental_model["knowledge"].rules
-        if known_rules:
-            for project in getattr(self, "observed_projects", []):
-                if not any(rule in project.get("expected_rules", []) for rule in known_rules):
-                    self.activity_log.append("Mismatch with construction: reevaluating knowledge")
-                    self.reevaluate_knowledge()
-
-    def evaluate_goals(self):
-        """Compatibility shim for legacy callers; delegates to legacy goal-state evaluator."""
-        self._evaluate_goal_state(environment=None)
-
-    def _evaluate_goal_state(self, environment):
-        """Compatibility shim for legacy callers; delegates to legacy evaluator."""
-        self._legacy_evaluate_goal_state(environment)
-
-    def _legacy_evaluate_goal_state(self, environment):
-        """Legacy goal-state evaluator used by compatibility wrappers only."""
-        if environment is None:
-            return
-
-        self._update_goal_states_from_runtime(sim_state=None, environment=environment)
-        goal_entry = self.current_goal()
-        if not goal_entry:
-            self.push_goal("seek_info", self._choose_info_target(environment))
-            return
-
-        goal = goal_entry["goal"]
-        self.target = goal_entry["target"]
-
-        if goal == "seek_info":
-            if self.mental_model["information"]:
-                self.pop_goal()
-                self.push_goal("share")
-            else:
-                self.activity_log.append("Still seeking info...")
-
-        elif goal == "share":
-            if not self.has_shared:
-                self.activity_log.append("Preparing to share information with teammates")
-                return
-
-            self.pop_goal()
-            if self._is_build_eligible(environment):
-                build_selection = self._select_build_target(environment, include_project=True)
-                if build_selection is not None:
-                    self.push_goal("build", build_selection)
-                else:
-                    self.activity_log.append("No accessible build interaction target found; gathering more info")
-                    self.push_goal("seek_info", self._choose_info_target(environment))
-            else:
-                self.activity_log.append(
-                    f"Build deferred (readiness={self._build_readiness_score()}, blockers={self._build_readiness_blockers(environment)}); continuing information gathering"
-                )
-                self.push_goal("seek_info", self._choose_info_target(environment))
-
-        elif goal == "build":
-            if self.target is None:
-                selected = self._select_build_target(environment, include_project=True)
-                self.target = selected["target"] if isinstance(selected, dict) else selected
-
-            if self.mental_model["knowledge"].rules:
-                self.activity_log.append("Building task engaged")
-            elif not self._is_build_eligible(environment):
-                self.pop_goal()
-                self.push_goal("seek_info", self._choose_info_target(environment))
-
-        elif goal == "idle":
-            self.activity_log.append("Idling...")
-
-    def _plan_actions_for_current_goal(self):
-        """Compatibility shim for legacy callers; delegates to legacy planner."""
-        return self._legacy_plan_actions_for_current_goal()
-
-    def _legacy_plan_actions_for_current_goal(self):
-        """Legacy action planner used by compatibility wrappers only."""
-        if not self.goal_stack:
-            return [{"type": "idle", "duration": 1.0, "priority": 0}]
-
-        top_goal = self.current_goal()
-        goal = top_goal["goal"]
-
-        if goal == "seek_info":
-            target = top_goal.get("target") or self.target or (7.0, 6.4)
-            return [{"type": "move_to", "target": target, "duration": 1.0, "priority": 1}]
-        if goal == "share":
-            return [{"type": "communicate", "duration": 0.5, "priority": 1}]
-        if goal == "build":
-            goal_target = top_goal.get("target")
-            project_id = goal_target.get("project_id") if isinstance(goal_target, dict) else None
-            target_point = goal_target.get("target") if isinstance(goal_target, dict) else goal_target
-            return [{"type": "construct", "duration": 2.0, "priority": 1, "project_id": project_id, "target": target_point}]
-
-        return [{"type": "idle", "duration": 1.0, "priority": 0}]
-
-    def _run_goal_management_pipeline(self, dt, environment):
-        """Compatibility shim for legacy mode; delegates to legacy goal pipeline."""
-        self._legacy_run_goal_management_pipeline(dt=dt, environment=environment)
-
-    def _legacy_run_goal_management_pipeline(self, dt, environment):
-        """Legacy goal-management pipeline for non-SimulationState compatibility mode."""
-        self._legacy_update_internal_state()
-        self._legacy_evaluate_goal_state(environment)
-        self.current_action = self._legacy_plan_actions_for_current_goal()
-        self._advance_active_actions(dt, sim_state=None)
-
-    def select_action(self):
-        """Compatibility shim for legacy callers; delegates to legacy planner."""
-        actions = self._legacy_plan_actions_for_current_goal()
-        self.current_action = actions
-        return actions
-
     def perform_action(self, actions):
         if not isinstance(actions, list):
             actions = [actions]
@@ -6068,163 +5939,135 @@ class Agent:
         self.temperature = max(96.0, min(self.temperature, 101.0))
         self.co2_output = 0.04 + 0.01 * abs(self.heart_rate - 70)
 
-    def update_knowledge(self, environment, full_packet_sweep=True, sim_state=None):
+    def update_knowledge(self, environment, sim_state=None):
         """Observational DIK/source bookkeeping; epistemic derivation is trigger-owned."""
         self._ensure_source_state(environment)
-        if full_packet_sweep:
-            self._legacy_full_packet_sweep(environment, sim_state=sim_state)
-
         if "mismatch with construction" in " ".join(self.activity_log[-6:]).lower() and self.current_inspect_target_id:
             self.mark_source_revisitable(self.current_inspect_target_id, reason="construction_mismatch")
 
-    def _legacy_full_packet_sweep(self, environment, sim_state=None):
-        """Legacy packet sweep for compatibility mode (`sim_state is None`)."""
-        for packet_name, packet_content in environment.knowledge_packets.items():
-            if packet_name in self.mental_model["information"]:
-                continue
-            if not self._has_packet_access(packet_name):
-                continue
-            if self.role not in packet_name and "Team" not in packet_name:
-                continue
-            if environment.can_access_info(self.position, packet_name, role=self.role):
-                before = len(self.mental_model["information"])
-                self.absorb_packet(packet_content, accuracy=0.95, sim_state=sim_state, source_id=packet_name)
-                after = len(self.mental_model["information"])
-                if after > before:
-                    self.source_inspection_state[packet_name] = "inspected"
-                    self._set_status(f"Legacy sweep ingested packet from {packet_name}")
-            # Deliberately suppress per-tick access-failure spam from legacy sweep.
-
-    def decide_next_action(self, environment):
-        """Compatibility shim for legacy callers; not used by authoritative runtime."""
-        self._legacy_evaluate_goal_state(environment)
-        self.current_action = self._legacy_plan_actions_for_current_goal()
-
     def update(self, dt, environment, sim_state=None, planner_lifecycle_already_polled=False):
         self.update_physiology(exertion=0.5)
-        self.update_knowledge(environment, full_packet_sweep=(sim_state is None), sim_state=sim_state)
         if sim_state is None:
-            # Legacy compatibility path for unit-level agent calls outside full simulation state.
-            self._run_goal_management_pipeline(dt, environment)
+            raise ValueError("Agent.update requires sim_state in the SimulationState-authoritative runtime")
+        self.update_knowledge(environment, sim_state=sim_state)
+        self.perceive_environment(sim_state)
+        self.sim_step_count += 1
+        self._record_team_plan_commitment_tick(sim_state)
+        if self._team_plan_requires_uptake(sim_state):
+            active_team_plan = self._get_active_team_plan(sim_state)
+            if isinstance(active_team_plan, dict):
+                self._adopt_committed_team_plan(sim_state, active_team_plan, reason="active_team_plan_requires_uptake")
+        rule_brain_runtime = self._is_rule_brain_runtime(sim_state)
+        if not planner_lifecycle_already_polled:
+            self._check_inflight_timeout(sim_state)
+            if not rule_brain_runtime:
+                self._poll_planner_request(sim_state, environment)
+            self._poll_dik_integration_request(sim_state)
+        if self.active_actions:
+            self._advance_active_actions(dt, sim_state=sim_state)
         else:
-            self.perceive_environment(sim_state)
-            self.sim_step_count += 1
-            self._record_team_plan_commitment_tick(sim_state)
-            if self._team_plan_requires_uptake(sim_state):
-                active_team_plan = self._get_active_team_plan(sim_state)
-                if isinstance(active_team_plan, dict):
-                    self._adopt_committed_team_plan(sim_state, active_team_plan, reason="active_team_plan_requires_uptake")
-            rule_brain_runtime = self._is_rule_brain_runtime(sim_state)
-            if not planner_lifecycle_already_polled:
-                self._check_inflight_timeout(sim_state)
-                if not rule_brain_runtime:
-                    self._poll_planner_request(sim_state, environment)
-                self._poll_dik_integration_request(sim_state)
-            if self.active_actions:
-                self._advance_active_actions(dt, sim_state=sim_state)
-            else:
-                trigger_reason = self._plan_trigger_reason(sim_state, environment)
-                dik_trigger_reason = self._dik_integration_trigger_reason(sim_state, trigger_reason)
-                dik_allowed, dik_reason = self._dik_integration_allowed(sim_state, dik_trigger_reason)
-                if dik_allowed and self.dik_integration_state.get("status") != "in_flight":
-                    self._emit_event(sim_state, "dik_integration_invocation_requested", {"tick": self.sim_step_count, "trigger_reason": dik_reason})
-                    self._submit_dik_integration_request_async(sim_state, dik_reason)
-                planner_allowed, planner_reason = self._planner_decision_allowed(sim_state, trigger_reason)
-                if rule_brain_runtime:
-                    if self.planner_state.get("status") == "in_flight":
-                        self.clear_planner_inflight_state(sim_state=sim_state, reason="rule_brain_authoritative_controller")
-                    if not self._run_rule_brain_controller(sim_state, environment, planner_reason or trigger_reason or "rule_brain_tick"):
-                        decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="rule_brain controller unavailable", confidence=1.0)
-                        self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment)
-                elif planner_allowed:
-                    cooldown_remaining = self._planner_cooldown_remaining(sim_state)
-                    if cooldown_remaining > 0.0:
-                        self.planner_state["total_skipped_cooldown"] += 1
-                        runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"config": sim_state.brain_backend_config, "configured_backend": sim_state.configured_brain_backend}
-                        self._emit_event(sim_state, "planner_request_skipped_cooldown", {"reason": planner_reason, "cooldown_remaining": cooldown_remaining, "consecutive_failures": self.planner_state["consecutive_failures"], "backend": runtime.get("configured_backend", sim_state.configured_brain_backend), "model": runtime["config"].local_model})
-                    elif self.planner_state.get("status") == "in_flight":
-                        self.planner_state["total_skipped_inflight"] += 1
-                        self.planner_state["consecutive_inflight_skips"] = int(self.planner_state.get("consecutive_inflight_skips", 0)) + 1
-                        runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend, "effective_backend": sim_state.effective_brain_backend, "provider": sim_state.brain_provider}
-                        self._emit_event(sim_state, "planner_request_skipped_inflight", {"reason": planner_reason, "request_id": self.planner_state.get("request_id"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
-                        stall_threshold = max(3, int(self.planner_cadence.planner_interval_steps) * 3)
-                        early_window_steps = max(4, int(self.planner_cadence.planner_interval_steps) * 12)
-                        if (
-                            self.sim_step_count <= early_window_steps
-                            and int(self.planner_state.get("consecutive_inflight_skips", 0)) >= stall_threshold
-                            and int(self.planner_state.get("total_completed", 0)) == 0
-                        ):
-                            demoted = self._maybe_hard_demote_backend(
-                                sim_state,
-                                reason="early_inflight_stall",
-                                activate_bootstrap=True,
-                            )
-                            if demoted:
-                                self.clear_planner_inflight_state(sim_state=sim_state, reason="early_inflight_stall")
-                            else:
-                                self.clear_planner_inflight_state(sim_state=sim_state, reason="early_inflight_stall_recover")
-                                self.activate_fallback_bootstrap(sim_state=sim_state, reason="early_inflight_stall")
-                        if self.current_plan is None and not self.active_actions and not self.current_action:
-                            if self.planner_cadence.unrestricted_local_qwen_mode:
-                                self._emit_event(sim_state, "planner_waiting_on_inflight_unrestricted", {"reason": "inflight_without_plan", "request_state": self.planner_state.get("status"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
-                            else:
-                                startup_decision = BrainDecision(selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE, reason_summary="startup-safe action while planner request is in flight", confidence=0.4)
-                                self.current_action = self._translate_brain_decision_to_legacy_action(startup_decision, environment, sim_state=sim_state)
-                                self._emit_event(sim_state, "ui_safe_fallback_used", {"reason": "inflight_without_plan", "request_state": self.planner_state.get("status"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
-                    else:
-                        pending_trace_id = self._make_planner_trace_id(f"{self.agent_id}-{self.sim_step_count}")
-                        self._emit_event(sim_state, "planner_invocation_started", {"trigger_reason": planner_reason, "tick": self.sim_step_count, "current_plan_id": getattr(self.current_plan, "plan_id", None), "trace_id": pending_trace_id})
-                        runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend, "effective_backend": sim_state.effective_brain_backend, "provider": sim_state.brain_provider}
-                        self._emit_event(sim_state, "planner_invocation_requested", {"tick": self.sim_step_count, "trigger_reason": planner_reason, "configured_backend": runtime.get("configured_backend", sim_state.configured_brain_backend), "effective_backend": runtime.get("effective_backend", sim_state.effective_brain_backend), "request_explanation": self._should_request_explanation(), "current_plan_id": getattr(self.current_plan, "plan_id", None), "current_active_goal_ids": [g.get("goal_id") for g in self.goal_stack[:6]], "trace_id": pending_trace_id})
-                        self._emit_event(sim_state, "brain_provider_request_started", {"configured_backend": runtime.get("configured_backend", sim_state.configured_brain_backend), "effective_backend": runtime.get("effective_backend", sim_state.effective_brain_backend), "provider_class": runtime["provider"].__class__.__name__, "trace_id": pending_trace_id})
-                        self._submit_planner_request_async(sim_state, planner_reason)
-                elif self._continue_cached_plan(sim_state, environment):
-                    self.planner_state["stale_plan_reuse_count"] += 1
-                    sim_state.logger.log_event(sim_state.time, "planner_skipped_due_to_cadence", {"agent": self.name, "reason": planner_reason})
-                elif self._run_rule_brain_controller(sim_state, environment, planner_reason):
-                    sim_state.logger.log_event(sim_state.time, "planner_skipped_local_policy_refresh", {"agent": self.name, "reason": planner_reason})
-                else:
-                    decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="no active cached plan while planner cadence skips", confidence=1.0)
+            trigger_reason = self._plan_trigger_reason(sim_state, environment)
+            dik_trigger_reason = self._dik_integration_trigger_reason(sim_state, trigger_reason)
+            dik_allowed, dik_reason = self._dik_integration_allowed(sim_state, dik_trigger_reason)
+            if dik_allowed and self.dik_integration_state.get("status") != "in_flight":
+                self._emit_event(sim_state, "dik_integration_invocation_requested", {"tick": self.sim_step_count, "trigger_reason": dik_reason})
+                self._submit_dik_integration_request_async(sim_state, dik_reason)
+            planner_allowed, planner_reason = self._planner_decision_allowed(sim_state, trigger_reason)
+            if rule_brain_runtime:
+                if self.planner_state.get("status") == "in_flight":
+                    self.clear_planner_inflight_state(sim_state=sim_state, reason="rule_brain_authoritative_controller")
+                if not self._run_rule_brain_controller(sim_state, environment, planner_reason or trigger_reason or "rule_brain_tick"):
+                    decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="rule_brain controller unavailable", confidence=1.0)
                     self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment)
-                    self.planner_state["ui_safe_fallback_count"] += 1
-                    runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend}
-                    self._emit_event(sim_state, "ui_safe_fallback_used", {"reason": planner_reason, "request_state": self.planner_state.get("status"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
-                    sim_state.logger.log_event(sim_state.time, "planner_skipped_without_plan", {"agent": self.name, "reason": planner_reason})
-                if not rule_brain_runtime:
-                    bootstrap_decision = self._bootstrap_override_decision(environment, sim_state=sim_state)
-                    if bootstrap_decision is not None:
-                        self.current_action = self._translate_brain_decision_to_legacy_action(bootstrap_decision, environment, sim_state=sim_state)
-                        self._emit_event(
+            elif planner_allowed:
+                cooldown_remaining = self._planner_cooldown_remaining(sim_state)
+                if cooldown_remaining > 0.0:
+                    self.planner_state["total_skipped_cooldown"] += 1
+                    runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"config": sim_state.brain_backend_config, "configured_backend": sim_state.configured_brain_backend}
+                    self._emit_event(sim_state, "planner_request_skipped_cooldown", {"reason": planner_reason, "cooldown_remaining": cooldown_remaining, "consecutive_failures": self.planner_state["consecutive_failures"], "backend": runtime.get("configured_backend", sim_state.configured_brain_backend), "model": runtime["config"].local_model})
+                elif self.planner_state.get("status") == "in_flight":
+                    self.planner_state["total_skipped_inflight"] += 1
+                    self.planner_state["consecutive_inflight_skips"] = int(self.planner_state.get("consecutive_inflight_skips", 0)) + 1
+                    runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend, "effective_backend": sim_state.effective_brain_backend, "provider": sim_state.brain_provider}
+                    self._emit_event(sim_state, "planner_request_skipped_inflight", {"reason": planner_reason, "request_id": self.planner_state.get("request_id"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
+                    stall_threshold = max(3, int(self.planner_cadence.planner_interval_steps) * 3)
+                    early_window_steps = max(4, int(self.planner_cadence.planner_interval_steps) * 12)
+                    if (
+                        self.sim_step_count <= early_window_steps
+                        and int(self.planner_state.get("consecutive_inflight_skips", 0)) >= stall_threshold
+                        and int(self.planner_state.get("total_completed", 0)) == 0
+                    ):
+                        demoted = self._maybe_hard_demote_backend(
                             sim_state,
-                            "fallback_bootstrap_action_forced",
-                            {
-                                "action_type": bootstrap_decision.selected_action.value,
-                                "target_id": bootstrap_decision.target_id,
-                                "activation_reason": self.fallback_bootstrap.get("activation_reason"),
-                            },
+                            reason="early_inflight_stall",
+                            activate_bootstrap=True,
                         )
-                self._advance_active_actions(dt, sim_state=sim_state)
-
-            self._apply_externalization_and_construction_effects(environment, sim_state, dt)
-            now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
-            if (now_ts - float(self.last_support_goal_update_time)) >= float(self.support_goal_update_interval_s):
-                self._update_goal_states_from_runtime(sim_state, environment)
-                self.last_support_goal_update_time = now_ts
+                        if demoted:
+                            self.clear_planner_inflight_state(sim_state=sim_state, reason="early_inflight_stall")
+                        else:
+                            self.clear_planner_inflight_state(sim_state=sim_state, reason="early_inflight_stall_recover")
+                            self.activate_fallback_bootstrap(sim_state=sim_state, reason="early_inflight_stall")
+                    if self.current_plan is None and not self.active_actions and not self.current_action:
+                        if self.planner_cadence.unrestricted_local_qwen_mode:
+                            self._emit_event(sim_state, "planner_waiting_on_inflight_unrestricted", {"reason": "inflight_without_plan", "request_state": self.planner_state.get("status"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
+                        else:
+                            startup_decision = BrainDecision(selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE, reason_summary="startup-safe action while planner request is in flight", confidence=0.4)
+                            self.current_action = self._translate_brain_decision_to_legacy_action(startup_decision, environment, sim_state=sim_state)
+                            self._emit_event(sim_state, "ui_safe_fallback_used", {"reason": "inflight_without_plan", "request_state": self.planner_state.get("status"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
+                else:
+                    pending_trace_id = self._make_planner_trace_id(f"{self.agent_id}-{self.sim_step_count}")
+                    self._emit_event(sim_state, "planner_invocation_started", {"trigger_reason": planner_reason, "tick": self.sim_step_count, "current_plan_id": getattr(self.current_plan, "plan_id", None), "trace_id": pending_trace_id})
+                    runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend, "effective_backend": sim_state.effective_brain_backend, "provider": sim_state.brain_provider}
+                    self._emit_event(sim_state, "planner_invocation_requested", {"tick": self.sim_step_count, "trigger_reason": planner_reason, "configured_backend": runtime.get("configured_backend", sim_state.configured_brain_backend), "effective_backend": runtime.get("effective_backend", sim_state.effective_brain_backend), "request_explanation": self._should_request_explanation(), "current_plan_id": getattr(self.current_plan, "plan_id", None), "current_active_goal_ids": [g.get("goal_id") for g in self.goal_stack[:6]], "trace_id": pending_trace_id})
+                    self._emit_event(sim_state, "brain_provider_request_started", {"configured_backend": runtime.get("configured_backend", sim_state.configured_brain_backend), "effective_backend": runtime.get("effective_backend", sim_state.effective_brain_backend), "provider_class": runtime["provider"].__class__.__name__, "trace_id": pending_trace_id})
+                    self._submit_planner_request_async(sim_state, planner_reason)
+            elif self._continue_cached_plan(sim_state, environment):
+                self.planner_state["stale_plan_reuse_count"] += 1
+                sim_state.logger.log_event(sim_state.time, "planner_skipped_due_to_cadence", {"agent": self.name, "reason": planner_reason})
+            elif self._run_rule_brain_controller(sim_state, environment, planner_reason):
+                sim_state.logger.log_event(sim_state.time, "planner_skipped_local_policy_refresh", {"agent": self.name, "reason": planner_reason})
             else:
-                self._emit_event(
-                    sim_state,
-                    "support_goal_update_skipped_due_to_cadence",
-                    {
-                        "next_update_in_s": round(
-                            max(0.0, float(self.support_goal_update_interval_s) - (now_ts - float(self.last_support_goal_update_time))),
-                            3,
-                        ),
-                    },
-                )
-            if not self.startup_state.get("initial_goal_selected"):
-                current = self.current_goal()
-                if current:
-                    self._emit_startup_once(sim_state, "initial_goal_selected", "initial_goal_selected", {"goal": current.get("goal"), "goal_id": current.get("goal_id")})
+                decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="no active cached plan while planner cadence skips", confidence=1.0)
+                self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment)
+                self.planner_state["ui_safe_fallback_count"] += 1
+                runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend}
+                self._emit_event(sim_state, "ui_safe_fallback_used", {"reason": planner_reason, "request_state": self.planner_state.get("status"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
+                sim_state.logger.log_event(sim_state.time, "planner_skipped_without_plan", {"agent": self.name, "reason": planner_reason})
+            if not rule_brain_runtime:
+                bootstrap_decision = self._bootstrap_override_decision(environment, sim_state=sim_state)
+                if bootstrap_decision is not None:
+                    self.current_action = self._translate_brain_decision_to_legacy_action(bootstrap_decision, environment, sim_state=sim_state)
+                    self._emit_event(
+                        sim_state,
+                        "fallback_bootstrap_action_forced",
+                        {
+                            "action_type": bootstrap_decision.selected_action.value,
+                            "target_id": bootstrap_decision.target_id,
+                            "activation_reason": self.fallback_bootstrap.get("activation_reason"),
+                        },
+                    )
+            self._advance_active_actions(dt, sim_state=sim_state)
+
+        self._apply_externalization_and_construction_effects(environment, sim_state, dt)
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        if (now_ts - float(self.last_support_goal_update_time)) >= float(self.support_goal_update_interval_s):
+            self._update_goal_states_from_runtime(sim_state, environment)
+            self.last_support_goal_update_time = now_ts
+        else:
+            self._emit_event(
+                sim_state,
+                "support_goal_update_skipped_due_to_cadence",
+                {
+                    "next_update_in_s": round(
+                        max(0.0, float(self.support_goal_update_interval_s) - (now_ts - float(self.last_support_goal_update_time))),
+                        3,
+                    ),
+                },
+            )
+        if not self.startup_state.get("initial_goal_selected"):
+            current = self.current_goal()
+            if current:
+                self._emit_startup_once(sim_state, "initial_goal_selected", "initial_goal_selected", {"goal": current.get("goal"), "goal_id": current.get("goal_id")})
 
         if self.target:
             self.move_toward(self.target, dt, environment, sim_state=sim_state)
@@ -6983,10 +6826,6 @@ class Agent:
                         },
                     )
 
-    def update_active_actions(self, dt):
-        """Legacy compatibility shim: use `_advance_active_actions(...)` in live path."""
-        self._advance_active_actions(dt, sim_state=None)
-
     def _advance_active_actions(self, dt, sim_state=None):
         completed = []
 
@@ -7392,17 +7231,6 @@ class Agent:
                 if random.random() < 0.95:  # Retry with high confidence
                     self.mental_model["knowledge"].try_infer_rules(group)
                     self.activity_log.append(f"Reinferred rule from tag [{tag}]")
-
-    def should_request_knowledge(self):
-        """Compatibility shim for legacy callers; delegates to legacy heuristic."""
-        return self._legacy_should_request_knowledge()
-
-    def _legacy_should_request_knowledge(self):
-        # Decide whether the agent should explicitly request help.
-        if not self.mental_model["knowledge"].rules and self.goal not in ["seek_info", "request_info"]:
-            return True
-        return False
-
 
     def compare_and_repair_construction(self, construction, sim_state=None):
         for project in construction.projects.values():
