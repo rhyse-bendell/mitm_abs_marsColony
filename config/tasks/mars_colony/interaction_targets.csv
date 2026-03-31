@@ -1,5 +1,6 @@
 target_id,kind,zone_id,object_id,role_scope,enabled
 Team_Info,information,Zone_Team_Info,Team_Info,all,True
+whiteboard,artifact,Zone_Whiteboard,Whiteboard,all,True
 Engineer_Info,information,Zone_Engineer_Info,Engineer_Info,all,True
 Botanist_Info,information,Zone_Botanist_Info,Botanist_Info,all,True
 Architect_Info,information,Zone_Architect_Info,Architect_Info,all,True
