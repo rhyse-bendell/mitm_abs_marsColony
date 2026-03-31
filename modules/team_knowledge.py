@@ -242,7 +242,147 @@ class TeamKnowledgeManager:
             )
         return artifact
 
+    @staticmethod
+    def _team_plan_artifact_id(plan_id: str) -> str:
+        return f"team_plan:{plan_id}"
+
+    @staticmethod
+    def _team_plan_summary(content: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "plan_id": str(content.get("plan_id", "")),
+            "status": str(content.get("status", "")),
+            "goal_summary": content.get("goal_summary", ""),
+            "project_targets": list(content.get("project_targets", [])),
+            "assignments_by_role": dict(content.get("assignments_by_role", {})),
+            "last_plan_event": content.get("last_plan_event"),
+            "plan_event_time": content.get("plan_event_time"),
+        }
+
+    def list_team_plans(self) -> List[Dict[str, Any]]:
+        plans: List[Dict[str, Any]] = []
+        for artifact in self.artifacts.values():
+            if artifact.artifact_type != "team_plan" or not isinstance(artifact.content, dict):
+                continue
+            content = dict(artifact.content)
+            summary = self._team_plan_summary(content)
+            summary["artifact_id"] = artifact.artifact_id
+            summary["author"] = artifact.author
+            summary["created_at"] = artifact.created_at
+            plans.append(summary)
+        plans.sort(key=lambda item: float(item.get("plan_event_time") or item.get("created_at") or 0.0), reverse=True)
+        return plans
+
+    def get_active_team_plan(self) -> Optional[Dict[str, Any]]:
+        """
+        Deterministic active-plan selection:
+        1) newest committed team plan by plan_event_time/created_at
+        2) else newest proposed team plan by plan_event_time/created_at
+        """
+        plans = self.list_team_plans()
+        committed = [p for p in plans if p.get("status") == "committed"]
+        if committed:
+            return committed[0]
+        proposed = [p for p in plans if p.get("status") == "proposed"]
+        if proposed:
+            return proposed[0]
+        return None
+
+    def propose_team_plan(
+        self,
+        *,
+        plan_id: str,
+        proposed_by: str,
+        sim_time: float,
+        goal_ids: Optional[List[str]] = None,
+        goal_summary: str = "",
+        trigger_reason: str = "",
+        project_targets: Optional[List[str]] = None,
+        assignments_by_role: Optional[Dict[str, Any]] = None,
+        evidence_refs: Optional[List[str]] = None,
+        blocked_reasons: Optional[List[str]] = None,
+        success_criteria: Optional[List[str]] = None,
+        review_at: Optional[float] = None,
+        expires_at: Optional[float] = None,
+        supporters: Optional[List[str]] = None,
+        opposers: Optional[List[str]] = None,
+        consulted_by: Optional[List[str]] = None,
+        supersedes_plan_id: Optional[str] = None,
+    ) -> TeamArtifact:
+        artifact_id = self._team_plan_artifact_id(plan_id)
+        existing = self.artifacts.get(artifact_id)
+        previous = dict(existing.content) if existing and isinstance(existing.content, dict) else {}
+        event_name = "team_plan_updated" if existing is not None else "team_plan_proposed"
+        content = {
+            "plan_id": plan_id,
+            "status": "proposed",
+            "proposed_by": proposed_by or previous.get("proposed_by"),
+            "proposed_at": previous.get("proposed_at", sim_time),
+            "committed_by": previous.get("committed_by"),
+            "committed_at": previous.get("committed_at"),
+            "goal_ids": list(goal_ids if goal_ids is not None else previous.get("goal_ids", [])),
+            "goal_summary": goal_summary or str(previous.get("goal_summary", "")),
+            "trigger_reason": trigger_reason or str(previous.get("trigger_reason", "")),
+            "project_targets": list(project_targets if project_targets is not None else previous.get("project_targets", [])),
+            "assignments_by_role": dict(assignments_by_role if assignments_by_role is not None else previous.get("assignments_by_role", {})),
+            "evidence_refs": list(evidence_refs if evidence_refs is not None else previous.get("evidence_refs", [])),
+            "blocked_reasons": list(blocked_reasons if blocked_reasons is not None else previous.get("blocked_reasons", [])),
+            "success_criteria": list(success_criteria if success_criteria is not None else previous.get("success_criteria", [])),
+            "review_at": review_at if review_at is not None else previous.get("review_at"),
+            "expires_at": expires_at if expires_at is not None else previous.get("expires_at"),
+            "last_plan_event": event_name,
+            "plan_event_time": sim_time,
+            "supporters": list(supporters if supporters is not None else previous.get("supporters", [])),
+            "opposers": list(opposers if opposers is not None else previous.get("opposers", [])),
+            "consulted_by": list(consulted_by if consulted_by is not None else previous.get("consulted_by", [])),
+            "supersedes_plan_id": supersedes_plan_id if supersedes_plan_id is not None else previous.get("supersedes_plan_id"),
+        }
+        summary = f"team_plan {plan_id} proposed: {content['goal_summary']}".strip()
+        if existing is None:
+            artifact = self.externalize_artifact(
+                artifact_id=artifact_id,
+                artifact_type="team_plan",
+                summary=summary,
+                content=content,
+                author=proposed_by or "system",
+                sim_time=sim_time,
+                source="team_plan_lifecycle",
+                contributors=[proposed_by] if proposed_by else [],
+                validation_state="tentative",
+            )
+        else:
+            existing.summary = summary
+            existing.content = content
+            existing.source = "team_plan_lifecycle"
+            if proposed_by and proposed_by not in existing.contributors:
+                existing.contributors.append(proposed_by)
+            existing.validation_state = "tentative"
+            artifact = existing
+        self.recent_updates.append({"event": event_name, "artifact_id": artifact_id, "plan_id": plan_id, "author": proposed_by, "time": sim_time})
+        if event_name != "team_plan_proposed":
+            self.recent_updates.append({"event": "team_plan_proposed", "artifact_id": artifact_id, "plan_id": plan_id, "author": proposed_by, "time": sim_time})
+        return artifact
+
+    def commit_team_plan(self, *, plan_id: str, committed_by: str, sim_time: float) -> Optional[TeamArtifact]:
+        artifact_id = self._team_plan_artifact_id(plan_id)
+        artifact = self.artifacts.get(artifact_id)
+        if artifact is None:
+            return None
+        content = dict(artifact.content or {})
+        content["status"] = "committed"
+        content["committed_by"] = committed_by
+        content["committed_at"] = sim_time
+        content["last_plan_event"] = "team_plan_committed"
+        content["plan_event_time"] = sim_time
+        artifact.content = content
+        artifact.summary = f"team_plan {plan_id} committed: {content.get('goal_summary', '')}".strip()
+        artifact.validation_state = "validated"
+        if committed_by and committed_by not in artifact.contributors:
+            artifact.contributors.append(committed_by)
+        self.recent_updates.append({"event": "team_plan_committed", "artifact_id": artifact_id, "plan_id": plan_id, "author": committed_by, "time": sim_time})
+        return artifact
+
     def summarize(self) -> Dict[str, Any]:
+        team_plan_summaries = self.list_team_plans()
         return {
             "validated_knowledge": dict(self.validated_knowledge),
             "artifact_summaries": {
@@ -257,5 +397,7 @@ class TeamKnowledgeManager:
                 }
                 for aid, artifact in self.artifacts.items()
             },
+            "active_team_plan": self.get_active_team_plan(),
+            "team_plan_summaries": team_plan_summaries,
             "recent_updates": self.recent_updates[-10:],
         }

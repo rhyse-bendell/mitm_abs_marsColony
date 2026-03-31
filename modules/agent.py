@@ -5970,17 +5970,36 @@ class Agent:
                 fidelity = max(self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5), self._trait_value("rule_accuracy"))
                 if rules and fidelity < 0.5:
                     rules = rules[:-1]
-                sim_state.team_knowledge_manager.externalize_artifact(
-                    artifact_id=artifact_id,
-                    artifact_type="whiteboard_plan",
-                    summary=f"Plan externalized by {self.name}",
-                    content={"rules": rules, "goal": self.goal},
-                    author=self.name,
-                    sim_time=sim_state.time,
-                    contributors=[self.name],
-                    knowledge_summary=rules,
-                    validation_state="validated" if fidelity >= 0.7 else "tentative",
-                )
+                if hasattr(sim_state.team_knowledge_manager, "propose_team_plan"):
+                    plan_id = f"{self.name}-{int(sim_state.time*10)}"
+                    sim_state.team_knowledge_manager.propose_team_plan(
+                        plan_id=plan_id,
+                        proposed_by=self.name,
+                        sim_time=sim_state.time,
+                        goal_ids=[str(self.goal)] if self.goal else [],
+                        goal_summary=f"{self.name} proposes next logistics/build objective",
+                        trigger_reason="no_active_plan",
+                        project_targets=[str(action.get('project_id') or "active_construction")],
+                        assignments_by_role={self.role: "lead_next_action"},
+                        evidence_refs=rules,
+                        blocked_reasons=["no_active_plan"],
+                        success_criteria=["establish coordinated project direction", "resume concrete execution"],
+                        review_at=sim_state.time + 20.0,
+                        expires_at=sim_state.time + 90.0,
+                        supporters=[self.name],
+                    )
+                else:
+                    sim_state.team_knowledge_manager.externalize_artifact(
+                        artifact_id=artifact_id,
+                        artifact_type="whiteboard_plan",
+                        summary=f"Plan externalized by {self.name}",
+                        content={"rules": rules, "goal": self.goal},
+                        author=self.name,
+                        sim_time=sim_state.time,
+                        contributors=[self.name],
+                        knowledge_summary=rules,
+                        validation_state="validated" if fidelity >= 0.7 else "tentative",
+                    )
                 _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": artifact_id})
                 sim_state.logger.log_event(sim_state.time, "externalization_created", {"agent": self.name, "artifact_id": artifact_id, "type": "whiteboard_plan"})
 
