@@ -377,24 +377,69 @@ class BrainContextBuilder:
             aid for aid in agent.memory_seen_packets if isinstance(aid, str) and aid in sim_state.team_knowledge_manager.artifacts
         }
         artifact_summaries = []
+        team_plan_summaries = []
         for aid, artifact in sim_state.team_knowledge_manager.artifacts.items():
-            artifact_summaries.append(
-                {
-                    "artifact_id": aid,
-                    "type": artifact.artifact_type,
-                    "summary": artifact.summary,
-                    "author": artifact.author,
-                    "contributors": list(getattr(artifact, "contributors", [])),
-                    "knowledge_summary": list(getattr(artifact, "knowledge_summary", [])),
-                    "validation_state": getattr(artifact, "validation_state", "unvalidated"),
-                    "uptake_count": artifact.uptake_count,
-                    "consulted_by": list(getattr(artifact, "consulted_by", [])),
-                    "inspected_by_agent": aid in inspected_artifact_ids,
-                    "adopted_by_agent": aid in inspected_artifact_ids,
+            payload = {
+                "artifact_id": aid,
+                "type": artifact.artifact_type,
+                "summary": artifact.summary,
+                "author": artifact.author,
+                "contributors": list(getattr(artifact, "contributors", [])),
+                "knowledge_summary": list(getattr(artifact, "knowledge_summary", [])),
+                "validation_state": getattr(artifact, "validation_state", "unvalidated"),
+                "uptake_count": artifact.uptake_count,
+                "consulted_by": list(getattr(artifact, "consulted_by", [])),
+                "inspected_by_agent": aid in inspected_artifact_ids,
+                "adopted_by_agent": aid in inspected_artifact_ids,
+            }
+            if artifact.artifact_type == "team_plan" and isinstance(getattr(artifact, "content", None), dict):
+                content = dict(artifact.content)
+                payload["team_plan"] = {
+                    "plan_id": content.get("plan_id"),
+                    "status": content.get("status"),
+                    "goal_ids": list(content.get("goal_ids", [])),
+                    "goal_summary": content.get("goal_summary"),
+                    "project_targets": list(content.get("project_targets", [])),
+                    "assignments_by_role": dict(content.get("assignments_by_role", {})),
+                    "trigger_reason": content.get("trigger_reason"),
+                    "blocked_reasons": list(content.get("blocked_reasons", [])),
+                    "supporters": list(content.get("supporters", [])),
+                    "opposers": list(content.get("opposers", [])),
+                    "review_at": content.get("review_at"),
+                    "expires_at": content.get("expires_at"),
+                    "last_plan_event": content.get("last_plan_event"),
+                    "plan_event_time": content.get("plan_event_time"),
                 }
-            )
+                team_plan_summaries.append({"artifact_id": aid, **payload["team_plan"]})
+            artifact_summaries.append(payload)
 
-        validated_plan_exists = any(a.artifact_type == "plan" for a in sim_state.team_knowledge_manager.artifacts.values())
+        team_knowledge_summary = sim_state.team_knowledge_manager.summarize()
+        active_team_plan = dict(team_knowledge_summary.get("active_team_plan") or {})
+        team_plan_recent_updates = list(team_knowledge_summary.get("team_plan_recent_updates", []))
+        if not team_plan_summaries:
+            team_plan_summaries = list(team_knowledge_summary.get("team_plan_summaries", []))
+        team_plan_summaries = sorted(
+            team_plan_summaries,
+            key=lambda item: float(item.get("plan_event_time") or 0.0),
+            reverse=True,
+        )[:6]
+        my_role_assignment = None
+        if active_team_plan:
+            my_role_assignment = dict(active_team_plan.get("assignments_by_role", {})).get(agent.role)
+        validated_plan_exists = any(
+            a.artifact_type in {"plan", "team_plan"}
+            and (
+                a.artifact_type == "plan"
+                or (isinstance(getattr(a, "content", None), dict) and str(a.content.get("status", "")).lower() in {"proposed", "committed"})
+            )
+            for a in sim_state.team_knowledge_manager.artifacts.values()
+        )
+        committed_team_plan_exists = any(
+            a.artifact_type == "team_plan"
+            and isinstance(getattr(a, "content", None), dict)
+            and str(a.content.get("status", "")).lower() == "committed"
+            for a in sim_state.team_knowledge_manager.artifacts.values()
+        )
         teammate_help_signals = {
             other.name: (
                 bool(other.known_gaps)
@@ -433,7 +478,7 @@ class BrainContextBuilder:
             if isinstance(getattr(artifact, "content", None), dict) and str(artifact.artifact_id).startswith("construction:")
         ]
         team_state = {
-            "team_shared_knowledge": sim_state.team_knowledge_manager.summarize(),
+            "team_shared_knowledge": team_knowledge_summary,
             "teammate_roles": {other.name: other.role for other in sim_state.agents if other.name != agent.name},
             "teammate_inferred_goals": {
                 teammate: model.get("goals", []) for teammate, model in agent.theory_of_mind.items()
@@ -441,8 +486,12 @@ class BrainContextBuilder:
             "tom_summary": agent.theory_of_mind,
             "recent_shared_updates": recent_updates[-5:],
             "recent_construction_updates": recent_construction_updates,
-            "plan_readiness": "validated_shared_plan" if validated_plan_exists else "partial_or_fragmentary_plan",
+            "plan_readiness": "validated_shared_plan" if committed_team_plan_exists else ("proposed_shared_plan" if validated_plan_exists else "partial_or_fragmentary_plan"),
             "externalized_artifacts": artifact_summaries,
+            "active_team_plan": active_team_plan,
+            "team_plan_summaries": team_plan_summaries,
+            "my_role_assignment": my_role_assignment,
+            "team_plan_recent_updates": team_plan_recent_updates[-8:],
             "construction_artifacts": construction_artifacts,
             "teammate_help_signals": teammate_help_signals,
             "derivation_events": list(getattr(agent, "derivation_events", [])[-5:]),

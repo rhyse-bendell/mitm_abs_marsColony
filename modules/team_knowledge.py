@@ -251,9 +251,16 @@ class TeamKnowledgeManager:
         return {
             "plan_id": str(content.get("plan_id", "")),
             "status": str(content.get("status", "")),
+            "goal_ids": list(content.get("goal_ids", [])),
             "goal_summary": content.get("goal_summary", ""),
             "project_targets": list(content.get("project_targets", [])),
             "assignments_by_role": dict(content.get("assignments_by_role", {})),
+            "trigger_reason": content.get("trigger_reason", ""),
+            "blocked_reasons": list(content.get("blocked_reasons", [])),
+            "supporters": list(content.get("supporters", [])),
+            "opposers": list(content.get("opposers", [])),
+            "review_at": content.get("review_at"),
+            "expires_at": content.get("expires_at"),
             "last_plan_event": content.get("last_plan_event"),
             "plan_event_time": content.get("plan_event_time"),
         }
@@ -381,6 +388,96 @@ class TeamKnowledgeManager:
         self.recent_updates.append({"event": "team_plan_committed", "artifact_id": artifact_id, "plan_id": plan_id, "author": committed_by, "time": sim_time})
         return artifact
 
+    def record_team_plan_response(
+        self,
+        *,
+        plan_id: str,
+        responder: str,
+        response_type: str,
+        sim_time: float,
+        role: Optional[str] = None,
+        reason: str = "",
+    ) -> Optional[TeamArtifact]:
+        artifact_id = self._team_plan_artifact_id(plan_id)
+        artifact = self.artifacts.get(artifact_id)
+        if artifact is None:
+            return None
+        content = dict(artifact.content or {})
+        normalized = str(response_type or "").strip().lower()
+        supporters = set(content.get("supporters", []) or [])
+        opposers = set(content.get("opposers", []) or [])
+        clarification_requests = list(content.get("clarification_requests", []) or [])
+        assignment_ack = dict(content.get("assignment_acknowledged_by", {}) or {})
+        assignment_declined = dict(content.get("assignment_declined_by", {}) or {})
+
+        event_name = "team_plan_updated"
+        if normalized == "agree":
+            supporters.add(responder)
+            opposers.discard(responder)
+            event_name = "team_plan_agreed"
+        elif normalized == "disagree":
+            opposers.add(responder)
+            supporters.discard(responder)
+            event_name = "team_plan_disagreed"
+        elif normalized == "request_clarification":
+            clarification_requests.append({"agent": responder, "role": role, "reason": reason, "time": sim_time})
+            event_name = "team_plan_clarification_requested"
+        elif normalized == "assignment_accept":
+            assignment_ack[str(role or responder)] = {"agent": responder, "reason": reason, "time": sim_time}
+            event_name = "team_plan_assignment_accepted"
+        elif normalized == "assignment_decline":
+            assignment_declined[str(role or responder)] = {"agent": responder, "reason": reason, "time": sim_time}
+            event_name = "team_plan_assignment_declined"
+
+        content["supporters"] = sorted(supporters)
+        content["opposers"] = sorted(opposers)
+        content["clarification_requests"] = clarification_requests[-10:]
+        content["assignment_acknowledged_by"] = assignment_ack
+        content["assignment_declined_by"] = assignment_declined
+        content["last_plan_event"] = event_name
+        content["plan_event_time"] = sim_time
+        artifact.content = content
+        artifact.summary = f"team_plan {plan_id} {content.get('status', 'proposed')}: {content.get('goal_summary', '')}".strip()
+        if responder and responder not in artifact.contributors:
+            artifact.contributors.append(responder)
+
+        self.recent_updates.append(
+            {"event": event_name, "artifact_id": artifact_id, "plan_id": plan_id, "agent": responder, "role": role, "reason": reason, "time": sim_time}
+        )
+        self.recent_updates.append(
+            {"event": "team_plan_updated", "artifact_id": artifact_id, "plan_id": plan_id, "agent": responder, "response_type": normalized, "time": sim_time}
+        )
+        return artifact
+
+    def update_team_plan_assignments(
+        self,
+        *,
+        plan_id: str,
+        assignments_by_role: Dict[str, Any],
+        updated_by: str,
+        sim_time: float,
+        reason: str = "",
+    ) -> Optional[TeamArtifact]:
+        artifact_id = self._team_plan_artifact_id(plan_id)
+        artifact = self.artifacts.get(artifact_id)
+        if artifact is None:
+            return None
+        content = dict(artifact.content or {})
+        content["assignments_by_role"] = dict(assignments_by_role or {})
+        content["last_assignment_revision"] = {"updated_by": updated_by, "reason": reason, "time": sim_time}
+        content["last_plan_event"] = "team_plan_assignments_updated"
+        content["plan_event_time"] = sim_time
+        artifact.content = content
+        if updated_by and updated_by not in artifact.contributors:
+            artifact.contributors.append(updated_by)
+        self.recent_updates.append(
+            {"event": "team_plan_assignments_updated", "artifact_id": artifact_id, "plan_id": plan_id, "agent": updated_by, "reason": reason, "time": sim_time}
+        )
+        self.recent_updates.append(
+            {"event": "team_plan_updated", "artifact_id": artifact_id, "plan_id": plan_id, "agent": updated_by, "reason": reason, "time": sim_time}
+        )
+        return artifact
+
     def summarize(self) -> Dict[str, Any]:
         team_plan_summaries = self.list_team_plans()
         return {
@@ -399,5 +496,6 @@ class TeamKnowledgeManager:
             },
             "active_team_plan": self.get_active_team_plan(),
             "team_plan_summaries": team_plan_summaries,
+            "team_plan_recent_updates": [u for u in self.recent_updates if str(u.get("event", "")).startswith("team_plan_")][-12:],
             "recent_updates": self.recent_updates[-10:],
         }
