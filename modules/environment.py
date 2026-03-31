@@ -47,6 +47,14 @@ RAW_OBJECTS = {
         "passable": True,
         "access_radius": DEFAULT_INFO_ACCESS_RADIUS
     },
+    "Whiteboard": {
+        "type": "rect",
+        "position": (5.8, 6.4),
+        "size": (0.9, 0.5),
+        "label": "Whiteboard",
+        "passable": True,
+        "access_radius": DEFAULT_INFO_ACCESS_RADIUS,
+    },
     "Engineer_Info": {
         "type": "rect",
         "position": (3.25, 0.9),
@@ -129,6 +137,7 @@ RAW_OBJECTS = {
 
 ZONES = {
     "Zone_Team_Info": {"corners": [(7.0, 6.4), (9.0, 6.9)]},
+    "Zone_Whiteboard": {"corners": [(5.8, 6.4), (6.7, 6.9)]},
     "Zone_Engineer_Info": {"corners": [(3.25, 0.9), (3.65, 1.3)]},
     "Zone_Botanist_Info": {"corners": [(4.75, 0.4), (5.15, 0.8)]},
     "Zone_Architect_Info": {"corners": [(6.25, 0.9), (6.65, 1.3)]},
@@ -141,6 +150,7 @@ ZONES = {
 
 INTERACTION_TARGETS = {
     "Team_Info": {"kind": "information", "zone": "Zone_Team_Info"},
+    "whiteboard": {"kind": "artifact", "zone": "Zone_Whiteboard", "object": "Whiteboard"},
     "Engineer_Info": {"kind": "information", "zone": "Zone_Engineer_Info"},
     "Botanist_Info": {"kind": "information", "zone": "Zone_Botanist_Info"},
     "Architect_Info": {"kind": "information", "zone": "Zone_Architect_Info"},
@@ -989,6 +999,19 @@ class Environment:
                     return {"accessible": True, "reason": "in_work_zone"}
                 return {"accessible": True, "reason": "near_table"}
             return {"accessible": False, "reason": "not_in_work_zone_or_radius"}
+
+        if target.get("kind") == "artifact":
+            zone_name = target.get("zone")
+            object_name = target.get("object")
+            obj = self.objects.get(object_name or "")
+            access_radius = (obj or {}).get("access_radius", DEFAULT_INFO_ACCESS_RADIUS)
+            if zone_name and zone_name in self.zones and self._point_in_zone(position, self.zones[zone_name]["corners"]):
+                return {"accessible": True, "reason": "in_artifact_zone"}
+            if zone_name and zone_name in self.zones and self._nearest_distance_to_zone(position, zone_name) <= access_radius:
+                return {"accessible": True, "reason": "near_artifact_surface"}
+            if object_name and obj and self.is_near_object(position, object_name, threshold=access_radius):
+                return {"accessible": True, "reason": "near_artifact_surface"}
+            return {"accessible": False, "reason": "not_in_artifact_zone_or_radius"}
 
         return {"accessible": False, "reason": "unsupported_target_kind"}
 

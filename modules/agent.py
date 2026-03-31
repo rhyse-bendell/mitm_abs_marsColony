@@ -5439,7 +5439,13 @@ class Agent:
             return [action]
 
         if decision.target_id:
-            interaction_target = environment.get_interaction_target_position(decision.target_id, from_position=self.position)
+            lookup_target_id = decision.target_id
+            if (
+                decision.selected_action in {ExecutableActionType.EXTERNALIZE_PLAN, ExecutableActionType.CONSULT_TEAM_ARTIFACT}
+                and str(lookup_target_id).strip().lower() == "team_artifact"
+            ):
+                lookup_target_id = "whiteboard"
+            interaction_target = environment.get_interaction_target_position(lookup_target_id, from_position=self.position)
             if interaction_target is not None:
                 action["target"] = interaction_target
             if decision.selected_action in {
