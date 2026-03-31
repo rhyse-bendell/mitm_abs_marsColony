@@ -434,6 +434,17 @@ class Agent:
             "no_effect_streak": 0,
             "last_signature": None,
         }
+        self.team_plan_state = {
+            "last_adopted_plan_id": None,
+            "last_adopted_at": 0.0,
+            "adoption_reasons": {},
+            "team_plan_commit_until": 0.0,
+            "team_plan_assignment_commit_until": 0.0,
+            "assignment": None,
+            "assignment_target": None,
+            "pending_outbound_plan_responses": [],
+            "commitment_expired_emitted": False,
+        }
         self.progress_tracker = {
             "last_progress_time": -1.0,
             "last_progress_kind": None,
@@ -2810,6 +2821,158 @@ class Agent:
 
     def pop_goal(self):
         self.goal_manager.pop_goal()
+
+    def _get_active_team_plan(self, sim_state):
+        if sim_state is None:
+            return None
+        summary = sim_state.team_knowledge_manager.summarize() if hasattr(sim_state, "team_knowledge_manager") else {}
+        active = summary.get("active_team_plan")
+        if isinstance(active, dict) and active:
+            return dict(active)
+        return None
+
+    def _get_my_team_plan_assignment(self, sim_state, plan_summary=None):
+        summary = dict(plan_summary or self._get_active_team_plan(sim_state) or {})
+        assignments = dict(summary.get("assignments_by_role", {}) or {})
+        assignment = assignments.get(self.role)
+        if isinstance(assignment, str):
+            return {"task": assignment}
+        if isinstance(assignment, dict):
+            return assignment
+        return None
+
+    def _team_plan_requires_uptake(self, sim_state):
+        plan_summary = self._get_active_team_plan(sim_state)
+        if not plan_summary:
+            return False
+        if str(plan_summary.get("status", "")).lower() != "committed":
+            return False
+        plan_id = str(plan_summary.get("plan_id", "") or "")
+        if not plan_id:
+            return False
+        current = str(self.team_plan_state.get("last_adopted_plan_id") or "")
+        if current != plan_id:
+            return True
+        commit_until = float(self.team_plan_state.get("team_plan_commit_until", 0.0) or 0.0)
+        return float(getattr(sim_state, "time", 0.0)) > commit_until
+
+    def _normalize_team_plan_assignment(self, assignment):
+        text = ""
+        project_target = None
+        if isinstance(assignment, dict):
+            text = str(assignment.get("task") or assignment.get("type") or assignment.get("action") or "").lower()
+            project_target = assignment.get("project_target") or assignment.get("target_project") or assignment.get("target")
+        else:
+            text = str(assignment or "").lower()
+        if any(token in text for token in {"validate", "verification", "check"}):
+            return "validate", project_target
+        if any(token in text for token in {"transport", "logistics", "deliver"}):
+            return "transport", project_target
+        if any(token in text for token in {"repair", "correct", "fix"}):
+            return "repair", project_target
+        if any(token in text for token in {"consult", "inspect", "refresh", "observe"}):
+            return "epistemic_refresh", project_target
+        if any(token in text for token in {"build", "construct", "continue"}):
+            return "build", project_target
+        return "support", project_target
+
+    def _evaluate_team_plan_fit(self, sim_state, plan_summary):
+        assignment = self._get_my_team_plan_assignment(sim_state, plan_summary)
+        plan_status = str((plan_summary or {}).get("status", "")).lower()
+        blocked = list((plan_summary or {}).get("blocked_reasons", []) or [])
+        if not plan_status:
+            return "request_clarification", "missing_plan_status"
+        if blocked and self.rule_accuracy >= 0.45:
+            return "disagree", "plan_reports_blockers"
+        if assignment is None and float(self.goal_alignment) < 0.35:
+            return "request_clarification", "no_role_assignment"
+        if assignment is None:
+            return "agree", "plan_aligns_without_direct_assignment"
+        semantic, _project_target = self._normalize_team_plan_assignment(assignment)
+        if semantic == "support":
+            return "request_clarification", "assignment_underspecified"
+        if float(self.help_tendency) >= 0.35:
+            return "assignment_accept", "assignment_executable_for_role"
+        return "assignment_decline", "low_help_tendency"
+
+    def _record_team_plan_commitment_tick(self, sim_state):
+        if sim_state is None:
+            return
+        now_ts = float(getattr(sim_state, "time", 0.0))
+        commit_until = float(self.team_plan_state.get("team_plan_commit_until", 0.0) or 0.0)
+        if commit_until > 0.0 and now_ts <= commit_until:
+            self.post_acquisition_stabilization_until = max(float(self.post_acquisition_stabilization_until or 0.0), commit_until)
+        elif commit_until > 0.0 and not bool(self.team_plan_state.get("commitment_expired_emitted")):
+            self.team_plan_state["commitment_expired_emitted"] = True
+            self._emit_event(
+                sim_state,
+                "team_plan_commitment_expired",
+                {"plan_id": self.team_plan_state.get("last_adopted_plan_id"), "agent_role": self.role, "reason": "commitment_window_elapsed"},
+            )
+
+    def _adopt_committed_team_plan(self, sim_state, plan_summary, reason="consulted_committed_team_plan"):
+        if sim_state is None or not isinstance(plan_summary, dict):
+            return
+        plan_id = str(plan_summary.get("plan_id", "") or "")
+        if not plan_id:
+            return
+        artifact_id = f"team_plan:{plan_id}"
+        sim_state.team_knowledge_manager.adopt_artifact(artifact_id, self.name, sim_state.time)
+        self.memory_seen_packets.add(artifact_id)
+        self.team_plan_state["last_adopted_plan_id"] = plan_id
+        self.team_plan_state["last_adopted_at"] = float(sim_state.time)
+        self.team_plan_state["adoption_reasons"][plan_id] = str(reason)
+        self.team_plan_state["team_plan_commit_until"] = float(sim_state.time) + 16.0
+        self.team_plan_state["team_plan_assignment_commit_until"] = float(sim_state.time) + 12.0
+        self.team_plan_state["commitment_expired_emitted"] = False
+        self._emit_event(
+            sim_state,
+            "team_plan_adopted_locally",
+            {"plan_id": plan_id, "agent_role": self.role, "project_targets": list(plan_summary.get("project_targets", []) or []), "reason": reason},
+        )
+        self._emit_event(
+            sim_state,
+            "team_plan_commitment_started",
+            {"plan_id": plan_id, "agent_role": self.role, "team_plan_commit_until": self.team_plan_state["team_plan_commit_until"], "team_plan_assignment_commit_until": self.team_plan_state["team_plan_assignment_commit_until"], "reason": reason},
+        )
+
+        goal_summary = str(plan_summary.get("goal_summary", "") or "").strip()
+        goal_id = f"team_plan:{plan_id}"
+        goal_label = goal_summary or f"execute team plan {plan_id}"
+        self._upsert_goal_record(
+            label=goal_label,
+            goal_id=goal_id,
+            source="teammate_or_artifact_influenced",
+            status="active",
+            priority=0.78 + (0.15 * float(self.goal_alignment)),
+            goal_level="phase",
+            goal_type="coordination",
+            evidence=[artifact_id],
+            sim_state=sim_state,
+            reason="team_plan_adoption_goal_redirect",
+        )
+        self._refresh_goal_stack_view()
+        self._emit_event(sim_state, "team_plan_goal_redirect_applied", {"plan_id": plan_id, "goal_id": goal_id, "goal_label": goal_label, "agent_role": self.role, "reason": reason})
+
+        assignment = self._get_my_team_plan_assignment(sim_state, plan_summary)
+        if assignment is None:
+            return
+        semantic, explicit_project_target = self._normalize_team_plan_assignment(assignment)
+        project_targets = list(plan_summary.get("project_targets", []) or [])
+        preferred_target_id = explicit_project_target or (project_targets[0] if project_targets else None)
+        if isinstance(preferred_target_id, str):
+            preferred_pos = sim_state.environment.get_interaction_target_position(preferred_target_id, from_position=self.position)
+            if preferred_pos is not None:
+                self.target = preferred_pos
+        self.team_plan_state["assignment"] = assignment
+        self.team_plan_state["assignment_target"] = preferred_target_id
+        self.active_intent["category"] = f"team_plan:{semantic}"
+        self.active_intent["min_commit_until"] = max(float(self.active_intent.get("min_commit_until", 0.0) or 0.0), float(self.team_plan_state["team_plan_assignment_commit_until"]))
+        self._emit_event(
+            sim_state,
+            "team_plan_assignment_applied",
+            {"plan_id": plan_id, "agent_role": self.role, "assignment": assignment, "assignment_semantic": semantic, "project_targets": project_targets, "target_project": preferred_target_id, "reason": reason},
+        )
 
     def _seed_task_defined_goals(self, sim_state=None):
         if not self.task_model:
@@ -5775,6 +5938,11 @@ class Agent:
         else:
             self.perceive_environment(sim_state)
             self.sim_step_count += 1
+            self._record_team_plan_commitment_tick(sim_state)
+            if self._team_plan_requires_uptake(sim_state):
+                active_team_plan = self._get_active_team_plan(sim_state)
+                if isinstance(active_team_plan, dict):
+                    self._adopt_committed_team_plan(sim_state, active_team_plan, reason="active_team_plan_requires_uptake")
             rule_brain_runtime = self._is_rule_brain_runtime(sim_state)
             if not planner_lifecycle_already_polled:
                 self._check_inflight_timeout(sim_state)
@@ -6013,12 +6181,56 @@ class Agent:
                 if artifacts:
                     preferred = sorted(
                         artifacts.values(),
-                        key=lambda a: ((a.validation_state == "validated") and self._trait_value("goal_alignment"), a.uptake_count),
+                        key=lambda a: (
+                            a.artifact_type == "team_plan" and str((a.content or {}).get("status", "")).lower() == "committed",
+                            a.validation_state == "validated",
+                            self._trait_value("goal_alignment"),
+                            a.uptake_count,
+                        ),
                         reverse=True,
                     )[0]
                     adopt_prob = self._hook_value("artifact_use", "adopt_externalized_knowledge", "adoption_weight", default=0.5)
                     if random.random() <= adopt_prob:
                         sim_state.team_knowledge_manager.adopt_artifact(preferred.artifact_id, self.name, sim_state.time)
+                    if preferred.artifact_type == "team_plan" and isinstance(preferred.content, dict):
+                        plan_summary = sim_state.team_knowledge_manager._team_plan_summary(dict(preferred.content))
+                        if str(plan_summary.get("status", "")).lower() == "committed":
+                            self._adopt_committed_team_plan(sim_state, plan_summary, reason="consult_team_artifact")
+                        else:
+                            response_type, response_reason = self._evaluate_team_plan_fit(sim_state, plan_summary)
+                            if hasattr(sim_state.team_knowledge_manager, "record_team_plan_response"):
+                                sim_state.team_knowledge_manager.record_team_plan_response(
+                                    plan_id=str(plan_summary.get("plan_id", "")),
+                                    responder=self.name,
+                                    response_type=response_type,
+                                    sim_time=sim_state.time,
+                                    role=self.role,
+                                    reason=response_reason,
+                                )
+                            response_msg = {
+                                "type": CommunicationIntent.TPA.value,
+                                "sender": self.name,
+                                "content": {
+                                    "plan_id": str(plan_summary.get("plan_id", "")),
+                                    "response_type": response_type,
+                                    "reason": response_reason,
+                                    "agent_role": self.role,
+                                    "assignment": self._get_my_team_plan_assignment(sim_state, plan_summary),
+                                },
+                            }
+                            self.team_plan_state.setdefault("pending_outbound_plan_responses", []).append(response_msg)
+                            event_map = {
+                                "agree": "team_plan_agreed",
+                                "disagree": "team_plan_disagreed",
+                                "request_clarification": "team_plan_clarification_requested",
+                                "assignment_accept": "team_plan_assignment_accepted",
+                                "assignment_decline": "team_plan_assignment_declined",
+                            }
+                            self._emit_event(
+                                sim_state,
+                                event_map.get(response_type, "team_plan_updated"),
+                                {"plan_id": str(plan_summary.get("plan_id", "")), "agent_role": self.role, "assignment": self._get_my_team_plan_assignment(sim_state, plan_summary), "project_targets": list(plan_summary.get("project_targets", [])), "reason": response_reason},
+                            )
                     self.activity_log.append(f"Consulted shared artifact {preferred.artifact_id}")
                     sim_state.logger.log_event(sim_state.time, "artifact_consulted", {"agent": self.name, "artifact_id": preferred.artifact_id})
                     _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": preferred.artifact_id})
@@ -6728,11 +6940,35 @@ class Agent:
 
     def communicate_with(self, other_agent, sim_state=None):
         messages = self.generate_message()
+        if sim_state is not None:
+            active_team_plan = self._get_active_team_plan(sim_state)
+            if isinstance(active_team_plan, dict) and active_team_plan:
+                plan_id = str(active_team_plan.get("plan_id", "") or "")
+                if plan_id:
+                    messages.append(
+                        {
+                            "type": CommunicationIntent.TPP.value,
+                            "sender": self.name,
+                            "content": {
+                                "plan_id": plan_id,
+                                "status": active_team_plan.get("status"),
+                                "goal_summary": active_team_plan.get("goal_summary"),
+                                "project_targets": list(active_team_plan.get("project_targets", [])),
+                                "assignments_by_role": dict(active_team_plan.get("assignments_by_role", {})),
+                                "trigger_reason": active_team_plan.get("trigger_reason"),
+                                "blocked_reasons": list(active_team_plan.get("blocked_reasons", [])),
+                            },
+                        }
+                    )
+            pending = list(self.team_plan_state.get("pending_outbound_plan_responses", []) or [])
+            if pending:
+                messages.extend(pending)
+                self.team_plan_state["pending_outbound_plan_responses"] = []
         message_types = []
         receiver_dik_changed = False
         for msg in messages:
             message_types.append(msg.get("type"))
-            other_agent.receive_message(msg, from_agent=self.name)
+            other_agent.receive_message(msg, from_agent=self.name, sim_state=sim_state)
 
         # Directly transfer unseen Data
         for data in self.mental_model["data"]:
@@ -6813,7 +7049,7 @@ class Agent:
         if receiver_dik_changed:
             other_agent._trigger_epistemic_update_pipeline(sim_state=sim_state, trigger_source=f"communication:{self.name}")
 
-    def receive_message(self, message, from_agent=None):
+    def receive_message(self, message, from_agent=None, sim_state=None):
         sender = message.get("sender")
         if not sender:
             sender = from_agent
@@ -6881,6 +7117,93 @@ class Agent:
 
         elif mtype == "TCR":
             self.reevaluate_knowledge()
+        elif mtype in {CommunicationIntent.TPP.value, CommunicationIntent.TPA.value}:
+            payload = dict(content or {}) if isinstance(content, dict) else {}
+            plan_id = str(payload.get("plan_id", "") or "")
+            if mtype == CommunicationIntent.TPP.value and plan_id:
+                self.theory_of_mind[sender]["goals"] = [f"team_plan:{plan_id}"]
+                if sim_state is not None and hasattr(sim_state.team_knowledge_manager, "propose_team_plan"):
+                    existing_plan = sim_state.team_knowledge_manager.get_artifact(f"team_plan:{plan_id}")
+                    existing_status = ""
+                    if existing_plan is not None and isinstance(getattr(existing_plan, "content", None), dict):
+                        existing_status = str(existing_plan.content.get("status", "")).lower()
+                    if existing_status != "committed":
+                        sim_state.team_knowledge_manager.propose_team_plan(
+                            plan_id=plan_id,
+                            proposed_by=sender,
+                            sim_time=sim_state.time,
+                            goal_summary=str(payload.get("goal_summary", "")),
+                            trigger_reason=str(payload.get("trigger_reason", "")),
+                            project_targets=list(payload.get("project_targets", [])),
+                            assignments_by_role=dict(payload.get("assignments_by_role", {})),
+                            blocked_reasons=list(payload.get("blocked_reasons", [])),
+                        )
+                    response_type, response_reason = self._evaluate_team_plan_fit(sim_state, payload)
+                    sim_state.team_knowledge_manager.record_team_plan_response(
+                        plan_id=plan_id,
+                        responder=self.name,
+                        response_type=response_type,
+                        sim_time=sim_state.time,
+                        role=self.role,
+                        reason=response_reason,
+                    )
+                    self.team_plan_state.setdefault("pending_outbound_plan_responses", []).append(
+                        {
+                            "type": CommunicationIntent.TPA.value,
+                            "sender": self.name,
+                            "content": {
+                                "plan_id": plan_id,
+                                "response_type": response_type,
+                                "reason": response_reason,
+                                "agent_role": self.role,
+                                "assignment": self._get_my_team_plan_assignment(sim_state, payload),
+                            },
+                        }
+                    )
+            elif mtype == CommunicationIntent.TPA.value and plan_id and sim_state is not None and hasattr(sim_state.team_knowledge_manager, "record_team_plan_response"):
+                response_type = str(payload.get("response_type", "") or "").strip().lower()
+                response_reason = str(payload.get("reason", "") or "")
+                sim_state.team_knowledge_manager.record_team_plan_response(
+                    plan_id=plan_id,
+                    responder=sender,
+                    response_type=response_type,
+                    sim_time=sim_state.time,
+                    role=str(payload.get("agent_role", "") or None),
+                    reason=response_reason,
+                )
+                if response_type == "assignment_decline" and hasattr(sim_state.team_knowledge_manager, "update_team_plan_assignments"):
+                    active_plan = self._get_active_team_plan(sim_state)
+                    if active_plan and str(active_plan.get("plan_id", "")) == plan_id:
+                        revised = dict(active_plan.get("assignments_by_role", {}))
+                        if payload.get("agent_role") in revised:
+                            revised[payload.get("agent_role")] = "support_consultation"
+                            sim_state.team_knowledge_manager.update_team_plan_assignments(
+                                plan_id=plan_id,
+                                assignments_by_role=revised,
+                                updated_by=self.name,
+                                sim_time=sim_state.time,
+                                reason=f"assignment_declined_by_{sender}",
+                            )
+                event_map = {
+                    "agree": "team_plan_agreed",
+                    "disagree": "team_plan_disagreed",
+                    "request_clarification": "team_plan_clarification_requested",
+                    "assignment_accept": "team_plan_assignment_accepted",
+                    "assignment_decline": "team_plan_assignment_declined",
+                }
+                self._emit_event(
+                    sim_state,
+                    event_map.get(response_type, "team_plan_updated"),
+                    {
+                        "plan_id": plan_id,
+                        "agent": sender,
+                        "agent_role": payload.get("agent_role"),
+                        "assignment": payload.get("assignment"),
+                        "project_targets": payload.get("project_targets"),
+                        "reason": response_reason,
+                    },
+                )
+                self.theory_of_mind[sender]["goals"] = [f"team_plan_response:{response_type}:{plan_id}"]
 
         self.activity_log.append(f"Received {mtype} from {sender}")
         if dik_changed:
