@@ -6189,6 +6189,8 @@ class Agent:
                         validation_state="validated" if fidelity >= 0.7 else "tentative",
                     )
                 _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": artifact_id})
+                if action.get("target") is not None and self.target is not None and tuple(self.target) == tuple(action.get("target")):
+                    self.target = None
                 sim_state.logger.log_event(sim_state.time, "externalization_created", {"agent": self.name, "artifact_id": artifact_id, "type": "whiteboard_plan"})
 
             if action["type"] == "idle" and action.get("artifact_action") == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value:
@@ -6248,6 +6250,8 @@ class Agent:
                     self.activity_log.append(f"Consulted shared artifact {preferred.artifact_id}")
                     sim_state.logger.log_event(sim_state.time, "artifact_consulted", {"agent": self.name, "artifact_id": preferred.artifact_id})
                     _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": preferred.artifact_id})
+                    if action.get("target") is not None and self.target is not None and tuple(self.target) == tuple(action.get("target")):
+                        self.target = None
 
             if action["type"] == "communicate" and action.get("assist_action") == ExecutableActionType.REQUEST_ASSISTANCE.value and action["progress"] == 0:
                 sim_state.logger.log_event(sim_state.time, "assistance_requested", {"agent": self.name})
@@ -6834,6 +6838,10 @@ class Agent:
 
     def _advance_active_actions(self, dt, sim_state=None):
         completed = []
+        artifact_idle_actions = {
+            ExecutableActionType.EXTERNALIZE_PLAN.value,
+            ExecutableActionType.CONSULT_TEAM_ARTIFACT.value,
+        }
 
         for action in self.active_actions:
             if action.get("type") == "communicate" and not action.get("communication_attempted"):
@@ -6893,6 +6901,15 @@ class Agent:
                             "communication_ineffective",
                             {"receiver": receiver.name, "decision_action": action.get("decision_action"), "no_effect_streak": self.communication_state["no_effect_streak"]},
                         )
+            if (
+                action.get("type") == "idle"
+                and action.get("artifact_action") in artifact_idle_actions
+                and sim_state is not None
+                and getattr(sim_state, "environment", None) is not None
+            ):
+                access = sim_state.environment.get_interaction_access(self.position, "whiteboard", role=self.role)
+                if not access.get("accessible"):
+                    continue
             action["progress"] += dt
             if action["progress"] >= action["duration"]:
                 completed.append(action)
@@ -6930,7 +6947,13 @@ class Agent:
                     "decision_action": action.get("decision_action"),
                     "source_target_id": action.get("source_target_id"),
                 })
-                if action.get("type") in {"move_to", "construct", "transport_resources"} and action.get("target") is not None:
+                if (
+                    action.get("type") in {"move_to", "construct", "transport_resources"}
+                    or (
+                        action.get("type") == "idle"
+                        and action.get("artifact_action") in artifact_idle_actions
+                    )
+                ) and action.get("target") is not None:
                     self.target = action.get("target")
             self.current_action = []
 
