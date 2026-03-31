@@ -206,6 +206,18 @@ def _rule_method_library() -> dict[str, RuleMethodDefinition]:
             ordered_steps=("select_teammate_or_artifact", "communicate_critical_dik"),
             retry_budgets={"communicate_critical_dik": 2},
         ),
+        "ProposeTeamPlan": RuleMethodDefinition(
+            method_id="ProposeTeamPlan",
+            applicable_modes=("COORDINATE",),
+            ordered_steps=("diagnose_deadlock", "formulate_team_plan", "externalize_team_plan"),
+            retry_budgets={"externalize_team_plan": 2},
+        ),
+        "ConsultCommittedTeamPlan": RuleMethodDefinition(
+            method_id="ConsultCommittedTeamPlan",
+            applicable_modes=("COORDINATE", "LOGISTICS"),
+            ordered_steps=("consult_team_plan", "adopt_team_plan_direction"),
+            retry_budgets={"consult_team_plan": 2},
+        ),
         "IntegrateColonyRules": RuleMethodDefinition(
             method_id="IntegrateColonyRules",
             applicable_modes=("INTEGRATE_DIK",),
@@ -326,6 +338,9 @@ def _request_from_context_packet(context_packet) -> AgentBrainRequest:
             "control_state": control_state,
             "build_readiness": dict(cognitive.get("build_readiness", {})),
             "built_state": list(world.get("built_state", [])),
+            "team_shared_knowledge": dict(context_packet.team_state.get("team_shared_knowledge", {})),
+            "active_team_plan": dict(context_packet.team_state.get("team_shared_knowledge", {}).get("active_team_plan") or {}),
+            "team_plan_summaries": list(context_packet.team_state.get("team_shared_knowledge", {}).get("team_plan_summaries", [])),
             "loop_counters": dict(cognitive.get("loop_counters", {})),
             "progress_state": dict(cognitive.get("progress_state", {})),
             "seconds_since_dik_change": cognitive.get("seconds_since_dik_change"),
@@ -385,7 +400,7 @@ class RuleBrain(BrainProvider):
         "BOOTSTRAP": ("AcquireInitialGrounding",),
         "ACQUIRE_DIK": ("AcquireRoleSpecificGrounding", "AcquireInitialGrounding"),
         "INTEGRATE_DIK": ("IntegrateColonyRules",),
-        "COORDINATE": ("ShareCriticalDIK",),
+        "COORDINATE": ("ProposeTeamPlan", "ConsultCommittedTeamPlan", "ShareCriticalDIK"),
         "LOGISTICS": ("SelectProjectAndSite", "TransportResourcesToProject"),
         "CONSTRUCT": ("ConstructProject", "SelectProjectAndSite"),
         "VALIDATE": ("ValidateProject",),
@@ -403,6 +418,11 @@ class RuleBrain(BrainProvider):
         "integrate_role_dik": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.EXTERNALIZE_PLAN.value},
         "select_teammate_or_artifact": {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.EXTERNALIZE_PLAN.value},
         "communicate_critical_dik": {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.EXTERNALIZE_PLAN.value, ExecutableActionType.REQUEST_ASSISTANCE.value},
+        "diagnose_deadlock": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.OBSERVE_ENVIRONMENT.value},
+        "formulate_team_plan": {ExecutableActionType.EXTERNALIZE_PLAN.value, ExecutableActionType.COMMUNICATE.value},
+        "externalize_team_plan": {ExecutableActionType.EXTERNALIZE_PLAN.value},
+        "consult_team_plan": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value},
+        "adopt_team_plan_direction": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.COMMUNICATE.value},
         "consult_artifact": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.EXTERNALIZE_PLAN.value},
         "reassess_plan_with_rules": {ExecutableActionType.REASSESS_PLAN.value},
         "identify_viable_project": {ExecutableActionType.TRANSPORT_RESOURCES.value, ExecutableActionType.OBSERVE_ENVIRONMENT.value},
@@ -422,6 +442,27 @@ class RuleBrain(BrainProvider):
 
     def __init__(self, policy_config: RuleBrainPolicyConfig | None = None):
         self.policy_config = policy_config or RuleBrainPolicyConfig()
+
+    @staticmethod
+    def _detect_team_plan_state(team_shared_knowledge: dict[str, Any], artifacts: list[dict[str, Any]]) -> dict[str, float]:
+        summaries = list(team_shared_knowledge.get("team_plan_summaries", [])) if isinstance(team_shared_knowledge, dict) else []
+        active_plan = dict(team_shared_knowledge.get("active_team_plan") or {}) if isinstance(team_shared_knowledge, dict) else {}
+        if not summaries:
+            for artifact in artifacts:
+                if str(artifact.get("type")) != "team_plan":
+                    continue
+                content = artifact.get("content", {}) if isinstance(artifact.get("content", {}), dict) else {}
+                summaries.append({"status": content.get("status") or artifact.get("status")})
+        statuses = {str(item.get("status", "")) for item in summaries}
+        active_status = str(active_plan.get("status", ""))
+        committed = ("committed" in statuses) or active_status == "committed"
+        proposed = ("proposed" in statuses) or active_status == "proposed"
+        available = committed or proposed or bool(summaries) or bool(active_plan)
+        return {
+            "team_plan_available": 1.0 if available else 0.0,
+            "team_plan_committed": 1.0 if committed else 0.0,
+            "team_plan_proposed": 1.0 if proposed else 0.0,
+        }
 
     @staticmethod
     def _best_affordance(
@@ -468,12 +509,14 @@ class RuleBrain(BrainProvider):
         mismatch_signals = context_packet.history_bands.get("semantic_plan_evolution", {}).get("unresolved_contradictions", []) if not is_request else list(request_ctx.get("mismatch_signals", []))
         loop_counters = cognitive.get("loop_counters", {}) if not is_request else dict(request_ctx.get("loop_counters", {}))
         progress_state = cognitive.get("progress_state", {}) if not is_request else dict(request_ctx.get("progress_state", {}))
+        plan_summary = dict(cognitive.get("active_plan", {})) if not is_request else dict(context_packet.current_plan_summary or {})
         repeated = max(int(loop_counters.get("action_repeats", 0) or 0), int(loop_counters.get("selected_action_repeats", 0) or 0))
         no_progress_streak = max(int(loop_counters.get("no_progress_streak", 0) or 0), int(progress_state.get("no_progress_streak", 0) or 0))
         observe_no_effect = int(loop_counters.get("observe_no_effect", 0) or 0)
         communication_no_effect = int(loop_counters.get("communication_no_effect", 0) or 0)
         goal_stack = cognitive.get("goal_stack", []) if not is_request else list(context_packet.current_goal_stack)
         externalized = context_packet.team_state.get("externalized_artifacts", []) if not is_request else list(context_packet.artifact_context)
+        team_shared_knowledge = context_packet.team_state.get("team_shared_knowledge", {}) if not is_request else dict(request_ctx.get("team_shared_knowledge", {}))
         validated = sum(1 for a in externalized if a.get("validation_state") == "validated")
         seconds_since_dik_change = cognitive.get("seconds_since_dik_change") if not is_request else request_ctx.get("seconds_since_dik_change")
         inspect_state = cognitive.get("inspect_state", {}) if not is_request else dict(request_ctx.get("inspect_state", {}))
@@ -482,7 +525,6 @@ class RuleBrain(BrainProvider):
             if request_control:
                 inspect_state = dict(request_control.get("inspect_state") or inspect_state)
             goal_stack = list(context_packet.current_goal_stack or goal_stack)
-            plan_summary = dict(context_packet.current_plan_summary or {})
             if not goal_stack:
                 derived_goal = plan_summary.get("goal_id") or plan_summary.get("summary")
                 if derived_goal:
@@ -511,6 +553,33 @@ class RuleBrain(BrainProvider):
         epistemic_suff = cognitive.get("epistemic_sufficiency", {}) if not is_request else dict(request_ctx.get("epistemic_sufficiency", {}))
         refresh_pressure = float(epistemic_suff.get("refresh_pressure", 0.0) or 0.0)
         stale_grounding_pressure = max(0.0, min(1.0, (1.0 - ((team_freshness + role_freshness) / 2.0)) + refresh_pressure))
+        plan_state = self._detect_team_plan_state(team_shared_knowledge, externalized)
+        ready_for_validation = any(bool(p.get("ready_for_validation")) for p in built_state)
+        active_work_remains = bool(active_projects or ready_for_validation)
+        no_active_reason = any(
+            "no_active_plan" in str(reason or "")
+            for reason in (
+                plan_summary.get("refresh_reason"),
+                plan_summary.get("status_reason"),
+                plan_summary.get("status"),
+                (context_packet.control_state_snapshot or {}).get("last_transition_reason") if is_request else None,
+            )
+        )
+        concrete_action_available = any(
+            str(a.get("action_type")) in {
+                ExecutableActionType.TRANSPORT_RESOURCES.value,
+                ExecutableActionType.START_CONSTRUCTION.value,
+                ExecutableActionType.CONTINUE_CONSTRUCTION.value,
+                ExecutableActionType.VALIDATE_CONSTRUCTION.value,
+                ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value,
+            }
+            and bool(a.get("reachable", True))
+            for a in (context_packet.allowed_actions if is_request else context_packet.action_affordances)
+        )
+        plan_summary_usable = bool(plan_summary.get("summary") or plan_summary.get("goal_id") or plan_summary.get("target_project"))
+        no_active_plan_pressure = 1.0 if (active_work_remains and (no_active_reason or not plan_summary_usable) and not concrete_action_available) else 0.0
+        coordination_deadlock_pressure = min(1.0, no_active_plan_pressure + (0.45 if no_progress_streak >= 1 else 0.0) + (0.35 if active_work_remains else 0.0))
+        construction_decision_pressure = min(1.0, (0.55 if active_work_remains else 0.0) + (0.55 if ready_for_validation else 0.0) + (0.4 * no_active_plan_pressure))
         return {
             "epistemic_deficit": min(1.0, len(known_gaps) / 4.0),
             "build_opportunity": 1.0 if readiness.get("ready_for_build") else 0.0,
@@ -536,6 +605,10 @@ class RuleBrain(BrainProvider):
             "need_to_refresh_assumptions": refresh_pressure,
             "construction_state_needs_recheck": 1.0 if bool(epistemic_suff.get("construction_state_needs_recheck")) else 0.0,
             "stale_grounding_pressure": stale_grounding_pressure,
+            "no_active_plan_pressure": no_active_plan_pressure,
+            "coordination_deadlock_pressure": coordination_deadlock_pressure,
+            "construction_decision_pressure": construction_decision_pressure,
+            **plan_state,
         }
 
     @staticmethod
@@ -581,6 +654,9 @@ class RuleBrain(BrainProvider):
         mode_scores["CONSTRUCT"] -= 1.15 * features.get("stale_grounding_pressure", 0.0)
         mode_scores["VALIDATE"] -= 1.3 * max(0.0, 0.8 - features.get("epistemic_sufficiency", 0.0))
         mode_scores["MONITOR"] = 0.35 + 0.2 * (1.0 - features["goal_pressure"]) + 0.55 * features.get("construction_state_needs_recheck", 0.0)
+        mode_scores["COORDINATE"] += 2.6 * features.get("coordination_deadlock_pressure", 0.0) + 1.1 * features.get("no_active_plan_pressure", 0.0)
+        mode_scores["LOGISTICS"] -= 0.8 * features.get("no_active_plan_pressure", 0.0)
+        mode_scores["RECOVERY"] -= 0.5 * features.get("coordination_deadlock_pressure", 0.0)
         current_mode = str(control_state.get("mode") or "BOOTSTRAP")
         if current_mode in mode_scores:
             mode_scores[current_mode] += self.policy_config.dwell_bonus
@@ -637,6 +713,15 @@ class RuleBrain(BrainProvider):
                 if mode in guarded_scores:
                     guarded_scores[mode] -= 0.9
             notes.append("no_progress_pressure_bias_logistics_recovery")
+        if (
+            features.get("coordination_deadlock_pressure", 0.0) >= 0.6
+            and features.get("no_active_plan_pressure", 0.0) >= 0.5
+            and features.get("active_incomplete_projects", 0.0) > 0.0
+        ):
+            guarded_scores["COORDINATE"] = guarded_scores.get("COORDINATE", mode_scores.get("COORDINATE", 0.0)) + 2.4
+            guarded_scores["LOGISTICS"] = guarded_scores.get("LOGISTICS", mode_scores.get("LOGISTICS", 0.0)) - 0.9
+            guarded_scores["MONITOR"] = guarded_scores.get("MONITOR", mode_scores.get("MONITOR", 0.0)) - 1.1
+            notes.append("no_active_plan_deadlock_bias_coordinate")
 
         if features.get("contradiction_pressure", 0.0) > 0.0 or features.get("repair_pressure", 0.0) > 0.0:
             for mode in ("REPAIR", "VALIDATE"):
@@ -783,6 +868,13 @@ class RuleBrain(BrainProvider):
         notes: list[str] = []
         now = int(method_state.get("sim_step", 0) or 0)
         candidates = self._candidate_methods(selected_mode, method_state)
+        if selected_mode == "COORDINATE" and features.get("coordination_deadlock_pressure", 0.0) >= 0.55:
+            if features.get("team_plan_committed", 0.0) > 0.0 or features.get("team_plan_proposed", 0.0) > 0.0:
+                candidates = ["ConsultCommittedTeamPlan"] + [c for c in candidates if c != "ConsultCommittedTeamPlan"]
+                notes.append("coordination_deadlock_prioritize_consult_team_plan")
+            else:
+                candidates = ["ProposeTeamPlan"] + [c for c in candidates if c != "ProposeTeamPlan"]
+                notes.append("coordination_deadlock_prioritize_propose_team_plan")
         active = method_state.get("active_method_id")
         method_commit_until = int(method_state.get("method_commit_until", now) or now)
         emergency_switch = self._is_emergency_switch(
@@ -965,6 +1057,13 @@ class RuleBrain(BrainProvider):
                     score -= 2.2
                 if features.get("need_to_refresh_assumptions", 0.0) > 0.0:
                     score -= 0.6
+            if features.get("coordination_deadlock_pressure", 0.0) >= 0.55:
+                if action_type == ExecutableActionType.EXTERNALIZE_PLAN.value and features.get("team_plan_available", 0.0) <= 0.0:
+                    score += 3.1
+                if action_type == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value and features.get("team_plan_available", 0.0) > 0.0:
+                    score += 3.2
+                if action_type == ExecutableActionType.REASSESS_PLAN.value:
+                    score -= 2.4
             if action_type in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value} and features.get("readiness_blocked", 0.0) > 0.0:
                 score -= 1.6
             if action_type in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value, ExecutableActionType.TRANSPORT_RESOURCES.value}:
@@ -1024,6 +1123,15 @@ class RuleBrain(BrainProvider):
             transport = next((a for a in sorted_affordances if a.get("action_type") == ExecutableActionType.TRANSPORT_RESOURCES.value), None)
             if transport is not None:
                 chosen = transport
+        if features.get("coordination_deadlock_pressure", 0.0) >= 0.55:
+            if features.get("team_plan_available", 0.0) > 0.0:
+                consult = next((a for a in sorted_affordances if a.get("action_type") == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value), None)
+                if consult is not None:
+                    chosen = consult
+            else:
+                externalize = next((a for a in sorted_affordances if a.get("action_type") == ExecutableActionType.EXTERNALIZE_PLAN.value), None)
+                if externalize is not None:
+                    chosen = externalize
         selected_action = ExecutableActionType(chosen.get("action_type", ExecutableActionType.WAIT.value))
         return selected_action, chosen, action_probs
 
