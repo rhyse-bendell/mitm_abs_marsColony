@@ -2,6 +2,7 @@
 
 import math
 import random
+import json
 import threading
 import time
 import uuid
@@ -436,7 +437,10 @@ class Agent:
         }
         self.team_plan_state = {
             "last_adopted_plan_id": None,
+            "last_adopted_plan_event_time": 0.0,
             "last_adopted_at": 0.0,
+            "last_assignment_signature": None,
+            "last_assignment_ack_signature": None,
             "adoption_reasons": {},
             "team_plan_commit_until": 0.0,
             "team_plan_assignment_commit_until": 0.0,
@@ -2853,8 +2857,100 @@ class Agent:
         current = str(self.team_plan_state.get("last_adopted_plan_id") or "")
         if current != plan_id:
             return True
+        plan_event_time = float(plan_summary.get("plan_event_time", 0.0) or 0.0)
+        last_adopted_event_time = float(self.team_plan_state.get("last_adopted_plan_event_time", 0.0) or 0.0)
+        current_signature = self._team_plan_assignment_signature(plan_summary)
+        last_signature = self.team_plan_state.get("last_assignment_signature")
+        if plan_event_time > last_adopted_event_time:
+            self._emit_event(
+                sim_state,
+                "team_plan_reuptake_due_to_revision",
+                {
+                    "plan_id": plan_id,
+                    "agent": self.name,
+                    "agent_role": self.role,
+                    "plan_event_time": plan_event_time,
+                    "assignment": self._get_my_team_plan_assignment(sim_state, plan_summary),
+                    "target_project": self._extract_team_plan_target_project(plan_summary),
+                    "reason": "plan_event_time_newer_than_last_adoption",
+                },
+            )
+            return True
+        if current_signature != last_signature:
+            self._emit_event(
+                sim_state,
+                "team_plan_assignment_revision_detected",
+                {
+                    "plan_id": plan_id,
+                    "agent": self.name,
+                    "agent_role": self.role,
+                    "plan_event_time": plan_event_time,
+                    "assignment": self._get_my_team_plan_assignment(sim_state, plan_summary),
+                    "target_project": self._extract_team_plan_target_project(plan_summary),
+                    "reason": "role_assignment_signature_changed",
+                },
+            )
+            return True
         commit_until = float(self.team_plan_state.get("team_plan_commit_until", 0.0) or 0.0)
         return float(getattr(sim_state, "time", 0.0)) > commit_until
+
+    def _extract_team_plan_target_project(self, plan_summary):
+        assignment = self._get_my_team_plan_assignment(None, plan_summary)
+        _semantic, explicit_project_target = self._normalize_team_plan_assignment(assignment)
+        project_targets = list((plan_summary or {}).get("project_targets", []) or [])
+        return explicit_project_target or (project_targets[0] if project_targets else None)
+
+    def _team_plan_assignment_signature(self, plan_summary):
+        summary = dict(plan_summary or {})
+        plan_id = str(summary.get("plan_id", "") or "")
+        plan_event_time = float(summary.get("plan_event_time", 0.0) or 0.0)
+        assignment = self._get_my_team_plan_assignment(None, summary)
+        target_project = self._extract_team_plan_target_project(summary)
+        payload = {"plan_id": plan_id, "plan_event_time": plan_event_time, "assignment": assignment, "target_project": target_project}
+        try:
+            return json.dumps(payload, sort_keys=True, default=str)
+        except Exception:
+            return str(payload)
+
+    def _record_team_plan_response_immediately(self, sim_state, *, plan_summary, response_type, response_reason):
+        if sim_state is None or not isinstance(plan_summary, dict):
+            return
+        plan_id = str(plan_summary.get("plan_id", "") or "")
+        assignment = self._get_my_team_plan_assignment(sim_state, plan_summary)
+        target_project = self._extract_team_plan_target_project(plan_summary)
+        event_map = {
+            "agree": "team_plan_agreed",
+            "disagree": "team_plan_disagreed",
+            "request_clarification": "team_plan_clarification_requested",
+            "assignment_accept": "team_plan_assignment_accepted",
+            "assignment_decline": "team_plan_assignment_declined",
+        }
+        self._emit_event(
+            sim_state,
+            event_map.get(response_type, "team_plan_updated"),
+            {
+                "plan_id": plan_id,
+                "agent": self.name,
+                "agent_role": self.role,
+                "plan_event_time": float(plan_summary.get("plan_event_time", 0.0) or 0.0),
+                "assignment": assignment,
+                "target_project": target_project,
+                "reason": response_reason,
+            },
+        )
+        self._emit_event(
+            sim_state,
+            "team_plan_response_emitted_immediately",
+            {
+                "plan_id": plan_id,
+                "agent": self.name,
+                "agent_role": self.role,
+                "plan_event_time": float(plan_summary.get("plan_event_time", 0.0) or 0.0),
+                "assignment": assignment,
+                "target_project": target_project,
+                "reason": f"{response_type}:{response_reason}",
+            },
+        )
 
     def _normalize_team_plan_assignment(self, assignment):
         text = ""
@@ -2916,11 +3012,30 @@ class Agent:
         plan_id = str(plan_summary.get("plan_id", "") or "")
         if not plan_id:
             return
+        plan_event_time = float(plan_summary.get("plan_event_time", 0.0) or 0.0)
+        assignment_signature = self._team_plan_assignment_signature(plan_summary)
+        last_signature = self.team_plan_state.get("last_assignment_signature")
+        if last_signature and assignment_signature != last_signature:
+            self._emit_event(
+                sim_state,
+                "team_plan_assignment_revision_detected",
+                {
+                    "plan_id": plan_id,
+                    "agent": self.name,
+                    "agent_role": self.role,
+                    "plan_event_time": plan_event_time,
+                    "assignment": self._get_my_team_plan_assignment(sim_state, plan_summary),
+                    "target_project": self._extract_team_plan_target_project(plan_summary),
+                    "reason": "assignment_signature_changed_before_adoption",
+                },
+            )
         artifact_id = f"team_plan:{plan_id}"
         sim_state.team_knowledge_manager.adopt_artifact(artifact_id, self.name, sim_state.time)
         self.memory_seen_packets.add(artifact_id)
         self.team_plan_state["last_adopted_plan_id"] = plan_id
+        self.team_plan_state["last_adopted_plan_event_time"] = plan_event_time
         self.team_plan_state["last_adopted_at"] = float(sim_state.time)
+        self.team_plan_state["last_assignment_signature"] = assignment_signature
         self.team_plan_state["adoption_reasons"][plan_id] = str(reason)
         self.team_plan_state["team_plan_commit_until"] = float(sim_state.time) + 16.0
         self.team_plan_state["team_plan_assignment_commit_until"] = float(sim_state.time) + 12.0
@@ -2973,6 +3088,46 @@ class Agent:
             "team_plan_assignment_applied",
             {"plan_id": plan_id, "agent_role": self.role, "assignment": assignment, "assignment_semantic": semantic, "project_targets": project_targets, "target_project": preferred_target_id, "reason": reason},
         )
+        self._emit_event(
+            sim_state,
+            "team_plan_assignment_reapplied",
+            {
+                "plan_id": plan_id,
+                "agent": self.name,
+                "agent_role": self.role,
+                "plan_event_time": plan_event_time,
+                "assignment": assignment,
+                "target_project": preferred_target_id,
+                "reason": reason,
+            },
+        )
+        if hasattr(sim_state.team_knowledge_manager, "record_team_plan_response"):
+            ack_reason = "assignment_executable_for_role" if semantic != "support" else "assignment_underspecified"
+            ack_type = "assignment_accept" if semantic != "support" else "assignment_decline"
+            ack_signature = f"{assignment_signature}:{ack_type}"
+            if self.team_plan_state.get("last_assignment_ack_signature") != ack_signature:
+                sim_state.team_knowledge_manager.record_team_plan_response(
+                    plan_id=plan_id,
+                    responder=self.name,
+                    response_type=ack_type,
+                    sim_time=sim_state.time,
+                    role=self.role,
+                    reason=ack_reason,
+                )
+                self.team_plan_state["last_assignment_ack_signature"] = ack_signature
+                self._emit_event(
+                    sim_state,
+                    "team_plan_assignment_acknowledged",
+                    {
+                        "plan_id": plan_id,
+                        "agent": self.name,
+                        "agent_role": self.role,
+                        "plan_event_time": plan_event_time,
+                        "assignment": assignment,
+                        "target_project": preferred_target_id,
+                        "reason": ack_reason,
+                    },
+                )
 
     def _seed_task_defined_goals(self, sim_state=None):
         if not self.task_model:
@@ -6207,6 +6362,12 @@ class Agent:
                                     role=self.role,
                                     reason=response_reason,
                                 )
+                            self._record_team_plan_response_immediately(
+                                sim_state,
+                                plan_summary=plan_summary,
+                                response_type=response_type,
+                                response_reason=response_reason,
+                            )
                             response_msg = {
                                 "type": CommunicationIntent.TPA.value,
                                 "sender": self.name,
@@ -6219,18 +6380,6 @@ class Agent:
                                 },
                             }
                             self.team_plan_state.setdefault("pending_outbound_plan_responses", []).append(response_msg)
-                            event_map = {
-                                "agree": "team_plan_agreed",
-                                "disagree": "team_plan_disagreed",
-                                "request_clarification": "team_plan_clarification_requested",
-                                "assignment_accept": "team_plan_assignment_accepted",
-                                "assignment_decline": "team_plan_assignment_declined",
-                            }
-                            self._emit_event(
-                                sim_state,
-                                event_map.get(response_type, "team_plan_updated"),
-                                {"plan_id": str(plan_summary.get("plan_id", "")), "agent_role": self.role, "assignment": self._get_my_team_plan_assignment(sim_state, plan_summary), "project_targets": list(plan_summary.get("project_targets", [])), "reason": response_reason},
-                            )
                     self.activity_log.append(f"Consulted shared artifact {preferred.artifact_id}")
                     sim_state.logger.log_event(sim_state.time, "artifact_consulted", {"agent": self.name, "artifact_id": preferred.artifact_id})
                     _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": preferred.artifact_id})
@@ -7146,6 +7295,12 @@ class Agent:
                         sim_time=sim_state.time,
                         role=self.role,
                         reason=response_reason,
+                    )
+                    self._record_team_plan_response_immediately(
+                        sim_state,
+                        plan_summary=payload,
+                        response_type=response_type,
+                        response_reason=response_reason,
                     )
                     self.team_plan_state.setdefault("pending_outbound_plan_responses", []).append(
                         {
