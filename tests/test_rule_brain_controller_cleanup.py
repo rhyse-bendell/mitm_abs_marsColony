@@ -100,7 +100,7 @@ class TestRuleBrainControllerCleanup(unittest.TestCase):
 
         agent._apply_task_derivations = _count_derivations
         agent._apply_secondary_rule_inference = _count_secondary
-        agent.update_knowledge(env, full_packet_sweep=False, sim_state=None)
+        agent.update_knowledge(env, sim_state=None)
         self.assertEqual(calls["derivations"], 0)
         self.assertEqual(calls["secondary"], 0)
 
@@ -124,7 +124,7 @@ class TestRuleBrainControllerCleanup(unittest.TestCase):
             return original_try_infer(*args, **kwargs)
 
         agent.mental_model["knowledge"].try_infer_rules = _count_try_infer
-        agent.update_knowledge(env, full_packet_sweep=False, sim_state=None)
+        agent.update_knowledge(env, sim_state=None)
         self.assertEqual(calls["count"], 0)
 
     def test_communication_transfer_still_triggers_epistemic_pipeline(self):
@@ -144,88 +144,34 @@ class TestRuleBrainControllerCleanup(unittest.TestCase):
         sender.communicate_with(receiver, sim_state=None)
         self.assertGreater(seen["count"], 0)
 
-    def test_legacy_wrappers_remain_callable_as_compatibility_shims(self):
+    def test_removed_legacy_api_surface_is_absent(self):
+        agent = Agent(name="Architect", role="Architect")
+        removed_methods = [
+            "decide",
+            "update_internal_state",
+            "evaluate_goals",
+            "_evaluate_goal_state",
+            "_plan_actions_for_current_goal",
+            "_run_goal_management_pipeline",
+            "select_action",
+            "decide_next_action",
+            "update_active_actions",
+            "should_request_knowledge",
+            "_legacy_update_internal_state",
+            "_legacy_evaluate_goal_state",
+            "_legacy_plan_actions_for_current_goal",
+            "_legacy_run_goal_management_pipeline",
+            "_legacy_full_packet_sweep",
+            "_legacy_should_request_knowledge",
+        ]
+        for method_name in removed_methods:
+            self.assertFalse(hasattr(agent, method_name), msg=f"{method_name} should be removed in stage-2 retirement")
+
+    def test_update_requires_sim_state_authoritative_runtime(self):
         env = Environment(phases=[])
         agent = Agent(name="Architect", role="Architect", position=env.get_spawn_point("Architect"))
-        env.agents = [agent]
-
-        agent.evaluate_goals()
-        actions = agent.select_action()
-        self.assertIsInstance(actions, list)
-
-        agent.decide_next_action(env)
-        self.assertIsInstance(agent.current_action, list)
-
-        agent.decide(type("LegacySim", (), {"environment": env, "agents": [agent], "time": 0.0})())
-        self.assertIsInstance(agent.current_action, list)
-
-    def test_legacy_wrappers_delegate_to_legacy_helpers(self):
-        env = Environment(phases=[])
-        agent = Agent(name="Architect", role="Architect", position=env.get_spawn_point("Architect"))
-        sim_stub = type("LegacySim", (), {"environment": env, "agents": [agent], "time": 0.0})()
-
-        seen = {"pipeline": 0, "eval": 0, "plan": 0, "request": 0}
-
-        def _pipeline(*_args, **_kwargs):
-            seen["pipeline"] += 1
-
-        def _evaluate(*_args, **_kwargs):
-            seen["eval"] += 1
-
-        def _plan(*_args, **_kwargs):
-            seen["plan"] += 1
-            return [{"type": "idle", "duration": 1.0, "priority": 0}]
-
-        def _request(*_args, **_kwargs):
-            seen["request"] += 1
-            return False
-
-        agent._legacy_run_goal_management_pipeline = _pipeline
-        agent._legacy_evaluate_goal_state = _evaluate
-        agent._legacy_plan_actions_for_current_goal = _plan
-        agent._legacy_should_request_knowledge = _request
-
-        agent.decide(sim_stub)
-        agent.decide_next_action(env)
-        agent.select_action()
-        agent.should_request_knowledge()
-
-        self.assertGreaterEqual(seen["pipeline"], 1)
-        self.assertGreaterEqual(seen["eval"], 1)
-        self.assertGreaterEqual(seen["plan"], 2)
-        self.assertEqual(seen["request"], 1)
-
-    def test_update_knowledge_legacy_sweep_is_isolated_behind_helper(self):
-        env = Environment(phases=[])
-        agent = Agent(name="Engineer", role="Engineer", position=env.get_spawn_point("Engineer"))
-        calls = {"legacy_sweep": 0}
-
-        def _legacy_sweep(*_args, **_kwargs):
-            calls["legacy_sweep"] += 1
-
-        agent._legacy_full_packet_sweep = _legacy_sweep
-        agent.update_knowledge(env, full_packet_sweep=False, sim_state=None)
-        agent.update_knowledge(env, full_packet_sweep=True, sim_state=None)
-
-        self.assertEqual(calls["legacy_sweep"], 1)
-
-    def test_deprecated_wrappers_not_used_in_live_simulation_update(self):
-        sim = SimulationState(phases=[], brain_backend="rule_brain")
-        try:
-            agent = sim.agents[0]
-
-            def _fail(*_args, **_kwargs):
-                raise AssertionError("deprecated wrapper should not drive live runtime")
-
-            agent.decide = _fail
-            agent.evaluate_goals = _fail
-            agent.select_action = _fail
-            agent.update_active_actions = _fail
-            agent.decide_next_action = _fail
-            agent._run_goal_management_pipeline = _fail
-            sim.update(0.2)
-        finally:
-            sim.stop()
+        with self.assertRaisesRegex(ValueError, "requires sim_state"):
+            agent.update(0.25, env, sim_state=None)
 
     def test_rule_brain_runtime_does_not_increment_llm_counters(self):
         sim = SimulationState(phases=[], brain_backend="rule_brain")

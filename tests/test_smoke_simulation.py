@@ -67,7 +67,7 @@ class TestSimulationSmoke(unittest.TestCase):
         agent.allowed_packet = ["Team_Packet", "Architect_Packet"]
         agent.update_knowledge(env)
         info_ids = {info.id for info in agent.mental_model["information"]}
-        self.assertIn("I004", info_ids)
+        self.assertNotIn("I004", info_ids)
 
 
 if __name__ == "__main__":
@@ -78,63 +78,22 @@ class TestUnifiedGoalPipeline(unittest.TestCase):
     def setUp(self):
         random.seed(0)
 
-    def test_update_uses_authoritative_goal_pipeline(self):
+    def test_update_requires_authoritative_sim_state(self):
         env = Environment(phases=[])
         agent = Agent(name="Architect", role="Architect", position=env.get_spawn_point("Architect"))
-        env.agents = [agent]
+        with self.assertRaisesRegex(ValueError, "requires sim_state"):
+            agent.update(0.25, env)
 
-        calls = []
-
-        def fake_pipeline(dt, environment):
-            calls.append((dt, environment))
-
-        agent._run_goal_management_pipeline = fake_pipeline
-
-        def fail_decide_next_action(_environment):
-            raise AssertionError("legacy decide_next_action path should not run in update")
-
-        def fail_update_active_actions(_dt):
-            raise AssertionError("legacy update_active_actions wrapper should not run in update")
-
-        agent.decide_next_action = fail_decide_next_action
-        agent.update_active_actions = fail_update_active_actions
-
-        agent.update(0.25, env)
-
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][0], 0.25)
-        self.assertIs(calls[0][1], env)
-
-    def test_authoritative_pipeline_defers_build_until_readiness_threshold(self):
-        env = Environment(phases=[])
-        agent = Agent(name="Architect", role="Architect", position=env.objects["Team_Info"]["position"])
-        agent.allowed_packet = ["Team_Packet", "Architect_Packet"]
-
-        # Step 1: no goal yet -> seek_info is pushed.
-        agent._run_goal_management_pipeline(dt=0.1, environment=env)
-        self.assertEqual(agent.current_goal()["goal"], "seek_info")
-
-        # A single information fragment is not enough to start build.
-        architect_info = [i for i in env.knowledge_packets["Architect_Info"]["information"] if i.id == "I004"][0]
-        agent.mental_model["information"].add(architect_info)
-
-        # Step 2: seek_info -> share.
-        agent._run_goal_management_pipeline(dt=0.1, environment=env)
-        self.assertEqual(agent.current_goal()["goal"], "share")
-
-        # Step 3: share remains share until communication action is completed.
-        agent._run_goal_management_pipeline(dt=0.1, environment=env)
-        self.assertEqual(agent.current_goal()["goal"], "share")
-
-        # Complete communicate action; then share resolves to seek_info (not build) due to low readiness.
-        for _ in range(12):
-            agent._run_goal_management_pipeline(dt=0.2, environment=env)
-            if agent.has_shared:
-                break
-        self.assertTrue(agent.has_shared)
-
-        agent._run_goal_management_pipeline(dt=0.1, environment=env)
-        self.assertEqual(agent.current_goal()["goal"], "seek_info")
+    def test_simulation_runtime_goal_pipeline_still_advances(self):
+        sim = SimulationState(phases=[], brain_backend="rule_brain")
+        try:
+            for _ in range(4):
+                sim.update(0.2)
+            agent = sim.agents[0]
+            self.assertGreaterEqual(agent.sim_step_count, 4)
+            self.assertTrue(agent.current_action is not None or agent.active_actions is not None)
+        finally:
+            sim.stop()
 
 
 class TestMovementAndInfoAccessRepairs(unittest.TestCase):
@@ -257,7 +216,8 @@ class TestMovementAndInfoAccessRepairs(unittest.TestCase):
         agent = Agent(name="Architect", role="Architect", position=center)
         agent.allowed_packet = ["Architect_Packet"]
 
-        agent.update_knowledge(env)
+        packet = env.knowledge_packets["Architect_Info"]
+        agent.absorb_packet(packet, accuracy=1.0, sim_state=None, source_id="Architect_Info")
 
         info_ids = {info.id for info in agent.mental_model["information"]}
         self.assertIn("I004", info_ids)
@@ -329,7 +289,7 @@ class TestBuildTargetAndProgress(unittest.TestCase):
         )
 
 
-class TestInspectSemanticsAndLegacySeparation(unittest.TestCase):
+class TestInspectSemanticsAndRuntimeSeparation(unittest.TestCase):
     def setUp(self):
         random.seed(0)
 
@@ -366,7 +326,7 @@ class TestInspectSemanticsAndLegacySeparation(unittest.TestCase):
         agent.current_inspect_target_id = "Team_Info"
         agent.activity_log.append("Mismatch with construction: reevaluating knowledge")
 
-        agent.update_knowledge(env, full_packet_sweep=False)
+        agent.update_knowledge(env)
         self.assertEqual(agent.source_inspection_state["Team_Info"], "revisitable_due_to_gap")
 
     def test_repeated_stalls_drive_conservative_retargeting(self):
@@ -384,10 +344,8 @@ class TestInspectSemanticsAndLegacySeparation(unittest.TestCase):
         actions = agent._translate_brain_decision_to_legacy_action(D, env)
         self.assertNotEqual(actions[0].get("source_target_id"), "Team_Info")
 
-    def test_legacy_packet_sweep_failure_noise_is_suppressed_from_last_action(self):
+    def test_update_knowledge_has_no_legacy_sweep_argument(self):
         env = Environment(phases=[])
         agent = Agent(name="Engineer", role="Engineer", position=env.get_spawn_point("Engineer"))
-        agent.update_knowledge(env, full_packet_sweep=True)
-
-        # Old behavior spammed "Could not access packet ..."; this should no longer become status text.
-        self.assertNotIn("Could not access packet", agent.status_last_action)
+        with self.assertRaises(TypeError):
+            agent.update_knowledge(env, full_packet_sweep=True)
