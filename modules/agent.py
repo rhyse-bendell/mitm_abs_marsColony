@@ -6199,21 +6199,72 @@ class Agent:
                     self._emit_event(sim_state, "artifact_consult_en_route", {"target_id": "whiteboard", "access_reason": access.get("reason")})
                     continue
                 _set_action_stage(action, "mutation_execution_started", {"target_id": "whiteboard"})
-                artifacts = sim_state.team_knowledge_manager.artifacts
+                artifacts = dict(sim_state.team_knowledge_manager.artifacts or {})
                 if artifacts:
+                    planless_consult = (
+                        str(getattr(self.current_plan, "trigger_reason", "") or "") == "no_active_plan"
+                        or str((self.control_state or {}).get("last_transition_reason", "") or "") == "no_active_plan"
+                    )
+                    candidate_artifacts = list(artifacts.values())
+                    if planless_consult:
+                        candidate_artifacts = [
+                            a for a in candidate_artifacts
+                            if a.artifact_type == "team_plan"
+                            and not self._in_cooldown("planless_consult_artifact", a.artifact_id, sim_state=sim_state)
+                        ]
                     preferred = sorted(
-                        artifacts.values(),
+                        candidate_artifacts,
                         key=lambda a: (
                             a.artifact_type == "team_plan" and str((a.content or {}).get("status", "")).lower() == "committed",
+                            a.artifact_type == "team_plan",
                             a.validation_state == "validated",
-                            self._trait_value("goal_alignment"),
                             a.uptake_count,
                         ),
                         reverse=True,
-                    )[0]
+                    )[0] if candidate_artifacts else None
+                    if preferred is None:
+                        _set_action_stage(
+                            action,
+                            "mutation_execution_blocked",
+                            {"target_id": "whiteboard", "failure_category": "no_valid_team_plan_artifact"},
+                        )
+                        self._emit_event(
+                            sim_state,
+                            "artifact_consult_skipped",
+                            {
+                                "target_id": "whiteboard",
+                                "reason": "no_valid_team_plan_artifact",
+                                "planless_consult": planless_consult,
+                            },
+                        )
+                        continue
                     adopt_prob = self._hook_value("artifact_use", "adopt_externalized_knowledge", "adoption_weight", default=0.5)
                     if random.random() <= adopt_prob:
                         sim_state.team_knowledge_manager.adopt_artifact(preferred.artifact_id, self.name, sim_state.time)
+                    if planless_consult and preferred.artifact_type != "team_plan":
+                        self._set_cooldown(
+                            "planless_consult_artifact",
+                            preferred.artifact_id,
+                            8.0,
+                            sim_state=sim_state,
+                            reason="non_plan_artifact_not_valid_for_no_active_plan",
+                        )
+                        _set_action_stage(
+                            action,
+                            "mutation_execution_blocked",
+                            {"target_id": "whiteboard", "failure_category": "non_plan_artifact_not_valid_for_no_active_plan", "artifact_id": preferred.artifact_id},
+                        )
+                        self._emit_event(
+                            sim_state,
+                            "artifact_consult_skipped",
+                            {
+                                "target_id": "whiteboard",
+                                "reason": "non_plan_artifact_not_valid_for_no_active_plan",
+                                "artifact_id": preferred.artifact_id,
+                                "planless_consult": True,
+                            },
+                        )
+                        continue
                     if preferred.artifact_type == "team_plan" and isinstance(preferred.content, dict):
                         plan_summary = sim_state.team_knowledge_manager._team_plan_summary(dict(preferred.content))
                         if str(plan_summary.get("status", "")).lower() == "committed":

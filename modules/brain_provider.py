@@ -1062,8 +1062,17 @@ class RuleBrain(BrainProvider):
                     score += 3.1
                 if action_type == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value and features.get("team_plan_available", 0.0) > 0.0:
                     score += 3.2
-                if action_type == ExecutableActionType.REASSESS_PLAN.value:
-                    score -= 2.4
+            if (
+                action_type == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value
+                and features.get("no_active_plan_pressure", 0.0) >= 0.5
+                and features.get("team_plan_available", 0.0) <= 0.0
+            ):
+                # Narrow guard: consulting arbitrary artifacts should not be
+                # scored as a remedy when the deficit is specifically
+                # "no_active_plan" and no team-plan artifact is available.
+                score -= 3.0
+            if action_type == ExecutableActionType.REASSESS_PLAN.value:
+                score -= 2.4
             if action_type in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value} and features.get("readiness_blocked", 0.0) > 0.0:
                 score -= 1.6
             if action_type in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value, ExecutableActionType.TRANSPORT_RESOURCES.value}:
