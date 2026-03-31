@@ -159,6 +159,56 @@ class TestRuleBrainControllerCleanup(unittest.TestCase):
         agent.decide(type("LegacySim", (), {"environment": env, "agents": [agent], "time": 0.0})())
         self.assertIsInstance(agent.current_action, list)
 
+    def test_legacy_wrappers_delegate_to_legacy_helpers(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Architect", role="Architect", position=env.get_spawn_point("Architect"))
+        sim_stub = type("LegacySim", (), {"environment": env, "agents": [agent], "time": 0.0})()
+
+        seen = {"pipeline": 0, "eval": 0, "plan": 0, "request": 0}
+
+        def _pipeline(*_args, **_kwargs):
+            seen["pipeline"] += 1
+
+        def _evaluate(*_args, **_kwargs):
+            seen["eval"] += 1
+
+        def _plan(*_args, **_kwargs):
+            seen["plan"] += 1
+            return [{"type": "idle", "duration": 1.0, "priority": 0}]
+
+        def _request(*_args, **_kwargs):
+            seen["request"] += 1
+            return False
+
+        agent._legacy_run_goal_management_pipeline = _pipeline
+        agent._legacy_evaluate_goal_state = _evaluate
+        agent._legacy_plan_actions_for_current_goal = _plan
+        agent._legacy_should_request_knowledge = _request
+
+        agent.decide(sim_stub)
+        agent.decide_next_action(env)
+        agent.select_action()
+        agent.should_request_knowledge()
+
+        self.assertGreaterEqual(seen["pipeline"], 1)
+        self.assertGreaterEqual(seen["eval"], 1)
+        self.assertGreaterEqual(seen["plan"], 2)
+        self.assertEqual(seen["request"], 1)
+
+    def test_update_knowledge_legacy_sweep_is_isolated_behind_helper(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Engineer", role="Engineer", position=env.get_spawn_point("Engineer"))
+        calls = {"legacy_sweep": 0}
+
+        def _legacy_sweep(*_args, **_kwargs):
+            calls["legacy_sweep"] += 1
+
+        agent._legacy_full_packet_sweep = _legacy_sweep
+        agent.update_knowledge(env, full_packet_sweep=False, sim_state=None)
+        agent.update_knowledge(env, full_packet_sweep=True, sim_state=None)
+
+        self.assertEqual(calls["legacy_sweep"], 1)
+
     def test_deprecated_wrappers_not_used_in_live_simulation_update(self):
         sim = SimulationState(phases=[], brain_backend="rule_brain")
         try:

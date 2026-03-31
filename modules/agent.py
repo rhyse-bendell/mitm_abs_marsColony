@@ -3184,12 +3184,9 @@ class Agent:
     # Legacy compatibility wrappers (non-authoritative runtime surfaces)
     # ---------------------------------------------------------------------
     def decide(self, sim_state):
-        """Legacy compatibility shim; not part of authoritative RuleBrain runtime."""
+        """Compatibility shim for legacy call sites; not used by authoritative runtime."""
         self.perceive_environment(sim_state)
-        self.update_internal_state()
-        self._evaluate_goal_state(sim_state.environment)
-        self.current_action = self._plan_actions_for_current_goal()
-        self._advance_active_actions(dt=1.0)
+        self._legacy_run_goal_management_pipeline(dt=1.0, environment=sim_state.environment)
 
     def _should_request_explanation(self):
         mode = (self.planner_cadence.explanation_mode or "never").lower()
@@ -5555,6 +5552,10 @@ class Agent:
                 }
 
     def update_internal_state(self):
+        """Compatibility shim that delegates to the legacy internal-state updater."""
+        self._legacy_update_internal_state()
+
+    def _legacy_update_internal_state(self):
         for name, model in self.theory_of_mind.items():
             if not model["knowledge_ids"]:
                 self.activity_log.append(f"ToM: {name} may need assistance")
@@ -5568,10 +5569,14 @@ class Agent:
                     self.reevaluate_knowledge()
 
     def evaluate_goals(self):
-        """Legacy compatibility shim; delegates to goal-state evaluator."""
+        """Compatibility shim for legacy callers; delegates to legacy goal-state evaluator."""
         self._evaluate_goal_state(environment=None)
 
     def _evaluate_goal_state(self, environment):
+        """Compatibility shim for legacy callers; delegates to legacy evaluator."""
+        self._legacy_evaluate_goal_state(environment)
+
+    def _legacy_evaluate_goal_state(self, environment):
         """Legacy goal-state evaluator used by compatibility wrappers only."""
         if environment is None:
             return
@@ -5626,6 +5631,10 @@ class Agent:
             self.activity_log.append("Idling...")
 
     def _plan_actions_for_current_goal(self):
+        """Compatibility shim for legacy callers; delegates to legacy planner."""
+        return self._legacy_plan_actions_for_current_goal()
+
+    def _legacy_plan_actions_for_current_goal(self):
         """Legacy action planner used by compatibility wrappers only."""
         if not self.goal_stack:
             return [{"type": "idle", "duration": 1.0, "priority": 0}]
@@ -5647,15 +5656,19 @@ class Agent:
         return [{"type": "idle", "duration": 1.0, "priority": 0}]
 
     def _run_goal_management_pipeline(self, dt, environment):
+        """Compatibility shim for legacy mode; delegates to legacy goal pipeline."""
+        self._legacy_run_goal_management_pipeline(dt=dt, environment=environment)
+
+    def _legacy_run_goal_management_pipeline(self, dt, environment):
         """Legacy goal-management pipeline for non-SimulationState compatibility mode."""
-        self.update_internal_state()
-        self._evaluate_goal_state(environment)
-        self.current_action = self._plan_actions_for_current_goal()
+        self._legacy_update_internal_state()
+        self._legacy_evaluate_goal_state(environment)
+        self.current_action = self._legacy_plan_actions_for_current_goal()
         self._advance_active_actions(dt, sim_state=None)
 
     def select_action(self):
-        """Legacy compatibility shim; delegates to legacy action planner."""
-        actions = self._plan_actions_for_current_goal()
+        """Compatibility shim for legacy callers; delegates to legacy planner."""
+        actions = self._legacy_plan_actions_for_current_goal()
         self.current_action = actions
         return actions
 
@@ -6059,30 +6072,33 @@ class Agent:
         """Observational DIK/source bookkeeping; epistemic derivation is trigger-owned."""
         self._ensure_source_state(environment)
         if full_packet_sweep:
-            for packet_name, packet_content in environment.knowledge_packets.items():
-                if packet_name in self.mental_model["information"]:
-                    continue
-                if not self._has_packet_access(packet_name):
-                    continue
-                if self.role not in packet_name and "Team" not in packet_name:
-                    continue
-                if environment.can_access_info(self.position, packet_name, role=self.role):
-                    before = len(self.mental_model["information"])
-                    self.absorb_packet(packet_content, accuracy=0.95, sim_state=sim_state, source_id=packet_name)
-                    after = len(self.mental_model["information"])
-                    if after > before:
-                        self.source_inspection_state[packet_name] = "inspected"
-                        self._set_status(f"Legacy sweep ingested packet from {packet_name}")
-                # Deliberately suppress per-tick access-failure spam from legacy sweep.
-
+            self._legacy_full_packet_sweep(environment, sim_state=sim_state)
 
         if "mismatch with construction" in " ".join(self.activity_log[-6:]).lower() and self.current_inspect_target_id:
             self.mark_source_revisitable(self.current_inspect_target_id, reason="construction_mismatch")
 
+    def _legacy_full_packet_sweep(self, environment, sim_state=None):
+        """Legacy packet sweep for compatibility mode (`sim_state is None`)."""
+        for packet_name, packet_content in environment.knowledge_packets.items():
+            if packet_name in self.mental_model["information"]:
+                continue
+            if not self._has_packet_access(packet_name):
+                continue
+            if self.role not in packet_name and "Team" not in packet_name:
+                continue
+            if environment.can_access_info(self.position, packet_name, role=self.role):
+                before = len(self.mental_model["information"])
+                self.absorb_packet(packet_content, accuracy=0.95, sim_state=sim_state, source_id=packet_name)
+                after = len(self.mental_model["information"])
+                if after > before:
+                    self.source_inspection_state[packet_name] = "inspected"
+                    self._set_status(f"Legacy sweep ingested packet from {packet_name}")
+            # Deliberately suppress per-tick access-failure spam from legacy sweep.
+
     def decide_next_action(self, environment):
-        """Legacy compatibility shim; not used by authoritative controller runtime."""
-        self._evaluate_goal_state(environment)
-        self.current_action = self._plan_actions_for_current_goal()
+        """Compatibility shim for legacy callers; not used by authoritative runtime."""
+        self._legacy_evaluate_goal_state(environment)
+        self.current_action = self._legacy_plan_actions_for_current_goal()
 
     def update(self, dt, environment, sim_state=None, planner_lifecycle_already_polled=False):
         self.update_physiology(exertion=0.5)
@@ -7378,7 +7394,11 @@ class Agent:
                     self.activity_log.append(f"Reinferred rule from tag [{tag}]")
 
     def should_request_knowledge(self):
-        # Decide whether the agent should explicitly request help
+        """Compatibility shim for legacy callers; delegates to legacy heuristic."""
+        return self._legacy_should_request_knowledge()
+
+    def _legacy_should_request_knowledge(self):
+        # Decide whether the agent should explicitly request help.
         if not self.mental_model["knowledge"].rules and self.goal not in ["seek_info", "request_info"]:
             return True
         return False
