@@ -435,7 +435,6 @@ class TeamKnowledgeManager:
         content["assignment_acknowledged_by"] = assignment_ack
         content["assignment_declined_by"] = assignment_declined
         content["last_plan_event"] = event_name
-        content["plan_event_time"] = sim_time
         artifact.content = content
         artifact.summary = f"team_plan {plan_id} {content.get('status', 'proposed')}: {content.get('goal_summary', '')}".strip()
         if responder and responder not in artifact.contributors:

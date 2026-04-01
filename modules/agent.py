@@ -441,6 +441,7 @@ class Agent:
             "last_adopted_at": 0.0,
             "last_assignment_signature": None,
             "last_assignment_ack_signature": None,
+            "last_response_signature_by_plan": {},
             "adoption_reasons": {},
             "team_plan_commit_until": 0.0,
             "team_plan_assignment_commit_until": 0.0,
@@ -2975,11 +2976,8 @@ class Agent:
     def _evaluate_team_plan_fit(self, sim_state, plan_summary):
         assignment = self._get_my_team_plan_assignment(sim_state, plan_summary)
         plan_status = str((plan_summary or {}).get("status", "")).lower()
-        blocked = list((plan_summary or {}).get("blocked_reasons", []) or [])
         if not plan_status:
             return "request_clarification", "missing_plan_status"
-        if blocked and self.rule_accuracy >= 0.45:
-            return "disagree", "plan_reports_blockers"
         if assignment is None and float(self.goal_alignment) < 0.35:
             return "request_clarification", "no_role_assignment"
         if assignment is None:
@@ -2990,6 +2988,38 @@ class Agent:
         if float(self.help_tendency) >= 0.35:
             return "assignment_accept", "assignment_executable_for_role"
         return "assignment_decline", "low_help_tendency"
+
+    def _team_plan_response_signature(self, sim_state, plan_summary, response_type):
+        summary = dict(plan_summary or {})
+        plan_id = str(summary.get("plan_id", "") or "")
+        plan_event_time = float(summary.get("plan_event_time", 0.0) or 0.0)
+        assignment_signature = self._team_plan_assignment_signature(summary)
+        payload = {
+            "plan_id": plan_id,
+            "plan_event_time": plan_event_time,
+            "assignment_signature": assignment_signature,
+            "response_type": str(response_type or ""),
+        }
+        try:
+            return json.dumps(payload, sort_keys=True, default=str)
+        except Exception:
+            return str(payload)
+
+    def _should_emit_team_plan_response(self, sim_state, plan_summary, response_type):
+        plan_id = str((plan_summary or {}).get("plan_id", "") or "")
+        if not plan_id:
+            return True
+        signature = self._team_plan_response_signature(sim_state, plan_summary, response_type)
+        by_plan = self.team_plan_state.setdefault("last_response_signature_by_plan", {})
+        return by_plan.get(plan_id) != signature
+
+    def _mark_team_plan_response_emitted(self, sim_state, plan_summary, response_type):
+        plan_id = str((plan_summary or {}).get("plan_id", "") or "")
+        if not plan_id:
+            return
+        signature = self._team_plan_response_signature(sim_state, plan_summary, response_type)
+        by_plan = self.team_plan_state.setdefault("last_response_signature_by_plan", {})
+        by_plan[plan_id] = signature
 
     def _record_team_plan_commitment_tick(self, sim_state):
         if sim_state is None:
@@ -6271,33 +6301,35 @@ class Agent:
                             self._adopt_committed_team_plan(sim_state, plan_summary, reason="consult_team_artifact")
                         else:
                             response_type, response_reason = self._evaluate_team_plan_fit(sim_state, plan_summary)
-                            if hasattr(sim_state.team_knowledge_manager, "record_team_plan_response"):
-                                sim_state.team_knowledge_manager.record_team_plan_response(
-                                    plan_id=str(plan_summary.get("plan_id", "")),
-                                    responder=self.name,
+                            if self._should_emit_team_plan_response(sim_state, plan_summary, response_type):
+                                if hasattr(sim_state.team_knowledge_manager, "record_team_plan_response"):
+                                    sim_state.team_knowledge_manager.record_team_plan_response(
+                                        plan_id=str(plan_summary.get("plan_id", "")),
+                                        responder=self.name,
+                                        response_type=response_type,
+                                        sim_time=sim_state.time,
+                                        role=self.role,
+                                        reason=response_reason,
+                                    )
+                                self._record_team_plan_response_immediately(
+                                    sim_state,
+                                    plan_summary=plan_summary,
                                     response_type=response_type,
-                                    sim_time=sim_state.time,
-                                    role=self.role,
-                                    reason=response_reason,
+                                    response_reason=response_reason,
                                 )
-                            self._record_team_plan_response_immediately(
-                                sim_state,
-                                plan_summary=plan_summary,
-                                response_type=response_type,
-                                response_reason=response_reason,
-                            )
-                            response_msg = {
-                                "type": CommunicationIntent.TPA.value,
-                                "sender": self.name,
-                                "content": {
-                                    "plan_id": str(plan_summary.get("plan_id", "")),
-                                    "response_type": response_type,
-                                    "reason": response_reason,
-                                    "agent_role": self.role,
-                                    "assignment": self._get_my_team_plan_assignment(sim_state, plan_summary),
-                                },
-                            }
-                            self.team_plan_state.setdefault("pending_outbound_plan_responses", []).append(response_msg)
+                                response_msg = {
+                                    "type": CommunicationIntent.TPA.value,
+                                    "sender": self.name,
+                                    "content": {
+                                        "plan_id": str(plan_summary.get("plan_id", "")),
+                                        "response_type": response_type,
+                                        "reason": response_reason,
+                                        "agent_role": self.role,
+                                        "assignment": self._get_my_team_plan_assignment(sim_state, plan_summary),
+                                    },
+                                }
+                                self.team_plan_state.setdefault("pending_outbound_plan_responses", []).append(response_msg)
+                                self._mark_team_plan_response_emitted(sim_state, plan_summary, response_type)
                     self.activity_log.append(f"Consulted shared artifact {preferred.artifact_id}")
                     sim_state.logger.log_event(sim_state.time, "artifact_consulted", {"agent": self.name, "artifact_id": preferred.artifact_id})
                     _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": preferred.artifact_id})
@@ -7223,33 +7255,35 @@ class Agent:
                             blocked_reasons=list(payload.get("blocked_reasons", [])),
                         )
                     response_type, response_reason = self._evaluate_team_plan_fit(sim_state, payload)
-                    sim_state.team_knowledge_manager.record_team_plan_response(
-                        plan_id=plan_id,
-                        responder=self.name,
-                        response_type=response_type,
-                        sim_time=sim_state.time,
-                        role=self.role,
-                        reason=response_reason,
-                    )
-                    self._record_team_plan_response_immediately(
-                        sim_state,
-                        plan_summary=payload,
-                        response_type=response_type,
-                        response_reason=response_reason,
-                    )
-                    self.team_plan_state.setdefault("pending_outbound_plan_responses", []).append(
-                        {
-                            "type": CommunicationIntent.TPA.value,
-                            "sender": self.name,
-                            "content": {
-                                "plan_id": plan_id,
-                                "response_type": response_type,
-                                "reason": response_reason,
-                                "agent_role": self.role,
-                                "assignment": self._get_my_team_plan_assignment(sim_state, payload),
-                            },
-                        }
-                    )
+                    if self._should_emit_team_plan_response(sim_state, payload, response_type):
+                        sim_state.team_knowledge_manager.record_team_plan_response(
+                            plan_id=plan_id,
+                            responder=self.name,
+                            response_type=response_type,
+                            sim_time=sim_state.time,
+                            role=self.role,
+                            reason=response_reason,
+                        )
+                        self._record_team_plan_response_immediately(
+                            sim_state,
+                            plan_summary=payload,
+                            response_type=response_type,
+                            response_reason=response_reason,
+                        )
+                        self.team_plan_state.setdefault("pending_outbound_plan_responses", []).append(
+                            {
+                                "type": CommunicationIntent.TPA.value,
+                                "sender": self.name,
+                                "content": {
+                                    "plan_id": plan_id,
+                                    "response_type": response_type,
+                                    "reason": response_reason,
+                                    "agent_role": self.role,
+                                    "assignment": self._get_my_team_plan_assignment(sim_state, payload),
+                                },
+                            }
+                        )
+                        self._mark_team_plan_response_emitted(sim_state, payload, response_type)
             elif mtype == CommunicationIntent.TPA.value and plan_id and sim_state is not None and hasattr(sim_state.team_knowledge_manager, "record_team_plan_response"):
                 response_type = str(payload.get("response_type", "") or "").strip().lower()
                 response_reason = str(payload.get("reason", "") or "")
