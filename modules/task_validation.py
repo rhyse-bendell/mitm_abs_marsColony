@@ -877,7 +877,7 @@ def run_task_validation(
     config_root: str | Path = "config/tasks",
     output_dir: Optional[str | Path] = None,
 ) -> TaskValidationReport:
-    model = load_task_model(task_id=task_id, config_root=config_root)
+    model = load_task_model(task_id=task_id, config_root=config_root, validate=False)
     report = validate_task_model(model)
     if output_dir is not None:
         report.write_artifacts(output_dir)
