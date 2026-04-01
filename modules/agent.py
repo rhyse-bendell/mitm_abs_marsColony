@@ -458,6 +458,11 @@ class Agent:
             "last_externalized_plan_signature": None,
             "last_externalized_time": -1.0,
             "last_context_signature": None,
+            "repeated_suppressed_artifact_action_count": 0,
+            "last_suppressed_artifact_id": None,
+            "last_suppressed_time": -1.0,
+            "last_non_artifact_progress_time": -1.0,
+            "escape_hatch_pending": False,
         }
         self.progress_tracker = {
             "last_progress_time": -1.0,
@@ -518,6 +523,11 @@ class Agent:
         events = list(tracker.get("recent_events", []))
         events.append({"time": now_ts, "kind": str(kind), "progress": True, "detail": dict(detail or {})})
         tracker["recent_events"] = events[-24:]
+        if not str(kind).startswith("artifact_"):
+            artifact_state = self.artifact_coordination_state
+            artifact_state["last_non_artifact_progress_time"] = now_ts
+            artifact_state["repeated_suppressed_artifact_action_count"] = 0
+            artifact_state["escape_hatch_pending"] = False
         if self.active_intent.get("intent_id"):
             self.active_intent["last_meaningful_progress_time"] = now_ts
             if str(kind) in {"inspection_success", "construction_progress", "transport_dropoff", "project_validated"}:
@@ -2456,6 +2466,8 @@ class Agent:
         state["last_consulted_time"] = now_ts
         state["last_consulted_signature"] = self._artifact_coordination_context_signature(environment, sim_state=sim_state)
         state["last_context_signature"] = dict(state["last_consulted_signature"])
+        state["repeated_suppressed_artifact_action_count"] = 0
+        state["escape_hatch_pending"] = False
 
     def _record_plan_externalization(self, environment, sim_state=None):
         state = self.artifact_coordination_state
@@ -2469,6 +2481,50 @@ class Agent:
             context["blocker_category"],
         )
         state["last_context_signature"] = dict(context)
+        state["repeated_suppressed_artifact_action_count"] = 0
+        state["escape_hatch_pending"] = False
+
+    def _record_artifact_suppression(self, artifact_id, sim_state=None):
+        state = self.artifact_coordination_state
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        if str(state.get("last_suppressed_artifact_id")) == str(artifact_id):
+            state["repeated_suppressed_artifact_action_count"] = int(state.get("repeated_suppressed_artifact_action_count", 0) or 0) + 1
+        else:
+            state["repeated_suppressed_artifact_action_count"] = 1
+        state["last_suppressed_artifact_id"] = artifact_id
+        state["last_suppressed_time"] = now_ts
+
+    def _should_force_artifact_escape_hatch(self, artifact_id, sim_state=None):
+        state = self.artifact_coordination_state
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        repeated = int(state.get("repeated_suppressed_artifact_action_count", 0) or 0)
+        same_artifact = str(state.get("last_suppressed_artifact_id")) == str(artifact_id)
+        last_progress = float(state.get("last_non_artifact_progress_time", -1.0) or -1.0)
+        no_recent_progress = last_progress < 0.0 or (now_ts - last_progress) >= 3.0
+        return bool(same_artifact and repeated >= 2 and no_recent_progress)
+
+    def _choose_whiteboard_escape_decision(self, environment, sim_state=None):
+        role_source = f"{self.role}_Info"
+        if role_source in environment.knowledge_packets:
+            role_mem = self.source_memory_state.get(role_source, {})
+            if not bool(role_mem.get("ever_inspected")):
+                return BrainDecision(
+                    selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                    target_id=role_source,
+                    reason_summary="Whiteboard escape hatch: force missing role brief inspection.",
+                    confidence=0.86,
+                )
+        if self._can_attempt_verbal_plan_communication(sim_state):
+            return BrainDecision(
+                selected_action=ExecutableActionType.COMMUNICATE,
+                reason_summary="Whiteboard escape hatch: force verbal coordination after repeated suppression.",
+                confidence=0.78,
+            )
+        return BrainDecision(
+            selected_action=ExecutableActionType.REASSESS_PLAN,
+            reason_summary="Whiteboard escape hatch: reassess away from redundant artifact loop.",
+            confidence=0.74,
+        )
 
 
 
@@ -5193,6 +5249,25 @@ class Agent:
                 self._emit_event(sim_state, "recovery_pivot_applied", {"origin": pivot_origin, "forced_action": forced_pivot, "from_action": decision.selected_action.value})
         handoff = dict(self.post_inspect_handoff or {})
         rule_brain_runtime = self._is_rule_brain_runtime(sim_state)
+        artifact_state = self.artifact_coordination_state
+        if (
+            artifact_state.get("escape_hatch_pending")
+            and rewritten.selected_action in {ExecutableActionType.CONSULT_TEAM_ARTIFACT, ExecutableActionType.EXTERNALIZE_PLAN}
+        ):
+            escape_decision = self._choose_whiteboard_escape_decision(environment, sim_state=sim_state)
+            self._emit_event(
+                sim_state,
+                "whiteboard_escape_hatch_forced",
+                {
+                    "origin": pivot_origin,
+                    "from_action": rewritten.selected_action.value,
+                    "to_action": escape_decision.selected_action.value,
+                    "suppressed_artifact_id": artifact_state.get("last_suppressed_artifact_id"),
+                    "suppressed_repeat_count": int(artifact_state.get("repeated_suppressed_artifact_action_count", 0) or 0),
+                },
+            )
+            rewritten = escape_decision
+            artifact_state["escape_hatch_pending"] = False
         if (
             handoff.get("pending")
             and handoff.get("expires_at", 0.0) >= now_ts
@@ -5217,16 +5292,15 @@ class Agent:
                     },
                 )
                 rewritten = followup
-            if context is not None and sim_state is not None:
-                rerouted = self._reroute_decision_through_rulebrain_controller(
-                    context,
-                    rewritten,
-                    sim_state=sim_state,
-                    pivot_origin=pivot_origin,
-                    reason=f"post_inspect:{handoff.get('outcome') or 'none'}",
-                )
-                if rerouted is not None:
-                    rewritten = rerouted
+            self._emit_event(
+                sim_state,
+                "post_inspect_followup_reroute_skipped",
+                {
+                    "origin": pivot_origin,
+                    "reason": f"post_inspect:{handoff.get('outcome') or 'none'}",
+                    "selected_action": rewritten.selected_action.value,
+                },
+            )
         if context is not None and rewritten.selected_action in {ExecutableActionType.INSPECT_INFORMATION_SOURCE, ExecutableActionType.REQUEST_ASSISTANCE}:
             readiness = context.individual_cognitive_state.get("build_readiness", {})
             epistemic = context.individual_cognitive_state.get("epistemic_sufficiency", {})
@@ -5357,6 +5431,11 @@ class Agent:
         if rewritten.selected_action in {ExecutableActionType.CONSULT_TEAM_ARTIFACT, ExecutableActionType.EXTERNALIZE_PLAN}:
             is_redundant = self._artifact_action_is_redundant(rewritten.selected_action.value, environment, sim_state=sim_state, artifact_id="whiteboard")
             if is_redundant:
+                self._record_artifact_suppression("whiteboard", sim_state=sim_state)
+                evt = "artifact_consult_suppressed_redundant" if rewritten.selected_action == ExecutableActionType.CONSULT_TEAM_ARTIFACT else "artifact_externalization_suppressed_redundant"
+                self._emit_event(sim_state, evt, {"origin": pivot_origin, "reason": "recent_no_novelty"})
+                if self._should_force_artifact_escape_hatch("whiteboard", sim_state=sim_state):
+                    self.artifact_coordination_state["escape_hatch_pending"] = True
                 if self._can_attempt_verbal_plan_communication(sim_state):
                     self._emit_event(
                         sim_state,
@@ -5369,9 +5448,7 @@ class Agent:
                         confidence=max(0.72, float(rewritten.confidence or 0.0)),
                     )
                 else:
-                    evt = "artifact_consult_suppressed_redundant" if rewritten.selected_action == ExecutableActionType.CONSULT_TEAM_ARTIFACT else "artifact_externalization_suppressed_redundant"
-                    self._emit_event(sim_state, evt, {"origin": pivot_origin, "reason": "recent_no_novelty"})
-                    rewritten = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
+                    rewritten = self._choose_whiteboard_escape_decision(environment, sim_state=sim_state)
         return rewritten
 
     def _reroute_decision_through_rulebrain_controller(self, context, fallback_decision, *, sim_state, pivot_origin, reason):
@@ -6423,9 +6500,24 @@ class Agent:
                             "mutation_execution_blocked",
                             {"target_id": "whiteboard", "failure_category": "redundant_artifact_consult", "artifact_id": preferred.artifact_id},
                         )
+                        self._record_artifact_suppression(preferred.artifact_id, sim_state=sim_state)
                         self._emit_event(sim_state, "artifact_consult_suppressed_redundant", {"target_id": "whiteboard", "artifact_id": preferred.artifact_id})
                         if self._can_attempt_verbal_plan_communication(sim_state):
                             self._emit_event(sim_state, "verbal_plan_communication_preferred_over_artifact", {"artifact_id": preferred.artifact_id, "suppressed_action": ExecutableActionType.CONSULT_TEAM_ARTIFACT.value})
+                            self._force_recovery_pivot(
+                                sim_state,
+                                to_action=ExecutableActionType.COMMUNICATE.value,
+                                reason="runtime_redundant_artifact_consult",
+                                ttl_s=4.0,
+                            )
+                        elif self._should_force_artifact_escape_hatch(preferred.artifact_id, sim_state=sim_state):
+                            self.artifact_coordination_state["escape_hatch_pending"] = True
+                            self._force_recovery_pivot(
+                                sim_state,
+                                to_action=ExecutableActionType.REASSESS_PLAN.value,
+                                reason="runtime_redundant_artifact_escape_hatch",
+                                ttl_s=4.0,
+                            )
                         if action.get("target") is not None and self.target is not None and tuple(self.target) == tuple(action.get("target")):
                             self.target = None
                         continue
