@@ -450,6 +450,15 @@ class Agent:
             "pending_outbound_plan_responses": [],
             "commitment_expired_emitted": False,
         }
+        self.artifact_coordination_state = {
+            "last_consulted_artifact_id": None,
+            "last_consulted_time": -1.0,
+            "last_consulted_signature": None,
+            "consecutive_same_artifact_consults": 0,
+            "last_externalized_plan_signature": None,
+            "last_externalized_time": -1.0,
+            "last_context_signature": None,
+        }
         self.progress_tracker = {
             "last_progress_time": -1.0,
             "last_progress_kind": None,
@@ -2333,6 +2342,15 @@ class Agent:
                     reason_summary="Post-inspect pivot to unmet critical witness source access.",
                     confidence=0.84,
                 )
+        active_team_plan = self._get_active_team_plan(sim_state) if sim_state is not None else None
+        assignment = self._get_my_team_plan_assignment(sim_state, active_team_plan) if isinstance(active_team_plan, dict) else None
+        coordination_needed = bool(self._team_plan_requires_uptake(sim_state)) or bool(assignment)
+        if coordination_needed and self._can_attempt_verbal_plan_communication(sim_state):
+            return BrainDecision(
+                selected_action=ExecutableActionType.COMMUNICATE,
+                reason_summary="Post-inspect pivot to verbal team-plan/dependency coordination.",
+                confidence=0.8,
+            )
         if epistemic.get("construction_state_needs_recheck"):
             self.last_construction_state_check_time = now_ts
             return BrainDecision(
@@ -2362,6 +2380,95 @@ class Agent:
             reason_summary="Post-inspect fallback to communication handoff.",
             confidence=0.66,
         )
+
+    def _can_attempt_verbal_plan_communication(self, sim_state):
+        if sim_state is None:
+            return False
+        for other in getattr(sim_state, "agents", []):
+            if other is self:
+                continue
+            dist = math.hypot(other.position[0] - self.position[0], other.position[1] - self.position[1])
+            if dist <= COMMUNICATION_RADIUS:
+                return True
+        return False
+
+    def _artifact_coordination_context_signature(self, environment, sim_state=None):
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        active_team_plan = self._get_active_team_plan(sim_state) if sim_state is not None else {}
+        assignment_signature = self._team_plan_assignment_signature(active_team_plan or {})
+        plan_event_time = float((active_team_plan or {}).get("event_time", 0.0) or 0.0)
+        construction_sig = self._construction_state_signature(environment)
+        blockers = tuple(sorted(self._build_readiness_blockers(environment, sim_state=sim_state)))
+        blocker_category = self._categorize_readiness_blockers(set(blockers))
+        return {
+            "now_ts": now_ts,
+            "assignment_signature": assignment_signature,
+            "plan_id": str((active_team_plan or {}).get("plan_id", "") or ""),
+            "plan_event_time": plan_event_time,
+            "construction_signature": construction_sig,
+            "dik_change_time": float(getattr(self, "last_dik_change_time", -1.0) or -1.0),
+            "blockers": blockers,
+            "blocker_category": blocker_category,
+        }
+
+    def _artifact_action_is_redundant(self, action_type, environment, sim_state=None, artifact_id=None):
+        state = self.artifact_coordination_state
+        context = self._artifact_coordination_context_signature(environment, sim_state=sim_state)
+        last_ctx = state.get("last_context_signature") or {}
+        now_ts = context["now_ts"]
+        if action_type == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value:
+            same_artifact = bool(artifact_id) and str(state.get("last_consulted_artifact_id")) == str(artifact_id)
+            recent_consult = same_artifact and (now_ts - float(state.get("last_consulted_time", -999.0) or -999.0)) <= 4.0
+            no_novelty = (
+                context["dik_change_time"] <= float(state.get("last_consulted_time", -999.0) or -999.0)
+                and context["assignment_signature"] == last_ctx.get("assignment_signature")
+                and context["plan_event_time"] == last_ctx.get("plan_event_time")
+                and context["construction_signature"] == last_ctx.get("construction_signature")
+                and context["blocker_category"] == last_ctx.get("blocker_category")
+            )
+            return bool(recent_consult and no_novelty)
+        if action_type == ExecutableActionType.EXTERNALIZE_PLAN.value:
+            recent_externalization = (now_ts - float(state.get("last_externalized_time", -999.0) or -999.0)) <= 6.0
+            same_signature = state.get("last_externalized_plan_signature") == (
+                context["plan_id"],
+                context["plan_event_time"],
+                context["assignment_signature"],
+                context["construction_signature"],
+                context["blocker_category"],
+            )
+            no_novelty = (
+                context["dik_change_time"] <= float(state.get("last_externalized_time", -999.0) or -999.0)
+                and context["assignment_signature"] == last_ctx.get("assignment_signature")
+                and context["plan_event_time"] == last_ctx.get("plan_event_time")
+                and context["construction_signature"] == last_ctx.get("construction_signature")
+            )
+            return bool(recent_externalization and same_signature and no_novelty)
+        return False
+
+    def _record_artifact_consult(self, artifact_id, environment, sim_state=None):
+        state = self.artifact_coordination_state
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        if str(state.get("last_consulted_artifact_id")) == str(artifact_id):
+            state["consecutive_same_artifact_consults"] = int(state.get("consecutive_same_artifact_consults", 0) or 0) + 1
+        else:
+            state["consecutive_same_artifact_consults"] = 1
+        state["last_consulted_artifact_id"] = artifact_id
+        state["last_consulted_time"] = now_ts
+        state["last_consulted_signature"] = self._artifact_coordination_context_signature(environment, sim_state=sim_state)
+        state["last_context_signature"] = dict(state["last_consulted_signature"])
+
+    def _record_plan_externalization(self, environment, sim_state=None):
+        state = self.artifact_coordination_state
+        context = self._artifact_coordination_context_signature(environment, sim_state=sim_state)
+        state["last_externalized_time"] = context["now_ts"]
+        state["last_externalized_plan_signature"] = (
+            context["plan_id"],
+            context["plan_event_time"],
+            context["assignment_signature"],
+            context["construction_signature"],
+            context["blocker_category"],
+        )
+        state["last_context_signature"] = dict(context)
 
 
 
@@ -5086,14 +5193,31 @@ class Agent:
                 self._emit_event(sim_state, "recovery_pivot_applied", {"origin": pivot_origin, "forced_action": forced_pivot, "from_action": decision.selected_action.value})
         handoff = dict(self.post_inspect_handoff or {})
         rule_brain_runtime = self._is_rule_brain_runtime(sim_state)
-        if decision.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE and handoff.get("pending") and handoff.get("expires_at", 0.0) >= now_ts:
+        if (
+            handoff.get("pending")
+            and handoff.get("expires_at", 0.0) >= now_ts
+            and rewritten.selected_action in {
+                ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                ExecutableActionType.CONSULT_TEAM_ARTIFACT,
+                ExecutableActionType.EXTERNALIZE_PLAN,
+            }
+        ):
+            followup = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
             self.post_inspect_handoff["pending"] = False
+            if followup.selected_action != rewritten.selected_action:
+                self._emit_event(
+                    sim_state,
+                    "post_inspect_followup_forced",
+                    {
+                        "origin": pivot_origin,
+                        "from_action": rewritten.selected_action.value,
+                        "to_action": followup.selected_action.value,
+                        "outcome": handoff.get("outcome"),
+                        "blocker_category": handoff.get("blocker_category"),
+                    },
+                )
+                rewritten = followup
             if context is not None and sim_state is not None:
-                if not rule_brain_runtime:
-                    followup = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
-                    if followup.selected_action != ExecutableActionType.INSPECT_INFORMATION_SOURCE:
-                        rewritten = followup
-                        self._emit_event(sim_state, "policy_pivot_applied", {"origin": pivot_origin, "kind": "post_inspect", "previous_action": decision.selected_action.value, "pivoted_to": rewritten.selected_action.value, "reason": handoff.get("outcome")})
                 rerouted = self._reroute_decision_through_rulebrain_controller(
                     context,
                     rewritten,
@@ -5230,6 +5354,24 @@ class Agent:
                 if fallback.selected_action != ExecutableActionType.OBSERVE_ENVIRONMENT:
                     self._emit_event(sim_state, "observe_suppressed_due_to_no_effect_streak", {"observe_no_effect_streak": observe_streak, "pivot_to": fallback.selected_action.value})
                     rewritten = fallback
+        if rewritten.selected_action in {ExecutableActionType.CONSULT_TEAM_ARTIFACT, ExecutableActionType.EXTERNALIZE_PLAN}:
+            is_redundant = self._artifact_action_is_redundant(rewritten.selected_action.value, environment, sim_state=sim_state, artifact_id="whiteboard")
+            if is_redundant:
+                if self._can_attempt_verbal_plan_communication(sim_state):
+                    self._emit_event(
+                        sim_state,
+                        "verbal_plan_communication_preferred_over_artifact",
+                        {"origin": pivot_origin, "suppressed_action": rewritten.selected_action.value},
+                    )
+                    rewritten = BrainDecision(
+                        selected_action=ExecutableActionType.COMMUNICATE,
+                        reason_summary="Artifact action suppressed as redundant; prefer verbal coordination.",
+                        confidence=max(0.72, float(rewritten.confidence or 0.0)),
+                    )
+                else:
+                    evt = "artifact_consult_suppressed_redundant" if rewritten.selected_action == ExecutableActionType.CONSULT_TEAM_ARTIFACT else "artifact_externalization_suppressed_redundant"
+                    self._emit_event(sim_state, evt, {"origin": pivot_origin, "reason": "recent_no_novelty"})
+                    rewritten = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
         return rewritten
 
     def _reroute_decision_through_rulebrain_controller(self, context, fallback_decision, *, sim_state, pivot_origin, reason):
@@ -6182,6 +6324,12 @@ class Agent:
                 if not ready:
                     self._emit_event(sim_state, "externalization_en_route", {"target_id": "whiteboard", "access_reason": access.get("reason")})
                     continue
+                if self._artifact_action_is_redundant(ExecutableActionType.EXTERNALIZE_PLAN.value, environment, sim_state=sim_state, artifact_id="whiteboard"):
+                    _set_action_stage(action, "mutation_execution_blocked", {"target_id": "whiteboard", "failure_category": "redundant_externalization"})
+                    self._emit_event(sim_state, "artifact_externalization_suppressed_redundant", {"target_id": "whiteboard"})
+                    if action.get("target") is not None and self.target is not None and tuple(self.target) == tuple(action.get("target")):
+                        self.target = None
+                    continue
                 _set_action_stage(action, "mutation_execution_started", {"target_id": "whiteboard"})
                 artifact_id = f"whiteboard:{self.name}:{int(sim_state.time*10)}"
                 rules = list(self.mental_model["knowledge"].rules)[-3:]
@@ -6219,6 +6367,7 @@ class Agent:
                         validation_state="validated" if fidelity >= 0.7 else "tentative",
                     )
                 _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": artifact_id})
+                self._record_plan_externalization(environment, sim_state=sim_state)
                 if action.get("target") is not None and self.target is not None and tuple(self.target) == tuple(action.get("target")):
                     self.target = None
                 sim_state.logger.log_event(sim_state.time, "externalization_created", {"agent": self.name, "artifact_id": artifact_id, "type": "whiteboard_plan"})
@@ -6267,6 +6416,18 @@ class Agent:
                                 "planless_consult": planless_consult,
                             },
                         )
+                        continue
+                    if self._artifact_action_is_redundant(ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, environment, sim_state=sim_state, artifact_id=preferred.artifact_id):
+                        _set_action_stage(
+                            action,
+                            "mutation_execution_blocked",
+                            {"target_id": "whiteboard", "failure_category": "redundant_artifact_consult", "artifact_id": preferred.artifact_id},
+                        )
+                        self._emit_event(sim_state, "artifact_consult_suppressed_redundant", {"target_id": "whiteboard", "artifact_id": preferred.artifact_id})
+                        if self._can_attempt_verbal_plan_communication(sim_state):
+                            self._emit_event(sim_state, "verbal_plan_communication_preferred_over_artifact", {"artifact_id": preferred.artifact_id, "suppressed_action": ExecutableActionType.CONSULT_TEAM_ARTIFACT.value})
+                        if action.get("target") is not None and self.target is not None and tuple(self.target) == tuple(action.get("target")):
+                            self.target = None
                         continue
                     adopt_prob = self._hook_value("artifact_use", "adopt_externalized_knowledge", "adoption_weight", default=0.5)
                     if random.random() <= adopt_prob:
@@ -6331,6 +6492,7 @@ class Agent:
                                 self.team_plan_state.setdefault("pending_outbound_plan_responses", []).append(response_msg)
                                 self._mark_team_plan_response_emitted(sim_state, plan_summary, response_type)
                     self.activity_log.append(f"Consulted shared artifact {preferred.artifact_id}")
+                    self._record_artifact_consult(preferred.artifact_id, environment, sim_state=sim_state)
                     sim_state.logger.log_event(sim_state.time, "artifact_consulted", {"agent": self.name, "artifact_id": preferred.artifact_id})
                     _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": preferred.artifact_id})
                     if action.get("target") is not None and self.target is not None and tuple(self.target) == tuple(action.get("target")):
