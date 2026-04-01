@@ -7,7 +7,7 @@ from pathlib import Path
 from modules.agent import Agent
 from modules.environment import Environment
 from modules.simulation import SimulationState
-from modules.task_model import REQUIRED_TASK_FILES, TaskModelError, load_task_model
+from modules.task_model import REQUIRED_TASK_FILES, TaskModelError, load_task_model, validate_task_model
 
 
 class TaskModelIntegrationTests(unittest.TestCase):
@@ -130,6 +130,12 @@ class TaskModelIntegrationTests(unittest.TestCase):
             sim.update(0.1)
         sim.stop()
         self.assertEqual(sim.task_model.task_id, "mars_colony")
+
+    def test_task_model_validation_report_for_mars(self):
+        model = load_task_model("mars_colony")
+        report = validate_task_model(model)
+        self.assertEqual(0, len(report.errors))
+        self.assertTrue(any(w.code.startswith("PHASE_UNLOCK_") for w in report.warnings))
 
 
 if __name__ == "__main__":

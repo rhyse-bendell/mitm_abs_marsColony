@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import csv
 import json
@@ -324,6 +324,25 @@ class ConstructionTemplate:
     enabled: bool
 
 
+@dataclass(frozen=True)
+class TaskModelValidationIssue:
+    severity: str
+    code: str
+    message: str
+    context: Dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TaskModelValidationReport:
+    task_id: str
+    errors: List[TaskModelValidationIssue]
+    warnings: List[TaskModelValidationIssue]
+
+    @property
+    def is_valid(self) -> bool:
+        return not self.errors
+
+
 @dataclass
 class TaskModel:
     task_id: str
@@ -393,7 +412,7 @@ class TaskModelLoader:
     def __init__(self, config_root: str | Path = "config/tasks"):
         self.config_root = Path(config_root)
 
-    def load(self, task_id: str = "mars_colony") -> TaskModel:
+    def load(self, task_id: str = "mars_colony", *, validate: bool = True) -> TaskModel:
         task_path = self.config_root / task_id
         if not task_path.exists():
             raise TaskModelError(f"Task package not found: {task_path}")
@@ -402,7 +421,7 @@ class TaskModelLoader:
         if missing:
             raise TaskModelError(f"Task package '{task_id}' missing required files: {', '.join(sorted(missing))}")
 
-        return TaskModel(
+        model = TaskModel(
             task_id=task_id,
             base_path=task_path,
             manifest=self._load_manifest(task_path / REQUIRED_TASK_FILES["task_manifest"]),
@@ -427,6 +446,16 @@ class TaskModelLoader:
             communication_catalog=self._load_communication_catalog(task_path / REQUIRED_TASK_FILES["communication_catalog"]),
             construction_templates=self._load_construction_templates(task_path / REQUIRED_TASK_FILES["construction_templates"]),
         )
+        if validate:
+            report = validate_task_model(model)
+            if report.errors:
+                snippets = "; ".join(f"{i.code}: {i.message}" for i in report.errors[:5])
+                if len(report.errors) > 5:
+                    snippets = f"{snippets}; ... (+{len(report.errors) - 5} more)"
+                raise TaskModelError(
+                    f"Task package '{task_id}' failed internal validation with {len(report.errors)} error(s): {snippets}"
+                )
+        return model
 
     @staticmethod
     def _rows(path: Path) -> List[dict]:
@@ -779,5 +808,145 @@ class TaskModelLoader:
         return out
 
 
-def load_task_model(task_id: str = "mars_colony", config_root: str | Path = "config/tasks") -> TaskModel:
-    return TaskModelLoader(config_root=config_root).load(task_id=task_id)
+def _append_issue(
+    errors: List[TaskModelValidationIssue],
+    warnings: List[TaskModelValidationIssue],
+    *,
+    severity: str,
+    code: str,
+    message: str,
+    context: Optional[Dict[str, object]] = None,
+) -> None:
+    issue = TaskModelValidationIssue(severity=severity, code=code, message=message, context=context or {})
+    if severity == "error":
+        errors.append(issue)
+    else:
+        warnings.append(issue)
+
+
+def validate_task_model(task_model: TaskModel) -> TaskModelValidationReport:
+    errors: List[TaskModelValidationIssue] = []
+    warnings: List[TaskModelValidationIssue] = []
+    valid_elem_types = {"data", "information", "knowledge"}
+    spawn_ids = {s.spawn_id for s in task_model.spawn_points}
+
+    for row in task_model.source_contents:
+        if row.source_id not in task_model.sources:
+            _append_issue(errors, warnings, severity="error", code="MISSING_SOURCE", message=f"Unknown source_id '{row.source_id}' in source_contents.")
+        element = task_model.dik_elements.get(row.element_id)
+        if element is None:
+            _append_issue(errors, warnings, severity="error", code="MISSING_DIK_ELEMENT", message=f"Unknown element_id '{row.element_id}' in source_contents.")
+            continue
+        if row.element_type != element.element_type:
+            _append_issue(
+                errors,
+                warnings,
+                severity="error",
+                code="SOURCE_CONTENT_TYPE_MISMATCH",
+                message=f"source_contents element_type '{row.element_type}' mismatches dik element '{row.element_id}' type '{element.element_type}'.",
+            )
+
+    for derivation in task_model.derivations.values():
+        output = task_model.dik_elements.get(derivation.output_element_id)
+        if output is None:
+            _append_issue(errors, warnings, severity="error", code="MISSING_DERIVATION_OUTPUT", message=f"Derivation '{derivation.derivation_id}' output '{derivation.output_element_id}' is not in dik_elements.")
+        elif derivation.output_type != output.element_type:
+            _append_issue(errors, warnings, severity="error", code="DERIVATION_OUTPUT_TYPE_MISMATCH", message=f"Derivation '{derivation.derivation_id}' output_type '{derivation.output_type}' mismatches element type '{output.element_type}' for '{derivation.output_element_id}'.")
+        for element_id in derivation.required_inputs + derivation.optional_inputs:
+            if element_id not in task_model.dik_elements:
+                _append_issue(errors, warnings, severity="error", code="MISSING_DERIVATION_INPUT", message=f"Derivation '{derivation.derivation_id}' references missing input '{element_id}'.")
+
+    for rule in task_model.rules.values():
+        for kid in rule.required_knowledge:
+            element = task_model.dik_elements.get(kid)
+            if element is None:
+                _append_issue(errors, warnings, severity="error", code="MISSING_RULE_KNOWLEDGE", message=f"Rule '{rule.rule_id}' requires unknown knowledge '{kid}'.")
+            elif element.element_type != "knowledge":
+                _append_issue(errors, warnings, severity="error", code="RULE_KNOWLEDGE_TYPE_MISMATCH", message=f"Rule '{rule.rule_id}' requires '{kid}' as knowledge but element type is '{element.element_type}'.")
+        for iid in rule.required_information:
+            element = task_model.dik_elements.get(iid)
+            if element is None:
+                _append_issue(errors, warnings, severity="error", code="MISSING_RULE_INFORMATION", message=f"Rule '{rule.rule_id}' requires unknown information '{iid}'.")
+            elif element.element_type != "information":
+                _append_issue(errors, warnings, severity="error", code="RULE_INFORMATION_TYPE_MISMATCH", message=f"Rule '{rule.rule_id}' requires '{iid}' as information but element type is '{element.element_type}'.")
+
+    for goal in task_model.goals.values():
+        for rule_id in goal.prerequisite_rules:
+            if rule_id not in task_model.rules:
+                _append_issue(errors, warnings, severity="error", code="MISSING_GOAL_PREREQ_RULE", message=f"Goal '{goal.goal_id}' prerequisite rule '{rule_id}' is not defined.")
+
+    for method in task_model.plan_methods.values():
+        if method.goal_id not in task_model.goals:
+            _append_issue(errors, warnings, severity="error", code="MISSING_PLAN_METHOD_GOAL", message=f"Plan method '{method.method_id}' references unknown goal '{method.goal_id}'.")
+        for rule_id in method.required_rules:
+            if rule_id not in task_model.rules:
+                _append_issue(errors, warnings, severity="error", code="MISSING_PLAN_METHOD_RULE", message=f"Plan method '{method.method_id}' requires unknown rule '{rule_id}'.")
+        for element_id in method.required_knowledge:
+            element = task_model.dik_elements.get(element_id)
+            if element is None:
+                _append_issue(errors, warnings, severity="error", code="MISSING_PLAN_METHOD_KNOWLEDGE", message=f"Plan method '{method.method_id}' requires unknown knowledge '{element_id}'.")
+            elif element.element_type != "knowledge":
+                _append_issue(errors, warnings, severity="error", code="PLAN_METHOD_KNOWLEDGE_TYPE_MISMATCH", message=f"Plan method '{method.method_id}' expects knowledge '{element_id}' but element type is '{element.element_type}'.")
+        for element_id in method.required_information:
+            element = task_model.dik_elements.get(element_id)
+            if element is None:
+                _append_issue(errors, warnings, severity="error", code="MISSING_PLAN_METHOD_INFORMATION", message=f"Plan method '{method.method_id}' requires unknown information '{element_id}'.")
+            elif element.element_type != "information":
+                _append_issue(errors, warnings, severity="error", code="PLAN_METHOD_INFORMATION_TYPE_MISMATCH", message=f"Plan method '{method.method_id}' expects information '{element_id}' but element type is '{element.element_type}'.")
+        for element_id in method.required_data:
+            element = task_model.dik_elements.get(element_id)
+            if element is None:
+                _append_issue(errors, warnings, severity="error", code="MISSING_PLAN_METHOD_DATA", message=f"Plan method '{method.method_id}' requires unknown data '{element_id}'.")
+            elif element.element_type != "data":
+                _append_issue(errors, warnings, severity="error", code="PLAN_METHOD_DATA_TYPE_MISMATCH", message=f"Plan method '{method.method_id}' expects data '{element_id}' but element type is '{element.element_type}'.")
+
+    for template in task_model.construction_templates.values():
+        if template.target_id not in task_model.interaction_targets:
+            _append_issue(errors, warnings, severity="error", code="MISSING_CONSTRUCTION_TARGET", message=f"Construction template '{template.project_id}' target_id '{template.target_id}' is not defined in interaction_targets.")
+        if template.artifact_type not in task_model.artifacts:
+            _append_issue(errors, warnings, severity="error", code="MISSING_CONSTRUCTION_ARTIFACT_TYPE", message=f"Construction template '{template.project_id}' artifact_type '{template.artifact_type}' is not defined in artifact_definitions.")
+        for rule_token in template.expected_rules:
+            normalized = normalize_rule_token(rule_token)
+            if not normalized.startswith("R_"):
+                _append_issue(errors, warnings, severity="error", code="NON_CANONICAL_EXPECTED_RULE", message=f"Construction template '{template.project_id}' expected rule '{rule_token}' does not normalize to canonical R_* id.", context={"normalized": normalized})
+            elif normalized not in task_model.rules:
+                _append_issue(errors, warnings, severity="error", code="MISSING_CONSTRUCTION_RULE", message=f"Construction template '{template.project_id}' expected rule '{normalized}' not present in rule_definitions.")
+
+    for role in task_model.roles.values():
+        if role.spawn_id and role.spawn_id not in spawn_ids:
+            _append_issue(errors, warnings, severity="error", code="MISSING_ROLE_SPAWN", message=f"Role '{role.role_id}' spawn_id '{role.spawn_id}' does not exist.")
+
+    for default in task_model.agent_defaults:
+        if default.role_id not in task_model.roles:
+            _append_issue(errors, warnings, severity="error", code="MISSING_AGENT_DEFAULT_ROLE", message=f"Agent default '{default.agent_name}' references unknown role '{default.role_id}'.")
+        for source_id in default.source_access_override:
+            if source_id not in task_model.sources:
+                _append_issue(errors, warnings, severity="error", code="MISSING_AGENT_SOURCE_OVERRIDE", message=f"Agent default '{default.agent_name}' references unknown source access override '{source_id}'.")
+        for goal_id in default.initial_goal_seeds or []:
+            if goal_id not in task_model.goals:
+                _append_issue(errors, warnings, severity="error", code="MISSING_AGENT_INITIAL_GOAL_SEED", message=f"Agent default '{default.agent_name}' references unknown initial goal seed '{goal_id}'.")
+
+    known_unlock_ids = {
+        "interaction_target": set(task_model.interaction_targets.keys()),
+        "zone": set(task_model.zones.keys()),
+        "environment_object": set(task_model.environment_objects.keys()),
+        "resource_node": set(task_model.resource_nodes.keys()),
+        "spawn_id": spawn_ids,
+    }
+    for phase in task_model.phases:
+        for unlock_token in phase.unlocks:
+            matches = [space for space, ids in known_unlock_ids.items() if unlock_token in ids]
+            if matches:
+                _append_issue(errors, warnings, severity="warning", code="PHASE_UNLOCK_AMBIGUOUS_NAMESPACE", message=f"Phase '{phase.phase_id}' unlock '{unlock_token}' is namespace-ambiguous in current architecture.", context={"matched_namespaces": matches})
+            else:
+                _append_issue(errors, warnings, severity="warning", code="PHASE_UNLOCK_UNRESOLVED", message=f"Phase '{phase.phase_id}' unlock '{unlock_token}' does not resolve to known ids; reference space is architecture-dependent.")
+
+    for element in task_model.dik_elements.values():
+        if element.element_type not in valid_elem_types:
+            _append_issue(errors, warnings, severity="error", code="INVALID_DIK_ELEMENT_TYPE", message=f"DIK element '{element.element_id}' has invalid type '{element.element_type}'.")
+
+    return TaskModelValidationReport(task_id=task_model.task_id, errors=errors, warnings=warnings)
+
+
+def load_task_model(task_id: str = "mars_colony", config_root: str | Path = "config/tasks", *, validate: bool = True) -> TaskModel:
+    return TaskModelLoader(config_root=config_root).load(task_id=task_id, validate=validate)
