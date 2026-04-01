@@ -1397,6 +1397,60 @@ class Agent:
         expires_at = self.inspect_pursuit.get("expires_at")
         return expires_at is not None and float(expires_at) >= float(now_ts)
 
+    def _has_live_epistemic_commitment(self, environment, sim_state=None, now_ts=None):
+        now_ts = float(now_ts if now_ts is not None else getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        source_id = self.inspect_pursuit.get("source_id")
+        if not source_id:
+            return False, None, "no_source"
+        if self.inspect_pursuit.get("action_type") != ExecutableActionType.INSPECT_INFORMATION_SOURCE.value:
+            return False, None, "not_inspect_action"
+        expires_at = float(self.inspect_pursuit.get("expires_at") or 0.0)
+        if not expires_at or expires_at < now_ts:
+            return False, source_id, "lease_expired"
+        if int(self.inspect_pursuit.get("blocked_attempts", 0) or 0) >= int(self.inspect_pursuit_blocked_attempt_limit):
+            return False, source_id, "blocked_threshold"
+        if int(self.inspect_pursuit.get("no_progress_ticks", 0) or 0) >= int(self.inspect_pursuit_no_progress_limit):
+            return False, source_id, "no_progress_threshold"
+        allowed, reason = self._agent_can_target_information_source(source_id, environment)
+        if not allowed:
+            return False, source_id, f"illegal:{reason}"
+        return True, source_id, "live"
+
+    def _should_retarget_source_pursuit(self, current_source, candidate_source, environment, sim_state=None, now_ts=None):
+        now_ts = float(now_ts if now_ts is not None else getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        if not current_source or not candidate_source or current_source == candidate_source:
+            return True, "same_or_missing"
+        allowed, reason = self._agent_can_target_information_source(current_source, environment)
+        if not allowed:
+            return True, f"current_illegal:{reason}"
+        current_memory = self.source_memory_state.get(current_source, {})
+        current_exhausted = bool(
+            self.source_exhaustion_state.get(current_source, {}).get(
+                "exhausted_for_acquisition",
+                self.source_exhaustion_state.get(current_source, {}).get("exhausted"),
+            )
+        )
+        current_cooldown = float(current_memory.get("revisit_cooldown_until", 0.0) or 0.0)
+        if current_exhausted and current_cooldown > now_ts:
+            return True, "current_exhausted_with_cooldown"
+        current_stalled = int(self.inspect_stall_counts.get(current_source, 0) or 0)
+        if current_stalled >= 3:
+            return True, "current_stalled"
+        critical_needs = self._critical_unmet_source_targets(sim_state, environment)
+        if candidate_source in critical_needs and current_source not in critical_needs:
+            return True, "candidate_resolves_critical_source_blocker"
+        role_source = f"{self.role}_Info"
+        role_missing = bool(self._epistemic_sufficiency(environment, sim_state=sim_state).get("role_missing"))
+        current_mem = self.source_memory_state.get(current_source, {})
+        if (
+            role_missing
+            and candidate_source == role_source
+            and current_source == "Team_Info"
+            and bool(current_mem.get("ever_inspected"))
+        ):
+            return True, "candidate_restores_missing_role_grounding"
+        return False, "not_materially_better"
+
     def _commit_inspect_pursuit(self, source_id, target_position, now_ts, slot_id=None, sim_state=None):
         self.inspect_pursuit.update(
             {
@@ -1734,6 +1788,37 @@ class Agent:
                             "reason": "role_grounding_prioritized_over_shared_verification",
                         },
                     )
+        live_commitment, current_source, _ = self._has_live_epistemic_commitment(environment, sim_state=sim_state, now_ts=now_ts)
+        if live_commitment and current_source and chosen[1] != current_source:
+            candidate_source = chosen[1]
+            allow_retarget, reason = self._should_retarget_source_pursuit(
+                current_source,
+                candidate_source,
+                environment,
+                sim_state=sim_state,
+                now_ts=now_ts,
+            )
+            if not allow_retarget:
+                chosen = next((c for c in candidates if c[1] == current_source), chosen)
+                self._emit_event(
+                    sim_state,
+                    "source_retarget_rejected_not_materially_better",
+                    {
+                        "current_source_target": current_source,
+                        "candidate_source_target": candidate_source,
+                        "reason": reason,
+                    },
+                )
+            else:
+                self._emit_event(
+                    sim_state,
+                    "source_pursuit_released_for_replan",
+                    {
+                        "current_source_target": current_source,
+                        "candidate_source_target": candidate_source,
+                        "reason": reason,
+                    },
+                )
         if chosen[6]:
             self._emit_event(sim_state, "source_revisit_required", {"source_id": chosen[1], "reason": "all_sources_exhausted_or_stalled"})
         if explicit_target is None:
@@ -5235,6 +5320,11 @@ class Agent:
         context = context or (sim_state.brain_context_builder.build(sim_state, self) if sim_state is not None else None)
         rewritten = decision
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        live_commitment, live_source_id, live_reason = self._has_live_epistemic_commitment(
+            environment,
+            sim_state=sim_state,
+            now_ts=now_ts,
+        )
         forced_pivot = str(self.progress_tracker.get("forced_pivot") or "")
         if forced_pivot and float(self.progress_tracker.get("forced_pivot_until", 0.0) or 0.0) >= now_ts:
             if decision.selected_action.value != forced_pivot:
@@ -5449,6 +5539,29 @@ class Agent:
                     )
                 else:
                     rewritten = self._choose_whiteboard_escape_decision(environment, sim_state=sim_state)
+        if (
+            live_commitment
+            and live_source_id
+            and pivot_origin in {"local_refresh", "cached_plan"}
+            and rewritten.selected_action != ExecutableActionType.INSPECT_INFORMATION_SOURCE
+        ):
+            self._emit_event(
+                sim_state,
+                "epistemic_commitment_preserved",
+                {
+                    "origin": pivot_origin,
+                    "preserved_source_id": live_source_id,
+                    "from_action": rewritten.selected_action.value,
+                    "reason": live_reason,
+                },
+            )
+            rewritten = BrainDecision(
+                selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                target_id=live_source_id,
+                goal_update=decision.goal_update,
+                reason_summary=f"Preserve live inspect pursuit for {live_source_id}",
+                confidence=max(0.8, float(rewritten.confidence or decision.confidence or 0.0)),
+            )
         return rewritten
 
     def _reroute_decision_through_rulebrain_controller(self, context, fallback_decision, *, sim_state, pivot_origin, reason):
@@ -5511,6 +5624,32 @@ class Agent:
             return True
         if now_ts < float(self.next_rulebrain_recalc_time or 0.0) and self.current_action:
             self._emit_event(sim_state, "controller_recalculation_skipped_due_to_commitment", {"intent_id": self.active_intent.get("intent_id"), "planner_reason": "cadence_hold"})
+            return True
+        live_commitment, live_source_id, live_reason = self._has_live_epistemic_commitment(
+            environment,
+            sim_state=sim_state,
+            now_ts=now_ts,
+        )
+        if live_commitment and live_source_id and self.current_action:
+            self._emit_event(
+                sim_state,
+                "local_refresh_suppressed_due_to_live_source_pursuit",
+                {
+                    "planner_reason": planner_reason,
+                    "source_id": live_source_id,
+                    "reason": live_reason,
+                },
+            )
+            self._emit_event(
+                sim_state,
+                "epistemic_commitment_preserved",
+                {
+                    "origin": "local_refresh",
+                    "planner_reason": planner_reason,
+                    "source_id": live_source_id,
+                },
+            )
+            self.next_rulebrain_recalc_time = now_ts + float(self.rulebrain_recalc_interval_s)
             return True
         context = sim_state.brain_context_builder.build(sim_state, self)
         context.individual_cognitive_state.setdefault("control_state", dict(self.control_state or {}))
@@ -7269,6 +7408,35 @@ class Agent:
                 self.progress_tracker["observe_no_effect"] = 0
             self._emit_event(sim_state, "executable_action_completed", {"action_type": action.get("type"), "decision_action": action.get("decision_action"), "project_id": action.get("project_id")})
             self.active_actions.remove(action)
+
+        if not self.active_actions and not self.current_action and completed:
+            env = getattr(sim_state, "environment", None) if sim_state is not None else None
+            if env is not None:
+                now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+                live_commitment, source_id, reason = self._has_live_epistemic_commitment(
+                    env,
+                    sim_state=sim_state,
+                    now_ts=now_ts,
+                )
+                target_pos = self.inspect_pursuit.get("target_position")
+                if live_commitment and source_id and target_pos is not None:
+                    self.current_action = [{
+                        "type": "move_to",
+                        "target": target_pos,
+                        "duration": 1.0,
+                        "priority": 1,
+                        "decision_action": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
+                        "source_target_id": source_id,
+                    }]
+                    self._emit_event(
+                        sim_state,
+                        "micro_action_completed_pursuit_continues",
+                        {
+                            "source_id": source_id,
+                            "reason": reason,
+                            "completed_action_types": [a.get("type") for a in completed],
+                        },
+                    )
 
         if not self.active_actions and self.current_action:
             for action in self.current_action:
