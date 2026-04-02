@@ -5,5 +5,5 @@
 - Canonical phase populations:
   - `phase1`: `{"civilians": 50, "VIPs": 0}`
   - `phase2`: `{"civilians": 40, "VIPs": 20}`
-- Canonical Build/Table C access unlock: `bridge_to_zone_C` (configured in `phase2.unlocks`).
+- Canonical Site C construction/resource access unlock: runtime bridge state (`bridge_bc.status == "complete"`), with site-gating truth configured in `construction_parameters.json`.
 - Rule references inside task config should use canonical `R_*` IDs (legacy aliases remain loader-compatible only).

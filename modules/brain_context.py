@@ -21,52 +21,27 @@ class BrainContextBuilder:
         self.scenario_name = scenario_name
 
     def _summarize_structures(self, environment) -> List[Dict[str, Any]]:
-        build_targets = {
-            name: t for name, t in environment.interaction_targets.items() if t.get("kind") == "build"
-        }
-        projects_by_id = {p.get("id"): p for p in environment.construction.projects.values() if isinstance(p, dict)}
+        build_targets = {name: t for name, t in environment.interaction_targets.items() if t.get("kind") == "build"}
+        projects = [p for p in environment.construction.projects.values() if isinstance(p, dict)]
         summaries: List[Dict[str, Any]] = []
-
-        for target_id, target in build_targets.items():
-            object_id = target.get("object")
-            project = projects_by_id.get(target_id)
-            state = "absent"
-            usable = False
-            progress = 0.0
-            validated_correctness = None
-            needs_repair = False
-            overloaded = False
-
-            if project:
-                raw_status = project.get("status")
-                if raw_status == "complete":
-                    state = "built"
-                    usable = bool(project.get("correct", True))
-                else:
-                    state = "in_progress"
-                    usable = False
-
-                required = project.get("required_resources", {}).get("bricks", 0)
-                delivered = project.get("delivered_resources", {}).get("bricks", 0)
-                progress = min(1.0, delivered / required) if required else 0.0
-                validated_correctness = bool(project.get("correct", True))
-                needs_repair = project.get("correct", True) is False
-                overloaded = bool(project.get("overloaded", False))
-                resource_complete = bool(project.get("resource_complete", False)) or (required > 0 and delivered >= required)
-            else:
-                raw_status = "absent"
-                required = 0
-                delivered = 0
-                resource_complete = False
-
+        for project in projects:
+            target_id = project.get("target_id") or environment.construction.SITE_TO_BUILD_TARGET.get(project.get("site_id"))
+            target = build_targets.get(target_id, {})
+            raw_status = project.get("status") or "absent"
+            state = "built" if raw_status == "complete" else "in_progress"
+            usable = raw_status == "complete" and bool(project.get("correct", True))
+            required = project.get("required_resources", {}).get("bricks", 0)
+            delivered = project.get("delivered_resources", {}).get("bricks", 0)
+            progress = min(1.0, delivered / required) if required else 0.0
+            resource_complete = bool(project.get("resource_complete", False)) or (required > 0 and delivered >= required)
             summaries.append(
                 {
-                    "structure_id": target_id,
-                    "object_id": object_id,
+                    "structure_id": project.get("id"),
+                    "object_id": target.get("object"),
                     "zone": target.get("zone"),
-                    "structure_type": (project or {}).get("type", "unknown"),
+                    "structure_type": project.get("type", "unknown"),
                     "state": state,
-                    "validated_correctness": validated_correctness,
+                    "validated_correctness": bool(project.get("correct", True)),
                     "usable": usable,
                     "progress": round(progress, 2),
                     "project_status": raw_status,
@@ -74,8 +49,8 @@ class BrainContextBuilder:
                     "required_resources": int(required or 0),
                     "delivered_resources": int(delivered or 0),
                     "ready_for_validation": raw_status == "ready_for_validation",
-                    "needs_repair": needs_repair,
-                    "overloaded": overloaded,
+                    "needs_repair": project.get("correct", True) is False,
+                    "overloaded": bool(project.get("overloaded", False)),
                     "functional_connections": [f"zone_link:{target.get('zone')}"] if target.get("zone") else [],
                 }
             )

@@ -3051,6 +3051,7 @@ class Agent:
 
     def _select_build_target(self, environment, require_readiness=False, include_project=False, action_type=None, requested_project_id=None, sim_state=None):
         candidates = []
+        seen_sites = set()
         decision_action = str(action_type or "")
         transport_selection = decision_action == ExecutableActionType.TRANSPORT_RESOURCES.value
         if transport_selection and requested_project_id:
@@ -3065,16 +3066,24 @@ class Agent:
         for target_name, target in environment.interaction_targets.items():
             if target.get("kind") != "build":
                 continue
+            site_id = target.get("site_id") or environment.construction.PROJECT_TO_SITE.get(target_name)
+            if site_id and site_id in seen_sites:
+                continue
+            if site_id:
+                seen_sites.add(site_id)
             point = environment.get_interaction_target_position(target_name, from_position=self.position)
             if point is None:
                 continue
-            project = environment.construction.projects.get(target_name, {})
+            project_id = environment.construction.resolve_project_id(target_name, create_if_missing=True)
+            if not project_id:
+                continue
+            project = environment.construction.projects.get(project_id, {})
             if transport_selection and not self._project_needs_transport(project):
                 self._emit_event(
                     sim_state,
                     "project_transport_target_suppressed",
                     {
-                        "project_id": target_name,
+                        "project_id": project_id,
                         "status": project.get("status"),
                         "resource_complete": bool(project.get("resource_complete", False)),
                         "required_resources": int(project.get("required_resources", {}).get("bricks", 0) or 0),
@@ -3086,7 +3095,7 @@ class Agent:
             delivered = project.get("delivered_resources", {}).get("bricks", 0)
             remaining = max(0, required - delivered)
             score = remaining + (0 if project.get("status") == "in_progress" else 100)
-            candidates.append((score, target_name, point))
+            candidates.append((score, project_id, point))
 
         if not candidates:
             return None
