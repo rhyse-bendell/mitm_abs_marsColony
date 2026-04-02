@@ -256,11 +256,22 @@ class Environment:
             return packet.replace("_Info", "")
         return None
 
+    def _expected_role_for_source(self, packet_name: str) -> str | None:
+        meta = self.source_metadata_for_packet(packet_name)
+        access_scope = str(meta.get("access_scope") or "").strip().lower()
+        if access_scope and access_scope not in {"all", "team"}:
+            return access_scope
+        role_scope = [str(r).strip().lower() for r in (meta.get("role_scope") or []) if str(r).strip()]
+        concrete_roles = [r for r in role_scope if r not in {"all", "team"}]
+        if len(concrete_roles) == 1:
+            return concrete_roles[0]
+        return self.expected_role_for_packet(packet_name)
+
     def is_shared_information_source(self, packet_name: str) -> bool:
         meta = self.source_metadata_for_packet(packet_name)
         access_scope = str(meta.get("access_scope") or "").strip().lower()
-        if access_scope in {"team", "all"}:
-            return True
+        if access_scope:
+            return access_scope in {"team", "all"}
         role_scope = set(meta.get("role_scope") or [])
         if role_scope & {"team", "all"}:
             return True
@@ -273,7 +284,7 @@ class Environment:
         kind = str(target_kind or target.get("kind") or "information").strip().lower()
         meta = self.source_metadata_for_packet(packet_name)
         is_shared = self.is_shared_information_source(packet_name)
-        expected_role = None if is_shared else self.expected_role_for_packet(packet_name)
+        expected_role = None if is_shared else self._expected_role_for_source(packet_name)
 
         role_mismatch = bool(expected_role and role and str(expected_role).lower() != str(role).lower())
         movement_only = False
@@ -616,6 +627,41 @@ class Environment:
                 return False
         return True
 
+    def _resolve_whiteboard_interaction_target(self, from_position=None):
+        target = self.interaction_targets.get("whiteboard", {})
+        zone_name = target.get("zone")
+        if not zone_name:
+            return None
+        corners = self._zone_corners(zone_name)
+        if not corners:
+            return None
+        (x1, y1), (x2, y2) = corners
+        x_min, x_max = min(x1, x2), max(x1, x2)
+        y_min, y_max = min(y1, y2), max(y1, y2)
+        pad = 0.12
+        candidates = [
+            (x_min + pad, (y_min + y_max) / 2.0),
+            ((x_min + x_max) / 2.0, y_min + pad),
+            ((x_min + x_max) / 2.0, (y_min + y_max) / 2.0),
+            (x_min + pad, y_min + pad),
+            (x_min + pad, y_max - pad),
+        ]
+        valid = []
+        for point in candidates:
+            if not self.is_point_navigable(point):
+                continue
+            access = self.get_interaction_access(point, "whiteboard")
+            if not access.get("accessible"):
+                continue
+            valid.append(point)
+        if not valid:
+            return None
+        if from_position is None:
+            return valid[0]
+        clear = [p for p in valid if self._segment_is_navigable(from_position, p)]
+        pool = clear or valid
+        return min(pool, key=lambda p: math.hypot(p[0] - from_position[0], p[1] - from_position[1]))
+
     def get_interaction_target_position(self, target_name, from_position=None):
         target = self.interaction_targets.get(target_name)
         if not target:
@@ -627,6 +673,11 @@ class Environment:
             slot = self.select_source_access_point(target_name, agent_id=None, from_position=from_position)
             if slot is not None:
                 return tuple(slot.get("position"))
+
+        if target_name == "whiteboard" and target.get("kind") == "artifact":
+            resolved = self._resolve_whiteboard_interaction_target(from_position=from_position)
+            if resolved is not None:
+                return resolved
 
         candidates = [p for p in self._zone_candidate_points(target["zone"]) if self.is_point_navigable(p)]
         if target.get("kind") == "build":
@@ -807,8 +858,9 @@ class Environment:
         }
 
     def can_agent_use_source_slot(self, packet_name, agent_id, position, slot_id=None, role=None):
-        if not self.can_access_info(position, packet_name, role=role):
-            return False, "too_far_or_role_mismatch"
+        info_access = self.evaluate_information_access(position, packet_name, role=role)
+        if not info_access.get("accessible"):
+            return False, info_access.get("reason", "illegal_target")
         slots = self.get_source_access_slots(packet_name)
         if not slots:
             return False, "no_slots"
@@ -909,38 +961,40 @@ class Environment:
 
         return False
 
-    def can_access_info(self, position, packet_name, role=None):
-        """
-        Determines whether a packet is accessible given agent's position and role.
-        """
-        # Match object name to packet name exactly or with a fallback
+    def evaluate_information_access(self, position, packet_name, role=None):
+        """Detailed info-source access evaluation with split reasons."""
         object_key = None
         if packet_name in self.objects:
             object_key = packet_name
         elif packet_name + "_Info" in self.objects:
             object_key = packet_name + "_Info"
         else:
-            return False
+            return {"accessible": False, "reason": "illegal_target", "object_key": None}
 
         obj = self.objects[object_key]
         access_radius = obj.get("access_radius", DEFAULT_INFO_ACCESS_RADIUS)
+        expected_role = None if self.is_shared_information_source(object_key) else self._expected_role_for_source(object_key)
+        if expected_role is not None and str(role or "").strip().lower() != str(expected_role).strip().lower():
+            return {
+                "accessible": False,
+                "reason": "role_mismatch",
+                "object_key": object_key,
+                "expected_role": expected_role,
+            }
 
-        expected_role = self.expected_role_for_packet(object_key)
-        if self.is_shared_information_source(object_key):
-            expected_role = None
-        if expected_role is not None:
-            if str(role or "").strip().lower() != str(expected_role).strip().lower():
-                return False
-
-        # If packet has an explicit role restriction, ensure agent has the correct role
         if "role" in self.objects[object_key]:
             if role is None or self.objects[object_key]["role"] != role:
-                return False
+                return {
+                    "accessible": False,
+                    "reason": "role_mismatch",
+                    "object_key": object_key,
+                    "expected_role": self.objects[object_key]["role"],
+                }
 
         target_meta = self.interaction_targets.get(object_key, {})
         zone_name = target_meta.get("zone")
         if zone_name and self._nearest_distance_to_zone(position, zone_name) <= access_radius:
-            return True
+            return {"accessible": True, "reason": "near_zone", "object_key": object_key}
 
         if obj.get("type") == "rect":
             ox, oy = obj["position"]
@@ -958,9 +1012,15 @@ class Environment:
             dist = math.hypot(position[0] - obj_pos[0], position[1] - obj_pos[1])
 
         if dist > access_radius:
-            return False
+            return {"accessible": False, "reason": "too_far", "object_key": object_key}
 
-        return True
+        return {"accessible": True, "reason": "distance_threshold", "object_key": object_key}
+
+    def can_access_info(self, position, packet_name, role=None):
+        """
+        Determines whether a packet is accessible given agent's position and role.
+        """
+        return bool(self.evaluate_information_access(position, packet_name, role=role).get("accessible"))
 
     def can_interact_with_table(self, agent_pos, table_name):
         table_zone_name = f"Zone_{table_name}"
@@ -977,9 +1037,9 @@ class Environment:
             return {"accessible": False, "reason": "locked_until_bridge_access"}
 
         if target.get("kind") == "information":
-            role_ok = self.can_access_info(position, target_name, role=role)
-            if not role_ok:
-                return {"accessible": False, "reason": "too_far_or_role_mismatch"}
+            info_access = self.evaluate_information_access(position, target_name, role=role)
+            if not info_access.get("accessible"):
+                return {"accessible": False, "reason": info_access.get("reason", "illegal_target")}
 
             zone_name = target.get("zone")
             obj = self.objects.get(target_name)
