@@ -1656,8 +1656,17 @@ class Agent:
                 score += 1.5
             if packet_name == "Team_Info":
                 score += 1.0
+                team_cooldown_ready = float(memory.get("revisit_cooldown_until", 0.0) or 0.0) <= now_ts
+                role_missing = bool(epistemic.get("role_missing"))
+                role_unseen = not bool(self.source_memory_state.get(role_source, {}).get("ever_inspected"))
+                if bool(memory.get("ever_inspected")) and exhausted_for_acquisition:
+                    score -= 2.4
+                    if role_missing or role_unseen:
+                        score -= 2.2
+                    if not team_cooldown_ready and no_new_streak >= 1:
+                        score -= 1.6
             if packet_name == "Team_Info" and exhausted_for_acquisition and no_new_streak >= 2:
-                score -= 1.2
+                score -= 2.8
             if self.role == "Architect" and packet_name == "Architect_Info" and any(k in goal_text for k in {"shelter", "build", "construction"}):
                 score += 2.2
             if self.role == "Engineer" and packet_name == "Engineer_Info" and any(k in goal_text for k in {"water", "power", "connectivity", "logistics"}):
@@ -1707,6 +1716,17 @@ class Agent:
                 )
                 if explicit_team_exhausted_verification:
                     rerank_explicit_target = True
+                    self._emit_event(
+                        sim_state,
+                        "team_info_revisit_suppressed_post_baseline",
+                        {
+                            "source_id": explicit_target,
+                            "preferred_source_target": role_source,
+                            "reason": "shared_source_verification_only_while_role_grounding_missing",
+                            "role_missing": role_missing,
+                            "role_never_inspected": role_never_inspected,
+                        },
+                    )
                     self._emit_event(
                         sim_state,
                         "source_retargeted_due_to_missing_role_grounding",
@@ -1904,6 +1924,33 @@ class Agent:
 
         return {"added": sorted(set(added)), "adopted": sorted(set(adopted))}
 
+    def _evaluate_source_access_status(self, environment, source_id, target_pos, slot_id=None, arrival_tolerance=0.24):
+        if target_pos is None:
+            return {"state": "illegal", "reason": "illegal_target", "usable": False, "arrival_distance": None}
+        arrival_distance = math.hypot(self.position[0] - target_pos[0], self.position[1] - target_pos[1])
+        if arrival_distance > float(arrival_tolerance):
+            return {"state": "en_route", "reason": "too_far", "usable": False, "arrival_distance": arrival_distance}
+        if hasattr(environment, "can_agent_use_source_slot"):
+            usable, reason = environment.can_agent_use_source_slot(
+                source_id,
+                agent_id=self.agent_id,
+                position=self.position,
+                slot_id=slot_id,
+                role=self.role,
+            )
+        else:
+            usable = bool(environment.can_access_info(self.position, source_id, role=self.role)) if hasattr(environment, "can_access_info") else True
+            reason = "slot_access_ok" if usable else "too_far"
+        if usable:
+            return {"state": "arrived_legal", "reason": "slot_access_ok", "usable": True, "arrival_distance": arrival_distance}
+        if reason in {"role_mismatch", "role_private_mismatch"}:
+            return {"state": "arrived_role_mismatch", "reason": "role_mismatch", "usable": False, "arrival_distance": arrival_distance}
+        if reason in {"slot_reserved_by_other", "occupied", "busy"}:
+            return {"state": "arrived_occupied", "reason": "occupied", "usable": False, "arrival_distance": arrival_distance}
+        if reason in {"illegal_target", "unknown_target", "no_slots"}:
+            return {"state": "illegal", "reason": "illegal_target", "usable": False, "arrival_distance": arrival_distance}
+        return {"state": "en_route", "reason": "too_far", "usable": False, "arrival_distance": arrival_distance}
+
     def _inspect_source(self, environment, source_id, sim_state=None):
         allowed, legality_reason = self._agent_can_target_information_source(source_id, environment)
         if not allowed and legality_reason != "unknown_source":
@@ -1972,22 +2019,19 @@ class Agent:
             return False
         self.target = target_pos
 
-        # Distinguish source vicinity from legal slot-based interaction access.
+        # Distinguish en-route movement from true arrival/access failures.
         slot_id = self.source_access_state.get("slot_id")
-        usable, access_reason = (True, "legacy")
-        if sim_state is None and hasattr(environment, "can_access_info"):
-            usable = bool(environment.can_access_info(self.position, source_id, role=self.role))
-            access_reason = "legacy_direct_inspection" if usable else "not_at_interaction_slot"
-        elif hasattr(environment, "can_agent_use_source_slot"):
-            usable, access_reason = environment.can_agent_use_source_slot(
-                source_id,
-                agent_id=self.agent_id,
-                position=self.position,
-                slot_id=slot_id,
-                role=self.role,
-            )
-
-        arrival_distance = math.hypot(self.position[0] - target_pos[0], self.position[1] - target_pos[1]) if target_pos is not None else None
+        access_eval = self._evaluate_source_access_status(
+            environment,
+            source_id,
+            target_pos,
+            slot_id=slot_id,
+            arrival_tolerance=0.24,
+        )
+        usable = bool(access_eval.get("usable"))
+        access_reason = str(access_eval.get("reason") or "illegal_target")
+        access_state = str(access_eval.get("state") or "illegal")
+        arrival_distance = access_eval.get("arrival_distance")
         self._emit_event(
             sim_state,
             "source_access_legality_checked",
@@ -2000,30 +2044,45 @@ class Agent:
                 "arrival_distance": round(float(arrival_distance), 4) if arrival_distance is not None else None,
                 "access_legal": bool(usable),
                 "reason": access_reason,
+                "access_state": access_state,
             },
         )
         if arrival_distance is not None:
             self._mark_inspect_pursuit_progress(source_id, arrival_distance, sim_state=sim_state)
 
-        if not usable:
+        if access_state == "en_route":
+            self._set_status(f"Inspect pending: still approaching source {source_id} ({access_reason})")
+            self.inspect_session["last_updated_at"] = now_ts
+            self.inspect_session["state"] = "target_selected"
+            self._emit_event(sim_state, "inspect_progressed", {"source_id": source_id, "stage": self.inspect_session.get("state"), "target": target_pos, "goal": self.goal})
+            self._emit_event(sim_state, "source_access_pending_arrival", {"source_id": source_id, "slot_id": slot_id, "reason": access_reason, "arrival_distance": round(float(arrival_distance), 4) if arrival_distance is not None else None})
+            self._emit_event(sim_state, "source_access_not_yet_arrived", {"source_id": source_id, "slot_id": slot_id, "reason": access_reason})
+            return False
+
+        if access_state == "arrived_role_mismatch":
             self.source_access_state["blocked_attempts"] = int(self.source_access_state.get("blocked_attempts", 0)) + 1
             blocked_attempts = int(self.source_access_state.get("blocked_attempts", 0))
             if self.inspect_pursuit.get("source_id") == source_id:
                 self.inspect_pursuit["blocked_attempts"] = blocked_attempts
-            self._set_status(f"Inspect pending: usable source access not obtained for {source_id} ({access_reason})")
-            self.inspect_session["last_updated_at"] = now_ts
-            self.inspect_session["state"] = "target_reached" if self.inspect_session.get("state") == "target_reached" else "target_selected"
-            self._emit_event(sim_state, "inspect_progressed", {"source_id": source_id, "stage": self.inspect_session.get("state"), "target": target_pos, "goal": self.goal})
+            self._emit_event(sim_state, "source_access_arrived_role_mismatch", {"source_id": source_id, "slot_id": slot_id, "reason": access_reason, "blocked_attempts": blocked_attempts})
+            return False
+
+        if access_state == "arrived_occupied":
+            self.source_access_state["blocked_attempts"] = int(self.source_access_state.get("blocked_attempts", 0)) + 1
+            blocked_attempts = int(self.source_access_state.get("blocked_attempts", 0))
+            if self.inspect_pursuit.get("source_id") == source_id:
+                self.inspect_pursuit["blocked_attempts"] = blocked_attempts
+            self._set_status(f"Inspect pending: source slot occupied for {source_id}")
+            self._emit_event(sim_state, "source_access_arrived_occupied", {"source_id": source_id, "slot_id": slot_id, "reason": access_reason, "blocked_attempts": blocked_attempts})
             self._emit_event(sim_state, "source_access_blocked_by_occupancy", {"source_id": source_id, "slot_id": slot_id, "reason": access_reason, "blocked_attempts": blocked_attempts})
-            if access_reason in {"slot_reserved_by_other", "not_at_interaction_slot"}:
-                alt = self._select_source_access_target(environment, source_id, sim_state=sim_state)
-                if alt is not None and alt.get("slot_id") != slot_id:
-                    self.target = alt.get("position")
-                    if self.inspect_pursuit.get("source_id") == source_id:
-                        self.inspect_pursuit["target_position"] = alt.get("position")
-                        self.inspect_pursuit["slot_id"] = alt.get("slot_id")
-                    self._emit_event(sim_state, "source_access_retargeted_alternate_slot", {"source_id": source_id, "previous_slot_id": slot_id, "next_slot_id": alt.get("slot_id")})
-                    self._emit_event(sim_state, "same_source_slot_reselected", {"source_id": source_id, "previous_slot_id": slot_id, "next_slot_id": alt.get("slot_id")})
+            alt = self._select_source_access_target(environment, source_id, sim_state=sim_state)
+            if alt is not None and alt.get("slot_id") != slot_id:
+                self.target = alt.get("position")
+                if self.inspect_pursuit.get("source_id") == source_id:
+                    self.inspect_pursuit["target_position"] = alt.get("position")
+                    self.inspect_pursuit["slot_id"] = alt.get("slot_id")
+                self._emit_event(sim_state, "source_access_retargeted_alternate_slot", {"source_id": source_id, "previous_slot_id": slot_id, "next_slot_id": alt.get("slot_id")})
+                self._emit_event(sim_state, "same_source_slot_reselected", {"source_id": source_id, "previous_slot_id": slot_id, "next_slot_id": alt.get("slot_id")})
             stalled = self._expire_or_stall_inspect_pursuit(
                 source_id,
                 now_ts,
@@ -2032,26 +2091,30 @@ class Agent:
                 reason_hint=f"blocked:{access_reason}",
             )
             if stalled:
-                self._emit_event(
-                    sim_state,
-                    "source_access_unstuck_backoff",
-                    {"source_id": source_id, "slot_id": slot_id, "blocked_attempts": blocked_attempts, "backoff_target": "same_source"},
-                )
+                self._emit_event(sim_state, "source_access_unstuck_backoff", {"source_id": source_id, "slot_id": slot_id, "blocked_attempts": blocked_attempts, "backoff_target": "same_source"})
             if shared_source:
-                transient_block = access_reason in {"not_at_interaction_slot", "slot_reserved_by_other", "too_far_or_role_mismatch"}
                 self._emit_event(
                     sim_state,
                     "shared_source_access_blocked",
                     {
                         "source_id": source_id,
                         "reason": access_reason,
-                        "transient": bool(transient_block),
-                        "terminal": bool(not transient_block),
+                        "transient": True,
+                        "terminal": False,
                         "source_meta": source_meta,
                         "source_access_classification": source_access_classification.get("classification"),
                     },
                 )
             return False
+
+        if access_state == "illegal":
+            self.source_access_state["blocked_attempts"] = int(self.source_access_state.get("blocked_attempts", 0)) + 1
+            blocked_attempts = int(self.source_access_state.get("blocked_attempts", 0))
+            self._set_status(f"Inspect failed: illegal source target {source_id} ({access_reason})")
+            self._emit_event(sim_state, "inspect_completion_blocked", {"source_id": source_id, "failure_category": "illegal_target", "reason": access_reason, "blocked_attempts": blocked_attempts})
+            return False
+
+        self._emit_event(sim_state, "source_access_arrived_legal", {"source_id": source_id, "slot_id": slot_id, "reason": access_reason})
 
         self.source_access_state["blocked_attempts"] = 0
         if self.inspect_pursuit.get("source_id") == source_id:
@@ -5836,6 +5899,16 @@ class Agent:
             interaction_target = environment.get_interaction_target_position(lookup_target_id, from_position=self.position)
             if interaction_target is not None:
                 action["target"] = interaction_target
+                if lookup_target_id == "whiteboard":
+                    self._emit_event(sim_state, "whiteboard_target_resolved", {"target_id": lookup_target_id, "target_position": interaction_target})
+                    zone = environment.zones.get("Zone_Whiteboard", {}) if hasattr(environment, "zones") else {}
+                    corners = zone.get("corners") if isinstance(zone, dict) else None
+                    if corners:
+                        (x1, y1), (x2, y2) = corners
+                        cx = (float(x1) + float(x2)) / 2.0
+                        cy = (float(y1) + float(y2)) / 2.0
+                        if math.hypot(float(interaction_target[0]) - cx, float(interaction_target[1]) - cy) > 0.18:
+                            self._emit_event(sim_state, "whiteboard_target_adjusted_to_reachable_point", {"target_id": lookup_target_id, "target_position": interaction_target})
             if decision.selected_action in {
                 ExecutableActionType.START_CONSTRUCTION,
                 ExecutableActionType.CONTINUE_CONSTRUCTION,
