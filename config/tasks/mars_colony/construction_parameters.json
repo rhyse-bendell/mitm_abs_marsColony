@@ -9,5 +9,26 @@
   "site_b_capacity": 8,
   "site_c_capacity": 16,
   "move_time_per_unit": 4,
-  "carry_capacity": 1
+  "carry_capacity": 1,
+  "site_definitions": {
+    "site_a": {
+      "label": "Site A",
+      "position": [6.5, 3.4],
+      "capacity_parameter": "site_a_capacity",
+      "buildable": true
+    },
+    "site_b": {
+      "label": "Site B",
+      "position": [5.0, 4.4],
+      "capacity_parameter": "site_b_capacity",
+      "buildable": true
+    },
+    "site_c": {
+      "label": "Site C",
+      "position": [3.5, 3.4],
+      "capacity_parameter": "site_c_capacity",
+      "buildable": false,
+      "buildable_when_bridge_complete": "bridge_bc"
+    }
+  }
 }

@@ -154,9 +154,9 @@ INTERACTION_TARGETS = {
     "Engineer_Info": {"kind": "information", "zone": "Zone_Engineer_Info"},
     "Botanist_Info": {"kind": "information", "zone": "Zone_Botanist_Info"},
     "Architect_Info": {"kind": "information", "zone": "Zone_Architect_Info"},
-    "Build_Table_A": {"kind": "build", "zone": "Zone_Table_A", "object": "Table_A"},
-    "Build_Table_B": {"kind": "build", "zone": "Zone_Table_B", "object": "Table_B"},
-    "Build_Table_C": {"kind": "build", "zone": "Zone_Table_C", "object": "Table_C"},
+    "Build_Site_A": {"kind": "build", "zone": "Zone_Table_A", "object": "Table_A", "site_id": "site_a"},
+    "Build_Site_B": {"kind": "build", "zone": "Zone_Table_B", "object": "Table_B", "site_id": "site_b"},
+    "Build_Site_C": {"kind": "build", "zone": "Zone_Table_C", "object": "Table_C", "site_id": "site_c"},
 }
 
 OBJECTS = RAW_OBJECTS
@@ -217,6 +217,11 @@ def _targets_from_task_model(task_model):
     return out
 
 class Environment:
+    LEGACY_BUILD_TARGET_ALIASES = {
+        "Build_Table_A": "Build_Site_A",
+        "Build_Table_B": "Build_Site_B",
+        "Build_Table_C": "Build_Site_C",
+    }
     SOURCE_PACKET_NAME_MAP = {
         "SRC_TEAM_SHARED": "Team_Info",
         "SRC_ARCHITECT_BRIEF": "Architect_Info",
@@ -332,10 +337,49 @@ class Environment:
         else:
             self.knowledge_packets = init_dik_packets()
         self.interaction_targets = _targets_from_task_model(task_model) if task_model and task_model.interaction_targets else INTERACTION_TARGETS
+        self._normalize_build_targets()
         self._time = 0.0
         self._path_cache = {}
         self._source_slot_reservations = {}
         self._source_queue_reservations = {}
+
+    def _normalize_build_targets(self):
+        targets = dict(self.interaction_targets or {})
+        for legacy_id, canonical in self.LEGACY_BUILD_TARGET_ALIASES.items():
+            legacy_target = targets.get(legacy_id, {})
+            if canonical not in targets and legacy_target:
+                canonical_target = dict(legacy_target)
+                canonical_target["site_id"] = self.construction.PROJECT_TO_SITE.get(legacy_id)
+                targets[canonical] = canonical_target
+            if legacy_target:
+                legacy_target = dict(legacy_target)
+                legacy_target["kind"] = "build_alias"
+                legacy_target["site_id"] = self.construction.PROJECT_TO_SITE.get(legacy_id)
+                targets[legacy_id] = legacy_target
+        for canonical in self.LEGACY_BUILD_TARGET_ALIASES.values():
+            row = targets.get(canonical)
+            if not row:
+                continue
+            row["kind"] = "build"
+            if not row.get("site_id"):
+                row["site_id"] = self.construction.PROJECT_TO_SITE.get(canonical)
+            targets[canonical] = row
+        self.interaction_targets = targets
+
+    def _canonical_build_target(self, target_name):
+        name = str(target_name or "").strip()
+        if name in self.LEGACY_BUILD_TARGET_ALIASES:
+            return self.LEGACY_BUILD_TARGET_ALIASES[name]
+        if name in self.interaction_targets:
+            return name
+        project = self.construction.projects.get(name)
+        if isinstance(project, dict):
+            site_id = project.get("site_id")
+            return self.construction.SITE_TO_BUILD_TARGET.get(site_id, name)
+        if name in self.construction.PROJECT_TO_SITE:
+            site_id = self.construction.PROJECT_TO_SITE.get(name)
+            return self.construction.SITE_TO_BUILD_TARGET.get(site_id, name)
+        return name
 
     @staticmethod
     def _quantize_point(point, step=0.2):
@@ -663,7 +707,8 @@ class Environment:
         return min(pool, key=lambda p: math.hypot(p[0] - from_position[0], p[1] - from_position[1]))
 
     def get_interaction_target_position(self, target_name, from_position=None):
-        target = self.interaction_targets.get(target_name)
+        canonical_target = self._canonical_build_target(target_name)
+        target = self.interaction_targets.get(canonical_target)
         if not target:
             return None
         if not self.is_interaction_target_unlocked(target_name):
@@ -689,10 +734,7 @@ class Environment:
                     if obj.get("type") == "blocked"
                 )
             ] or candidates
-            candidates = [
-                p for p in candidates
-                if self.get_interaction_access(p, target_name).get("accessible")
-            ]
+            candidates = [p for p in candidates if self.get_interaction_access(p, canonical_target).get("accessible")]
 
         if not candidates:
             return None
@@ -931,8 +973,15 @@ class Environment:
         return False
 
     def is_interaction_target_unlocked(self, target_name):
-        if target_name == "Build_Table_C":
-            return self.has_phase_unlock("bridge_to_zone_C")
+        canonical_target = self._canonical_build_target(target_name)
+        target = self.interaction_targets.get(canonical_target, {})
+        if target.get("kind") == "build":
+            site_id = target.get("site_id") or self.construction.PROJECT_TO_SITE.get(canonical_target)
+            if site_id:
+                return self.construction._is_site_buildable(site_id)
+        project = self.construction.projects.get(str(target_name))
+        if isinstance(project, dict):
+            return self.construction._is_site_buildable(project.get("site_id"))
         return True
 
     def is_near_object(self, agent_pos, object_name, threshold=0.5):
@@ -1029,7 +1078,8 @@ class Environment:
         return self.is_near_object(agent_pos, table_name, threshold=TABLE_INTERACTION_RADIUS)
 
     def get_interaction_access(self, position, target_name, role=None):
-        target = self.interaction_targets.get(target_name)
+        canonical_target = self._canonical_build_target(target_name)
+        target = self.interaction_targets.get(canonical_target)
         if not target:
             return {"accessible": False, "reason": "unknown_target"}
 
