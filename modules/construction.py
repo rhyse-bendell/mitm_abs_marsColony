@@ -465,6 +465,10 @@ class ConstructionManager:
             elif project["resource_complete"] and project.get("validated_complete"):
                 project["status"] = "complete"
                 project["in_progress"] = False
+            elif project["resource_complete"] and not bool(project.get("correct", True)):
+                project["status"] = "needs_repair"
+                project["in_progress"] = True
+                project["validated_complete"] = False
             elif project["resource_complete"]:
                 project["status"] = "ready_for_validation"
                 project["in_progress"] = True
@@ -510,7 +514,19 @@ class ConstructionManager:
         self.update_project_provenance(resolved_id, event="resource_delivered", sim_time=None)
         return True
 
-    def mark_validated(self, project_id, is_valid=True):
+    def mark_validated(
+        self,
+        project_id,
+        is_valid=True,
+        *,
+        actor=None,
+        sim_time=None,
+        held_data_ids=None,
+        held_information_ids=None,
+        held_rule_ids=None,
+        team_rule_snapshot_ids=None,
+        event=None,
+    ):
         project = self.projects.get(project_id)
         if not project:
             return
@@ -521,8 +537,18 @@ class ConstructionManager:
             project["validated_complete"] = False
             project["status"] = "needs_repair"
             project["in_progress"] = True
-            self.update_project_provenance(project_id, event="validation_failed", sim_time=None)
+            self.update_project_provenance(
+                project_id,
+                event=str(event or "validation_failed"),
+                actor=actor,
+                sim_time=sim_time,
+                held_data_ids=held_data_ids,
+                held_information_ids=held_information_ids,
+                held_rule_ids=held_rule_ids,
+                team_rule_snapshot_ids=team_rule_snapshot_ids,
+            )
             return
+        project["correct"] = True
         if project.get("resource_complete"):
             project["validated_complete"] = True
             project["status"] = "complete"
@@ -531,7 +557,16 @@ class ConstructionManager:
             project["validated_complete"] = False
             project["status"] = "in_progress"
             project["in_progress"] = True
-        self.update_project_provenance(project_id, event="validation_passed" if is_valid else "validation_failed", sim_time=None)
+        self.update_project_provenance(
+            project_id,
+            event=str(event or ("validation_passed" if is_valid else "validation_failed")),
+            actor=actor,
+            sim_time=sim_time,
+            held_data_ids=held_data_ids,
+            held_information_ids=held_information_ids,
+            held_rule_ids=held_rule_ids,
+            team_rule_snapshot_ids=team_rule_snapshot_ids,
+        )
 
     def claim_project_closure(self, project_id, agent_name, *, now_ts=0.0, ttl_s=12.0):
         project_id = str(project_id or "")
@@ -635,6 +670,7 @@ class ConstructionManager:
         for project in self.projects.values():
             if not project.get("started"):
                 continue
+            provenance = project.get("provenance") or {}
             structure_type = str(project.get("type") or "").strip().lower()
             style = self.STRUCTURE_STYLE_MAP.get(structure_type, {"symbol": "square", "color": "#666666"})
             structures.append(
@@ -649,6 +685,16 @@ class ConstructionManager:
                     "resource_complete": bool(project.get("resource_complete", False)),
                     "validated_complete": bool(project.get("validated_complete", False)),
                     "builders": sorted(project.get("builders", [])),
+                    "last_actor": project.get("last_actor") or provenance.get("last_actor"),
+                    "last_event_time": project.get("last_event_time") or provenance.get("last_update_time"),
+                    "provenance_summary": {
+                        "held_rule_ids_at_build": list(provenance.get("held_rule_ids_at_build", [])),
+                        "held_information_ids_at_build": list(provenance.get("held_information_ids_at_build", [])),
+                        "held_data_ids_at_build": list(provenance.get("held_data_ids_at_build", [])),
+                        "missing_expected_rules": list(provenance.get("missing_expected_rules", [])),
+                        "held_expected_rules_locally": bool(provenance.get("held_expected_rules_locally", False)),
+                        "team_rule_snapshot_ids": list(provenance.get("team_rule_snapshot_ids", [])),
+                    },
                     "symbol": style["symbol"],
                     "color": style["color"],
                 }

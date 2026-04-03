@@ -73,6 +73,29 @@ class ConstructionVisualizationTests(unittest.TestCase):
         self.assertEqual(by_id["Build_Table_C"]["color"], "#2f6fbf")
         self.assertGreater(by_id["Build_Table_B"]["progress"], 0.0)
         self.assertLess(by_id["Build_Table_B"]["progress"], 1.0)
+        self.assertIn("provenance_summary", by_id["Build_Table_B"])
+        self.assertIn("last_actor", by_id["Build_Table_B"])
+        self.assertIn("last_event_time", by_id["Build_Table_B"])
+
+    def test_structure_scene_includes_project_provenance_summary(self):
+        manager = ConstructionManager()
+        manager.assign_builder("Build_Table_A", "Architect")
+        manager.update_project_provenance(
+            "Build_Table_A",
+            event="validation_attempted",
+            actor="Architect",
+            sim_time=42.0,
+            held_data_ids=["D_SITE_A"],
+            held_information_ids=["I_SITE_A"],
+            held_rule_ids=["R_HOUSE_VALIDITY"],
+            team_rule_snapshot_ids=["R_HOUSE_VALIDITY", "R_RESOURCE_SAFETY"],
+        )
+        scene = manager.get_construction_scene_data()
+        structure = next(row for row in scene["structures"] if row["project_id"] == "Build_Table_A")
+        self.assertEqual(structure["last_actor"], "Architect")
+        self.assertEqual(structure["last_event_time"], 42.0)
+        self.assertEqual(structure["provenance_summary"]["held_rule_ids_at_build"], ["R_HOUSE_VALIDITY"])
+        self.assertIn("R_RESOURCE_SAFETY", structure["provenance_summary"]["team_rule_snapshot_ids"])
 
     def test_resource_pile_fill_reflects_remaining_quantity(self):
         manager = ConstructionManager(parameters={"pile_a_quantity": 100, "pile_c_quantity": 100})
