@@ -3869,9 +3869,23 @@ class Agent:
             if info_goal is not None and info_goal.status in {"active", "candidate", "queued"}:
                 info_goal.priority = self._goal_priority(info_goal.status, min(0.95, 0.78 + (0.05 * info_pressure)))
 
+        closure_project_id = self._live_project_closure_commitment(environment, sim_state=sim_state)
+        closure_project = environment.construction.projects.get(closure_project_id) if closure_project_id else None
+        closure_guarded = bool(
+            closure_project_id
+            and isinstance(closure_project, dict)
+            and str(closure_project.get("status")) == "ready_for_validation"
+        )
         if any("mismatch with construction" in e.lower() for e in self.activity_log[-6:]):
-            self._activate_support_goal("repair_detected_mismatch", "construction_mismatch_detected", sim_state=sim_state, priority=0.85, source="derived_from_rule")
-            self._activate_support_goal("validate_externalization", "validation_needed_after_mismatch", sim_state=sim_state, priority=0.8, source="derived_from_rule")
+            if closure_guarded:
+                self._emit_event(
+                    sim_state,
+                    "mismatch_support_goal_deferred_for_closure",
+                    {"project_id": closure_project_id, "reason": "closure_commitment_active"},
+                )
+            else:
+                self._activate_support_goal("repair_detected_mismatch", "construction_mismatch_detected", sim_state=sim_state, priority=0.85, source="derived_from_rule")
+                self._activate_support_goal("validate_externalization", "validation_needed_after_mismatch", sim_state=sim_state, priority=0.8, source="derived_from_rule")
 
         if getattr(self, "derivation_events", []):
             last = self.derivation_events[-1]
@@ -6995,6 +7009,18 @@ class Agent:
                     self._emit_event(sim_state, "construction_validation_attempted", {"project_id": project_id, "decision_action": action.get("decision_action")})
                     self.project_closure_state["attempt_count"] = int(self.project_closure_state.get("attempt_count", 0) or 0) + 1
                     self.project_closure_state["blocked_count"] = 0
+                    snapshot = self._snapshot_dik_provenance(sim_state=sim_state)
+                    validation_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+                    environment.construction.update_project_provenance(
+                        project_id,
+                        event="validation_attempted",
+                        actor=self.name,
+                        sim_time=validation_ts,
+                        held_data_ids=snapshot["held_data_ids_at_build"],
+                        held_information_ids=snapshot["held_information_ids_at_build"],
+                        held_rule_ids=snapshot["held_rule_ids_at_build"],
+                        team_rule_snapshot_ids=snapshot["team_rule_snapshot_ids"],
+                    )
                     if project.get("status") not in {"ready_for_validation", "needs_repair"}:
                         _log_mutation_blocked(
                             "construction_validation_blocked",
@@ -7007,11 +7033,17 @@ class Agent:
                         continue
                     has_required_rules, missing_rules = self._construction_rule_match(project_id, environment=environment, sim_state=sim_state, include_team=True)
                     is_valid = bool(project.get("correct", True)) and has_required_rules and bool(project.get("resource_complete", False))
-                    if has_required_rules:
-                        environment.construction.mark_validated(project_id, is_valid=is_valid)
-                    else:
-                        environment.construction.mark_validated(project_id, is_valid=False)
-                    self._refresh_construction_provenance(environment, project_id, sim_state=sim_state, event="validation")
+                    environment.construction.mark_validated(
+                        project_id,
+                        is_valid=bool(is_valid and has_required_rules),
+                        actor=self.name,
+                        sim_time=validation_ts,
+                        held_data_ids=snapshot["held_data_ids_at_build"],
+                        held_information_ids=snapshot["held_information_ids_at_build"],
+                        held_rule_ids=snapshot["held_rule_ids_at_build"],
+                        team_rule_snapshot_ids=snapshot["team_rule_snapshot_ids"],
+                        event="validation_passed" if (is_valid and has_required_rules) else "validation_failed",
+                    )
                     sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
                     self._emit_event(sim_state, "construction_artifact_provenance_updated", {"project_id": project_id, "event": "validation"})
                     _set_action_stage(action, "mutation_execution_succeeded", {"project_id": project_id, "is_valid": is_valid})
@@ -8084,6 +8116,12 @@ class Agent:
                             "construction_mismatch_detected",
                             {"agent": self.name, "project_id": project.get("id", "unknown")},
                         )
+                    self._refresh_construction_provenance(
+                        getattr(sim_state, "environment", None),
+                        project_id,
+                        sim_state=sim_state,
+                        event="construction_mismatch_detected",
+                    )
                     if readiness_ratio < 0.8:
                         self._emit_event(sim_state, "repair_trigger_suppressed_not_ready", {"project_id": project_id, "reason": "build_not_ready_for_repair", "readiness_ratio": round(readiness_ratio, 3)})
                         continue
@@ -8094,6 +8132,12 @@ class Agent:
                     if random.random() < self._trait_value("help_tendency"):
                         self.construction_validation_state["repair_last_ts"][project_id] = now_ts
                         project["correct"] = True
+                        self._refresh_construction_provenance(
+                            getattr(sim_state, "environment", None),
+                            project_id,
+                            sim_state=sim_state,
+                            event="construction_repair_episode",
+                        )
                         self.activity_log.append("Triggered correction/repair on construction externalization")
                         if sim_state is not None:
                             sim_state.logger.log_event(

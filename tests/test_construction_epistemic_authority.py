@@ -182,6 +182,19 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         self.assertTrue(any(e.get("event_type") == "construction_validation_blocked" for e in sim.logger.recent_events))
         sim.stop()
 
+    def test_failed_validation_persists_needs_repair_until_fixed(self):
+        sim = SimulationState(phases=[])
+        project_id = "Build_Table_B"
+        project = sim.environment.construction.projects[project_id]
+        required = int(project["required_resources"]["bricks"])
+        sim.environment.construction.deliver_resource(project_id, "bricks", quantity=required)
+        sim.environment.construction.mark_validated(project_id, is_valid=False, actor="Architect", sim_time=8.0)
+        sim.environment.construction.update()
+        self.assertEqual(project["status"], "needs_repair")
+        self.assertFalse(project["validated_complete"])
+        self.assertEqual(project.get("last_actor"), "Architect")
+        sim.stop()
+
     def test_inspect_context_cannot_shortcut_delivery(self):
         sim = SimulationState(phases=[])
         agent = sim.agents[0]
