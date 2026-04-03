@@ -270,6 +270,10 @@ class ConstructionManager:
             "target_id": canonical_target_id,
             "last_actor": None,
             "last_event_time": None,
+            "closure_owner": None,
+            "closure_started_at": None,
+            "closure_attempt_count": 0,
+            "closure_status": "idle",
             "provenance": {
                 "last_actor": None,
                 "contributors": [],
@@ -323,7 +327,13 @@ class ConstructionManager:
         expected_set = set(expected)
         held_expected_locally = bool(expected_set.issubset(set(held_rules))) if expected_set else True
         missing_expected = sorted(expected_set - set(held_rules))
-        contributors = sorted(set(list(prov.get("contributors", [])) + ([actor] if actor else [])))
+        contributors = sorted(
+            set(
+                list(prov.get("contributors", []))
+                + ([actor] if actor else [])
+                + list(project.get("builders", []) if isinstance(project.get("builders", []), set) else project.get("builders", []))
+            )
+        )
         prov.update(
             {
                 "last_actor": actor or prov.get("last_actor"),
@@ -455,6 +465,7 @@ class ConstructionManager:
         self._advance_transports()
         self.sites["site_c"].buildable = self._is_site_buildable("site_c")
         for project in self.projects.values():
+            prior_status = str(project.get("status") or "")
             required = int(project["required_resources"].get("bricks", 0) or 0)
             delivered = int(project["delivered_resources"].get("bricks", 0) or 0)
             project["resource_complete"] = required > 0 and delivered >= required
@@ -477,6 +488,27 @@ class ConstructionManager:
                 project["status"] = "in_progress"
                 project["in_progress"] = True
                 project["validated_complete"] = False
+            if project["status"] == "ready_for_validation":
+                if not project.get("closure_owner"):
+                    preferred_owner = project.get("last_actor")
+                    if not preferred_owner:
+                        builders = sorted(project.get("builders", []))
+                        preferred_owner = builders[0] if builders else None
+                    if preferred_owner:
+                        project["closure_owner"] = preferred_owner
+                        project["closure_status"] = "assigned"
+                        if project.get("closure_started_at") is None:
+                            project["closure_started_at"] = project.get("last_event_time")
+                        self._closure_reservations[project["id"]] = {
+                            "agent": preferred_owner,
+                            "expires_at": float("inf"),
+                        }
+            elif prior_status == "ready_for_validation":
+                project["closure_status"] = "idle"
+                project["closure_owner"] = None
+                project["closure_started_at"] = None
+                project["closure_attempt_count"] = 0
+                self._closure_reservations.pop(project.get("id"), None)
 
     def get_active_projects(self):
         return [p for p in self.projects.values() if p.get("started") and p["status"] != "complete"]
@@ -537,6 +569,8 @@ class ConstructionManager:
             project["validated_complete"] = False
             project["status"] = "needs_repair"
             project["in_progress"] = True
+            project["closure_status"] = "failed"
+            project["closure_owner"] = actor or project.get("closure_owner")
             self.update_project_provenance(
                 project_id,
                 event=str(event or "validation_failed"),
@@ -553,6 +587,9 @@ class ConstructionManager:
             project["validated_complete"] = True
             project["status"] = "complete"
             project["in_progress"] = False
+            project["closure_status"] = "validated"
+            project["closure_owner"] = actor or project.get("closure_owner")
+            self._closure_reservations.pop(project_id, None)
         else:
             project["validated_complete"] = False
             project["status"] = "in_progress"
@@ -573,15 +610,30 @@ class ConstructionManager:
         agent_name = str(agent_name or "")
         if not project_id or project_id not in self.projects or not agent_name:
             return False
+        project = self.projects.get(project_id)
+        if not isinstance(project, dict):
+            return False
         reservation = self._closure_reservations.get(project_id)
         expires_at = float((reservation or {}).get("expires_at", -1.0) or -1.0)
         owner = (reservation or {}).get("agent")
         if reservation and owner != agent_name and expires_at > float(now_ts):
             return False
+        if (
+            project.get("closure_owner")
+            and str(project.get("closure_owner")) != agent_name
+            and str(project.get("status")) == "ready_for_validation"
+            and str(project.get("closure_status")) in {"assigned", "in_progress"}
+        ):
+            return False
         self._closure_reservations[project_id] = {
             "agent": agent_name,
             "expires_at": float(now_ts) + max(1.0, float(ttl_s)),
         }
+        if project.get("closure_owner") != agent_name:
+            project["closure_owner"] = agent_name
+            project["closure_started_at"] = float(now_ts)
+            project["closure_attempt_count"] = 0
+        project["closure_status"] = "in_progress"
         return True
 
     def release_project_closure(self, project_id, *, agent_name=None):
@@ -594,18 +646,35 @@ class ConstructionManager:
         if agent_name is not None and str(reservation.get("agent")) != str(agent_name):
             return
         self._closure_reservations.pop(project_id, None)
+        project = self.projects.get(project_id)
+        if isinstance(project, dict):
+            project["closure_owner"] = None
+            project["closure_started_at"] = None
+            project["closure_status"] = "idle"
 
     def project_closure_owner(self, project_id, *, now_ts=0.0):
         project_id = str(project_id or "")
         if not project_id:
             return None
+        project = self.projects.get(project_id)
         reservation = self._closure_reservations.get(project_id)
         if not reservation:
-            return None
+            return project.get("closure_owner") if isinstance(project, dict) else None
         if float(reservation.get("expires_at", -1.0) or -1.0) <= float(now_ts):
             self._closure_reservations.pop(project_id, None)
             return None
         return reservation.get("agent")
+
+    def note_project_closure_attempt(self, project_id, *, actor=None, sim_time=None):
+        project = self.projects.get(project_id)
+        if not isinstance(project, dict):
+            return
+        project["closure_attempt_count"] = int(project.get("closure_attempt_count", 0) or 0) + 1
+        project["closure_status"] = "in_progress"
+        if actor:
+            project["closure_owner"] = actor
+        if project.get("closure_started_at") is None:
+            project["closure_started_at"] = sim_time
 
     def assign_builder(self, project_id, agent_name):
         resolved_id = self.resolve_project_id(project_id, create_if_missing=True)
@@ -684,6 +753,10 @@ class ConstructionManager:
                     "correct": bool(project.get("correct", True)),
                     "resource_complete": bool(project.get("resource_complete", False)),
                     "validated_complete": bool(project.get("validated_complete", False)),
+                    "closure_owner": project.get("closure_owner"),
+                    "closure_started_at": project.get("closure_started_at"),
+                    "closure_attempt_count": int(project.get("closure_attempt_count", 0) or 0),
+                    "closure_status": project.get("closure_status", "idle"),
                     "builders": sorted(project.get("builders", [])),
                     "last_actor": project.get("last_actor") or provenance.get("last_actor"),
                     "last_event_time": project.get("last_event_time") or provenance.get("last_update_time"),
