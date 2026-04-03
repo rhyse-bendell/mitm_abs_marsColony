@@ -97,6 +97,7 @@ class ConstructionManager:
         }
         self.connectors: List[Dict] = []
         self._active_transports: Dict[str, Dict] = {}
+        self._closure_reservations: Dict[str, Dict] = {}
         self.project_templates = self._build_project_templates()
         self._project_counters: Dict[Tuple[str, str], int] = {}
 
@@ -531,6 +532,45 @@ class ConstructionManager:
             project["status"] = "in_progress"
             project["in_progress"] = True
         self.update_project_provenance(project_id, event="validation_passed" if is_valid else "validation_failed", sim_time=None)
+
+    def claim_project_closure(self, project_id, agent_name, *, now_ts=0.0, ttl_s=12.0):
+        project_id = str(project_id or "")
+        agent_name = str(agent_name or "")
+        if not project_id or project_id not in self.projects or not agent_name:
+            return False
+        reservation = self._closure_reservations.get(project_id)
+        expires_at = float((reservation or {}).get("expires_at", -1.0) or -1.0)
+        owner = (reservation or {}).get("agent")
+        if reservation and owner != agent_name and expires_at > float(now_ts):
+            return False
+        self._closure_reservations[project_id] = {
+            "agent": agent_name,
+            "expires_at": float(now_ts) + max(1.0, float(ttl_s)),
+        }
+        return True
+
+    def release_project_closure(self, project_id, *, agent_name=None):
+        project_id = str(project_id or "")
+        if not project_id:
+            return
+        reservation = self._closure_reservations.get(project_id)
+        if not reservation:
+            return
+        if agent_name is not None and str(reservation.get("agent")) != str(agent_name):
+            return
+        self._closure_reservations.pop(project_id, None)
+
+    def project_closure_owner(self, project_id, *, now_ts=0.0):
+        project_id = str(project_id or "")
+        if not project_id:
+            return None
+        reservation = self._closure_reservations.get(project_id)
+        if not reservation:
+            return None
+        if float(reservation.get("expires_at", -1.0) or -1.0) <= float(now_ts):
+            self._closure_reservations.pop(project_id, None)
+            return None
+        return reservation.get("agent")
 
     def assign_builder(self, project_id, agent_name):
         resolved_id = self.resolve_project_id(project_id, create_if_missing=True)
