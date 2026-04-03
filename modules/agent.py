@@ -215,6 +215,13 @@ class Agent:
         }
         self.status_last_action = ""
         self.construction_validation_state = {"mismatch_last_ts": {}, "repair_last_ts": {}}
+        self.project_closure_state = {
+            "active": False,
+            "project_id": None,
+            "commit_until": 0.0,
+            "attempt_count": 0,
+            "blocked_count": 0,
+        }
         self.last_construction_state_check_time = 0.0
         self.last_observed_construction_signature = None
 
@@ -560,6 +567,71 @@ class Agent:
         self.progress_tracker["forced_pivot"] = str(to_action)
         self.progress_tracker["forced_pivot_until"] = now_ts + max(1.0, float(ttl_s))
         self._emit_event(sim_state, "recovery_pivot_applied", {"to_action": str(to_action), "reason": str(reason), "ttl_s": ttl_s})
+
+    def _project_closure_ready(self, project):
+        return isinstance(project, dict) and str(project.get("status")) == "ready_for_validation"
+
+    def _clear_project_closure_commitment(self, sim_state=None, environment=None, reason="cleared"):
+        state = self.project_closure_state
+        project_id = state.get("project_id")
+        if environment is not None and project_id and getattr(environment, "construction", None) is not None:
+            if hasattr(environment.construction, "release_project_closure"):
+                environment.construction.release_project_closure(project_id, agent_name=self.name)
+        if state.get("active") or project_id:
+            self._emit_event(sim_state, "project_closure_commitment_cleared", {"project_id": project_id, "reason": reason})
+        state.update({"active": False, "project_id": None, "commit_until": 0.0, "attempt_count": 0, "blocked_count": 0})
+
+    def _start_project_closure_commitment(self, project_id, *, environment, sim_state=None, ttl_s=12.0, reason="ready_for_validation"):
+        if not project_id or getattr(environment, "construction", None) is None:
+            return False
+        project = environment.construction.projects.get(project_id)
+        if not self._project_closure_ready(project):
+            return False
+        now_ts = self._tracker_now(sim_state)
+        if hasattr(environment.construction, "claim_project_closure"):
+            claimed = environment.construction.claim_project_closure(project_id, self.name, now_ts=now_ts, ttl_s=ttl_s)
+            if not claimed:
+                owner = environment.construction.project_closure_owner(project_id, now_ts=now_ts) if hasattr(environment.construction, "project_closure_owner") else None
+                self._emit_event(sim_state, "project_closure_commitment_deferred", {"project_id": project_id, "owner": owner, "reason": reason})
+                return False
+        state = self.project_closure_state
+        state["active"] = True
+        state["project_id"] = project_id
+        state["commit_until"] = max(float(state.get("commit_until", 0.0) or 0.0), now_ts + max(3.0, float(ttl_s)))
+        state["blocked_count"] = 0
+        self._emit_event(
+            sim_state,
+            "project_closure_commitment_started",
+            {"project_id": project_id, "reason": reason, "commit_until": state["commit_until"], "attempt_count": int(state.get("attempt_count", 0) or 0)},
+        )
+        self._force_recovery_pivot(
+            sim_state,
+            to_action=ExecutableActionType.VALIDATE_CONSTRUCTION.value,
+            reason=f"closure_commitment:{reason}:{project_id}",
+            ttl_s=max(4.0, float(ttl_s) * 0.7),
+        )
+        return True
+
+    def _live_project_closure_commitment(self, environment, sim_state=None):
+        state = self.project_closure_state
+        if not state.get("active"):
+            return None
+        project_id = state.get("project_id")
+        project = environment.construction.projects.get(project_id) if project_id else None
+        now_ts = self._tracker_now(sim_state)
+        if not isinstance(project, dict):
+            self._clear_project_closure_commitment(sim_state=sim_state, environment=environment, reason="project_missing")
+            return None
+        if project.get("status") == "complete":
+            self._clear_project_closure_commitment(sim_state=sim_state, environment=environment, reason="project_complete")
+            return None
+        if not self._project_closure_ready(project):
+            self._clear_project_closure_commitment(sim_state=sim_state, environment=environment, reason=f"status_not_ready:{project.get('status')}")
+            return None
+        if float(state.get("commit_until", 0.0) or 0.0) < now_ts and int(state.get("attempt_count", 0) or 0) > 0:
+            self._clear_project_closure_commitment(sim_state=sim_state, environment=environment, reason="commit_window_expired")
+            return None
+        return project_id
 
     def _intent_window_for_action(self, action_type):
         if action_type == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value:
@@ -2936,6 +3008,16 @@ class Agent:
         if requested_project_id in environment.construction.projects:
             return requested_project_id
         if decision.selected_action in {ExecutableActionType.VALIDATE_CONSTRUCTION, ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION}:
+            closure_project_id = self._live_project_closure_commitment(environment)
+            if closure_project_id:
+                return closure_project_id
+            ready_projects = [
+                p for p in environment.construction.projects.values()
+                if isinstance(p, dict) and str(p.get("status")) == "ready_for_validation"
+            ]
+            if ready_projects:
+                ready_projects.sort(key=lambda p: str(p.get("id", "")))
+                return ready_projects[0].get("id")
             return None
         build_selection = self._select_build_target(environment, require_readiness=False, include_project=True)
         if isinstance(build_selection, dict):
@@ -2968,6 +3050,8 @@ class Agent:
         blockers = []
         epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
         project_id = self._construction_project_for_action(decision, action, environment)
+        closure_project_id = self._live_project_closure_commitment(environment, sim_state=sim_state)
+        closure_active_for_project = bool(project_id and closure_project_id and project_id == closure_project_id)
         if project_id is None:
             blockers.append("no_navigable_build_target")
             return blockers, None
@@ -2994,10 +3078,10 @@ class Agent:
             mismatch_detected = (project.get("correct", True) is False) or any(
                 "mismatch with construction" in str(e).lower() for e in self.activity_log[-8:]
             )
-            if not mismatch_detected:
+            if not mismatch_detected and not closure_active_for_project:
                 blockers.append("no_detected_mismatch")
         elif action_type == ExecutableActionType.VALIDATE_CONSTRUCTION:
-            if not epistemic.get("sufficient_for_validation", False):
+            if not epistemic.get("sufficient_for_validation", False) and not closure_active_for_project:
                 blockers.append("epistemic_sufficiency_low_for_validation")
             has_match, missing_rules = self._construction_rule_match(project_id, environment=environment, sim_state=sim_state, include_team=True)
             if not has_match:
@@ -3054,6 +3138,10 @@ class Agent:
         seen_sites = set()
         decision_action = str(action_type or "")
         transport_selection = decision_action == ExecutableActionType.TRANSPORT_RESOURCES.value
+        validation_selection = decision_action in {
+            ExecutableActionType.VALIDATE_CONSTRUCTION.value,
+            ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value,
+        }
         if transport_selection and requested_project_id:
             requested_project = environment.construction.projects.get(requested_project_id)
             if isinstance(requested_project, dict) and self._project_needs_transport(requested_project):
@@ -3094,7 +3182,16 @@ class Agent:
             required = project.get("required_resources", {}).get("bricks", 0)
             delivered = project.get("delivered_resources", {}).get("bricks", 0)
             remaining = max(0, required - delivered)
-            score = remaining + (0 if project.get("status") == "in_progress" else 100)
+            status = str(project.get("status") or "")
+            if validation_selection:
+                if status == "ready_for_validation":
+                    score = -1000 + remaining
+                elif status == "needs_repair":
+                    score = -200 + remaining
+                else:
+                    score = 500 + remaining
+            else:
+                score = remaining + (0 if status == "in_progress" else 100)
             candidates.append((score, project_id, point))
 
         if not candidates:
@@ -5409,6 +5506,32 @@ class Agent:
                     confidence=max(0.7, float(decision.confidence or 0.0)),
                 )
                 self._emit_event(sim_state, "recovery_pivot_applied", {"origin": pivot_origin, "forced_action": forced_pivot, "from_action": decision.selected_action.value})
+        closure_project_id = self._live_project_closure_commitment(environment, sim_state=sim_state)
+        if closure_project_id:
+            closure_locked = now_ts <= float(self.project_closure_state.get("commit_until", 0.0) or 0.0)
+            closure_guard_actions = {
+                ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                ExecutableActionType.CONSULT_TEAM_ARTIFACT,
+                ExecutableActionType.EXTERNALIZE_PLAN,
+                ExecutableActionType.REQUEST_ASSISTANCE,
+                ExecutableActionType.COMMUNICATE,
+                ExecutableActionType.REASSESS_PLAN,
+                ExecutableActionType.OBSERVE_ENVIRONMENT,
+            }
+            if closure_locked and rewritten.selected_action in closure_guard_actions:
+                self._emit_event(
+                    sim_state,
+                    "project_closure_commitment_preserved",
+                    {"origin": pivot_origin, "project_id": closure_project_id, "from_action": rewritten.selected_action.value, "to_action": ExecutableActionType.VALIDATE_CONSTRUCTION.value},
+                )
+                rewritten = BrainDecision(
+                    selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION,
+                    target_id=closure_project_id,
+                    target_zone=decision.target_zone,
+                    goal_update="close_ready_project",
+                    reason_summary=f"Closure commitment preserved for {closure_project_id}",
+                    confidence=max(0.82, float(rewritten.confidence or decision.confidence or 0.0)),
+                )
         handoff = dict(self.post_inspect_handoff or {})
         rule_brain_runtime = self._is_rule_brain_runtime(sim_state)
         artifact_state = self.artifact_coordination_state
@@ -5500,6 +5623,8 @@ class Agent:
             refresh_pressure = float(epistemic.get("refresh_pressure", 0.0) or 0.0)
             role_missing = bool(epistemic.get("role_missing"))
             if rewritten.selected_action in {ExecutableActionType.VALIDATE_CONSTRUCTION, ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION} and (role_missing or refresh_pressure >= 0.58):
+                if closure_project_id and rewritten.selected_action == ExecutableActionType.VALIDATE_CONSTRUCTION:
+                    return rewritten
                 fallback = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
                 if fallback.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
                     rewritten = fallback
@@ -5634,6 +5759,24 @@ class Agent:
                 reason_summary=f"Preserve live inspect pursuit for {live_source_id}",
                 confidence=max(0.8, float(rewritten.confidence or decision.confidence or 0.0)),
             )
+        if rewritten.selected_action == ExecutableActionType.VALIDATE_CONSTRUCTION:
+            closure_target = rewritten.target_id or self._construction_project_for_action(rewritten, {"project_id": None}, environment)
+            if closure_target:
+                rewritten = BrainDecision(
+                    selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION,
+                    target_id=closure_target,
+                    target_zone=rewritten.target_zone,
+                    goal_update=rewritten.goal_update,
+                    reason_summary=rewritten.reason_summary,
+                    confidence=rewritten.confidence,
+                )
+                self._start_project_closure_commitment(
+                    closure_target,
+                    environment=environment,
+                    sim_state=sim_state,
+                    ttl_s=12.0,
+                    reason=f"validate_decision_{pivot_origin}",
+                )
         return rewritten
 
     def _reroute_decision_through_rulebrain_controller(self, context, fallback_decision, *, sim_state, pivot_origin, reason):
@@ -5970,6 +6113,14 @@ class Agent:
                 action["project_id"] = project_id
             if blockers:
                 self._emit_event(sim_state, "execution_readiness_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "readiness_not_unlocked", "blockers": blockers, "project_id": project_id})
+                if decision.selected_action == ExecutableActionType.VALIDATE_CONSTRUCTION:
+                    self.project_closure_state["blocked_count"] = int(self.project_closure_state.get("blocked_count", 0) or 0) + 1
+                    if self.project_closure_state["blocked_count"] >= 3:
+                        self._clear_project_closure_commitment(
+                            sim_state=sim_state,
+                            environment=environment,
+                            reason="validation_readiness_blocked_threshold",
+                        )
                 return [{"type": "idle", "duration": 1.0, "priority": 1, "decision_action": ExecutableActionType.WAIT.value}]
             else:
                 payload = {"planner_action_type": decision.selected_action.value, "project_id": project_id}
@@ -5977,6 +6128,10 @@ class Agent:
                 if goal_id:
                     payload["goal_id"] = goal_id
                 self._emit_event(sim_state, "execution_readiness_passed", payload)
+                if project_id and not action.get("target"):
+                    resolved_target = environment.get_interaction_target_position(project_id, from_position=self.position)
+                    if resolved_target is not None:
+                        action["target"] = resolved_target
 
         if decision.selected_action in {ExecutableActionType.EXTERNALIZE_PLAN, ExecutableActionType.CONSULT_TEAM_ARTIFACT}:
             action["artifact_action"] = decision.selected_action.value
@@ -6821,14 +6976,25 @@ class Agent:
                         "construction_validation_blocked",
                         {"failure_category": "missing_project_binding", "decision_action": action.get("decision_action")},
                     )
+                    self.project_closure_state["blocked_count"] = int(self.project_closure_state.get("blocked_count", 0) or 0) + 1
                     continue
                 project = environment.construction.projects.get(project_id)
                 if project:
                     ready, access = _location_ready(action, project_id)
                     if not ready:
                         self._emit_event(sim_state, "construction_validation_en_route", {"project_id": project_id, "access_reason": access.get("reason"), "expected_interaction_location": _build_target(project_id)})
+                        self.project_closure_state["blocked_count"] = int(self.project_closure_state.get("blocked_count", 0) or 0) + 1
+                        if int(self.project_closure_state.get("blocked_count", 0) or 0) >= 5:
+                            self._clear_project_closure_commitment(
+                                sim_state=sim_state,
+                                environment=environment,
+                                reason="validation_access_threshold_exceeded",
+                            )
                         continue
                     _set_action_stage(action, "mutation_execution_started", {"project_id": project_id})
+                    self._emit_event(sim_state, "construction_validation_attempted", {"project_id": project_id, "decision_action": action.get("decision_action")})
+                    self.project_closure_state["attempt_count"] = int(self.project_closure_state.get("attempt_count", 0) or 0) + 1
+                    self.project_closure_state["blocked_count"] = 0
                     if project.get("status") not in {"ready_for_validation", "needs_repair"}:
                         _log_mutation_blocked(
                             "construction_validation_blocked",
@@ -6861,6 +7027,11 @@ class Agent:
                         },
                     )
                     if is_valid:
+                        self._clear_project_closure_commitment(
+                            sim_state=sim_state,
+                            environment=environment,
+                            reason="validation_succeeded",
+                        )
                         self._emit_event(
                             sim_state,
                             "construction_completed",
@@ -6870,6 +7041,12 @@ class Agent:
                                 "structure_type": project.get("type", "unknown"),
                                 "completion_mode": "validated",
                             },
+                        )
+                    else:
+                        self._clear_project_closure_commitment(
+                            sim_state=sim_state,
+                            environment=environment,
+                            reason="validation_failed_or_needs_repair",
                         )
 
             if action["type"] == "construct":
@@ -7058,6 +7235,13 @@ class Agent:
                     next_action = ExecutableActionType.REASSESS_PLAN.value
                     if isinstance(project, dict) and str(project.get("status")) == "ready_for_validation":
                         next_action = ExecutableActionType.VALIDATE_CONSTRUCTION.value
+                        self._start_project_closure_commitment(
+                            project_id,
+                            environment=environment,
+                            sim_state=sim_state,
+                            ttl_s=14.0,
+                            reason="transport_terminal_project_satisfied",
+                        )
                     else:
                         next_transport_target = self._select_build_target(
                             environment,
@@ -7381,6 +7565,13 @@ class Agent:
                             "delivered_total": delivered_after,
                             "decision_action": action.get("decision_action"),
                         },
+                    )
+                    self._start_project_closure_commitment(
+                        project_id,
+                        environment=environment,
+                        sim_state=sim_state,
+                        ttl_s=14.0,
+                        reason="resource_delivery_ready_for_validation",
                     )
                 if status_before != "complete" and status_after == "complete":
                     self._emit_event(
@@ -7851,6 +8042,7 @@ class Agent:
                     self.activity_log.append(f"Reinferred rule from tag [{tag}]")
 
     def compare_and_repair_construction(self, construction, sim_state=None):
+        closure_project_id = self.project_closure_state.get("project_id") if bool(self.project_closure_state.get("active")) else None
         for project in construction.projects.values():
             if not isinstance(project, dict):
                 continue
@@ -7861,6 +8053,9 @@ class Agent:
             delivered = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
             if required <= 0 or delivered <= 0:
                 self._emit_event(sim_state, "mismatch_detection_skipped_not_ready", {"project_id": project_id, "reason": "insufficient_build_state", "required": required, "delivered": delivered})
+                continue
+            if closure_project_id and project_id == closure_project_id and str(project.get("status")) == "ready_for_validation":
+                self._emit_event(sim_state, "mismatch_detection_deferred_for_closure", {"project_id": project_id, "reason": "closure_commitment_active"})
                 continue
             readiness_ratio = delivered / max(1, required)
             if readiness_ratio < 0.5:
