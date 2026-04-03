@@ -575,6 +575,20 @@ class Agent:
         state = self.project_closure_state
         project_id = state.get("project_id")
         if environment is not None and project_id and getattr(environment, "construction", None) is not None:
+            project = environment.construction.projects.get(project_id)
+            if isinstance(project, dict) and hasattr(environment.construction, "update_project_provenance"):
+                snapshot = self._snapshot_dik_provenance(sim_state=sim_state)
+                environment.construction.update_project_provenance(
+                    project_id,
+                    event=f"closure_released:{reason}",
+                    actor=self.name,
+                    sim_time=float(getattr(sim_state, "time", getattr(self, "current_time", 0.0))),
+                    held_data_ids=snapshot["held_data_ids_at_build"],
+                    held_information_ids=snapshot["held_information_ids_at_build"],
+                    held_rule_ids=snapshot["held_rule_ids_at_build"],
+                    team_rule_snapshot_ids=snapshot["team_rule_snapshot_ids"],
+                )
+        if environment is not None and project_id and getattr(environment, "construction", None) is not None:
             if hasattr(environment.construction, "release_project_closure"):
                 environment.construction.release_project_closure(project_id, agent_name=self.name)
         if state.get("active") or project_id:
@@ -599,6 +613,18 @@ class Agent:
         state["project_id"] = project_id
         state["commit_until"] = max(float(state.get("commit_until", 0.0) or 0.0), now_ts + max(3.0, float(ttl_s)))
         state["blocked_count"] = 0
+        if hasattr(environment.construction, "update_project_provenance"):
+            snapshot = self._snapshot_dik_provenance(sim_state=sim_state)
+            environment.construction.update_project_provenance(
+                project_id,
+                event="closure_assigned",
+                actor=self.name,
+                sim_time=now_ts,
+                held_data_ids=snapshot["held_data_ids_at_build"],
+                held_information_ids=snapshot["held_information_ids_at_build"],
+                held_rule_ids=snapshot["held_rule_ids_at_build"],
+                team_rule_snapshot_ids=snapshot["team_rule_snapshot_ids"],
+            )
         self._emit_event(
             sim_state,
             "project_closure_commitment_started",
@@ -6110,7 +6136,14 @@ class Agent:
             ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
             ExecutableActionType.VALIDATE_CONSTRUCTION,
         } and action.get("project_id") not in environment.construction.projects:
-            selected = self._select_build_target(environment, require_readiness=False, include_project=True)
+            selected = self._select_build_target(
+                environment,
+                require_readiness=False,
+                include_project=True,
+                action_type=decision.selected_action.value,
+                requested_project_id=decision.target_id,
+                sim_state=sim_state,
+            )
             if isinstance(selected, dict):
                 action["project_id"] = selected.get("project_id")
                 if not action.get("target"):
@@ -7011,6 +7044,8 @@ class Agent:
                     self.project_closure_state["blocked_count"] = 0
                     snapshot = self._snapshot_dik_provenance(sim_state=sim_state)
                     validation_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+                    if hasattr(environment.construction, "note_project_closure_attempt"):
+                        environment.construction.note_project_closure_attempt(project_id, actor=self.name, sim_time=validation_ts)
                     environment.construction.update_project_provenance(
                         project_id,
                         event="validation_attempted",
@@ -8088,6 +8123,18 @@ class Agent:
                 continue
             if closure_project_id and project_id == closure_project_id and str(project.get("status")) == "ready_for_validation":
                 self._emit_event(sim_state, "mismatch_detection_deferred_for_closure", {"project_id": project_id, "reason": "closure_commitment_active"})
+                continue
+            if (
+                str(project.get("status")) == "ready_for_validation"
+                and project.get("closure_owner")
+                and str(project.get("closure_status")) in {"assigned", "in_progress"}
+                and bool(project.get("correct", True))
+            ):
+                self._emit_event(
+                    sim_state,
+                    "mismatch_detection_deferred_for_closure",
+                    {"project_id": project_id, "reason": "project_closure_owner_active", "closure_owner": project.get("closure_owner")},
+                )
                 continue
             readiness_ratio = delivered / max(1, required)
             if readiness_ratio < 0.5:
