@@ -167,6 +167,7 @@ class Agent:
         self.knowledge_memory = set()
         self.known_gaps = set()
         self.communication_log = []
+        self._last_received_dik_changed = False
         self.memory_seen_packets = set()
         self.source_inspection_state = {}
         self.source_exhaustion_state = {}
@@ -441,6 +442,8 @@ class Agent:
             "last_exchange_tick": -1,
             "no_effect_streak": 0,
             "last_signature": None,
+            "last_meaningful_exchange_time": -1.0,
+            "last_meaningful_exchange_with": None,
         }
         self.team_plan_state = {
             "last_adopted_plan_id": None,
@@ -455,6 +458,7 @@ class Agent:
             "assignment": None,
             "assignment_target": None,
             "pending_outbound_plan_responses": [],
+            "pending_outbound_messages": [],
             "commitment_expired_emitted": False,
         }
         self.artifact_coordination_state = {
@@ -1990,37 +1994,10 @@ class Agent:
     def _write_shared_source_to_team_knowledge(self, sim_state, source_id, packet, new_info_ids, new_data_ids, new_rule_ids):
         if sim_state is None or not hasattr(sim_state, "team_knowledge_manager"):
             return {"added": [], "adopted": []}
-        manager = sim_state.team_knowledge_manager
-        added = []
+        # Shared-source inspection is local unless explicitly externalized/adopted by team pathways.
+        # Keep adoption bookkeeping events but avoid promoting one-agent inspection into validated team DIK.
         adopted = []
-
-        for item in packet.get("information", []):
-            key = self._team_dik_key(item.id, "information")
-            summary = f"{source_id}:{item.id}:{getattr(item, 'content', '')}"
-            if key not in manager.validated_knowledge:
-                manager.add_validated_knowledge(key, summary, self.name, float(getattr(sim_state, "time", 0.0)))
-                added.append(item.id)
-            elif item.id in set(new_info_ids):
-                adopted.append(item.id)
-
-        for item in packet.get("data", []):
-            key = self._team_dik_key(item.id, "data")
-            summary = f"{source_id}:{item.id}:{getattr(item, 'content', '')}"
-            if key not in manager.validated_knowledge:
-                manager.add_validated_knowledge(key, summary, self.name, float(getattr(sim_state, "time", 0.0)))
-                added.append(item.id)
-            elif item.id in set(new_data_ids):
-                adopted.append(item.id)
-
-        for rule_id in new_rule_ids:
-            key = self._team_dik_key(rule_id, "rule")
-            if key not in manager.validated_knowledge:
-                manager.add_validated_knowledge(key, f"{source_id}:{rule_id}", self.name, float(getattr(sim_state, "time", 0.0)))
-                added.append(rule_id)
-            else:
-                adopted.append(rule_id)
-
-        return {"added": sorted(set(added)), "adopted": sorted(set(adopted))}
+        return {"added": [], "adopted": sorted(set(adopted))}
 
     def _evaluate_source_access_status(self, environment, source_id, target_pos, slot_id=None, arrival_tolerance=0.24):
         if target_pos is None:
@@ -2405,6 +2382,18 @@ class Agent:
             readiness_after=readiness_after,
         )
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        role_source_id = f"{self.role}_Info"
+        role_packet_dik_ids = sorted(
+            {f"information:{i}" for i in new_ids}
+            | {f"data:{d}" for d in new_data_from_source}
+            | {f"rule:{normalize_rule_token(r)}" for r in new_rule_ids}
+        )
+        if source_id == role_source_id and net_dik_changed and role_packet_dik_ids:
+            role_mem = self.source_memory_state.setdefault(role_source_id, {})
+            pending_ids = set(role_mem.get("pending_role_share_ids", []))
+            pending_ids.update(role_packet_dik_ids)
+            role_mem["pending_role_share_ids"] = sorted(pending_ids)
+            role_mem["role_contribution_shared"] = False
         self.post_inspect_handoff = {
             "pending": True,
             "source_id": source_id,
@@ -2413,6 +2402,7 @@ class Agent:
             "blockers": sorted(readiness_after),
             "blocker_category": blocker_category,
             "outcome": post_inspect_outcome,
+            "role_packet_dik_ids": role_packet_dik_ids if source_id == role_source_id else [],
             "expires_at": now_ts + 5.0,
         }
         if sim_state is not None:
@@ -2554,6 +2544,7 @@ class Agent:
         return mapping.get(blocker_category, "inspect_success_readiness_blocked_missing_rule")
 
     def _choose_post_inspect_followup_decision(self, environment, sim_state=None):
+        handoff = dict(self.post_inspect_handoff or {})
         critical_sources = self._critical_unmet_source_targets(sim_state, environment)
         critical_sources = {
             source_id: priority
@@ -2563,6 +2554,25 @@ class Agent:
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
         role_source = f"{self.role}_Info"
         epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
+        meaningful_exchange_at = float((self.communication_state or {}).get("last_meaningful_exchange_time", -1.0) or -1.0)
+        recent_meaningful_exchange = meaningful_exchange_at >= 0.0 and (now_ts - meaningful_exchange_at) <= 6.0
+        role_source_handoff = str(handoff.get("source_id", "") or "") == role_source
+        role_dik_changed = bool(handoff.get("dik_changed"))
+        role_packet_ids = list(handoff.get("role_packet_dik_ids", []) or [])
+        role_pending_share = bool(self.source_memory_state.get(role_source, {}).get("pending_role_share_ids"))
+        if (
+            role_source_handoff
+            and role_dik_changed
+            and bool(role_packet_ids)
+            and role_pending_share
+            and not recent_meaningful_exchange
+            and self._can_attempt_verbal_plan_communication(sim_state)
+        ):
+            return BrainDecision(
+                selected_action=ExecutableActionType.COMMUNICATE,
+                reason_summary="Post-inspect role-packet uptake prioritized for team DIK integration.",
+                confidence=0.83,
+            )
         role_missing = bool(epistemic.get("role_missing"))
         role_unseen = not bool(self.source_memory_state.get(role_source, {}).get("ever_inspected"))
         team_seen = bool(self.source_memory_state.get("Team_Info", {}).get("ever_inspected"))
@@ -6159,6 +6169,7 @@ class Agent:
             if project_id:
                 action["project_id"] = project_id
             if blockers:
+                self._record_known_gaps_from_blockers(blockers, sim_state=sim_state, project_id=project_id)
                 self._emit_event(sim_state, "execution_readiness_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "readiness_not_unlocked", "blockers": blockers, "project_id": project_id})
                 if decision.selected_action == ExecutableActionType.VALIDATE_CONSTRUCTION:
                     self.project_closure_state["blocked_count"] = int(self.project_closure_state.get("blocked_count", 0) or 0) + 1
@@ -6168,6 +6179,19 @@ class Agent:
                             environment=environment,
                             reason="validation_readiness_blocked_threshold",
                         )
+                if (
+                    decision.selected_action == ExecutableActionType.VALIDATE_CONSTRUCTION
+                    and project_id
+                    and
+                    any(str(b).startswith("missing_") or str(b).startswith("insufficient_") for b in blockers)
+                    and self._can_attempt_verbal_plan_communication(sim_state)
+                ):
+                    self._emit_event(
+                        sim_state,
+                        "execution_readiness_blocked_requests_communication",
+                        {"project_id": project_id, "blockers": blockers, "decision_action": decision.selected_action.value},
+                    )
+                    return [{"type": "communicate", "duration": 1.0, "priority": 1, "decision_action": ExecutableActionType.COMMUNICATE.value}]
                 return [{"type": "idle", "duration": 1.0, "priority": 1, "decision_action": ExecutableActionType.WAIT.value}]
             else:
                 payload = {"planner_action_type": decision.selected_action.value, "project_id": project_id}
@@ -7802,22 +7826,115 @@ class Agent:
                     self.target = action.get("target")
             self.current_action = []
 
-    def generate_message(self):
+    def _extract_requested_dik_ids(self, items):
+        requested = set()
+        for raw in list(items or []):
+            token = str(raw or "").strip()
+            if not token:
+                continue
+            if token.startswith("missing_expected_rule:"):
+                rid = normalize_rule_token(token.split(":", 1)[1])
+                if rid:
+                    requested.add(f"rule:{rid}")
+            elif token.startswith("rule:"):
+                rid = normalize_rule_token(token.split(":", 1)[1])
+                if rid:
+                    requested.add(f"rule:{rid}")
+            elif token.startswith("information:") or token.startswith("data:"):
+                requested.add(token)
+            elif token.startswith("R_"):
+                rid = normalize_rule_token(token)
+                if rid:
+                    requested.add(f"rule:{rid}")
+        return requested
+
+    def _build_dik_payload_for_ids(self, requested_ids):
+        data_payload = []
+        info_payload = []
+        rule_payload = []
+        wanted = set(requested_ids or [])
+        if not wanted:
+            return data_payload, info_payload, rule_payload
+        for d in self.mental_model["data"]:
+            if f"data:{d.id}" in wanted:
+                data_payload.append(d)
+        for info in self.mental_model["information"]:
+            if f"information:{info.id}" in wanted:
+                info_payload.append(info)
+        for rule in self.mental_model["knowledge"].rules:
+            rid = normalize_rule_token(rule)
+            if f"rule:{rid}" in wanted:
+                rule_payload.append(rule)
+        return data_payload, info_payload, sorted(set(rule_payload))
+
+    def _record_known_gaps_from_blockers(self, blockers, sim_state=None, project_id=None):
+        gap_tokens = set()
+        for blocker in blockers or []:
+            text = str(blocker)
+            if text.startswith("missing_expected_rule:"):
+                rid = normalize_rule_token(text.split(":", 1)[1])
+                if rid:
+                    gap_tokens.add(f"missing_expected_rule:{rid}")
+            elif text in {
+                "missing_validation_rule_knowledge",
+                "missing_task_prerequisite_rules",
+                "insufficient_rule_knowledge",
+                "insufficient_information_inspection",
+            }:
+                gap_tokens.add(text)
+        if not gap_tokens:
+            return
+        self.known_gaps.update(gap_tokens)
+        self._emit_event(
+            sim_state,
+            "dik_gap_identified",
+            {"project_id": project_id, "gap_tokens": sorted(gap_tokens)},
+        )
+
+    def generate_message(self, recipient_name=None):
         messages = []
-        if self.mental_model["data"]:
-            messages.append({"type": "TDP", "content": list(self.mental_model["data"]), "sender": self.name})
-        if self.mental_model["information"]:
-            messages.append({"type": "TIP", "content": list(self.mental_model["information"]), "sender": self.name})
-        if self.mental_model["knowledge"].rules:
-            messages.append({"type": "TKP", "content": list(self.mental_model["knowledge"].rules), "sender": self.name})
-        if not self.mental_model["knowledge"].rules:
-            messages.append({"type": "TKRQ", "content": ["Requesting help with rules"], "sender": self.name})
+        role_source = f"{self.role}_Info"
+        role_mem = self.source_memory_state.get(role_source, {})
+        pending_role_share = set(role_mem.get("pending_role_share_ids", []))
+        requested = set()
+        if recipient_name and recipient_name in self.theory_of_mind:
+            requested.update(self.theory_of_mind[recipient_name].get("requested_dik_ids", set()) or set())
+        if requested:
+            data_payload, info_payload, rule_payload = self._build_dik_payload_for_ids(requested)
+            if data_payload:
+                messages.append({"type": "TDP", "content": data_payload, "sender": self.name})
+            if info_payload:
+                messages.append({"type": "TIP", "content": info_payload, "sender": self.name})
+            if rule_payload:
+                messages.append({"type": "TKP", "content": rule_payload, "sender": self.name})
+            shared_ids = {f"data:{d.id}" for d in data_payload} | {f"information:{i.id}" for i in info_payload} | {f"rule:{normalize_rule_token(r)}" for r in rule_payload}
+            if pending_role_share and shared_ids:
+                remaining = sorted(pending_role_share - shared_ids)
+                self.source_memory_state.setdefault(role_source, {})["pending_role_share_ids"] = remaining
+                if not remaining:
+                    self.source_memory_state.setdefault(role_source, {})["role_contribution_shared"] = True
+        elif pending_role_share:
+            data_payload, info_payload, rule_payload = self._build_dik_payload_for_ids(set(sorted(pending_role_share)[:3]))
+            if data_payload:
+                messages.append({"type": "TDP", "content": data_payload, "sender": self.name})
+            if info_payload:
+                messages.append({"type": "TIP", "content": info_payload, "sender": self.name})
+            if rule_payload:
+                messages.append({"type": "TKP", "content": rule_payload, "sender": self.name})
+            shared_ids = {f"data:{d.id}" for d in data_payload} | {f"information:{i.id}" for i in info_payload} | {f"rule:{normalize_rule_token(r)}" for r in rule_payload}
+            if shared_ids:
+                remaining = sorted(pending_role_share - shared_ids)
+                self.source_memory_state.setdefault(role_source, {})["pending_role_share_ids"] = remaining
+                self.source_memory_state.setdefault(role_source, {})["role_contribution_shared"] = not bool(remaining)
+        missing_ids = self._extract_requested_dik_ids(self.known_gaps)
+        if missing_ids:
+            messages.append({"type": "TKRQ", "content": sorted(missing_ids), "sender": self.name})
         if self.current_goal():
             messages.append({"type": "TGTO", "content": self.current_goal()["goal"], "sender": self.name})
         return messages
 
     def communicate_with(self, other_agent, sim_state=None):
-        messages = self.generate_message()
+        messages = self.generate_message(recipient_name=other_agent.name)
         if sim_state is not None:
             active_team_plan = self._get_active_team_plan(sim_state)
             if isinstance(active_team_plan, dict) and active_team_plan:
@@ -7838,73 +7955,26 @@ class Agent:
                             },
                         }
                     )
+            routed_pending = []
+            carry_forward = []
             pending = list(self.team_plan_state.get("pending_outbound_plan_responses", []) or [])
-            if pending:
-                messages.extend(pending)
-                self.team_plan_state["pending_outbound_plan_responses"] = []
+            pending.extend(list(self.team_plan_state.get("pending_outbound_messages", []) or []))
+            for msg in pending:
+                intended = str(msg.get("recipient", "") or "")
+                if intended and intended != other_agent.name:
+                    carry_forward.append(msg)
+                else:
+                    routed_pending.append(msg)
+            if routed_pending:
+                messages.extend(routed_pending)
+            self.team_plan_state["pending_outbound_plan_responses"] = []
+            self.team_plan_state["pending_outbound_messages"] = carry_forward
         message_types = []
         receiver_dik_changed = False
         for msg in messages:
             message_types.append(msg.get("type"))
             other_agent.receive_message(msg, from_agent=self.name, sim_state=sim_state)
-
-        # Directly transfer unseen Data
-        for data in self.mental_model["data"]:
-            if data not in other_agent.mental_model["data"]:
-                other_agent.mental_model["data"].add(data)
-                receiver_dik_changed = True
-                if other_agent.name not in data.acquired_by:
-                    data.acquired_by[other_agent.name] = {
-                        "mode": "shared",
-                        "from": self.name
-                    }
-                other_agent.activity_log.append(f"Received data {data.id} from {self.name}")
-                DIK_LOG.append({
-                    "time": getattr(self, "current_time", 0.0),
-                    "agent": other_agent.name,
-                    "type": "Data",
-                    "id": data.id,
-                    "mode": "shared",
-                    "from": self.name
-                })
-
-        # Directly transfer unseen Information
-        for info in self.mental_model["information"]:
-            if info not in other_agent.mental_model["information"]:
-                other_agent.mental_model["information"].add(info)
-                receiver_dik_changed = True
-                if other_agent.name not in info.acquired_by:
-                    info.acquired_by[other_agent.name] = {
-                        "mode": "shared",
-                        "from": self.name
-                    }
-                other_agent.activity_log.append(f"Received info {info.id} from {self.name}")
-                DIK_LOG.append({
-                    "time": getattr(self, "current_time", 0.0),
-                    "agent": other_agent.name,
-                    "type": "Information",
-                    "id": info.id,
-                    "mode": "shared",
-                    "from": self.name
-                })
-
-        # Transfer inferred Rules (Knowledge)
-        for rule in self.mental_model["knowledge"].rules:
-            if rule not in other_agent.mental_model["knowledge"].rules:
-                info_ids = self.mental_model["knowledge"].built_from.get(rule, [])
-                other_agent.mental_model["knowledge"].add_rule(rule, info_ids)
-                receiver_dik_changed = True
-                other_agent.activity_log.append(f"Received rule from {self.name}")
-                DIK_LOG.append({
-                    "time": getattr(self, "current_time", 0.0),
-                    "agent": other_agent.name,
-                    "type": "Knowledge",
-                    "id": rule,
-                    "mode": "shared",
-                    "from": self.name
-                })
-                if sim_state is not None:
-                    sim_state.logger.log_event(sim_state.time, "rule_adopted", {"agent": other_agent.name, "agent_id": getattr(other_agent, "agent_id", other_agent.name), "rule_id": rule, "adoption_mode": "communication", "from_agent": self.name})
+        receiver_dik_changed = bool(getattr(other_agent, "_last_received_dik_changed", False))
 
         # Update Theory of Mind estimates
         other_agent.theory_of_mind[self.name] = {
@@ -7924,6 +7994,11 @@ class Agent:
                 "communication_exchange",
                 {"sender": self.name, "receiver": other_agent.name, "message_types": message_types},
             )
+        if receiver_dik_changed and sim_state is not None:
+            self.communication_state["last_meaningful_exchange_time"] = float(sim_state.time)
+            self.communication_state["last_meaningful_exchange_with"] = other_agent.name
+            other_agent.communication_state["last_meaningful_exchange_time"] = float(sim_state.time)
+            other_agent.communication_state["last_meaningful_exchange_with"] = self.name
         if receiver_dik_changed:
             other_agent._trigger_epistemic_update_pipeline(sim_state=sim_state, trigger_source=f"communication:{self.name}")
 
@@ -7939,12 +8014,14 @@ class Agent:
         mtype = LEGACY_COMMUNICATION_TYPE_MAP.get(mtype, mtype)
         content = message.get("content", [])
         dik_changed = False
+        self._last_received_dik_changed = False
 
         if mtype == "TDP":
             for d in content:
                 if d not in self.mental_model["data"]:
                     self.mental_model["data"].add(d)
                     dik_changed = True
+                    self.known_gaps.discard(f"data:{d.id}")
                     if self.name not in d.acquired_by:
                         d.acquired_by[self.name] = {"mode": "shared", "from": sender}
                     DIK_LOG.append({
@@ -7961,6 +8038,7 @@ class Agent:
                 if info not in self.mental_model["information"]:
                     self.mental_model["information"].add(info)
                     dik_changed = True
+                    self.known_gaps.discard(f"information:{info.id}")
                     if self.name not in info.acquired_by:
                         info.acquired_by[self.name] = {"mode": "shared", "from": sender}
                     DIK_LOG.append({
@@ -7978,6 +8056,9 @@ class Agent:
                     inferred_from = self.theory_of_mind[sender].get("knowledge_ids", [])
                     self.mental_model["knowledge"].add_rule(rule, inferred_from)
                     dik_changed = True
+                    rid = normalize_rule_token(rule)
+                    self.known_gaps.discard(f"rule:{rid}")
+                    self.known_gaps.discard(f"missing_expected_rule:{rid}")
                     DIK_LOG.append({
                         "time": getattr(self, "current_time", 0.0),
                         "agent": self.name,
@@ -7991,7 +8072,33 @@ class Agent:
             self.theory_of_mind[sender]["goals"] = [content]
 
         elif mtype == "TKRQ":
-            self.known_gaps.update(content)
+            requested_ids = self._extract_requested_dik_ids(content if isinstance(content, list) else [content])
+            self.known_gaps.update(set(content if isinstance(content, list) else [content]))
+            if sender:
+                self.theory_of_mind[sender]["requested_dik_ids"] = set(requested_ids)
+            if requested_ids:
+                data_payload, info_payload, rule_payload = self._build_dik_payload_for_ids(requested_ids)
+                if data_payload:
+                    self.team_plan_state.setdefault("pending_outbound_messages", []).append(
+                        {"type": "TDP", "sender": self.name, "recipient": sender, "content": data_payload}
+                    )
+                if info_payload:
+                    self.team_plan_state.setdefault("pending_outbound_messages", []).append(
+                        {"type": "TIP", "sender": self.name, "recipient": sender, "content": info_payload}
+                    )
+                if rule_payload:
+                    self.team_plan_state.setdefault("pending_outbound_messages", []).append(
+                        {"type": "TKP", "sender": self.name, "recipient": sender, "content": rule_payload}
+                    )
+                self._emit_event(
+                    sim_state,
+                    "dik_request_received",
+                    {
+                        "from_agent": sender,
+                        "requested_ids": sorted(requested_ids),
+                        "respondable_count": len(data_payload) + len(info_payload) + len(rule_payload),
+                    },
+                )
 
         elif mtype == "TCR":
             self.reevaluate_knowledge()
@@ -8093,7 +8200,8 @@ class Agent:
 
         self.activity_log.append(f"Received {mtype} from {sender}")
         if dik_changed:
-            self._trigger_epistemic_update_pipeline(sim_state=None, trigger_source=f"message:{sender}")
+            self._last_received_dik_changed = True
+            self._trigger_epistemic_update_pipeline(sim_state=sim_state, trigger_source=f"message:{sender}")
 
     def reevaluate_knowledge(self):
         # Recombine info to try and re-infer
