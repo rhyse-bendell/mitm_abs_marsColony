@@ -8,10 +8,18 @@ from modules.task_model import load_task_model
 class ConstructionEpistemicAuthorityTests(unittest.TestCase):
     def _prime_build_readiness(self, sim, agent):
         team_packet = sim.environment.knowledge_packets["Team_Info"]
+        role_packet = sim.environment.knowledge_packets.get(f"{agent.role}_Info", {})
         agent.mental_model["information"].add(team_packet["information"][0])
         agent.mental_model["information"].add(team_packet["information"][1])
+        if role_packet.get("information"):
+            agent.mental_model["information"].add(role_packet["information"][0])
         agent.mental_model["knowledge"].rules.append("R_HOUSE_VALIDITY")
         agent.source_inspection_state["Team_Info"] = "inspected"
+        agent.source_inspection_state[f"{agent.role}_Info"] = "inspected"
+        agent.source_memory_state.setdefault("Team_Info", {})["ever_inspected"] = True
+        agent.source_memory_state.setdefault("Team_Info", {})["last_inspected_time"] = float(sim.time)
+        agent.source_memory_state.setdefault(f"{agent.role}_Info", {})["ever_inspected"] = True
+        agent.source_memory_state.setdefault(f"{agent.role}_Info", {})["last_inspected_time"] = float(sim.time)
 
     def test_start_construction_blocked_when_epistemic_prereqs_missing(self):
         sim = SimulationState(phases=[])
