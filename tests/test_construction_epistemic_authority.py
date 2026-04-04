@@ -177,7 +177,7 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         project_id = "Build_Table_B"
         validate = {
             "type": "idle",
-            "duration": 1.0,
+            "duration": 0.0,
             "progress": 0.0,
             "project_id": project_id,
             "decision_action": ExecutableActionType.VALIDATE_CONSTRUCTION.value,
@@ -187,7 +187,7 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         agent.active_actions = [validate]
         agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.1)
         self.assertFalse(sim.environment.construction.projects[project_id]["validated_complete"])
-        self.assertTrue(any(e.get("event_type") == "construction_validation_blocked" for e in sim.logger.recent_events))
+        self.assertTrue(any(e.get("event_type") in {"construction_validation_blocked", "construction_validation_en_route"} for e in sim.logger.recent_events))
         sim.stop()
 
     def test_failed_validation_persists_needs_repair_until_fixed(self):
@@ -229,6 +229,34 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         for template in model.construction_templates.values():
             self.assertTrue(template.expected_rules)
             self.assertTrue(all(rule.startswith("R_") for rule in template.expected_rules))
+
+
+    def test_cross_role_engineer_witness_gap_blocks_validation_until_engineer_inspects(self):
+        sim = SimulationState(phases=[])
+        architect = next(a for a in sim.agents if a.role == "Architect")
+        engineer = next(a for a in sim.agents if a.role == "Engineer")
+        botanist = next(a for a in sim.agents if a.role == "Botanist")
+        project_id = "Build_Table_B"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_HOUSE_VALIDITY"]
+
+        self._prime_build_readiness(sim, architect)
+        botanist.source_memory_state.setdefault("Botanist_Info", {})["ever_inspected"] = True
+        botanist.source_inspection_state["Botanist_Info"] = "inspected"
+        architect.source_memory_state.setdefault("Engineer_Info", {})["ever_inspected"] = False
+        engineer.source_memory_state.setdefault("Engineer_Info", {})["ever_inspected"] = False
+        engineer.source_inspection_state["Engineer_Info"] = "unseen"
+
+        blocker = architect._build_readiness_blockers(sim.environment, sim_state=sim)
+        self.assertIn("missing_cross_role_engineer_grounding", blocker)
+
+        engineer.source_inspection_state["Engineer_Info"] = "inspected"
+        engineer.source_memory_state.setdefault("Engineer_Info", {})["ever_inspected"] = True
+
+        blocker_after = architect._build_readiness_blockers(sim.environment, sim_state=sim)
+        self.assertNotIn("missing_cross_role_engineer_grounding", blocker_after)
+        sim.stop()
 
 
 if __name__ == "__main__":

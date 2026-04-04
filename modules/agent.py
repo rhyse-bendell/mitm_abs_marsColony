@@ -444,6 +444,7 @@ class Agent:
             "last_signature": None,
             "last_meaningful_exchange_time": -1.0,
             "last_meaningful_exchange_with": None,
+            "last_exchange_effects": {},
         }
         self.team_plan_state = {
             "last_adopted_plan_id": None,
@@ -2573,6 +2574,24 @@ class Agent:
                 reason_summary="Post-inspect role-packet uptake prioritized for team DIK integration.",
                 confidence=0.83,
             )
+        engineer_gap = self._cross_role_engineer_dependency_gap(sim_state=sim_state, environment=environment)
+        if engineer_gap:
+            if self.role == "Engineer":
+                engineer_mem = self.source_memory_state.get("Engineer_Info", {})
+                cooldown_ready = float(engineer_mem.get("revisit_cooldown_until", 0.0) or 0.0) <= now_ts
+                if "Engineer_Info" in environment.knowledge_packets and cooldown_ready:
+                    return BrainDecision(
+                        selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                        target_id="Engineer_Info",
+                        reason_summary="Post-inspect cross-role witness gap: prioritize Engineer_Info grounding.",
+                        confidence=0.9,
+                    )
+            if self.role != "Engineer" and self._can_attempt_verbal_plan_communication(sim_state):
+                return BrainDecision(
+                    selected_action=ExecutableActionType.COMMUNICATE,
+                    reason_summary="Post-inspect cross-role witness gap: prompt engineer-side DIK integration.",
+                    confidence=0.84,
+                )
         role_missing = bool(epistemic.get("role_missing"))
         role_unseen = not bool(self.source_memory_state.get(role_source, {}).get("ever_inspected"))
         team_seen = bool(self.source_memory_state.get("Team_Info", {}).get("ever_inspected"))
@@ -3082,6 +3101,43 @@ class Agent:
         missing = sorted(expected - held_rules)
         return len(missing) == 0, missing
 
+
+    def _cross_role_engineer_dependency_gap(self, sim_state=None, environment=None):
+        if sim_state is None:
+            return False
+        env = environment or getattr(sim_state, "environment", None)
+        if env is None:
+            return False
+        if "Engineer_Info" not in getattr(env, "knowledge_packets", {}):
+            return False
+
+        role_seen = set()
+        for agent in getattr(sim_state, "agents", []):
+            role = str(getattr(agent, "role", "") or "")
+            source_id = f"{role}_Info"
+            mem = getattr(agent, "source_memory_state", {}).get(source_id, {})
+            state = getattr(agent, "source_inspection_state", {}).get(source_id)
+            if bool(mem.get("ever_inspected")) or state == "inspected":
+                role_seen.add(role)
+
+        if "Engineer" in role_seen:
+            return False
+        if not {"Architect", "Botanist"}.issubset(role_seen):
+            return False
+
+        audit = getattr(sim_state, "runtime_witness_audit", None)
+        if audit is None:
+            return False
+        for target in getattr(audit, "targets", {}).values():
+            for step in target.get("ordered_witness_steps", []) or []:
+                status = str(getattr(step, "status", ""))
+                raw = str(getattr(step, "raw_step", ""))
+                if status == "completed":
+                    continue
+                if raw.startswith("communicate_integrate:cross_role_dependency") or raw.startswith("source_access:Engineer_Info"):
+                    return True
+        return False
+
     def _construction_action_blockers(self, decision, action, environment, sim_state=None):
         blockers = []
         epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
@@ -3136,6 +3192,8 @@ class Agent:
             blockers.append("insufficient_rule_knowledge")
         if epistemic.get("role_missing"):
             blockers.append("missing_role_grounding")
+        if self._cross_role_engineer_dependency_gap(sim_state=sim_state, environment=environment):
+            blockers.append("missing_cross_role_engineer_grounding")
         if epistemic.get("stale_grounding"):
             blockers.append("stale_epistemic_grounding")
 
@@ -7709,15 +7767,8 @@ class Agent:
                     )
                 else:
                     _, receiver = sorted(nearby, key=lambda row: row[0])[0]
-                    data_before = len(receiver.mental_model["data"])
-                    info_before = len(receiver.mental_model["information"])
-                    rules_before = len(receiver.mental_model["knowledge"].rules)
-                    self.communicate_with(receiver, sim_state=sim_state)
-                    changed = (
-                        len(receiver.mental_model["data"]) != data_before
-                        or len(receiver.mental_model["information"]) != info_before
-                        or len(receiver.mental_model["knowledge"].rules) != rules_before
-                    )
+                    outcome = self.communicate_with(receiver, sim_state=sim_state) or {}
+                    changed = bool(outcome.get("meaningful"))
                     if changed:
                         self.communication_state["last_exchange_tick"] = int(getattr(self, "sim_step_count", 0))
                         self.communication_state["no_effect_streak"] = 0
@@ -7971,10 +8022,20 @@ class Agent:
             self.team_plan_state["pending_outbound_messages"] = carry_forward
         message_types = []
         receiver_dik_changed = False
+        receiver_gap_reduced = False
+        receiver_derivation_triggered = False
+        readiness_before = set(other_agent._build_readiness_blockers(sim_state.environment, sim_state=sim_state)) if sim_state is not None else set()
         for msg in messages:
             message_types.append(msg.get("type"))
-            other_agent.receive_message(msg, from_agent=self.name, sim_state=sim_state)
-        receiver_dik_changed = bool(getattr(other_agent, "_last_received_dik_changed", False))
+            outcome = other_agent.receive_message(msg, from_agent=self.name, sim_state=sim_state) or {}
+            receiver_dik_changed = receiver_dik_changed or bool(outcome.get("dik_changed"))
+            receiver_gap_reduced = receiver_gap_reduced or bool(outcome.get("known_gaps_reduced"))
+            receiver_derivation_triggered = receiver_derivation_triggered or bool(outcome.get("derivation_triggered"))
+        readiness_after = set(other_agent._build_readiness_blockers(sim_state.environment, sim_state=sim_state)) if sim_state is not None else set()
+        readiness_unblocked = bool(readiness_before and len(readiness_after) < len(readiness_before))
+        epistemic_types = {"TDP", "TIP", "TKP", "TKRQ"}
+        epistemic_exchange = any(t in epistemic_types for t in message_types)
+        meaningful_exchange = bool(epistemic_exchange and (receiver_dik_changed or receiver_derivation_triggered or receiver_gap_reduced or readiness_unblocked))
 
         # Update Theory of Mind estimates
         other_agent.theory_of_mind[self.name] = {
@@ -7992,15 +8053,36 @@ class Agent:
             sim_state.logger.log_event(
                 sim_state.time,
                 "communication_exchange",
-                {"sender": self.name, "receiver": other_agent.name, "message_types": message_types},
+                {
+                    "sender": self.name,
+                    "receiver": other_agent.name,
+                    "message_types": message_types,
+                    "meaningful": meaningful_exchange,
+                    "receiver_dik_changed": receiver_dik_changed,
+                    "receiver_gap_reduced": receiver_gap_reduced,
+                    "receiver_derivation_triggered": receiver_derivation_triggered,
+                    "receiver_readiness_unblocked": readiness_unblocked,
+                    "receiver_blockers_before": sorted(readiness_before),
+                    "receiver_blockers_after": sorted(readiness_after),
+                },
             )
-        if receiver_dik_changed and sim_state is not None:
+        self.communication_state["last_exchange_effects"] = {
+            "receiver": other_agent.name,
+            "meaningful": meaningful_exchange,
+            "receiver_dik_changed": receiver_dik_changed,
+            "receiver_gap_reduced": receiver_gap_reduced,
+            "receiver_derivation_triggered": receiver_derivation_triggered,
+            "receiver_readiness_unblocked": readiness_unblocked,
+        }
+        other_agent.communication_state["last_exchange_effects"] = dict(self.communication_state["last_exchange_effects"])
+        if meaningful_exchange and sim_state is not None:
             self.communication_state["last_meaningful_exchange_time"] = float(sim_state.time)
             self.communication_state["last_meaningful_exchange_with"] = other_agent.name
             other_agent.communication_state["last_meaningful_exchange_time"] = float(sim_state.time)
             other_agent.communication_state["last_meaningful_exchange_with"] = self.name
         if receiver_dik_changed:
             other_agent._trigger_epistemic_update_pipeline(sim_state=sim_state, trigger_source=f"communication:{self.name}")
+        return self.communication_state["last_exchange_effects"]
 
     def receive_message(self, message, from_agent=None, sim_state=None):
         sender = message.get("sender")
@@ -8015,6 +8097,10 @@ class Agent:
         content = message.get("content", [])
         dik_changed = False
         self._last_received_dik_changed = False
+        direct_rule_additions = 0
+        known_gaps_before = len(self.known_gaps)
+        readiness_before = set(self._build_readiness_blockers(sim_state.environment, sim_state=sim_state)) if sim_state is not None else set()
+        rules_before = len(self.mental_model["knowledge"].rules)
 
         if mtype == "TDP":
             for d in content:
@@ -8059,6 +8145,7 @@ class Agent:
                     rid = normalize_rule_token(rule)
                     self.known_gaps.discard(f"rule:{rid}")
                     self.known_gaps.discard(f"missing_expected_rule:{rid}")
+                    direct_rule_additions += 1
                     DIK_LOG.append({
                         "time": getattr(self, "current_time", 0.0),
                         "agent": self.name,
@@ -8202,6 +8289,18 @@ class Agent:
         if dik_changed:
             self._last_received_dik_changed = True
             self._trigger_epistemic_update_pipeline(sim_state=sim_state, trigger_source=f"message:{sender}")
+        known_gaps_after = len(self.known_gaps)
+        readiness_after = set(self._build_readiness_blockers(sim_state.environment, sim_state=sim_state)) if sim_state is not None else set()
+        rules_after = len(self.mental_model["knowledge"].rules)
+        derivation_triggered = bool((rules_after - rules_before) > direct_rule_additions)
+        effects = {
+            "dik_changed": bool(dik_changed),
+            "known_gaps_reduced": known_gaps_after < known_gaps_before,
+            "readiness_unblocked": bool(readiness_before and len(readiness_after) < len(readiness_before)),
+            "derivation_triggered": derivation_triggered,
+        }
+        self._last_received_comm_effects = effects
+        return effects
 
     def reevaluate_knowledge(self):
         # Recombine info to try and re-infer
