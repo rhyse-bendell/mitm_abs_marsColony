@@ -1430,10 +1430,44 @@ class Agent:
 
     def _clear_inspect_pursuit(self, reason=None, sim_state=None, release_slot=False, environment=None):
         source_id = self.inspect_pursuit.get("source_id")
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        session_source = self.inspect_session.get("source_id")
+        session_state = str(self.inspect_session.get("state") or "idle")
+        abandoned_pre_start = bool(
+            source_id
+            and session_source == source_id
+            and session_state in {"target_selected", "target_reached"}
+        )
         if self.current_inspect_target_id == source_id:
             self.current_inspect_target_id = None
         if release_slot and source_id and environment is not None:
             self._release_source_slot(environment, source_id=source_id, emit=True, sim_state=sim_state, reason=reason or "pursuit_cleared")
+        if abandoned_pre_start:
+            self.inspect_session = {
+                "source_id": None,
+                "target": None,
+                "state": "idle",
+                "started_at": None,
+                "last_updated_at": now_ts,
+                "restarts": 0,
+            }
+            if self.source_inspection_state.get(source_id) == "in_progress":
+                self.source_inspection_state[source_id] = "unseen"
+            intent_id = str(self.active_intent.get("intent_id") or "")
+            if intent_id.startswith(f"{ExecutableActionType.INSPECT_INFORMATION_SOURCE.value}:"):
+                self._emit_event(
+                    sim_state,
+                    "intent_aborted",
+                    {
+                        "intent_id": self.active_intent.get("intent_id"),
+                        "target": self.active_intent.get("target"),
+                        "reason": f"inspect_pursuit_abandoned:{reason or 'cleared'}",
+                    },
+                )
+                self.active_intent["intent_id"] = None
+                self.active_intent["target"] = None
+                self.active_intent["min_commit_until"] = 0.0
+                self.active_intent["last_meaningful_progress_time"] = now_ts
         self.inspect_pursuit = {
             "action_type": None,
             "source_id": None,
@@ -2720,6 +2754,22 @@ class Agent:
     def _artifact_action_is_redundant(self, action_type, environment, sim_state=None, artifact_id=None):
         state = self.artifact_coordination_state
         context = self._artifact_coordination_context_signature(environment, sim_state=sim_state)
+        closure_active_elsewhere = False
+        for project in getattr(environment.construction, "projects", {}).values():
+            if not isinstance(project, dict):
+                continue
+            if str(project.get("status")) != "ready_for_validation":
+                continue
+            owner = str(project.get("closure_owner") or "")
+            closure_status = str(project.get("closure_status") or "")
+            if owner and owner != self.name and closure_status in {"assigned", "in_progress"}:
+                closure_active_elsewhere = True
+                break
+        if closure_active_elsewhere and action_type in {
+            ExecutableActionType.CONSULT_TEAM_ARTIFACT.value,
+            ExecutableActionType.EXTERNALIZE_PLAN.value,
+        }:
+            return True
         last_ctx = state.get("last_context_signature") or {}
         now_ts = context["now_ts"]
         if action_type == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value:
@@ -5730,6 +5780,52 @@ class Agent:
                     goal_update="close_ready_project",
                     reason_summary=f"Closure commitment preserved for {closure_project_id}",
                     confidence=max(0.82, float(rewritten.confidence or decision.confidence or 0.0)),
+                )
+        teammate_closure_project_id = None
+        teammate_closure_owner = None
+        for project in getattr(environment.construction, "projects", {}).values():
+            if not isinstance(project, dict) or str(project.get("status")) != "ready_for_validation":
+                continue
+            owner = str(project.get("closure_owner") or "")
+            closure_status = str(project.get("closure_status") or "")
+            if owner and owner != self.name and closure_status in {"assigned", "in_progress"}:
+                teammate_closure_project_id = str(project.get("id") or "")
+                teammate_closure_owner = owner
+                break
+        if teammate_closure_project_id and rewritten.selected_action in {
+            ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+            ExecutableActionType.CONSULT_TEAM_ARTIFACT,
+            ExecutableActionType.EXTERNALIZE_PLAN,
+        }:
+            blockers = set(self._build_readiness_blockers(environment, sim_state=sim_state))
+            closure_relevant_inspect = bool(
+                rewritten.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE
+                and (
+                    any(str(b).startswith("missing_expected_rule:") for b in blockers)
+                    or "missing_validation_rule_knowledge" in blockers
+                    or "insufficient_rule_knowledge" in blockers
+                )
+                and rewritten.target_id in {f"{self.role}_Info", "Team_Info", "Engineer_Info"}
+            )
+            if not closure_relevant_inspect:
+                fallback_action = ExecutableActionType.COMMUNICATE if self._can_attempt_verbal_plan_communication(sim_state) else ExecutableActionType.WAIT
+                self._emit_event(
+                    sim_state,
+                    "closure_support_focus_applied",
+                    {
+                        "origin": pivot_origin,
+                        "closure_project_id": teammate_closure_project_id,
+                        "closure_owner": teammate_closure_owner,
+                        "from_action": rewritten.selected_action.value,
+                        "to_action": fallback_action.value,
+                    },
+                )
+                rewritten = BrainDecision(
+                    selected_action=fallback_action,
+                    target_id=teammate_closure_owner if fallback_action == ExecutableActionType.COMMUNICATE else None,
+                    goal_update="support_active_closure",
+                    reason_summary=f"Teammate closure support: suppress unrelated {decision.selected_action.value}.",
+                    confidence=max(0.74, float(rewritten.confidence or decision.confidence or 0.0)),
                 )
         handoff = dict(self.post_inspect_handoff or {})
         try:
