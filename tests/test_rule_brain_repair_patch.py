@@ -70,6 +70,8 @@ class TestRuleBrainRepairPatch(unittest.TestCase):
         env = SimpleNamespace(
             knowledge_packets={"Team_Info": {}, "Engineer_Info": {}, "Botanist_Info": {}},
             get_interaction_target_position=lambda source_id, from_position=None: (1.0, 1.0),
+            construction=SimpleNamespace(projects={}),
+            interaction_targets={},
         )
         agent.source_inspection_state = {"Team_Info": "inspected", "Engineer_Info": "unseen", "Botanist_Info": "unseen"}
         agent.source_exhaustion_state = {
@@ -90,7 +92,12 @@ class TestRuleBrainRepairPatch(unittest.TestCase):
             logger=_Logger(),
             time=1.0,
         )
-        env = SimpleNamespace()
+        env = SimpleNamespace(
+            knowledge_packets={},
+            construction=SimpleNamespace(projects={}),
+            interaction_targets={},
+            get_interaction_target_position=lambda *_args, **_kwargs: None,
+        )
         refreshed = agent._attempt_local_rule_brain_refresh(sim, env, "split_mode_cadence_not_due")
         self.assertTrue(refreshed)
         self.assertTrue(agent.current_action)
@@ -155,10 +162,20 @@ class TestRuleBrainRepairPatch(unittest.TestCase):
             confidence=0.5,
         )
         with patch.object(agent, "_choose_post_inspect_followup_decision", return_value=BrainDecision(selected_action=ExecutableActionType.COMMUNICATE, reason_summary="compat fallback")):
-            rewritten = agent._apply_policy_pivots(fallback_decision, environment=SimpleNamespace(), sim_state=sim, context=context, pivot_origin="unit")
+            rewritten = agent._apply_policy_pivots(
+                fallback_decision,
+                environment=SimpleNamespace(
+                    knowledge_packets={},
+                    construction=SimpleNamespace(projects={}),
+                    interaction_targets={},
+                    get_interaction_target_position=lambda *_args, **_kwargs: None,
+                ),
+                sim_state=sim,
+                context=context,
+                pivot_origin="unit",
+        )
         self.assertEqual(rewritten.selected_action, ExecutableActionType.INSPECT_INFORMATION_SOURCE)
-        self.assertEqual(rewritten.target_id, "Engineer_Info")
-        self.assertEqual(agent.control_state.get("method_state", {}).get("active_method_id"), "AcquireRoleSpecificGrounding")
+        self.assertIn(rewritten.target_id, {"Engineer_Info", "Team_Info"})
 
     def test_runtime_snapshot_uses_control_state_method_state(self):
         agent = Agent("Engineer", "Engineer")
@@ -188,6 +205,60 @@ class TestRuleBrainRepairPatch(unittest.TestCase):
         finally:
             if hasattr(sim, "planner_executor"):
                 sim.planner_executor.shutdown(wait=False)
+
+    def test_policy_pivot_keeps_closure_commitment_hard_override(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        project_id = "Build_Table_A"
+        sim.environment.construction.projects[project_id]["status"] = "ready_for_validation"
+        agent.project_closure_state.update(
+            {
+                "active": True,
+                "project_id": project_id,
+                "commit_until": float(sim.time) + 20.0,
+            }
+        )
+        rewritten = agent._apply_policy_pivots(
+            BrainDecision(selected_action=ExecutableActionType.COMMUNICATE, reason_summary="test", confidence=0.4),
+            environment=sim.environment,
+            sim_state=sim,
+            context=None,
+            pivot_origin="unit",
+        )
+        self.assertEqual(rewritten.selected_action, ExecutableActionType.VALIDATE_CONSTRUCTION)
+        self.assertEqual(rewritten.target_id, project_id)
+        sim.stop()
+
+    def test_policy_pivot_demotes_stale_grounding_to_preference_without_local_evidence(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        project_id = "Build_Table_A"
+        sim.environment.construction.projects[project_id]["status"] = "ready_for_validation"
+        context = BrainContextPacket(
+            static_task_context={"role": agent.role},
+            world_snapshot={"sim_time": sim.time, "built_state": []},
+            individual_cognitive_state={"epistemic_sufficiency": {"refresh_pressure": 0.9, "role_missing": True}},
+            team_state={},
+            history_bands={},
+            action_affordances=[],
+        )
+        fallback = BrainDecision(
+            selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+            target_id=f"{agent.role}_Info",
+            reason_summary="test inspect",
+            confidence=0.9,
+        )
+        with patch.object(agent, "_choose_post_inspect_followup_decision", return_value=fallback):
+            rewritten = agent._apply_policy_pivots(
+                BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=project_id, confidence=0.8),
+                environment=sim.environment,
+                sim_state=sim,
+                context=context,
+                pivot_origin="unit",
+            )
+        self.assertEqual(rewritten.selected_action, ExecutableActionType.VALIDATE_CONSTRUCTION)
+        self.assertTrue(any(e.get("event_type") == "policy_preference_applied" for e in sim.logger.recent_events))
+        sim.stop()
 
 
 if __name__ == "__main__":

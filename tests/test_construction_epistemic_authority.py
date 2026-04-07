@@ -258,6 +258,25 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         self.assertNotIn("missing_cross_role_engineer_grounding", blocker_after)
         sim.stop()
 
+    def test_blocker_partition_separates_hard_and_epistemic_advisories(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        partition = agent._partition_action_blockers(
+            [
+                "no_navigable_build_target",
+                "missing_role_grounding",
+                "missing_cross_role_engineer_grounding",
+                "stale_epistemic_grounding",
+                "missing_validation_rule_knowledge",
+            ]
+        )
+        self.assertIn("no_navigable_build_target", partition["hard_blockers"])
+        self.assertIn("missing_role_grounding", partition["epistemic_advisories"])
+        self.assertIn("missing_cross_role_engineer_grounding", partition["epistemic_advisories"])
+        self.assertIn("stale_epistemic_grounding", partition["epistemic_advisories"])
+        self.assertIn("missing_validation_rule_knowledge", partition["epistemic_advisories"])
+        sim.stop()
+
 
 if __name__ == "__main__":
     unittest.main()
