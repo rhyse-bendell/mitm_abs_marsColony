@@ -260,6 +260,134 @@ class TestRuleBrainRepairPatch(unittest.TestCase):
         self.assertTrue(any(e.get("event_type") == "policy_preference_applied" for e in sim.logger.recent_events))
         sim.stop()
 
+    def test_inspect_pursuit_abandon_before_start_clears_duplicate_latch_state(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[1]  # Engineer
+            source_id = "Engineer_Info"
+            target = sim.environment.get_interaction_target_position(source_id, from_position=agent.position)
+            self.assertIsNotNone(target)
+            now_ts = float(sim.time)
+            agent.current_inspect_target_id = source_id
+            agent.inspect_session = {
+                "source_id": source_id,
+                "target": target,
+                "state": "target_selected",
+                "started_at": now_ts,
+                "last_updated_at": now_ts,
+                "restarts": 1,
+            }
+            agent.inspect_pursuit = {
+                "action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
+                "source_id": source_id,
+                "slot_id": None,
+                "target_position": target,
+                "started_at": now_ts,
+                "expires_at": now_ts + 4.0,
+                "blocked_attempts": 0,
+                "no_progress_ticks": 0,
+                "last_distance_to_target": None,
+            }
+            agent.source_inspection_state[source_id] = "in_progress"
+            agent.active_intent.update(
+                {
+                    "intent_id": f"{ExecutableActionType.INSPECT_INFORMATION_SOURCE.value}:{source_id}",
+                    "target": source_id,
+                    "min_commit_until": now_ts + 5.0,
+                }
+            )
+            agent._clear_inspect_pursuit(reason="unit_stall", sim_state=sim, release_slot=True, environment=sim.environment)
+            self.assertIsNone(agent.current_inspect_target_id)
+            self.assertEqual(agent.inspect_session.get("state"), "idle")
+            self.assertEqual(agent.inspect_session.get("source_id"), None)
+            self.assertEqual(agent.source_inspection_state.get(source_id), "unseen")
+            self.assertIsNone(agent.active_intent.get("intent_id"))
+            decision = BrainDecision(
+                selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                target_id=source_id,
+                reason_summary="fresh retry",
+                confidence=0.8,
+            )
+            agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
+            events = [e["event_type"] for e in sim.logger.get_recent_events(120)]
+            self.assertIn("inspect_target_selected", events)
+            self.assertNotIn("inspect_restarted_duplicate", events[-20:])
+        finally:
+            sim.stop()
+
+    def test_repeated_stalled_inspect_still_allows_later_inspect_started(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[1]  # Engineer
+            source_id = "Engineer_Info"
+            target = sim.environment.get_interaction_target_position(source_id, from_position=agent.position)
+            self.assertIsNotNone(target)
+            now_ts = float(sim.time)
+            for _ in range(2):
+                agent.inspect_session = {
+                    "source_id": source_id,
+                    "target": target,
+                    "state": "target_selected",
+                    "started_at": now_ts,
+                    "last_updated_at": now_ts,
+                    "restarts": 0,
+                }
+                agent.inspect_pursuit = {
+                    "action_type": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
+                    "source_id": source_id,
+                    "slot_id": None,
+                    "target_position": target,
+                    "started_at": now_ts,
+                    "expires_at": now_ts + 8.0,
+                    "blocked_attempts": agent.inspect_pursuit_blocked_attempt_limit,
+                    "no_progress_ticks": 0,
+                    "last_distance_to_target": None,
+                }
+                agent.current_inspect_target_id = source_id
+                agent._inspect_source(sim.environment, source_id, sim_state=sim)
+            agent.position = target
+            agent.current_inspect_target_id = source_id
+            with patch("modules.agent.random.random", return_value=0.0):
+                changed = agent._inspect_source(sim.environment, source_id, sim_state=sim)
+            self.assertTrue(changed)
+            events = [e["event_type"] for e in sim.logger.get_recent_events(240)]
+            self.assertIn("inspect_started", events)
+        finally:
+            sim.stop()
+
+    def test_active_closure_suppresses_unrelated_artifact_consult_without_side_effects(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            owner = sim.agents[0]
+            teammate = sim.agents[1]
+            project_id = "Build_Table_A"
+            project = sim.environment.construction.projects[project_id]
+            project["status"] = "ready_for_validation"
+            project["closure_owner"] = owner.name
+            project["closure_status"] = "in_progress"
+            before_info = len(teammate.mental_model["information"])
+            decision = BrainDecision(
+                selected_action=ExecutableActionType.CONSULT_TEAM_ARTIFACT,
+                target_id="whiteboard",
+                reason_summary="unit test",
+                confidence=0.7,
+            )
+            with patch.object(teammate, "_can_attempt_verbal_plan_communication", return_value=True):
+                rewritten = teammate._apply_policy_pivots(
+                    decision,
+                    environment=sim.environment,
+                    sim_state=sim,
+                    context=None,
+                    pivot_origin="unit",
+                )
+            self.assertEqual(rewritten.selected_action, ExecutableActionType.COMMUNICATE)
+            self.assertEqual(project.get("closure_owner"), owner.name)
+            self.assertEqual(project.get("status"), "ready_for_validation")
+            self.assertEqual(len(teammate.mental_model["information"]), before_info)
+            self.assertNotEqual(rewritten.selected_action, ExecutableActionType.VALIDATE_CONSTRUCTION)
+        finally:
+            sim.stop()
+
 
 if __name__ == "__main__":
     unittest.main()
