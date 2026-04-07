@@ -445,6 +445,8 @@ class Agent:
             "last_meaningful_exchange_time": -1.0,
             "last_meaningful_exchange_with": None,
             "last_exchange_effects": {},
+            "last_received_epistemic_time": -1.0,
+            "last_received_epistemic_types": [],
         }
         self.team_plan_state = {
             "last_adopted_plan_id": None,
@@ -2546,6 +2548,7 @@ class Agent:
 
     def _choose_post_inspect_followup_decision(self, environment, sim_state=None):
         handoff = dict(self.post_inspect_handoff or {})
+        local_evidence = self._local_epistemic_evidence(environment, sim_state=sim_state, handoff=handoff)
         critical_sources = self._critical_unmet_source_targets(sim_state, environment)
         critical_sources = {
             source_id: priority
@@ -2575,7 +2578,14 @@ class Agent:
                 confidence=0.83,
             )
         engineer_gap = self._cross_role_engineer_dependency_gap(sim_state=sim_state, environment=environment)
-        if engineer_gap:
+        engineer_local_justified = bool(
+            local_evidence.get("has_missing_rule_blocker")
+            or local_evidence.get("recent_failed_derivation")
+            or local_evidence.get("received_engineering_request")
+            or local_evidence.get("artifact_engineering_dependency")
+            or local_evidence.get("role_grounding_complete_without_engineer")
+        )
+        if engineer_gap and engineer_local_justified:
             if self.role == "Engineer":
                 engineer_mem = self.source_memory_state.get("Engineer_Info", {})
                 cooldown_ready = float(engineer_mem.get("revisit_cooldown_until", 0.0) or 0.0) <= now_ts
@@ -2627,9 +2637,20 @@ class Agent:
                     reason_summary="Post-inspect pivot to unmet critical witness source access.",
                     confidence=0.84,
                 )
+        if engineer_gap and not engineer_local_justified and self._can_attempt_verbal_plan_communication(sim_state):
+            return BrainDecision(
+                selected_action=ExecutableActionType.COMMUNICATE,
+                reason_summary="Post-inspect weak advisory: cross-role engineer witness gap observed without direct local blocker.",
+                confidence=0.62,
+            )
         active_team_plan = self._get_active_team_plan(sim_state) if sim_state is not None else None
         assignment = self._get_my_team_plan_assignment(sim_state, active_team_plan) if isinstance(active_team_plan, dict) else None
-        coordination_needed = bool(self._team_plan_requires_uptake(sim_state)) or bool(assignment)
+        plan_adopted_locally = bool(
+            active_team_plan
+            and str((active_team_plan or {}).get("plan_id", "") or "")
+            and str(self.team_plan_state.get("last_adopted_plan_id") or "") == str((active_team_plan or {}).get("plan_id", "") or "")
+        )
+        coordination_needed = bool(self._team_plan_requires_uptake(sim_state)) or bool(assignment and plan_adopted_locally)
         if coordination_needed and self._can_attempt_verbal_plan_communication(sim_state):
             return BrainDecision(
                 selected_action=ExecutableActionType.COMMUNICATE,
@@ -3103,6 +3124,7 @@ class Agent:
 
 
     def _cross_role_engineer_dependency_gap(self, sim_state=None, environment=None):
+        """Diagnostic-only advisory for runtime witness coverage (not a direct behavior mandate)."""
         if sim_state is None:
             return False
         env = environment or getattr(sim_state, "environment", None)
@@ -3137,6 +3159,75 @@ class Agent:
                 if raw.startswith("communicate_integrate:cross_role_dependency") or raw.startswith("source_access:Engineer_Info"):
                     return True
         return False
+
+    def _partition_action_blockers(self, blockers):
+        hard_blockers = []
+        epistemic_advisories = []
+        hard_tokens = {
+            "no_navigable_build_target",
+            "unknown_project",
+            "missing_project_binding",
+            "project_already_complete",
+            "no_detected_mismatch",
+            "epistemic_sufficiency_low_for_construction",
+            "epistemic_sufficiency_low_for_repair",
+            "epistemic_sufficiency_low_for_validation",
+        }
+        for blocker in list(blockers or []):
+            token = str(blocker or "")
+            if token in hard_tokens:
+                hard_blockers.append(token)
+                continue
+            if token.startswith("project_status_") or token.startswith("illegal_project_status:"):
+                hard_blockers.append(token)
+                continue
+            epistemic_advisories.append(token)
+        return {"hard_blockers": sorted(set(hard_blockers)), "epistemic_advisories": sorted(set(epistemic_advisories))}
+
+    def _local_epistemic_evidence(self, environment, sim_state=None, handoff=None, blockers=None):
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        role_source = f"{self.role}_Info"
+        handoff_state = dict(handoff or self.post_inspect_handoff or {})
+        blocker_tokens = set(blockers or handoff_state.get("blockers") or self._build_readiness_blockers(environment, sim_state=sim_state))
+        normalized_blockers = {str(b) for b in blocker_tokens}
+        recent_dik_change = self.last_dik_change_time >= 0.0 and (now_ts - float(self.last_dik_change_time or 0.0)) <= 6.0
+        recent_events = list((self.progress_tracker or {}).get("recent_events", [])[-8:])
+        recent_failed_derivation = any("no_progress::derivation" in str(e.get("kind", "")) for e in recent_events)
+        last_msg_types = set((self.communication_state or {}).get("last_received_epistemic_types", []) or [])
+        last_msg_time = float((self.communication_state or {}).get("last_received_epistemic_time", -1.0) or -1.0)
+        recent_epistemic_request = bool(last_msg_types.intersection({"TKRQ", "TKP", "TIP", "TDP"})) and last_msg_time >= 0.0 and (now_ts - last_msg_time) <= 8.0
+        last_exchange = dict((self.communication_state or {}).get("last_exchange_effects", {}) or {})
+        role_mem = self.source_memory_state.get(role_source, {})
+        engineer_mem = self.source_memory_state.get("Engineer_Info", {})
+        pending_role_share = list(role_mem.get("pending_role_share_ids", []) or [])
+        adopted_plan_id = str(self.team_plan_state.get("last_adopted_plan_id") or "")
+        role_grounding_complete_without_engineer = bool(
+            role_mem.get("ever_inspected")
+            and not bool(pending_role_share)
+            and not bool(engineer_mem.get("ever_inspected"))
+            and bool(adopted_plan_id)
+        )
+        artifact_engineering_dependency = False
+        if adopted_plan_id:
+            assignment = self.team_plan_state.get("assignment")
+            artifact_text = str(assignment or "").lower()
+            artifact_engineering_dependency = "engineer" in artifact_text or "dependency" in artifact_text
+        return {
+            "recent_dik_change": bool(recent_dik_change),
+            "recent_failed_derivation": bool(recent_failed_derivation),
+            "has_missing_rule_blocker": any(
+                tok in normalized_blockers for tok in {"missing_validation_rule_knowledge", "missing_task_prerequisite_rules", "insufficient_rule_knowledge"}
+            ) or any(tok.startswith("missing_expected_rule:") for tok in normalized_blockers),
+            "pending_role_share_count": len(pending_role_share),
+            "recent_epistemic_request": bool(recent_epistemic_request),
+            "received_engineering_request": bool(recent_epistemic_request and any("engineer" in str(x).lower() for x in list(self.known_gaps)[:8])),
+            "recent_meaningful_comm": bool(last_exchange.get("meaningful")),
+            "recent_comm_no_effect": int(self.communication_state.get("no_effect_streak", 0) or 0) > 0,
+            "needs_source_revisit": bool(role_mem.get("revisitable_for_verification", True)) and float(role_mem.get("memory_confidence", 1.0) or 1.0) < 0.45,
+            "artifact_engineering_dependency": bool(artifact_engineering_dependency),
+            "role_grounding_complete_without_engineer": bool(role_grounding_complete_without_engineer),
+            "adopted_team_plan": bool(adopted_plan_id),
+        }
 
     def _construction_action_blockers(self, decision, action, environment, sim_state=None):
         blockers = []
@@ -5641,6 +5732,10 @@ class Agent:
                     confidence=max(0.82, float(rewritten.confidence or decision.confidence or 0.0)),
                 )
         handoff = dict(self.post_inspect_handoff or {})
+        try:
+            blocker_partition = self._partition_action_blockers(self._build_readiness_blockers(environment, sim_state=sim_state))
+        except Exception:
+            blocker_partition = {"hard_blockers": [], "epistemic_advisories": []}
         rule_brain_runtime = self._is_rule_brain_runtime(sim_state)
         artifact_state = self.artifact_coordination_state
         if (
@@ -5673,9 +5768,18 @@ class Agent:
             followup = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
             self.post_inspect_handoff["pending"] = False
             if followup.selected_action != rewritten.selected_action:
+                same_family = rewritten.selected_action in {
+                    ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                    ExecutableActionType.COMMUNICATE,
+                    ExecutableActionType.REQUEST_ASSISTANCE,
+                } and followup.selected_action in {
+                    ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                    ExecutableActionType.COMMUNICATE,
+                    ExecutableActionType.REQUEST_ASSISTANCE,
+                }
                 self._emit_event(
                     sim_state,
-                    "post_inspect_followup_forced",
+                    "post_inspect_followup_preferred" if same_family else "post_inspect_followup_forced",
                     {
                         "origin": pivot_origin,
                         "from_action": rewritten.selected_action.value,
@@ -5684,7 +5788,8 @@ class Agent:
                         "blocker_category": handoff.get("blocker_category"),
                     },
                 )
-                rewritten = followup
+                if not same_family:
+                    rewritten = followup
             self._emit_event(
                 sim_state,
                 "post_inspect_followup_reroute_skipped",
@@ -5730,18 +5835,39 @@ class Agent:
             epistemic = context.individual_cognitive_state.get("epistemic_sufficiency", {})
             refresh_pressure = float(epistemic.get("refresh_pressure", 0.0) or 0.0)
             role_missing = bool(epistemic.get("role_missing"))
+            local_evidence = self._local_epistemic_evidence(environment, sim_state=sim_state)
+            local_refresh_pressure = float(
+                (0.2 if local_evidence.get("needs_source_revisit") else 0.0)
+                + (0.2 if local_evidence.get("has_missing_rule_blocker") else 0.0)
+                + (0.15 if local_evidence.get("recent_epistemic_request") else 0.0)
+            )
             if rewritten.selected_action in {ExecutableActionType.VALIDATE_CONSTRUCTION, ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION} and (role_missing or refresh_pressure >= 0.58):
                 if closure_project_id and rewritten.selected_action == ExecutableActionType.VALIDATE_CONSTRUCTION:
                     return rewritten
                 fallback = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
-                if fallback.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
+                if fallback.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE and local_refresh_pressure >= 0.35:
                     rewritten = fallback
                     self._emit_event(sim_state, "policy_pivot_applied", {"origin": pivot_origin, "kind": "epistemic_refresh_guard", "previous_action": decision.selected_action.value, "pivoted_to": rewritten.selected_action.value, "reason": "validation_requires_fresher_grounding"})
+                elif fallback.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
+                    self._emit_event(sim_state, "policy_preference_applied", {"origin": pivot_origin, "kind": "epistemic_refresh_guard", "previous_action": decision.selected_action.value, "preferred_action": fallback.selected_action.value, "reason": "local_evidence_not_strong_enough_for_hard_pivot"})
             elif rewritten.selected_action in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION, ExecutableActionType.TRANSPORT_RESOURCES} and refresh_pressure >= 0.72:
                 fallback = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
-                if fallback.selected_action in {ExecutableActionType.INSPECT_INFORMATION_SOURCE, ExecutableActionType.VALIDATE_CONSTRUCTION}:
+                if fallback.selected_action in {ExecutableActionType.INSPECT_INFORMATION_SOURCE, ExecutableActionType.VALIDATE_CONSTRUCTION} and local_refresh_pressure >= 0.4:
                     rewritten = fallback
                     self._emit_event(sim_state, "policy_pivot_applied", {"origin": pivot_origin, "kind": "stale_grounding_pressure", "previous_action": decision.selected_action.value, "pivoted_to": rewritten.selected_action.value, "reason": "refresh_assumptions_needed"})
+                elif fallback.selected_action in {ExecutableActionType.INSPECT_INFORMATION_SOURCE, ExecutableActionType.VALIDATE_CONSTRUCTION}:
+                    self._emit_event(sim_state, "policy_preference_applied", {"origin": pivot_origin, "kind": "stale_grounding_pressure", "previous_action": decision.selected_action.value, "preferred_action": fallback.selected_action.value, "reason": "global_refresh_pressure_without_local_evidence"})
+            if blocker_partition["epistemic_advisories"] and not blocker_partition["hard_blockers"]:
+                self._emit_event(
+                    sim_state,
+                    "policy_preference_applied",
+                    {
+                        "origin": pivot_origin,
+                        "kind": "epistemic_advisory_only",
+                        "selected_action": rewritten.selected_action.value,
+                        "advisories": blocker_partition["epistemic_advisories"][:6],
+                    },
+                )
             if rewritten.selected_action == ExecutableActionType.TRANSPORT_RESOURCES:
                 project_id = rewritten.target_id
                 if not project_id or project_id not in getattr(environment.construction, "projects", {}):
@@ -6224,9 +6350,10 @@ class Agent:
             ExecutableActionType.VALIDATE_CONSTRUCTION,
         }:
             blockers, project_id = self._construction_action_blockers(decision, action, environment, sim_state=sim_state)
+            partitioned = self._partition_action_blockers(blockers)
             if project_id:
                 action["project_id"] = project_id
-            if blockers:
+            if blockers and partitioned["hard_blockers"]:
                 self._record_known_gaps_from_blockers(blockers, sim_state=sim_state, project_id=project_id)
                 self._emit_event(sim_state, "execution_readiness_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "readiness_not_unlocked", "blockers": blockers, "project_id": project_id})
                 if decision.selected_action == ExecutableActionType.VALIDATE_CONSTRUCTION:
@@ -6251,6 +6378,29 @@ class Agent:
                     )
                     return [{"type": "communicate", "duration": 1.0, "priority": 1, "decision_action": ExecutableActionType.COMMUNICATE.value}]
                 return [{"type": "idle", "duration": 1.0, "priority": 1, "decision_action": ExecutableActionType.WAIT.value}]
+            elif blockers:
+                self._record_known_gaps_from_blockers(blockers, sim_state=sim_state, project_id=project_id)
+                self._emit_event(
+                    sim_state,
+                    "execution_readiness_advisory_only",
+                    {
+                        "planner_action_type": decision.selected_action.value,
+                        "project_id": project_id,
+                        "epistemic_advisories": partitioned["epistemic_advisories"],
+                    },
+                )
+                if (
+                    decision.selected_action == ExecutableActionType.VALIDATE_CONSTRUCTION
+                    and project_id
+                    and any(str(b).startswith("missing_expected_rule:") for b in blockers)
+                    and self._can_attempt_verbal_plan_communication(sim_state)
+                ):
+                    self._emit_event(
+                        sim_state,
+                        "execution_readiness_blocked_requests_communication",
+                        {"project_id": project_id, "blockers": blockers, "decision_action": decision.selected_action.value},
+                    )
+                    return [{"type": "communicate", "duration": 1.0, "priority": 1, "decision_action": ExecutableActionType.COMMUNICATE.value}]
             else:
                 payload = {"planner_action_type": decision.selected_action.value, "project_id": project_id}
                 goal_id = self._canonical_readiness_goal_id()
@@ -8101,6 +8251,11 @@ class Agent:
         known_gaps_before = len(self.known_gaps)
         readiness_before = set(self._build_readiness_blockers(sim_state.environment, sim_state=sim_state)) if sim_state is not None else set()
         rules_before = len(self.mental_model["knowledge"].rules)
+        if mtype in {"TKRQ", "TKP", "TIP", "TDP"} and sim_state is not None:
+            self.communication_state["last_received_epistemic_time"] = float(sim_state.time)
+            history = list(self.communication_state.get("last_received_epistemic_types", []) or [])
+            history.append(str(mtype))
+            self.communication_state["last_received_epistemic_types"] = history[-6:]
 
         if mtype == "TDP":
             for d in content:
