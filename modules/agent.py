@@ -3234,6 +3234,39 @@ class Agent:
             epistemic_advisories.append(token)
         return {"hard_blockers": sorted(set(hard_blockers)), "epistemic_advisories": sorted(set(epistemic_advisories))}
 
+    def _classify_validation_blockers(self, blockers):
+        epistemic_blockers = []
+        non_epistemic_blockers = []
+        known_non_epistemic = {
+            "no_navigable_build_target",
+            "unknown_project",
+            "missing_project_binding",
+            "project_already_complete",
+            "no_detected_mismatch",
+        }
+        for blocker in list(blockers or []):
+            token = str(blocker or "")
+            if (
+                token.startswith("missing_")
+                or token.startswith("insufficient_")
+                or token.startswith("stale_epistemic_")
+                or token.startswith("epistemic_")
+                or token.startswith("plan_method_not_grounded")
+            ):
+                epistemic_blockers.append(token)
+                continue
+            if token.startswith("project_status_") or token.startswith("illegal_project_status:"):
+                non_epistemic_blockers.append(token)
+                continue
+            if token in known_non_epistemic:
+                non_epistemic_blockers.append(token)
+                continue
+            non_epistemic_blockers.append(token)
+        return {
+            "epistemic_blockers": sorted(set(epistemic_blockers)),
+            "non_epistemic_blockers": sorted(set(non_epistemic_blockers)),
+        }
+
     def _local_epistemic_evidence(self, environment, sim_state=None, handoff=None, blockers=None):
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
         role_source = f"{self.role}_Info"
@@ -5758,6 +5791,23 @@ class Agent:
         closure_project_id = self._live_project_closure_commitment(environment, sim_state=sim_state)
         if closure_project_id:
             closure_locked = now_ts <= float(self.project_closure_state.get("commit_until", 0.0) or 0.0)
+            closure_validation_probe = BrainDecision(
+                selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION,
+                target_id=closure_project_id,
+                confidence=max(0.6, float(rewritten.confidence or decision.confidence or 0.0)),
+            )
+            probe_blockers, _ = self._construction_action_blockers(
+                closure_validation_probe,
+                {
+                    "type": "idle",
+                    "decision_action": ExecutableActionType.VALIDATE_CONSTRUCTION.value,
+                    "project_id": closure_project_id,
+                },
+                environment,
+                sim_state=sim_state,
+            )
+            blocker_classification = self._classify_validation_blockers(probe_blockers)
+            closure_epistemic_blocked = bool(blocker_classification["epistemic_blockers"])
             closure_guard_actions = {
                 ExecutableActionType.INSPECT_INFORMATION_SOURCE,
                 ExecutableActionType.CONSULT_TEAM_ARTIFACT,
@@ -5767,11 +5817,41 @@ class Agent:
                 ExecutableActionType.REASSESS_PLAN,
                 ExecutableActionType.OBSERVE_ENVIRONMENT,
             }
-            if closure_locked and rewritten.selected_action in closure_guard_actions:
+            if (
+                closure_locked
+                and closure_epistemic_blocked
+                and rewritten.selected_action in {ExecutableActionType.CONSULT_TEAM_ARTIFACT, ExecutableActionType.EXTERNALIZE_PLAN}
+                and self._can_attempt_verbal_plan_communication(sim_state)
+            ):
+                self._emit_event(
+                    sim_state,
+                    "closure_episode_entered_epistemic_repair",
+                    {
+                        "origin": pivot_origin,
+                        "project_id": closure_project_id,
+                        "from_action": rewritten.selected_action.value,
+                        "to_action": ExecutableActionType.COMMUNICATE.value,
+                        "blockers": blocker_classification["epistemic_blockers"],
+                    },
+                )
+                rewritten = BrainDecision(
+                    selected_action=ExecutableActionType.COMMUNICATE,
+                    target_id=None,
+                    target_zone=decision.target_zone,
+                    goal_update="closure_epistemic_repair",
+                    reason_summary=f"Closure epistemic blockers require communication repair for {closure_project_id}",
+                    confidence=max(0.78, float(rewritten.confidence or decision.confidence or 0.0)),
+                )
+            elif closure_locked and rewritten.selected_action in closure_guard_actions and not closure_epistemic_blocked:
                 self._emit_event(
                     sim_state,
                     "project_closure_commitment_preserved",
                     {"origin": pivot_origin, "project_id": closure_project_id, "from_action": rewritten.selected_action.value, "to_action": ExecutableActionType.VALIDATE_CONSTRUCTION.value},
+                )
+                self._emit_event(
+                    sim_state,
+                    "closure_episode_returned_to_validation",
+                    {"origin": pivot_origin, "project_id": closure_project_id, "from_action": rewritten.selected_action.value},
                 )
                 rewritten = BrainDecision(
                     selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION,
@@ -6222,6 +6302,12 @@ class Agent:
             self._emit_event(sim_state, "first_action_translation_started", {"planner_action_type": decision.selected_action.value})
         self._emit_event(sim_state, "planner_next_action_selected", {"planner_action_type": decision.selected_action.value, "plan_id": getattr(self.current_plan, "plan_id", None)})
         self._emit_event(sim_state, "executable_action_attempted", {"planner_action_type": decision.selected_action.value, "plan_id": getattr(self.current_plan, "plan_id", None)})
+        if decision.selected_action == ExecutableActionType.VALIDATE_CONSTRUCTION:
+            self._emit_event(
+                sim_state,
+                "validate_construction_selected",
+                {"planner_action_type": decision.selected_action.value, "target_id": decision.target_id, "plan_id": getattr(self.current_plan, "plan_id", None)},
+            )
         if self.task_model is not None:
             enabled = set(self.task_model.enabled_actions_for_role(self.role))
             if decision.selected_action.value not in enabled:
@@ -6449,6 +6535,66 @@ class Agent:
             partitioned = self._partition_action_blockers(blockers)
             if project_id:
                 action["project_id"] = project_id
+            if decision.selected_action == ExecutableActionType.VALIDATE_CONSTRUCTION:
+                classified = self._classify_validation_blockers(blockers)
+                epistemic_blockers = list(classified.get("epistemic_blockers", []))
+                non_epistemic_blockers = list(classified.get("non_epistemic_blockers", []))
+                if blockers and epistemic_blockers and not non_epistemic_blockers:
+                    self._record_known_gaps_from_blockers(blockers, sim_state=sim_state, project_id=project_id)
+                    self._emit_event(
+                        sim_state,
+                        "validation_blocked_epistemic",
+                        {"project_id": project_id, "blockers": blockers, "epistemic_blockers": epistemic_blockers},
+                    )
+                    if self.project_closure_state.get("active") and project_id and project_id == self.project_closure_state.get("project_id"):
+                        self._emit_event(
+                            sim_state,
+                            "closure_episode_entered_epistemic_repair",
+                            {"project_id": project_id, "blockers": epistemic_blockers, "origin": "translation"},
+                        )
+                    if self._can_attempt_verbal_plan_communication(sim_state):
+                        self._emit_event(
+                            sim_state,
+                            "validate_construction_downgraded_to_communication",
+                            {"project_id": project_id, "blockers": epistemic_blockers, "decision_action": decision.selected_action.value},
+                        )
+                        return [{
+                            "type": "communicate",
+                            "duration": 1.0,
+                            "priority": 1,
+                            "decision_action": ExecutableActionType.COMMUNICATE.value,
+                            "translation_outcome": "validate_downgraded_epistemic",
+                            "downgraded_from": ExecutableActionType.VALIDATE_CONSTRUCTION.value,
+                            "project_id": project_id,
+                        }]
+                    self._emit_event(
+                        sim_state,
+                        "validation_blocked_epistemic",
+                        {"project_id": project_id, "blockers": blockers, "reason": "epistemic_blockers_without_communication_path"},
+                    )
+                    return [{
+                        "type": "idle",
+                        "duration": 1.0,
+                        "priority": 1,
+                        "decision_action": ExecutableActionType.WAIT.value,
+                        "translation_outcome": "validate_blocked_epistemic_no_comm_path",
+                        "project_id": project_id,
+                    }]
+                if blockers and non_epistemic_blockers:
+                    self._record_known_gaps_from_blockers(blockers, sim_state=sim_state, project_id=project_id)
+                    self._emit_event(
+                        sim_state,
+                        "validation_blocked_non_epistemic",
+                        {"project_id": project_id, "blockers": blockers, "non_epistemic_blockers": non_epistemic_blockers},
+                    )
+                    return [{
+                        "type": "idle",
+                        "duration": 1.0,
+                        "priority": 1,
+                        "decision_action": ExecutableActionType.WAIT.value,
+                        "translation_outcome": "validate_blocked_non_epistemic",
+                        "project_id": project_id,
+                    }]
             if blockers and partitioned["hard_blockers"]:
                 self._record_known_gaps_from_blockers(blockers, sim_state=sim_state, project_id=project_id)
                 self._emit_event(sim_state, "execution_readiness_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "readiness_not_unlocked", "blockers": blockers, "project_id": project_id})
@@ -6503,6 +6649,18 @@ class Agent:
                 if goal_id:
                     payload["goal_id"] = goal_id
                 self._emit_event(sim_state, "execution_readiness_passed", payload)
+                if decision.selected_action == ExecutableActionType.VALIDATE_CONSTRUCTION:
+                    self._emit_event(
+                        sim_state,
+                        "validate_construction_translated",
+                        {"project_id": project_id, "translated_action_type": action.get("type"), "decision_action": decision.selected_action.value},
+                    )
+                    if self.project_closure_state.get("active") and project_id and project_id == self.project_closure_state.get("project_id"):
+                        self._emit_event(
+                            sim_state,
+                            "closure_episode_returned_to_validation",
+                            {"project_id": project_id, "origin": "translation"},
+                        )
                 if project_id and not action.get("target"):
                     resolved_target = environment.get_interaction_target_position(project_id, from_position=self.position)
                     if resolved_target is not None:
