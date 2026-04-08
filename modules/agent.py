@@ -5883,6 +5883,72 @@ class Agent:
                         reason_summary=f"Closure epistemic blockers require communication repair for {closure_project_id}",
                         confidence=max(0.78, float(rewritten.confidence or decision.confidence or 0.0)),
                     )
+            if (
+                closure_locked
+                and closure_epistemic_blocked
+                and rewritten.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE
+            ):
+                target_id = rewritten.target_id
+                blocker_relevant = self._is_closure_relevant_inspect_target(
+                    target_id,
+                    closure_project_id,
+                    environment,
+                    blockers=blocker_classification["epistemic_blockers"],
+                    sim_state=sim_state,
+                )
+                if not blocker_relevant:
+                    candidate_target = None
+                    for candidate in self._candidate_information_sources(environment, sim_state=sim_state):
+                        source_id = candidate[1] if isinstance(candidate, (tuple, list)) and len(candidate) >= 2 else None
+                        if not source_id:
+                            continue
+                        if self._is_closure_relevant_inspect_target(
+                            source_id,
+                            closure_project_id,
+                            environment,
+                            blockers=blocker_classification["epistemic_blockers"],
+                            sim_state=sim_state,
+                        ):
+                            candidate_target = source_id
+                            break
+                    comm_available = self._can_attempt_verbal_plan_communication(sim_state)
+                    stalled_repair = bool(repair_update and repair_update.get("stalled"))
+                    if comm_available:
+                        rewritten = BrainDecision(
+                            selected_action=ExecutableActionType.COMMUNICATE,
+                            target_id=None,
+                            target_zone=decision.target_zone,
+                            goal_update="closure_epistemic_repair",
+                            reason_summary=f"Closure repair suppressed non-relevant inspect ({target_id}); communicate for blocker-specific DIK.",
+                            confidence=max(0.78, float(rewritten.confidence or decision.confidence or 0.0)),
+                        )
+                    elif stalled_repair:
+                        rewritten = BrainDecision(
+                            selected_action=ExecutableActionType.REASSESS_PLAN,
+                            target_id=closure_project_id,
+                            target_zone=decision.target_zone,
+                            goal_update="closure_epistemic_repair_stalled",
+                            reason_summary=f"Closure repair stalled for {closure_project_id}; reassess strategy.",
+                            confidence=max(0.72, float(rewritten.confidence or decision.confidence or 0.0)),
+                        )
+                    elif candidate_target:
+                        rewritten = BrainDecision(
+                            selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                            target_id=candidate_target,
+                            target_zone=decision.target_zone,
+                            goal_update="closure_epistemic_repair",
+                            reason_summary=f"Closure repair retargeted inspection to blocker-relevant source {candidate_target}.",
+                            confidence=max(0.74, float(rewritten.confidence or decision.confidence or 0.0)),
+                        )
+                    else:
+                        rewritten = BrainDecision(
+                            selected_action=ExecutableActionType.REASSESS_PLAN,
+                            target_id=closure_project_id,
+                            target_zone=decision.target_zone,
+                            goal_update="closure_epistemic_repair_stalled",
+                            reason_summary=f"No blocker-relevant inspect target available for {closure_project_id}; reassess.",
+                            confidence=max(0.68, float(rewritten.confidence or decision.confidence or 0.0)),
+                        )
             elif closure_locked and rewritten.selected_action in closure_guard_actions and not closure_epistemic_blocked:
                 self.project_closure_state["repair_mode"] = False
                 self.project_closure_state["repair_blocker_signature"] = None
@@ -5924,12 +5990,17 @@ class Agent:
             blockers = set(self._build_readiness_blockers(environment, sim_state=sim_state))
             closure_relevant_inspect = bool(
                 rewritten.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE
-                and (
-                    any(str(b).startswith("missing_expected_rule:") for b in blockers)
-                    or "missing_validation_rule_knowledge" in blockers
-                    or "insufficient_rule_knowledge" in blockers
+                and self._is_closure_relevant_inspect_target(
+                    rewritten.target_id,
+                    teammate_closure_project_id,
+                    environment,
+                    blockers={
+                        b for b in blockers
+                        if str(b).startswith("missing_expected_rule:")
+                        or str(b) in {"missing_validation_rule_knowledge", "insufficient_rule_knowledge"}
+                    },
+                    sim_state=sim_state,
                 )
-                and rewritten.target_id in {f"{self.role}_Info", "Team_Info", "Engineer_Info"}
             )
             if not closure_relevant_inspect:
                 fallback_action = ExecutableActionType.COMMUNICATE if self._can_attempt_verbal_plan_communication(sim_state) else ExecutableActionType.WAIT
@@ -6638,6 +6709,19 @@ class Agent:
                         "validation_blocked_epistemic",
                         {"project_id": project_id, "blockers": blockers, "reason": "epistemic_blockers_without_communication_path"},
                     )
+                    if (
+                        self.project_closure_state.get("active")
+                        and project_id
+                        and project_id == self.project_closure_state.get("project_id")
+                    ):
+                        return [{
+                            "type": "idle",
+                            "duration": 1.0,
+                            "priority": 1,
+                            "decision_action": ExecutableActionType.REASSESS_PLAN.value,
+                            "translation_outcome": "validate_blocked_epistemic_closure_no_comm_path",
+                            "project_id": project_id,
+                        }]
                     return [{
                         "type": "idle",
                         "duration": 1.0,
@@ -8447,6 +8531,55 @@ class Agent:
         if blocker_rules:
             return blocker_rules
         return self._closure_project_missing_expected_rules(project_id, environment)
+
+    def _is_closure_relevant_inspect_target(self, source_id, project_id, environment, *, blockers=None, sim_state=None):
+        source_id = self._normalize_packet_name(source_id)
+        if not source_id or not project_id:
+            return False
+        state = self.project_closure_state
+        if not (state.get("active") and str(state.get("project_id")) == str(project_id)):
+            return False
+        allowed, _reason = self._agent_can_target_information_source(source_id, environment)
+        if not allowed:
+            return False
+
+        missing_rules = self._closure_repair_missing_rules(project_id, environment, blockers=blockers)
+        if not missing_rules:
+            return False
+
+        critical_targets = self._critical_unmet_source_targets(sim_state, environment)
+        if critical_targets:
+            if source_id not in critical_targets:
+                return False
+        elif source_id == "Team_Info":
+            # During closure, do not treat Team_Info as broadly closure-relevant
+            # without explicit local evidence.
+            return False
+
+        repair_unchanged = int(state.get("repair_unchanged_count", 0) or 0)
+        signature = str(state.get("repair_blocker_signature") or "")
+        memory = self.source_memory_state.get(source_id, {})
+        exhaustion = self.source_exhaustion_state.get(source_id, {})
+        stalled_inspects = int(self.inspect_stall_counts.get(source_id, 0) or 0)
+        exhausted = bool(exhaustion.get("exhausted_for_acquisition", exhaustion.get("exhausted")))
+
+        if source_id == "Team_Info":
+            if exhausted:
+                return False
+            if stalled_inspects >= 2:
+                return False
+            if signature and repair_unchanged >= 1 and bool(memory.get("ever_inspected")):
+                # Same closure blocker persisted after team refresh; suppress repeat.
+                return False
+        elif source_id == f"{self.role}_Info":
+            if critical_targets and source_id not in critical_targets:
+                return False
+            if repair_unchanged >= 2 and (exhausted or stalled_inspects >= 2):
+                return False
+        else:
+            if repair_unchanged >= 2 and (exhausted or stalled_inspects >= 2):
+                return False
+        return True
 
     def _closure_blocker_signature(self, project_id, blockers, environment):
         missing_rules = self._closure_repair_missing_rules(project_id, environment, blockers=blockers)

@@ -218,13 +218,14 @@ class TestRuleBrainRepairPatch(unittest.TestCase):
                 "commit_until": float(sim.time) + 20.0,
             }
         )
-        rewritten = agent._apply_policy_pivots(
-            BrainDecision(selected_action=ExecutableActionType.COMMUNICATE, reason_summary="test", confidence=0.4),
-            environment=sim.environment,
-            sim_state=sim,
-            context=None,
-            pivot_origin="unit",
-        )
+        with patch.object(agent, "_construction_action_blockers", return_value=([], project_id)):
+            rewritten = agent._apply_policy_pivots(
+                BrainDecision(selected_action=ExecutableActionType.COMMUNICATE, reason_summary="test", confidence=0.4),
+                environment=sim.environment,
+                sim_state=sim,
+                context=None,
+                pivot_origin="unit",
+            )
         self.assertEqual(rewritten.selected_action, ExecutableActionType.VALIDATE_CONSTRUCTION)
         self.assertEqual(rewritten.target_id, project_id)
         sim.stop()
@@ -385,6 +386,123 @@ class TestRuleBrainRepairPatch(unittest.TestCase):
             self.assertEqual(project.get("status"), "ready_for_validation")
             self.assertEqual(len(teammate.mental_model["information"]), before_info)
             self.assertNotEqual(rewritten.selected_action, ExecutableActionType.VALIDATE_CONSTRUCTION)
+        finally:
+            sim.stop()
+
+    def test_active_closure_suppresses_generic_team_info_inspect_with_communication_first(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            owner = sim.agents[0]
+            project_id = "Build_Table_A"
+            project = sim.environment.construction.projects[project_id]
+            project["status"] = "ready_for_validation"
+            project["expected_rules"] = ["R_BLOCKED"]
+            sim.environment.construction.update_project_provenance(project_id, event="unit_setup", held_rule_ids=[], sim_time=sim.time)
+            owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+            owner.progress_tracker["forced_pivot"] = ""
+            owner.progress_tracker["forced_pivot_until"] = 0.0
+            owner.project_closure_state["repair_mode"] = True
+            owner.project_closure_state["repair_blocker_signature"] = f"{project_id}|missing_expected_rule:R_BLOCKED|R_BLOCKED"
+            decision = BrainDecision(
+                selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                target_id="Team_Info",
+                confidence=0.7,
+            )
+            with patch.object(owner, "_construction_action_blockers", return_value=(["missing_expected_rule:R_BLOCKED", "missing_validation_rule_knowledge"], project_id)), patch.object(owner, "_critical_unmet_source_targets", return_value={"Engineer_Info": 1}), patch.object(owner, "_can_attempt_verbal_plan_communication", return_value=True):
+                rewritten = owner._apply_policy_pivots(
+                    decision,
+                    environment=sim.environment,
+                    sim_state=sim,
+                    context=None,
+                    pivot_origin="unit",
+                )
+            self.assertEqual(rewritten.selected_action, ExecutableActionType.COMMUNICATE)
+            self.assertNotEqual(rewritten.selected_action, ExecutableActionType.INSPECT_INFORMATION_SOURCE)
+        finally:
+            sim.stop()
+
+    def test_active_closure_preserves_blocker_relevant_inspect_target(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            owner = sim.agents[0]
+            project_id = "Build_Table_A"
+            project = sim.environment.construction.projects[project_id]
+            project["status"] = "ready_for_validation"
+            project["expected_rules"] = ["R_BLOCKED"]
+            sim.environment.construction.update_project_provenance(project_id, event="unit_setup", held_rule_ids=[], sim_time=sim.time)
+            owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+            owner.progress_tracker["forced_pivot"] = ""
+            owner.progress_tracker["forced_pivot_until"] = 0.0
+            owner.project_closure_state["repair_mode"] = True
+            owner.project_closure_state["repair_blocker_signature"] = f"{project_id}|missing_expected_rule:R_BLOCKED|R_BLOCKED"
+            decision = BrainDecision(
+                selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                target_id="Architect_Info",
+                confidence=0.7,
+            )
+            with patch.object(owner, "_construction_action_blockers", return_value=(["missing_expected_rule:R_BLOCKED", "missing_validation_rule_knowledge"], project_id)), patch.object(owner, "_critical_unmet_source_targets", return_value={"Architect_Info": 1}):
+                rewritten = owner._apply_policy_pivots(
+                    decision,
+                    environment=sim.environment,
+                    sim_state=sim,
+                    context=None,
+                    pivot_origin="unit",
+                )
+            self.assertEqual(rewritten.selected_action, ExecutableActionType.INSPECT_INFORMATION_SOURCE)
+            self.assertEqual(rewritten.target_id, "Architect_Info")
+        finally:
+            sim.stop()
+
+    def test_stalled_closure_suppresses_repeated_non_relevant_inspect_without_comm(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            owner = sim.agents[0]
+            project_id = "Build_Table_A"
+            project = sim.environment.construction.projects[project_id]
+            project["status"] = "ready_for_validation"
+            project["expected_rules"] = ["R_STALLED"]
+            sim.environment.construction.update_project_provenance(project_id, event="unit_setup", held_rule_ids=[], sim_time=sim.time)
+            owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+            owner.progress_tracker["forced_pivot"] = ""
+            owner.progress_tracker["forced_pivot_until"] = 0.0
+            owner.project_closure_state["repair_mode"] = True
+            owner.project_closure_state["repair_unchanged_count"] = 3
+            owner.project_closure_state["repair_blocker_signature"] = f"{project_id}|missing_expected_rule:R_STALLED|R_STALLED"
+            owner.source_exhaustion_state.setdefault("Team_Info", {})["exhausted"] = True
+            decision = BrainDecision(
+                selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                target_id="Team_Info",
+                confidence=0.7,
+            )
+            with patch.object(owner, "_construction_action_blockers", return_value=(["missing_expected_rule:R_STALLED", "missing_validation_rule_knowledge"], project_id)), patch.object(owner, "_critical_unmet_source_targets", return_value={"Team_Info": 1}), patch.object(owner, "_can_attempt_verbal_plan_communication", return_value=False):
+                rewritten = owner._apply_policy_pivots(
+                    decision,
+                    environment=sim.environment,
+                    sim_state=sim,
+                    context=None,
+                    pivot_origin="local_refresh",
+                )
+            self.assertEqual(rewritten.selected_action, ExecutableActionType.REASSESS_PLAN)
+        finally:
+            sim.stop()
+
+    def test_non_closure_inspect_behavior_remains_available(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            decision = BrainDecision(
+                selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                target_id="Team_Info",
+                confidence=0.6,
+            )
+            rewritten = agent._apply_policy_pivots(
+                decision,
+                environment=sim.environment,
+                sim_state=sim,
+                context=None,
+                pivot_origin="unit",
+            )
+            self.assertEqual(rewritten.selected_action, ExecutableActionType.INSPECT_INFORMATION_SOURCE)
         finally:
             sim.stop()
 
