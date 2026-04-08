@@ -59,6 +59,98 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         self.assertNotIn("missing_validation_rule_knowledge", blockers)
         sim.stop()
 
+    def test_closure_repair_tkrq_is_anchored_to_missing_expected_rule(self):
+        sim = SimulationState(phases=[])
+        owner, helper = sim.agents[0], sim.agents[1]
+        owner.position = helper.position = (8.0, 6.6)
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_RULE_X"]
+        sim.environment.construction.update_project_provenance(project_id, event="unit_setup", held_rule_ids=[], sim_time=sim.time)
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        decision = BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=project_id, confidence=0.9)
+        owner._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
+
+        request = next((m for m in owner.generate_message(recipient_name=helper.name) if m["type"] == "TKRQ"), None)
+        self.assertIsNotNone(request)
+        self.assertEqual(request.get("project_id"), project_id)
+        self.assertIn("R_RULE_X", request.get("missing_expected_rules", []))
+        self.assertIn("rule:R_RULE_X", set(request.get("content", [])))
+        sim.stop()
+
+    def test_repeated_unchanged_closure_repair_emits_stalled_and_stops_refresh(self):
+        sim = SimulationState(phases=[])
+        owner = sim.agents[0]
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_STALL"]
+        sim.environment.construction.update_project_provenance(project_id, event="unit_setup", held_rule_ids=[], sim_time=sim.time)
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        decision = BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=project_id, confidence=0.9)
+        owner._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
+        owner._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
+        stalled_result = owner._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
+        self.assertEqual(stalled_result[0].get("decision_action"), ExecutableActionType.REASSESS_PLAN.value)
+        self.assertTrue(any(e.get("event_type") == "closure_episode_epistemic_repair_stalled" for e in sim.logger.recent_events))
+        sim.stop()
+
+    def test_closure_repair_clears_back_to_validation_when_missing_rule_resolved(self):
+        sim = SimulationState(phases=[])
+        owner = sim.agents[0]
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_RETURN"]
+        sim.environment.construction.update_project_provenance(project_id, event="unit_setup", held_rule_ids=[], sim_time=sim.time)
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        blocked = BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=project_id, confidence=0.9)
+        owner._translate_brain_decision_to_legacy_action(blocked, sim.environment, sim_state=sim)
+
+        owner.mental_model["knowledge"].add_rule("R_RETURN", [])
+        snapshot = owner._snapshot_dik_provenance(sim_state=sim)
+        sim.environment.construction.update_project_provenance(
+            project_id,
+            event="unit_rule_added",
+            sim_time=sim.time,
+            held_rule_ids=snapshot["held_rule_ids_at_build"],
+        )
+        reroute = owner._apply_policy_pivots(
+            BrainDecision(selected_action=ExecutableActionType.COMMUNICATE, confidence=0.6),
+            sim.environment,
+            sim_state=sim,
+            pivot_origin="local_refresh",
+        )
+        self.assertEqual(reroute.selected_action, ExecutableActionType.VALIDATE_CONSTRUCTION)
+        owner._translate_brain_decision_to_legacy_action(reroute, sim.environment, sim_state=sim)
+        self.assertTrue(any(e.get("event_type") == "closure_episode_returned_to_validation" for e in sim.logger.recent_events))
+        sim.stop()
+
+    def test_closure_owner_not_reassigned_during_epistemic_repair(self):
+        sim = SimulationState(phases=[])
+        owner = sim.agents[0]
+        helper = sim.agents[1]
+        owner.position = helper.position = (8.0, 6.6)
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_LOCKED"]
+        sim.environment.construction.update_project_provenance(project_id, event="unit_setup", held_rule_ids=[], sim_time=sim.time)
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        owner._translate_brain_decision_to_legacy_action(
+            BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=project_id, confidence=0.9),
+            sim.environment,
+            sim_state=sim,
+        )
+        owner.communicate_with(helper, sim_state=sim)
+        self.assertEqual(sim.environment.construction.projects[project_id].get("closure_owner"), owner.name)
+        sim.stop()
+
     def test_shared_source_inspection_does_not_auto_promote_team_validated_knowledge(self):
         sim = SimulationState(phases=[])
         agent = sim.agents[0]
