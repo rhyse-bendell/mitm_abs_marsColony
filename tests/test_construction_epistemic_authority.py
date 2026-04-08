@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 from modules.action_schema import BrainDecision, ExecutableActionType
 from modules.simulation import SimulationState
@@ -18,8 +19,17 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         agent.source_inspection_state[f"{agent.role}_Info"] = "inspected"
         agent.source_memory_state.setdefault("Team_Info", {})["ever_inspected"] = True
         agent.source_memory_state.setdefault("Team_Info", {})["last_inspected_time"] = float(sim.time)
+        agent.source_memory_state.setdefault("Team_Info", {})["last_verified_time"] = float(sim.time)
+        agent.source_memory_state.setdefault("Team_Info", {})["memory_confidence"] = 0.95
         agent.source_memory_state.setdefault(f"{agent.role}_Info", {})["ever_inspected"] = True
         agent.source_memory_state.setdefault(f"{agent.role}_Info", {})["last_inspected_time"] = float(sim.time)
+        agent.source_memory_state.setdefault(f"{agent.role}_Info", {})["last_verified_time"] = float(sim.time)
+        agent.source_memory_state.setdefault(f"{agent.role}_Info", {})["memory_confidence"] = 0.95
+        agent.source_memory_state.setdefault("Engineer_Info", {})["ever_inspected"] = True
+        agent.source_memory_state.setdefault("Engineer_Info", {})["last_inspected_time"] = float(sim.time)
+        agent.source_memory_state.setdefault("Engineer_Info", {})["last_verified_time"] = float(sim.time)
+        agent.source_memory_state.setdefault("Engineer_Info", {})["memory_confidence"] = 0.95
+        agent.source_inspection_state["Engineer_Info"] = "inspected"
 
     def test_start_construction_blocked_when_epistemic_prereqs_missing(self):
         sim = SimulationState(phases=[])
@@ -75,6 +85,9 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         required = int(project["required_resources"]["bricks"])
         sim.environment.construction.deliver_resource("Build_Table_B", "bricks", quantity=required)
         project["correct"] = False
+        for expected_rule in list(project.get("expected_rules") or []):
+            if expected_rule not in agent.mental_model["knowledge"].rules:
+                agent.mental_model["knowledge"].rules.append(expected_rule)
 
         agent.activity_log.append("Mismatch with construction: reevaluating knowledge")
         repair = BrainDecision(
@@ -90,6 +103,7 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         agent.active_actions = [{**repair_action, "progress": 0.0}]
         agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.1)
         self.assertTrue(project["correct"])
+        agent.activity_log = [entry for entry in agent.activity_log if "Mismatch with construction" not in str(entry)]
 
         validate = BrainDecision(
             selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION,
@@ -275,6 +289,109 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         self.assertIn("missing_cross_role_engineer_grounding", partition["epistemic_advisories"])
         self.assertIn("stale_epistemic_grounding", partition["epistemic_advisories"])
         self.assertIn("missing_validation_rule_knowledge", partition["epistemic_advisories"])
+        sim.stop()
+
+    def test_validation_survives_translation_and_hits_mark_validated(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        self._prime_build_readiness(sim, agent)
+        project_id = "Build_Table_B"
+        project = sim.environment.construction.projects[project_id]
+        required = int(project["required_resources"]["bricks"])
+        sim.environment.construction.deliver_resource(project_id, "bricks", quantity=required)
+        project["correct"] = True
+        self.assertEqual(project.get("status"), "ready_for_validation")
+
+        decision = BrainDecision(
+            selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION,
+            target_id=project_id,
+            confidence=0.9,
+        )
+        translated = agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)[0]
+        self.assertEqual(translated["type"], "idle")
+        self.assertEqual(translated.get("decision_action"), ExecutableActionType.VALIDATE_CONSTRUCTION.value)
+        self.assertTrue(any(e.get("event_type") == "validate_construction_translated" for e in sim.logger.recent_events))
+
+        agent.position = sim.environment.get_interaction_target_position(project_id, from_position=agent.position)
+        with mock.patch.object(sim.environment.construction, "mark_validated", wraps=sim.environment.construction.mark_validated) as mark_spy:
+            agent.active_actions = [{**translated, "progress": 0.0}]
+            agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.1)
+            self.assertEqual(mark_spy.call_count, 1)
+        self.assertEqual(project.get("status"), "complete")
+        self.assertTrue(project.get("validated_complete"))
+        sim.stop()
+
+    def test_validation_epistemic_downgrade_is_explicit(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        project_id = "Build_Table_B"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["correct"] = True
+
+        decision = BrainDecision(
+            selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION,
+            target_id=project_id,
+            confidence=0.9,
+        )
+        translated = agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)[0]
+        self.assertEqual(translated["type"], "communicate")
+        self.assertEqual(translated.get("decision_action"), ExecutableActionType.COMMUNICATE.value)
+        self.assertEqual(translated.get("translation_outcome"), "validate_downgraded_epistemic")
+        self.assertTrue(any(e.get("event_type") == "validation_blocked_epistemic" for e in sim.logger.recent_events))
+        self.assertTrue(any(e.get("event_type") == "validate_construction_downgraded_to_communication" for e in sim.logger.recent_events))
+        sim.stop()
+
+    def test_validation_non_epistemic_block_is_explicit(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        decision = BrainDecision(
+            selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION,
+            target_id="Build_Table_DOES_NOT_EXIST",
+            confidence=0.9,
+        )
+        translated = agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)[0]
+        self.assertEqual(translated["type"], "idle")
+        self.assertEqual(translated.get("decision_action"), ExecutableActionType.WAIT.value)
+        self.assertEqual(translated.get("translation_outcome"), "validate_blocked_non_epistemic")
+        self.assertTrue(any(e.get("event_type") == "validation_blocked_non_epistemic" for e in sim.logger.recent_events))
+        self.assertFalse(any(e.get("event_type") == "validate_construction_downgraded_to_communication" for e in sim.logger.recent_events))
+        sim.stop()
+
+    def test_only_mark_validated_mutates_validation_state(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        self._prime_build_readiness(sim, agent)
+        project_id = "Build_Table_B"
+        project = sim.environment.construction.projects[project_id]
+        required = int(project["required_resources"]["bricks"])
+        sim.environment.construction.deliver_resource(project_id, "bricks", quantity=required)
+        project["correct"] = True
+        self.assertEqual(project.get("status"), "ready_for_validation")
+
+        with mock.patch.object(sim.environment.construction, "mark_validated", wraps=sim.environment.construction.mark_validated) as mark_spy:
+            agent.active_actions = [{
+                "type": "idle",
+                "duration": 1.0,
+                "progress": 0.0,
+                "project_id": project_id,
+                "decision_action": ExecutableActionType.WAIT.value,
+            }]
+            agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.1)
+            self.assertEqual(mark_spy.call_count, 0)
+            self.assertEqual(project.get("status"), "ready_for_validation")
+
+            decision = BrainDecision(
+                selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION,
+                target_id=project_id,
+                confidence=0.9,
+            )
+            translated = agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)[0]
+            agent.position = sim.environment.get_interaction_target_position(project_id, from_position=agent.position)
+            agent.active_actions = [{**translated, "progress": 0.0}]
+            agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.1)
+            self.assertEqual(mark_spy.call_count, 1)
+            self.assertEqual(project.get("status"), "complete")
         sim.stop()
 
 
