@@ -14,7 +14,7 @@ from modules.interaction_graph import InteractionTelemetryBridge
 from modules.metrics import MetricsCollector
 from modules.runtime_witness_audit import RuntimeWitnessAudit
 from modules.team_knowledge import TeamKnowledgeManager
-from modules.construct_mapping import ConstructMapper
+from modules.experimental_config import load_experimental_mapper
 from modules.task_model import load_task_model
 
 LOCAL_BACKEND_ALIASES = {"local_http", "openai_compatible_local", "ollama_local", "ollama"}
@@ -297,7 +297,7 @@ class SimulationState:
         self.save_interval = 10.0
         self._last_save_time = 0.0
         self._last_phase_index = self.environment.current_phase_index
-        self.construct_mapper = ConstructMapper()
+        self.construct_mapper = load_experimental_mapper()
         if self.construct_mapper.validation_issues:
             self.logger.log_event(self.time, "construct_mapping_validation_issues", {"issues": self.construct_mapper.validation_issues})
         self.logger.log_event(
@@ -308,6 +308,11 @@ class SimulationState:
                 "construct_to_mechanism_rows": len(self.construct_mapper.construct_to_mechanism),
                 "mechanism_to_hook_rows": len(self.construct_mapper.mechanism_to_hook),
             },
+        )
+        self.logger.log_event(
+            self.time,
+            "construct_mapping_hook_families",
+            {"active_hook_families": self.construct_mapper.active_hook_families()},
         )
 
         # Determine speed multiplier
@@ -380,9 +385,17 @@ class SimulationState:
             incoming_traits = dict(config.get("traits", {}))
             construct_values = dict(config.get("constructs", {}))
             mechanism_overrides = dict(config.get("mechanism_overrides", incoming_traits))
+            mechanism_defaults = {
+                "communication_propensity": float(getattr(agent, "communication_propensity", 0.5)),
+                "goal_alignment": float(getattr(agent, "goal_alignment", 0.5)),
+                "help_tendency": float(getattr(agent, "help_tendency", 0.5)),
+                "build_speed": float(getattr(agent, "build_speed", 0.5)),
+                "rule_accuracy": float(getattr(agent, "rule_accuracy", 0.5)),
+            }
             resolved_constructs, resolved_mechanisms, resolved_hooks = self.construct_mapper.resolve_agent_profile(
                 construct_values=construct_values,
                 mechanism_overrides=mechanism_overrides,
+                mechanism_defaults=mechanism_defaults,
             )
             agent.construct_values = resolved_constructs
             agent.mechanism_profile = resolved_mechanisms
@@ -398,6 +411,19 @@ class SimulationState:
                 self.time,
                 "agent_mechanism_profile",
                 {"agent": agent.name, "mechanisms": resolved_mechanisms},
+            )
+            self.logger.log_event(
+                self.time,
+                "agent_mechanism_overrides",
+                {"agent": agent.name, "mechanism_overrides": mechanism_overrides},
+            )
+            self.logger.log_event(
+                self.time,
+                "agent_active_hook_effects",
+                {
+                    "agent": agent.name,
+                    "hook_keys": [f"{k[0]}::{k[1]}::{k[2]}" for k in sorted(resolved_hooks.keys())],
+                },
             )
             role_sources = self.task_model.source_ids_for_role(role_id)
             mapped_packets = [
@@ -475,6 +501,9 @@ class SimulationState:
             "high_latency_stale_result_grace_s": float(agent.planner_cadence.high_latency_stale_result_grace_s),
             "sticky_backend_demotion_enabled": bool(agent.planner_cadence.sticky_backend_demotion_enabled),
             "planner_blocks_sim_time": agent.planner_cadence.planner_blocks_sim_time,
+            "construct_values": dict(getattr(agent, "construct_values", {})),
+            "mechanism_profile": dict(getattr(agent, "mechanism_profile", {})),
+            "mechanism_hook_keys": [f"{k[0]}::{k[1]}::{k[2]}" for k in sorted(getattr(agent, "hook_effects", {}).keys())],
         }
 
     def _register_agent_brain_runtime(self, agent):

@@ -70,7 +70,7 @@ class ConstructMappingError(ValueError):
 
 
 class ConstructMapper:
-    def __init__(self, config_dir: str | Path = "config"):
+    def __init__(self, config_dir: str | Path = "config/experimental"):
         self.config_dir = Path(config_dir)
         self.constructs: dict[str, ConstructDefinition] = {}
         self.construct_to_mechanism: list[ConstructMechanismRule] = []
@@ -94,6 +94,12 @@ class ConstructMapper:
 
     def _load_csv(self, file_name: str) -> list[dict[str, str]]:
         path = self.config_dir / file_name
+        if not path.exists():
+            legacy = Path("config") / file_name
+            if legacy.exists():
+                path = legacy
+            else:
+                raise ConstructMappingError(f"Missing configuration file: {file_name}")
         with path.open("r", encoding="utf-8", newline="") as f:
             return list(csv.DictReader(f))
 
@@ -179,9 +185,14 @@ class ConstructMapper:
             if max_effect < min_effect:
                 self.validation_issues.append(f"Invalid bounds in {context}: max_effect < min_effect")
                 continue
+            mechanism_id = row["mechanism_id"].strip()
+            known_mechanisms = {r.mechanism_id for r in self.construct_to_mechanism}
+            if mechanism_id not in known_mechanisms:
+                self.validation_issues.append(f"Unknown mechanism '{mechanism_id}' in {context}")
+                continue
             self.mechanism_to_hook.append(
                 MechanismHookRule(
-                    mechanism_id=row["mechanism_id"].strip(),
+                    mechanism_id=mechanism_id,
                     hook_type=row["hook_type"].strip(),
                     hook_target=row["hook_target"].strip(),
                     operator=row.get("operator", "").strip(),
@@ -202,10 +213,12 @@ class ConstructMapper:
         self,
         construct_values: dict[str, float] | None = None,
         mechanism_overrides: dict[str, float] | None = None,
+        mechanism_defaults: dict[str, float] | None = None,
     ) -> dict[str, float]:
         construct_values = construct_values or {}
         mechanism_overrides = mechanism_overrides or {}
-        resolved: dict[str, float] = {}
+        mechanism_defaults = mechanism_defaults or {}
+        resolved: dict[str, float] = {k: clamp(float(v), 0.0, 1.0) for k, v in mechanism_defaults.items()}
 
         for rule in self.construct_to_mechanism:
             if not rule.enabled:
@@ -239,6 +252,7 @@ class ConstructMapper:
         self,
         construct_values: dict[str, float] | None = None,
         mechanism_overrides: dict[str, float] | None = None,
+        mechanism_defaults: dict[str, float] | None = None,
     ) -> tuple[dict[str, float], dict[str, float], dict[tuple[str, str, str], float]]:
         construct_values = construct_values or {}
         normalized_constructs: dict[str, float] = {}
@@ -247,6 +261,17 @@ class ConstructMapper:
                 continue
             normalized_constructs[construct_id] = self._construct_value(construct_id, construct_values)
 
-        mechanisms = self.resolve_mechanisms(normalized_constructs, mechanism_overrides)
+        mechanisms = self.resolve_mechanisms(normalized_constructs, mechanism_overrides, mechanism_defaults=mechanism_defaults)
         hooks = self.resolve_hooks(mechanisms)
         return normalized_constructs, mechanisms, hooks
+
+
+    def active_hook_families(self) -> dict[str, list[str]]:
+        families: dict[str, list[str]] = {}
+        for rule in self.mechanism_to_hook:
+            if not rule.enabled:
+                continue
+            families.setdefault(rule.hook_type, [])
+            if rule.hook_target not in families[rule.hook_type]:
+                families[rule.hook_type].append(rule.hook_target)
+        return families

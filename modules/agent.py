@@ -1196,7 +1196,7 @@ class Agent:
     def _epistemic_success_probability(self, hook_target, *, base_trait="rule_accuracy", context_modifier=0.0, retry_bonus=0.0):
         hook_base = self._hook_value("dik_update", hook_target, "success_probability", default=0.5)
         trait_base = self._trait_value(base_trait, default=0.5)
-        mechanism_base = max(hook_base, trait_base)
+        mechanism_base = (0.6 * trait_base) + (0.4 * hook_base)
         deterministic_component = 0.2 + (0.75 * mechanism_base)
         residual_noise = random.uniform(-0.04, 0.04)
         probability = deterministic_component + context_modifier + retry_bonus + residual_noise
@@ -1277,6 +1277,14 @@ class Agent:
             if any(g in {"stalled", "idle"} for g in goals):
                 return True
         return bool(sim_state and len(self.known_gaps) > 0)
+
+    def _tom_update_success_probability(self):
+        hook_base = self._hook_value("tom_update", "update_teammate_model", "success_probability", default=0.5)
+        trait_base = self._trait_value("teammate_model_accuracy", default=0.5)
+        return max(0.05, min(0.99, 0.15 + 0.8 * max(hook_base, trait_base)))
+
+    def _should_apply_tom_update(self):
+        return random.random() <= self._tom_update_success_probability()
 
     def _ensure_source_state(self, environment):
         for packet_name in environment.knowledge_packets.keys():
@@ -5390,6 +5398,8 @@ class Agent:
         ext_utility = self._hook_value("action_utility", "externalize_plan", "utility_weight", default=0.5)
         consult_utility = self._hook_value("action_utility", "consult_team_artifact", "utility_weight", default=0.5)
         assist_utility = self._hook_value("action_utility", "request_assistance", "utility_weight", default=0.5)
+        validate_utility = self._hook_value("action_utility", "validate_construction", "utility_weight", default=0.5)
+        assist_bias = self._hook_value("decision_bias", "assist_stalled_teammate", "priority_weight", default=0.5)
         action_repeat_count = int(getattr(self, "loop_counters", {}).get("action_repeats", 0) or 0)
         repeated_selected_action_count = int(getattr(self, "selection_loop_guard", {}).get("consecutive_count", 0) or 0)
         seconds_since_dik_change = (
@@ -5415,10 +5425,20 @@ class Agent:
             help_t >= 0.7
             and self._help_context_available(sim_state)
             and not assistance_stalled
-            and random.random() < ((help_t + assist_utility) / 2.0)
+            and random.random() < ((help_t + assist_utility + assist_bias) / 3.0)
         ):
             selected = ExecutableActionType.REQUEST_ASSISTANCE
             reason_bits.append("help_tendency redirected toward assistance exchange")
+
+
+        if (
+            selected not in {ExecutableActionType.REQUEST_ASSISTANCE, ExecutableActionType.VALIDATE_CONSTRUCTION}
+            and trigger_reason in {"construction_stalled", "validation_due", "closure_commitment"}
+            and validate_utility >= 0.75
+            and random.random() < validate_utility
+        ):
+            selected = ExecutableActionType.VALIDATE_CONSTRUCTION
+            reason_bits.append("validation_thoroughness increased validation preference")
 
         if selected != decision.selected_action:
             decision.selected_action = selected
@@ -7475,7 +7495,7 @@ class Agent:
                 _set_action_stage(action, "mutation_execution_started", {"target_id": "whiteboard"})
                 artifact_id = f"whiteboard:{self.name}:{int(sim_state.time*10)}"
                 rules = list(self.mental_model["knowledge"].rules)[-3:]
-                fidelity = max(self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5), self._trait_value("rule_accuracy"))
+                fidelity = (self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5) + self._trait_value("rule_accuracy")) / 2.0
                 if rules and fidelity < 0.5:
                     rules = rules[:-1]
                 if hasattr(sim_state.team_knowledge_manager, "propose_team_plan"):
@@ -7801,7 +7821,7 @@ class Agent:
                     self._refresh_construction_provenance(environment, project_id, sim_state=sim_state, event="build_attempt")
                     delivered_before = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
 
-                    fidelity = max(self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5), self._trait_value("rule_accuracy"))
+                    fidelity = (self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5) + self._trait_value("rule_accuracy")) / 2.0
                     if random.random() > fidelity:
                         project["correct"] = False
 
@@ -8755,11 +8775,16 @@ class Agent:
         )
 
         # Update Theory of Mind estimates
-        other_agent.theory_of_mind[self.name] = {
-            "goals": [self.goal] if self.goal else [],
-            "knowledge_ids": set(self.mental_model["knowledge"].rules),
-            "last_seen": None
-        }
+        if other_agent._should_apply_tom_update():
+            other_agent.theory_of_mind[self.name] = {
+                "goals": [self.goal] if self.goal else [],
+                "knowledge_ids": set(self.mental_model["knowledge"].rules),
+                "last_seen": None
+            }
+            if sim_state is not None:
+                other_agent._emit_event(sim_state, "teammate_model_updated", {"teammate": self.name, "source": "communication_exchange"})
+        elif sim_state is not None:
+            other_agent._emit_event(sim_state, "teammate_model_update_degraded", {"teammate": self.name, "source": "communication_exchange"})
 
         # Physiological cost of talking
         self.update_physiology(exertion=0.1, speaking=True)
@@ -9103,7 +9128,7 @@ class Agent:
             expected_rules = {normalize_rule_token(r) for r in project.get("expected_rules", [])}
             rule_matches = bool(known_rules.intersection(expected_rules))
             if not rule_matches:
-                mismatch_sensitivity = max(self._hook_value("validation_check", "detect_mismatch", "sensitivity", default=0.5), self._trait_value("rule_accuracy"))
+                mismatch_sensitivity = (self._hook_value("validation_check", "detect_mismatch", "sensitivity", default=0.5) + self._trait_value("rule_accuracy")) / 2.0
                 mismatch_detect_prob = min(1.0, 0.25 + 0.7 * mismatch_sensitivity)
                 if random.random() <= mismatch_detect_prob:
                     self.construction_validation_state["mismatch_last_ts"][project_id] = now_ts

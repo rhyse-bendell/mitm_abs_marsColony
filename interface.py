@@ -1703,27 +1703,39 @@ class MarsColonyInterface:
     def build_agent_configs(self):
         agent_configs = []
         profile_constructs = {
-            "High": 1.0,
-            "Low": 0.0,
+            "High": 0.75,
+            "Low": 0.25,
         }
         profile_traits = {
             "High_Team": {
-                "communication_propensity": 1.0,
-                "goal_alignment": 1.0,
-                "help_tendency": 1.0
+                "communication_propensity": 0.85,
+                "goal_alignment": 0.85,
+                "help_tendency": 0.85,
+                "artifact_externalization_tendency": 0.8,
+                "artifact_consultation_tendency": 0.8,
+                "teammate_model_accuracy": 0.8,
             },
             "Low_Team": {
-                "communication_propensity": 0.3,
-                "goal_alignment": 0.4,
-                "help_tendency": 0.2
+                "communication_propensity": 0.35,
+                "goal_alignment": 0.35,
+                "help_tendency": 0.35,
+                "artifact_externalization_tendency": 0.3,
+                "artifact_consultation_tendency": 0.3,
+                "teammate_model_accuracy": 0.3,
             },
             "High_Task": {
-                "build_speed": 1.0,
-                "rule_accuracy": 1.0
+                "build_speed": 0.85,
+                "rule_accuracy": 0.85,
+                "build_readiness_sensitivity": 0.8,
+                "mismatch_detection_sensitivity": 0.8,
+                "validation_thoroughness": 0.8,
             },
             "Low_Task": {
-                "build_speed": 0.5,
-                "rule_accuracy": 0.5
+                "build_speed": 0.35,
+                "rule_accuracy": 0.35,
+                "build_readiness_sensitivity": 0.3,
+                "mismatch_detection_sensitivity": 0.3,
+                "validation_thoroughness": 0.3,
             }
         }
 
@@ -1734,8 +1746,8 @@ class MarsColonyInterface:
                 task_pot = self.agent_profiles[role]["task"].get()
 
                 traits = {}
-                traits.update(profile_traits[f"{team_pot}_Team"])
-                traits.update(profile_traits[f"{task_pot}_Task"])
+                traits.update(profile_traits.get(f"{team_pot}_Team", {}))
+                traits.update(profile_traits.get(f"{task_pot}_Task", {}))
 
                 for trait_key, var in self.agent_traits[role].items():
                     traits[trait_key] = var.get()  # override with current slider value
@@ -1795,8 +1807,8 @@ class MarsColonyInterface:
                     "role": role,
                     "template_id": identity["template_id"],
                     "constructs": {
-                        "teamwork_potential": profile_constructs[team_pot],
-                        "taskwork_potential": profile_constructs[task_pot],
+                        "teamwork_potential": self.agent_profiles[role]["team_value"].get() if team_pot == "Custom" else profile_constructs[team_pot],
+                        "taskwork_potential": self.agent_profiles[role]["task_value"].get() if task_pot == "Custom" else profile_constructs[task_pot],
                     },
                     "mechanism_overrides": dict(traits),
                     "traits": traits,
@@ -4051,36 +4063,63 @@ class MarsColonyInterface:
         ttk.Label(header, text="Alias").grid(row=2, column=0, sticky="w", pady=(2, 0))
         ttk.Entry(header, textvariable=self.agent_identity[role]["alias"], width=20).grid(row=2, column=1, sticky="w", padx=(10, 0), pady=(2, 0))
 
-        ttk.Label(card, text="Teamwork Potential").grid(row=1, column=0, sticky="w")
-        ttk.Label(card, text="Taskwork Potential").grid(row=1, column=1, sticky="w")
+        profile_frame = ttk.LabelFrame(card, text="Experimental Profile", padding=(8, 6))
+        profile_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        profile_frame.columnconfigure(0, weight=1)
+        profile_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(profile_frame, text="Teamwork Potential").grid(row=0, column=0, sticky="w")
+        ttk.Label(profile_frame, text="Taskwork Potential").grid(row=0, column=1, sticky="w")
 
         team_potential = StringVar(value="High")
         task_potential = StringVar(value="High")
-        self.agent_profiles[role] = {"team": team_potential, "task": task_potential}
+        team_value = DoubleVar(value=0.75)
+        task_value = DoubleVar(value=0.75)
+        self.agent_profiles[role] = {"team": team_potential, "task": task_potential, "team_value": team_value, "task_value": task_value}
 
-        ttk.OptionMenu(card, team_potential, "High", "High", "Low", command=lambda _, r=role: update_traits_from_profile(r)).grid(row=2, column=0, sticky="w", pady=(2, 6))
-        ttk.OptionMenu(card, task_potential, "High", "High", "Low", command=lambda _, r=role: update_traits_from_profile(r)).grid(row=2, column=1, sticky="w", pady=(2, 6))
+        ttk.OptionMenu(profile_frame, team_potential, "High", "High", "Low", "Custom", command=lambda _, r=role: update_traits_from_profile(r)).grid(row=1, column=0, sticky="w", pady=(2, 2))
+        ttk.OptionMenu(profile_frame, task_potential, "High", "High", "Low", "Custom", command=lambda _, r=role: update_traits_from_profile(r)).grid(row=1, column=1, sticky="w", pady=(2, 2))
+        tk.Scale(profile_frame, variable=team_value, from_=0.0, to=1.0, resolution=0.05, orient="horizontal", length=180).grid(row=2, column=0, sticky="w")
+        tk.Scale(profile_frame, variable=task_value, from_=0.0, to=1.0, resolution=0.05, orient="horizontal", length=180).grid(row=2, column=1, sticky="w")
 
-        traits_frame = ttk.LabelFrame(card, text="Traits", padding=(8, 6))
-        traits_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 6))
-        traits_frame.columnconfigure(0, weight=1)
-        traits_frame.columnconfigure(1, weight=1)
+        team_traits_frame = ttk.LabelFrame(card, text="Teamwork Mechanisms", padding=(8, 6))
+        team_traits_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        team_traits_frame.columnconfigure(0, weight=1)
+        team_traits_frame.columnconfigure(1, weight=1)
 
-        left_traits = ["communication_propensity", "help_tendency", "rule_accuracy"]
-        right_traits = ["goal_alignment", "build_speed"]
+        task_traits_frame = ttk.LabelFrame(card, text="Taskwork Mechanisms", padding=(8, 6))
+        task_traits_frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        task_traits_frame.columnconfigure(0, weight=1)
+        task_traits_frame.columnconfigure(1, weight=1)
+
+        teamwork_traits = [
+            "communication_propensity",
+            "goal_alignment",
+            "help_tendency",
+            "artifact_externalization_tendency",
+            "artifact_consultation_tendency",
+            "teammate_model_accuracy",
+        ]
+        taskwork_traits = [
+            "build_speed",
+            "rule_accuracy",
+            "build_readiness_sensitivity",
+            "mismatch_detection_sensitivity",
+            "validation_thoroughness",
+        ]
 
         self.agent_traits[role] = {}
 
-        for idx, trait in enumerate(left_traits):
+        for idx, trait in enumerate(teamwork_traits):
             self.agent_traits[role][trait] = DoubleVar(value=0.5)
-            self._create_trait_slider(traits_frame, row=idx, col=0, label=trait_labels[trait], variable=self.agent_traits[role][trait])
+            self._create_trait_slider(team_traits_frame, row=idx // 2, col=idx % 2, label=trait_labels[trait], variable=self.agent_traits[role][trait])
 
-        for idx, trait in enumerate(right_traits):
+        for idx, trait in enumerate(taskwork_traits):
             self.agent_traits[role][trait] = DoubleVar(value=0.5)
-            self._create_trait_slider(traits_frame, row=idx, col=1, label=trait_labels[trait], variable=self.agent_traits[role][trait])
+            self._create_trait_slider(task_traits_frame, row=idx // 2, col=idx % 2, label=trait_labels[trait], variable=self.agent_traits[role][trait])
 
         packet_frame = ttk.LabelFrame(card, text="Packet Access", padding=(8, 6))
-        packet_frame.grid(row=4, column=0, columnspan=2, sticky="ew")
+        packet_frame.grid(row=5, column=0, columnspan=2, sticky="ew")
         packet_frame.columnconfigure(0, weight=1)
 
         packet_names = ["Team_Packet", "Architect_Packet", "Engineer_Packet", "Botanist_Packet"]
@@ -4091,9 +4130,14 @@ class MarsColonyInterface:
             self.packet_access[role][pkt] = pkt_enabled
             ttk.Checkbutton(packet_frame, text=pkt, variable=pkt_enabled).grid(row=idx, column=0, sticky="w", pady=1)
 
-        settings_frame = ttk.LabelFrame(card, text="Per-Agent Brain/Planner", padding=(8, 6))
-        settings_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        advanced_toggle = BooleanVar(value=False)
+        settings_frame = ttk.LabelFrame(card, text="Advanced Backend / Planner", padding=(8, 6))
+        settings_frame.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         settings_frame.columnconfigure(1, weight=1)
+        ttk.Checkbutton(settings_frame, text="Show advanced settings", variable=advanced_toggle).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        advanced_body = ttk.Frame(settings_frame)
+        advanced_body.grid(row=1, column=0, columnspan=2, sticky="ew")
+        advanced_body.columnconfigure(1, weight=1)
 
         default_brain = dict(agent_row.get("brain_config", {}))
         default_planner = dict(agent_row.get("planner_config", {}))
@@ -4129,33 +4173,33 @@ class MarsColonyInterface:
         }
 
         fields = [
-            ("Backend Override", ttk.Combobox(settings_frame, textvariable=self.agent_brain_settings[role]["backend"], values=["", "rule_brain", "local_http", "ollama"], state="readonly", width=18), "Optional per-agent backend override. Leave blank to inherit global default.", "backend"),
-            ("Model Override", ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["local_model"], width=20), "Optional model override for this agent. Leave blank to inherit global model.", "local_model"),
-            ("Fallback Override", ttk.Combobox(settings_frame, textvariable=self.agent_brain_settings[role]["fallback_backend"], values=["", "rule_brain"], state="readonly", width=18), "Fallback used by this agent if its selected backend fails. Leave blank to inherit global fallback.", "fallback_backend"),
-            ("Planner Cadence (steps)", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_interval_steps"], width=8), "Higher values reduce how often this agent's brain is queried.", None),
-            ("Planner Timeout (s)", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_timeout_seconds"], width=8), "Maximum time allowed for this agent's planning step before it is treated as failed.", None),
-            ("Backend Timeout (s)", ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["timeout_s"], width=8), "Maximum backend request time for this agent.", None),
-            ("Backend Max Retries", ttk.Entry(settings_frame, textvariable=self.agent_brain_settings[role]["max_retries"], width=8), self.RETRY_HELP_TEXT["backend_max_retries"], None),
-            ("Planner Max Retries", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planner_max_retries"], width=8), self.RETRY_HELP_TEXT["planner_max_retries"], None),
-            ("Planner Request Policy", ttk.Combobox(settings_frame, textvariable=self.agent_planner_settings[role]["planner_request_policy"], values=["cadence_with_dik_integration", "legacy"], state="readonly", width=28), "Optional per-agent policy override for split DIK/planning cadence.", None),
-            ("Split Planning Interval", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["planning_interval_steps"], width=8), "Per-agent split mode planner interval in ticks.", None),
-            ("DIK Cooldown (steps)", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["dik_integration_cooldown_steps"], width=8), "Per-agent minimum spacing between DIK integration requests.", None),
-            ("DIK Batch Threshold", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["dik_integration_batch_threshold"], width=8), "Per-agent minimum epistemic delta before DIK integration is requested.", None),
-            ("Degraded Threshold", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_consecutive_failures_threshold"], width=8), "Number of consecutive backend failures before degraded mode begins.", None),
-            ("Degraded Cooldown (s)", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_cooldown_seconds"], width=8), "How long this agent waits before retrying the backend after repeated failures.", None),
-            ("Degraded Step Multiplier", ttk.Entry(settings_frame, textvariable=self.agent_planner_settings[role]["degraded_step_interval_multiplier"], width=8), "In degraded mode, increases the interval between planning attempts.", None),
+            ("Backend Override", ttk.Combobox(advanced_body, textvariable=self.agent_brain_settings[role]["backend"], values=["", "rule_brain", "local_http", "ollama"], state="readonly", width=18), "Optional per-agent backend override. Leave blank to inherit global default.", "backend"),
+            ("Model Override", ttk.Entry(advanced_body, textvariable=self.agent_brain_settings[role]["local_model"], width=20), "Optional model override for this agent. Leave blank to inherit global model.", "local_model"),
+            ("Fallback Override", ttk.Combobox(advanced_body, textvariable=self.agent_brain_settings[role]["fallback_backend"], values=["", "rule_brain"], state="readonly", width=18), "Fallback used by this agent if its selected backend fails. Leave blank to inherit global fallback.", "fallback_backend"),
+            ("Planner Cadence (steps)", ttk.Entry(advanced_body, textvariable=self.agent_planner_settings[role]["planner_interval_steps"], width=8), "Higher values reduce how often this agent's brain is queried.", None),
+            ("Planner Timeout (s)", ttk.Entry(advanced_body, textvariable=self.agent_planner_settings[role]["planner_timeout_seconds"], width=8), "Maximum time allowed for this agent's planning step before it is treated as failed.", None),
+            ("Backend Timeout (s)", ttk.Entry(advanced_body, textvariable=self.agent_brain_settings[role]["timeout_s"], width=8), "Maximum backend request time for this agent.", None),
+            ("Backend Max Retries", ttk.Entry(advanced_body, textvariable=self.agent_brain_settings[role]["max_retries"], width=8), self.RETRY_HELP_TEXT["backend_max_retries"], None),
+            ("Planner Max Retries", ttk.Entry(advanced_body, textvariable=self.agent_planner_settings[role]["planner_max_retries"], width=8), self.RETRY_HELP_TEXT["planner_max_retries"], None),
+            ("Planner Request Policy", ttk.Combobox(advanced_body, textvariable=self.agent_planner_settings[role]["planner_request_policy"], values=["cadence_with_dik_integration", "legacy"], state="readonly", width=28), "Optional per-agent policy override for split DIK/planning cadence.", None),
+            ("Split Planning Interval", ttk.Entry(advanced_body, textvariable=self.agent_planner_settings[role]["planning_interval_steps"], width=8), "Per-agent split mode planner interval in ticks.", None),
+            ("DIK Cooldown (steps)", ttk.Entry(advanced_body, textvariable=self.agent_planner_settings[role]["dik_integration_cooldown_steps"], width=8), "Per-agent minimum spacing between DIK integration requests.", None),
+            ("DIK Batch Threshold", ttk.Entry(advanced_body, textvariable=self.agent_planner_settings[role]["dik_integration_batch_threshold"], width=8), "Per-agent minimum epistemic delta before DIK integration is requested.", None),
+            ("Degraded Threshold", ttk.Entry(advanced_body, textvariable=self.agent_planner_settings[role]["degraded_consecutive_failures_threshold"], width=8), "Number of consecutive backend failures before degraded mode begins.", None),
+            ("Degraded Cooldown (s)", ttk.Entry(advanced_body, textvariable=self.agent_planner_settings[role]["degraded_cooldown_seconds"], width=8), "How long this agent waits before retrying the backend after repeated failures.", None),
+            ("Degraded Step Multiplier", ttk.Entry(advanced_body, textvariable=self.agent_planner_settings[role]["degraded_step_interval_multiplier"], width=8), "In degraded mode, increases the interval between planning attempts.", None),
         ]
 
         current_row = 0
         for label, widget, help_text, inheritance_key in fields:
-            ttk.Label(settings_frame, text=label).grid(row=current_row, column=0, sticky="w", pady=(2, 0))
+            ttk.Label(advanced_body, text=label).grid(row=current_row, column=0, sticky="w", pady=(2, 0))
             widget.grid(row=current_row, column=1, sticky="w", pady=(2, 0))
             current_row += 1
-            self._add_help_text(settings_frame, current_row, help_text)
+            self._add_help_text(advanced_body, current_row, help_text)
             current_row += 1
             if inheritance_key:
                 ttk.Label(
-                    settings_frame,
+                    advanced_body,
                     textvariable=self.agent_inheritance_note_vars[role][inheritance_key],
                     foreground="#3f556e",
                     wraplength=620,
@@ -4163,7 +4207,7 @@ class MarsColonyInterface:
                 ).grid(row=current_row, column=0, columnspan=2, sticky="w", padx=(0, 8), pady=(0, 4))
                 current_row += 1
 
-        effective_frame = ttk.Frame(settings_frame)
+        effective_frame = ttk.Frame(advanced_body)
         effective_frame.grid(row=current_row, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         ttk.Label(effective_frame, text="Effective Settings", foreground="#1f3247").grid(row=0, column=0, sticky="w")
         ttk.Label(effective_frame, textvariable=self.agent_effective_summary_vars[role]["backend"], foreground="#3f556e").grid(row=1, column=0, sticky="w")
@@ -4173,6 +4217,8 @@ class MarsColonyInterface:
         for key in ("backend", "local_model", "fallback_backend"):
             self.agent_brain_settings[role][key].trace_add("write", lambda *_args, r=role: self._update_agent_inheritance_display(r))
         self._update_agent_inheritance_display(role)
+        advanced_toggle.trace_add("write", lambda *_args, frame=advanced_body, var=advanced_toggle: frame.grid() if var.get() else frame.grid_remove())
+        advanced_body.grid_remove()
         return card
 
     def create_experiment_tab(self):
@@ -4262,29 +4308,40 @@ class MarsColonyInterface:
 
         # Trait labels
         trait_labels = {
-            "communication_propensity": "Tendency to Communicate",
-            "goal_alignment": "Agreement with Team Goals",
-            "help_tendency": "Willingness to Help",
-            "build_speed": "Speed of Building",
-            "rule_accuracy": "Rule Interpretation Accuracy"
+            "communication_propensity": "Communication Propensity",
+            "goal_alignment": "Goal Alignment",
+            "help_tendency": "Help Tendency",
+            "artifact_externalization_tendency": "Artifact Externalization",
+            "artifact_consultation_tendency": "Artifact Consultation",
+            "teammate_model_accuracy": "Teammate Model Accuracy",
+            "build_speed": "Build Speed",
+            "rule_accuracy": "Rule Accuracy",
+            "build_readiness_sensitivity": "Build Readiness Sensitivity",
+            "mismatch_detection_sensitivity": "Mismatch Detection Sensitivity",
+            "validation_thoroughness": "Validation Thoroughness",
         }
 
         # Preset values
         profile_traits = {
-            "High_Team": {"communication_propensity": 1.0, "goal_alignment": 1.0, "help_tendency": 1.0},
-            "Low_Team": {"communication_propensity": 0.3, "goal_alignment": 0.4, "help_tendency": 0.2},
-            "High_Task": {"build_speed": 1.0, "rule_accuracy": 1.0},
-            "Low_Task": {"build_speed": 0.5, "rule_accuracy": 0.5}
+            "High_Team": {"communication_propensity": 0.85, "goal_alignment": 0.85, "help_tendency": 0.85, "artifact_externalization_tendency": 0.8, "artifact_consultation_tendency": 0.8, "teammate_model_accuracy": 0.8},
+            "Low_Team": {"communication_propensity": 0.35, "goal_alignment": 0.35, "help_tendency": 0.35, "artifact_externalization_tendency": 0.3, "artifact_consultation_tendency": 0.3, "teammate_model_accuracy": 0.3},
+            "High_Task": {"build_speed": 0.85, "rule_accuracy": 0.85, "build_readiness_sensitivity": 0.8, "mismatch_detection_sensitivity": 0.8, "validation_thoroughness": 0.8},
+            "Low_Task": {"build_speed": 0.35, "rule_accuracy": 0.35, "build_readiness_sensitivity": 0.3, "mismatch_detection_sensitivity": 0.3, "validation_thoroughness": 0.3}
         }
 
         def update_traits_from_profile(role):
             team = self.agent_profiles[role]["team"].get()
             task = self.agent_profiles[role]["task"].get()
 
-            for trait, value in profile_traits[f"{team}_Team"].items():
+            for trait, value in profile_traits.get(f"{team}_Team", {}).items():
                 self.agent_traits[role][trait].set(value)
-            for trait, value in profile_traits[f"{task}_Task"].items():
+            for trait, value in profile_traits.get(f"{task}_Task", {}).items():
                 self.agent_traits[role][trait].set(value)
+
+            if team == "Custom":
+                self.agent_profiles[role]["team_value"].set(max(0.0, min(1.0, float(self.agent_profiles[role]["team_value"].get()))))
+            if task == "Custom":
+                self.agent_profiles[role]["task_value"].set(max(0.0, min(1.0, float(self.agent_profiles[role]["task_value"].get()))))
 
         self._create_experiment_global_settings(self.tab_experiment)
 

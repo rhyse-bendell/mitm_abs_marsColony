@@ -1,0 +1,29 @@
+construct_id,mechanism_id,effect_weight,transform,intercept,min_output,max_output,phase_scope,condition_group,enabled,notes
+teamwork_potential,communication_propensity,0.75,linear_centered,0.0,0.0,1.0,all,default,true,Higher teamwork raises communication tendency
+teamwork_potential,goal_alignment,0.85,linear_centered,0.0,0.0,1.0,all,default,true,Higher teamwork raises adoption of team-relevant goals
+teamwork_potential,help_tendency,0.80,linear_centered,0.0,0.0,1.0,all,default,true,Higher teamwork raises help and repair tendency
+teamwork_potential,artifact_externalization_tendency,0.60,linear_centered,0.0,0.0,1.0,all,default,true,Higher teamwork raises likelihood of making shared artifacts
+teamwork_potential,artifact_consultation_tendency,0.65,linear_centered,0.0,0.0,1.0,all,default,true,Higher teamwork raises shared artifact consultation
+teamwork_potential,teammate_model_accuracy,0.55,linear_centered,0.0,0.0,1.0,all,default,true,Higher teamwork improves team-model quality
+taskwork_potential,build_speed,0.80,linear_centered,0.0,0.0,1.0,all,default,true,Higher taskwork improves work rate
+taskwork_potential,rule_accuracy,0.85,linear_centered,0.0,0.0,1.0,all,default,true,Higher taskwork improves DIK and construction fidelity
+taskwork_potential,build_readiness_sensitivity,0.60,linear_centered,0.0,0.0,1.0,all,default,true,Higher taskwork improves readiness to begin valid construction
+taskwork_potential,mismatch_detection_sensitivity,0.55,linear_centered,0.0,0.0,1.0,all,default,true,Higher taskwork improves error detection
+taskwork_potential,validation_thoroughness,0.70,linear_centered,0.0,0.0,1.0,all,default,true,Higher taskwork increases validation likelihood
+conscientiousness,plan_persistence,0.60,linear_centered,0.0,0.0,1.0,all,default,false,More conscientious agents persist longer before replanning
+conscientiousness,validation_thoroughness,0.50,linear_centered,0.0,0.0,1.0,all,default,false,More conscientious agents validate more often
+agreeableness,help_tendency,0.65,linear_centered,0.0,0.0,1.0,all,default,false,More agreeable agents help more often
+agreeableness,communication_propensity,0.40,linear_centered,0.0,0.0,1.0,all,default,false,More agreeable agents communicate somewhat more
+working_memory,rule_accuracy,0.45,linear_centered,0.0,0.0,1.0,all,default,false,More working memory improves DIK retention
+working_memory,build_readiness_sensitivity,0.35,linear_centered,0.0,0.0,1.0,all,default,false,More working memory supports readiness integration
+spatial_skill,navigation_efficiency,0.80,linear_centered,0.0,0.0,1.0,all,default,false,Better spatial skill improves movement/path decisions
+spatial_skill,construction_layout_quality,0.55,linear_centered,0.0,0.0,1.0,all,default,false,Better spatial skill improves layout choices
+cognitive_flexibility,replanning_tendency,0.75,linear_centered,0.0,0.0,1.0,all,default,false,More flexibility increases adaptation after failure
+trust_bias,artifact_adoption_tendency,0.70,linear_centered,0.0,0.0,1.0,all,default,false,Higher trust increases adoption of teammate/shared artifacts
+trust_bias,communication_acceptance_bias,0.65,linear_centered,0.0,0.0,1.0,all,default,false,Higher trust increases uptake of teammate communications
+fatigue,build_speed,-0.70,linear,0.0,0.0,1.0,all,default,false,Fatigue lowers speed
+fatigue,rule_accuracy,-0.45,linear,0.0,0.0,1.0,all,default,false,Fatigue lowers accuracy
+fatigue,plan_persistence,-0.30,linear,0.0,0.0,1.0,all,default,false,Fatigue reduces persistence
+stress,communication_propensity,0.20,linear,0.0,0.0,1.0,all,default,false,Stress may raise urgent communication
+stress,rule_accuracy,-0.35,linear,0.0,0.0,1.0,all,default,false,Stress may lower accuracy
+stress,replanning_tendency,0.40,linear,0.0,0.0,1.0,all,default,false,Stress may increase reactive replanning

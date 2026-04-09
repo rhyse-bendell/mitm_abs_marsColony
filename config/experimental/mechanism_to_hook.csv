@@ -1,0 +1,33 @@
+mechanism_id,hook_type,hook_target,operator,parameter,formula_name,min_effect,max_effect,enabled,notes
+communication_propensity,action_utility,communicate,add,utility_weight,bounded_add,0.0,1.0,true,Boost utility of communicate
+communication_propensity,action_utility,request_assistance,add,utility_weight,bounded_add,0.0,1.0,true,Boost utility of requesting help
+communication_propensity,action_utility,meeting,add,utility_weight,bounded_add,0.0,1.0,true,Boost utility of team meeting
+goal_alignment,action_utility,consult_team_artifact,add,utility_weight,bounded_add,0.0,1.0,true,Boost utility of consulting team artifact
+goal_alignment,action_utility,externalize_plan,add,utility_weight,bounded_add,0.0,1.0,true,Boost utility of contributing to team artifact
+goal_alignment,action_utility,reassess_plan,add,utility_weight,bounded_add,0.0,1.0,true,Boost utility of team-oriented replanning
+help_tendency,action_utility,request_assistance,add,utility_weight,bounded_add,0.0,1.0,true,Increase willingness to engage with help logic
+help_tendency,action_utility,repair_or_correct_construction,add,utility_weight,bounded_add,0.0,1.0,true,Increase correction and repair tendency
+help_tendency,decision_bias,assist_stalled_teammate,add,priority_weight,bounded_add,0.0,1.0,true,Boost assistance targeting when teammate stalled
+build_speed,action_duration,transport_resources,multiply,duration_scale,inverse_duration_scale,0.5,1.5,true,Faster agents complete transport quicker
+build_speed,action_duration,start_construction,multiply,duration_scale,inverse_duration_scale,0.5,1.5,true,Faster agents begin building quicker
+build_speed,action_duration,continue_construction,multiply,duration_scale,inverse_duration_scale,0.5,1.5,true,Faster agents build quicker
+build_speed,action_duration,repair_or_correct_construction,multiply,duration_scale,inverse_duration_scale,0.5,1.5,true,Faster agents repair quicker
+build_speed,action_duration,validate_construction,multiply,duration_scale,inverse_duration_scale,0.5,1.5,true,Faster agents validate quicker
+rule_accuracy,dik_update,absorb_packet,multiply,success_probability,bounded_identity,0.0,1.0,true,Accuracy affects DIK uptake fidelity
+rule_accuracy,dik_update,transform_data_to_information,multiply,success_probability,bounded_identity,0.0,1.0,true,Accuracy affects data-to-information fidelity
+rule_accuracy,dik_update,transform_information_to_knowledge,multiply,success_probability,bounded_identity,0.0,1.0,true,Accuracy affects inference fidelity
+rule_accuracy,construction_fidelity,start_construction,set,fidelity_score,bounded_identity,0.0,1.0,true,Accuracy affects externalized build correctness
+rule_accuracy,validation_check,detect_mismatch,multiply,success_probability,bounded_identity,0.0,1.0,true,Accuracy affects mismatch detection
+artifact_externalization_tendency,action_utility,externalize_plan,add,utility_weight,bounded_add,0.0,1.0,true,Increase tendency to externalize plans/knowledge
+artifact_externalization_tendency,action_utility,start_construction,add,externalization_weight,bounded_add,0.0,1.0,true,Construction as externalization action
+artifact_consultation_tendency,action_utility,consult_team_artifact,add,utility_weight,bounded_add,0.0,1.0,true,Increase tendency to consult whiteboard/build artifacts
+artifact_adoption_tendency,artifact_use,adopt_externalized_knowledge,add,adoption_weight,bounded_add,0.0,1.0,true,Increase uptake of consulted artifact knowledge
+teammate_model_accuracy,tom_update,update_teammate_model,multiply,success_probability,bounded_identity,0.0,1.0,true,Improves teammate-model quality
+build_readiness_sensitivity,decision_threshold,start_construction,shift,readiness_threshold,threshold_shift,-1.0,1.0,true,Changes threshold for build eligibility
+mismatch_detection_sensitivity,validation_check,detect_mismatch,add,sensitivity,bounded_add,0.0,1.0,true,Improves mismatch detection
+validation_thoroughness,action_utility,validate_construction,add,utility_weight,bounded_add,0.0,1.0,true,Boost utility of validation action
+plan_persistence,plan_control,continue_current_plan,add,persistence_weight,bounded_add,0.0,1.0,true,Reduce unnecessary replanning
+replanning_tendency,plan_control,reassess_plan,add,utility_weight,bounded_add,0.0,1.0,true,Increase replanning after failure/uncertainty
+navigation_efficiency,movement,move_to_target,multiply,step_efficiency,bounded_identity,0.5,1.5,false,Future pathing efficiency hook
+construction_layout_quality,decision_bias,select_build_zone,add,layout_quality_weight,bounded_add,0.0,1.0,false,Future layout-quality hook
+communication_acceptance_bias,communication,accept_message,multiply,acceptance_probability,bounded_identity,0.0,1.0,false,Future message uptake hook
