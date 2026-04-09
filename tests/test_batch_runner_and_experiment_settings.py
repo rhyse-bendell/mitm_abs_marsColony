@@ -106,7 +106,7 @@ class TestInterfaceExperimentHelpers(unittest.TestCase):
         app.planner_completion_tokens_var = _StubVar(1024)
         app.high_latency_stale_result_grace_var = _StubVar(1800.0)
         app.BACKEND_DEFAULTS = self.MarsColonyInterface.BACKEND_DEFAULTS
-        app.build_agent_configs = lambda: [{"name": "Architect", "role": "Architect", "packet_access": ["Team_Packet", "Architect_Packet"], "traits": {}}]
+        app.build_agent_configs = lambda: [{"name": "Architect", "role": "Architect", "packet_access": ["Team_Packet", "Architect_Packet"], "mechanism_overrides": {}}]
         app._collect_construction_parameters = lambda: {"pile_a_quantity": 20}
 
         settings = app._collect_experiment_settings()

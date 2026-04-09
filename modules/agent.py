@@ -1272,11 +1272,27 @@ class Agent:
         return max(0.2, round(base_duration * factor, 3))
 
     def _help_context_available(self, sim_state):
-        for teammate_name, model in self.theory_of_mind.items():
+        if self._stalled_teammates(sim_state):
+            return True
+        for _teammate_name, model in self.theory_of_mind.items():
             goals = model.get("goals", [])
             if any(g in {"stalled", "idle"} for g in goals):
                 return True
         return bool(sim_state and len(self.known_gaps) > 0)
+
+    def _stalled_teammates(self, sim_state):
+        if sim_state is None:
+            return []
+        stalled = []
+        for other in getattr(sim_state, "agents", []):
+            if other is self:
+                continue
+            action_repeats = int(getattr(other, "loop_counters", {}).get("action_repeats", 0) or 0)
+            repeated_selected = int(getattr(other, "selection_loop_guard", {}).get("consecutive_count", 0) or 0)
+            inspect_stalls = max([int(v or 0) for v in getattr(other, "inspect_stall_counts", {}).values()] or [0])
+            if max(action_repeats, repeated_selected, inspect_stalls) >= 3:
+                stalled.append(other.name)
+        return stalled
 
     def _tom_update_success_probability(self):
         hook_base = self._hook_value("tom_update", "update_teammate_model", "success_probability", default=0.5)
@@ -3686,16 +3702,26 @@ class Agent:
     def _evaluate_team_plan_fit(self, sim_state, plan_summary):
         assignment = self._get_my_team_plan_assignment(sim_state, plan_summary)
         plan_status = str((plan_summary or {}).get("status", "")).lower()
+        alignment_signal = (
+            self._trait_value("goal_alignment")
+            + self._hook_value("action_utility", "consult_team_artifact", "utility_weight", default=0.5)
+            + self._hook_value("action_utility", "reassess_plan", "utility_weight", default=0.5)
+        ) / 3.0
+        help_signal = (
+            self._trait_value("help_tendency")
+            + self._hook_value("action_utility", "request_assistance", "utility_weight", default=0.5)
+            + self._hook_value("decision_bias", "assist_stalled_teammate", "priority_weight", default=0.5)
+        ) / 3.0
         if not plan_status:
             return "request_clarification", "missing_plan_status"
-        if assignment is None and float(self.goal_alignment) < 0.35:
+        if assignment is None and alignment_signal < 0.35:
             return "request_clarification", "no_role_assignment"
         if assignment is None:
             return "agree", "plan_aligns_without_direct_assignment"
         semantic, _project_target = self._normalize_team_plan_assignment(assignment)
         if semantic == "support":
             return "request_clarification", "assignment_underspecified"
-        if float(self.help_tendency) >= 0.35:
+        if help_signal >= 0.35:
             return "assignment_accept", "assignment_executable_for_role"
         return "assignment_decline", "low_help_tendency"
 
@@ -4189,13 +4215,41 @@ class Agent:
             and self._baseline_epistemic_sources_completed()
             and self._has_meaningful_consultable_artifact(sim_state)
         ):
-            self._activate_support_goal("consult_artifact", "teammate/shared-artifact influenced", sim_state=sim_state, priority=0.6, source="teammate_or_artifact_influenced")
+            consult_priority = min(
+                0.92,
+                0.5
+                + (0.22 * self._trait_value("artifact_consultation_tendency"))
+                + (0.2 * self._hook_value("action_utility", "consult_team_artifact", "utility_weight", default=0.5)),
+            )
+            self._activate_support_goal(
+                "consult_artifact",
+                "teammate/shared-artifact influenced",
+                sim_state=sim_state,
+                priority=consult_priority,
+                source="teammate_or_artifact_influenced",
+            )
         else:
             for goal in self.goal_registry.values():
                 if goal.goal_id == "SUPPORT_CONSULT_ARTIFACT" and goal.status in {"active", "queued", "candidate"}:
                     goal.status = "inactive"
                     goal.last_transition_reason = "consult_artifact_deferred_until_baseline_epistemic_ready"
                     self._log_goal_transition(sim_state, goal, "consult_artifact_deferred_until_baseline_epistemic_ready")
+
+        stalled_teammates = self._stalled_teammates(sim_state)
+        if stalled_teammates:
+            assist_priority = min(
+                0.95,
+                0.56
+                + (0.2 * self._trait_value("help_tendency"))
+                + (0.2 * self._hook_value("decision_bias", "assist_stalled_teammate", "priority_weight", default=0.5)),
+            )
+            self._activate_support_goal(
+                "assist_teammate",
+                f"stalled_teammate_detected:{','.join(stalled_teammates[:2])}",
+                sim_state=sim_state,
+                priority=assist_priority,
+                source="derived_from_rule",
+            )
 
         repeated_stall = any(v >= 3 for v in self.inspect_stall_counts.values())
         if repeated_stall:
@@ -5392,6 +5446,8 @@ class Agent:
         comm = self._trait_value("communication_propensity")
         align = self._trait_value("goal_alignment")
         help_t = self._trait_value("help_tendency")
+        ext_t = self._trait_value("artifact_externalization_tendency")
+        consult_t = self._trait_value("artifact_consultation_tendency")
 
         selected = decision.selected_action
         reason_bits = []
@@ -5400,6 +5456,7 @@ class Agent:
         assist_utility = self._hook_value("action_utility", "request_assistance", "utility_weight", default=0.5)
         validate_utility = self._hook_value("action_utility", "validate_construction", "utility_weight", default=0.5)
         assist_bias = self._hook_value("decision_bias", "assist_stalled_teammate", "priority_weight", default=0.5)
+        replanning_utility = self._hook_value("plan_control", "reassess_plan", "utility_weight", default=0.5)
         action_repeat_count = int(getattr(self, "loop_counters", {}).get("action_repeats", 0) or 0)
         repeated_selected_action_count = int(getattr(self, "selection_loop_guard", {}).get("consecutive_count", 0) or 0)
         seconds_since_dik_change = (
@@ -5411,13 +5468,21 @@ class Agent:
             max(action_repeat_count, repeated_selected_action_count) >= 3
             and (seconds_since_dik_change is None or float(seconds_since_dik_change) > 8.0)
         )
-        force_externalize = trigger_reason == "new_dik_acquired" and comm >= 0.7 and random.random() < ((comm + ext_utility) / 2.0)
+        force_externalize = (
+            trigger_reason == "new_dik_acquired"
+            and ((comm + ext_t) / 2.0) >= 0.7
+            and random.random() < ((comm + ext_t + ext_utility) / 3.0)
+        )
 
         if force_externalize:
             selected = ExecutableActionType.EXTERNALIZE_PLAN
             reason_bits.append("communication_propensity pushed externalization after DIK change")
 
-        if align >= 0.75 and context.team_state.get("plan_readiness") == "validated_shared_plan" and random.random() < ((align + consult_utility) / 2.0):
+        if (
+            (align >= 0.75 or (consult_t >= 0.7 and align >= 0.4))
+            and context.team_state.get("plan_readiness") == "validated_shared_plan"
+            and random.random() < ((align + consult_utility) / 2.0)
+        ):
             selected = ExecutableActionType.CONSULT_TEAM_ARTIFACT
             reason_bits.append("goal_alignment favored validated team artifact consultation")
 
@@ -5428,8 +5493,20 @@ class Agent:
             and random.random() < ((help_t + assist_utility + assist_bias) / 3.0)
         ):
             selected = ExecutableActionType.REQUEST_ASSISTANCE
+            self.active_intent["min_commit_until"] = max(
+                float(self.active_intent.get("min_commit_until", 0.0) or 0.0),
+                float(sim_state.time) + 8.0,
+            )
             reason_bits.append("help_tendency redirected toward assistance exchange")
 
+        if (
+            selected not in {ExecutableActionType.REQUEST_ASSISTANCE, ExecutableActionType.CONSULT_TEAM_ARTIFACT}
+            and trigger_reason in {"contradiction_detected", "path_blocked_or_stalled", "build_readiness_changed"}
+            and replanning_utility >= 0.72
+            and random.random() < replanning_utility
+        ):
+            selected = ExecutableActionType.REASSESS_PLAN
+            reason_bits.append("replanning_tendency promoted reassess_plan under uncertainty")
 
         if (
             selected not in {ExecutableActionType.REQUEST_ASSISTANCE, ExecutableActionType.VALIDATE_CONSTRUCTION}
@@ -5455,6 +5532,8 @@ class Agent:
                         "communication_propensity": comm,
                         "goal_alignment": align,
                         "help_tendency": help_t,
+                        "artifact_externalization_tendency": ext_t,
+                        "artifact_consultation_tendency": consult_t,
                     },
                 },
             )
@@ -7496,6 +7575,11 @@ class Agent:
                 artifact_id = f"whiteboard:{self.name}:{int(sim_state.time*10)}"
                 rules = list(self.mental_model["knowledge"].rules)[-3:]
                 fidelity = (self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5) + self._trait_value("rule_accuracy")) / 2.0
+                ext_signal = (
+                    self._trait_value("artifact_externalization_tendency")
+                    + self._hook_value("action_utility", "externalize_plan", "utility_weight", default=0.5)
+                    + self._hook_value("action_utility", "start_construction", "externalization_weight", default=0.5)
+                ) / 3.0
                 if rules and fidelity < 0.5:
                     rules = rules[:-1]
                 if hasattr(sim_state.team_knowledge_manager, "propose_team_plan"):
@@ -7513,7 +7597,7 @@ class Agent:
                         blocked_reasons=["no_active_plan"],
                         success_criteria=["establish coordinated project direction", "resume concrete execution"],
                         review_at=sim_state.time + 20.0,
-                        expires_at=sim_state.time + 90.0,
+                        expires_at=sim_state.time + max(45.0, 50.0 + (60.0 * ext_signal)),
                         supporters=[self.name],
                     )
                 else:
@@ -7606,7 +7690,11 @@ class Agent:
                         if action.get("target") is not None and self.target is not None and tuple(self.target) == tuple(action.get("target")):
                             self.target = None
                         continue
-                    adopt_prob = self._hook_value("artifact_use", "adopt_externalized_knowledge", "adoption_weight", default=0.5)
+                    adopt_prob = (
+                        self._trait_value("artifact_adoption_tendency")
+                        + self._hook_value("artifact_use", "adopt_externalized_knowledge", "adoption_weight", default=0.5)
+                        + self._trait_value("artifact_consultation_tendency")
+                    ) / 3.0
                     if random.random() <= adopt_prob:
                         sim_state.team_knowledge_manager.adopt_artifact(preferred.artifact_id, self.name, sim_state.time)
                     if planless_consult and preferred.artifact_type != "team_plan":
@@ -9152,7 +9240,15 @@ class Agent:
                     if now_ts - last_repair < 5.0:
                         self._emit_event(sim_state, "repair_trigger_suppressed_not_ready", {"project_id": project_id, "reason": "repair_cooldown_active", "cooldown_remaining": round(5.0 - (now_ts - last_repair), 3)})
                         continue
-                    if random.random() < self._trait_value("help_tendency"):
+                    repair_prob = min(
+                        1.0,
+                        (
+                            self._trait_value("help_tendency")
+                            + self._hook_value("action_utility", "repair_or_correct_construction", "utility_weight", default=0.5)
+                            + self._hook_value("decision_bias", "assist_stalled_teammate", "priority_weight", default=0.5)
+                        ) / 3.0,
+                    )
+                    if random.random() < repair_prob:
                         self.construction_validation_state["repair_last_ts"][project_id] = now_ts
                         project["correct"] = True
                         self._refresh_construction_provenance(

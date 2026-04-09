@@ -1231,7 +1231,14 @@ class RuleBrain(BrainProvider):
         affordances = list(context_packet.action_affordances if not is_request else context_packet.allowed_actions)
         sorted_affordances = sorted(affordances, key=lambda a: float(a.get("utility", 0.0)), reverse=True)
         legal_types = {a.get("action_type") for a in affordances if a.get("action_type")}
-        traits = (context_packet.individual_cognitive_state.get("traits", {}) if not is_request else {}) or {}
+        traits = (
+            context_packet.individual_cognitive_state.get(
+                "mechanism_profile",
+                context_packet.individual_cognitive_state.get("traits", {}),
+            )
+            if not is_request
+            else {}
+        ) or {}
         features = self._extract_features(context_packet, is_request=is_request)
         control_state = dict(control_state or (context_packet.individual_cognitive_state.get("control_state", {}) if not is_request else {}))
         if not control_state:

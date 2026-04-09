@@ -338,7 +338,6 @@ class SimulationState:
                                 "taskwork_potential": d.taskwork_potential,
                             },
                             "mechanism_overrides": dict(d.mechanism_overrides),
-                            "traits": dict(d.mechanism_overrides),
                             "packet_access": list(d.source_access_override),
                             "accessible_packet_ids": list(d.source_access_override),
                             "initial_goal_seeds": list(d.initial_goal_seeds or []),
@@ -350,9 +349,9 @@ class SimulationState:
                     )
             else:
                 agent_configs = [
-                    {"name": "Architect", "role": "Architect", "traits": {}},
-                    {"name": "Engineer", "role": "Engineer", "traits": {}},
-                    {"name": "Botanist", "role": "Botanist", "traits": {}},
+                    {"name": "Architect", "role": "Architect", "mechanism_overrides": {}},
+                    {"name": "Engineer", "role": "Engineer", "mechanism_overrides": {}},
+                    {"name": "Botanist", "role": "Botanist", "mechanism_overrides": {}},
                 ]
 
 
@@ -382,9 +381,17 @@ class SimulationState:
                 communication_params=config.get("communication_params"),
                 initial_goal_seeds=config.get("initial_goal_seeds"),
             )
-            incoming_traits = dict(config.get("traits", {}))
             construct_values = dict(config.get("constructs", {}))
-            mechanism_overrides = dict(config.get("mechanism_overrides", incoming_traits))
+            incoming_mechanism_overrides = dict(config.get("mechanism_overrides", {}))
+            legacy_traits_alias = dict(config.get("traits", {}))
+            mechanism_overrides = dict(incoming_mechanism_overrides)
+            if not mechanism_overrides and legacy_traits_alias:
+                mechanism_overrides = dict(legacy_traits_alias)
+                self.logger.log_event(
+                    self.time,
+                    "legacy_traits_alias_normalized",
+                    {"agent": config.get("name", role_id), "alias_size": len(legacy_traits_alias)},
+                )
             mechanism_defaults = {
                 "communication_propensity": float(getattr(agent, "communication_propensity", 0.5)),
                 "goal_alignment": float(getattr(agent, "goal_alignment", 0.5)),
@@ -398,6 +405,7 @@ class SimulationState:
                 mechanism_defaults=mechanism_defaults,
             )
             agent.construct_values = resolved_constructs
+            agent.mechanism_overrides = mechanism_overrides
             agent.mechanism_profile = resolved_mechanisms
             agent.hook_effects = resolved_hooks
             for mechanism, value in resolved_mechanisms.items():
@@ -415,7 +423,11 @@ class SimulationState:
             self.logger.log_event(
                 self.time,
                 "agent_mechanism_overrides",
-                {"agent": agent.name, "mechanism_overrides": mechanism_overrides},
+                {
+                    "agent": agent.name,
+                    "mechanism_overrides": mechanism_overrides,
+                    "legacy_traits_alias_supplied": bool(legacy_traits_alias),
+                },
             )
             self.logger.log_event(
                 self.time,
@@ -423,6 +435,7 @@ class SimulationState:
                 {
                     "agent": agent.name,
                     "hook_keys": [f"{k[0]}::{k[1]}::{k[2]}" for k in sorted(resolved_hooks.keys())],
+                    "hook_effects": {f"{k[0]}::{k[1]}::{k[2]}": float(v) for k, v in sorted(resolved_hooks.items())},
                 },
             )
             role_sources = self.task_model.source_ids_for_role(role_id)
@@ -502,7 +515,9 @@ class SimulationState:
             "sticky_backend_demotion_enabled": bool(agent.planner_cadence.sticky_backend_demotion_enabled),
             "planner_blocks_sim_time": agent.planner_cadence.planner_blocks_sim_time,
             "construct_values": dict(getattr(agent, "construct_values", {})),
+            "mechanism_overrides": dict(getattr(agent, "mechanism_overrides", {})),
             "mechanism_profile": dict(getattr(agent, "mechanism_profile", {})),
+            "hook_effects": {f"{k[0]}::{k[1]}::{k[2]}": float(v) for k, v in sorted(getattr(agent, "hook_effects", {}).items())},
             "mechanism_hook_keys": [f"{k[0]}::{k[1]}::{k[2]}" for k in sorted(getattr(agent, "hook_effects", {}).keys())],
         }
 
