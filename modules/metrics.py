@@ -55,6 +55,14 @@ class MetricsCollector:
             agent.name: {
                 "agent": agent.name,
                 "role": agent.role,
+                "mechanism_profile": {
+                    "communication_propensity": getattr(agent, "communication_propensity", 0.5),
+                    "goal_alignment": getattr(agent, "goal_alignment", 0.5),
+                    "help_tendency": getattr(agent, "help_tendency", 0.5),
+                    "build_speed": getattr(agent, "build_speed", 0.5),
+                    "rule_accuracy": getattr(agent, "rule_accuracy", 0.5),
+                },
+                # Backward-compatible alias for older analyses.
                 "traits": {
                     "communication_propensity": getattr(agent, "communication_propensity", 0.5),
                     "goal_alignment": getattr(agent, "goal_alignment", 0.5),
@@ -638,6 +646,30 @@ class MetricsCollector:
             else 0.0
         )
 
+        agent_profiles = {
+            a.name: {
+                "role": a.role,
+                "mechanism_profile": {
+                    "communication_propensity": getattr(a, "communication_propensity", 0.5),
+                    "goal_alignment": getattr(a, "goal_alignment", 0.5),
+                    "help_tendency": getattr(a, "help_tendency", 0.5),
+                    "build_speed": getattr(a, "build_speed", 0.5),
+                    "rule_accuracy": getattr(a, "rule_accuracy", 0.5),
+                },
+                "traits": {
+                    "communication_propensity": getattr(a, "communication_propensity", 0.5),
+                    "goal_alignment": getattr(a, "goal_alignment", 0.5),
+                    "help_tendency": getattr(a, "help_tendency", 0.5),
+                    "build_speed": getattr(a, "build_speed", 0.5),
+                    "rule_accuracy": getattr(a, "rule_accuracy", 0.5),
+                },
+                "construct_values": dict(getattr(a, "construct_values", {})),
+                "mechanism_overrides": dict(getattr(a, "mechanism_overrides", {})),
+                "mechanism_profile_resolved": dict(getattr(a, "mechanism_profile", {})),
+                "packet_access": list(getattr(a, "allowed_packet", [])),
+            }
+            for a in self.simulation.agents
+        }
         return {
             "validated_structures_used": {
                 "house": house_count,
@@ -744,6 +776,30 @@ class MetricsCollector:
             {"name": p.get("name"), "duration_minutes": p.get("duration_minutes")}
             for p in (env.phases or [])
         ]
+        agent_profiles = {
+            a.name: {
+                "role": a.role,
+                "mechanism_profile": {
+                    "communication_propensity": getattr(a, "communication_propensity", 0.5),
+                    "goal_alignment": getattr(a, "goal_alignment", 0.5),
+                    "help_tendency": getattr(a, "help_tendency", 0.5),
+                    "build_speed": getattr(a, "build_speed", 0.5),
+                    "rule_accuracy": getattr(a, "rule_accuracy", 0.5),
+                },
+                "traits": {
+                    "communication_propensity": getattr(a, "communication_propensity", 0.5),
+                    "goal_alignment": getattr(a, "goal_alignment", 0.5),
+                    "help_tendency": getattr(a, "help_tendency", 0.5),
+                    "build_speed": getattr(a, "build_speed", 0.5),
+                    "rule_accuracy": getattr(a, "rule_accuracy", 0.5),
+                },
+                "construct_values": dict(getattr(a, "construct_values", {})),
+                "mechanism_overrides": dict(getattr(a, "mechanism_overrides", {})),
+                "mechanism_profile_resolved": dict(getattr(a, "mechanism_profile", {})),
+                "packet_access": list(getattr(a, "allowed_packet", [])),
+            }
+            for a in self.simulation.agents
+        }
         return {
             "experiment_name": self.simulation.logger.output_session.experiment_name,
             "timestamp": self.simulation.logger.output_session.timestamp,
@@ -763,22 +819,8 @@ class MetricsCollector:
             "local_base_url": self.simulation.brain_backend_config.local_base_url,
             "fallback_occurred": bool(getattr(self.simulation, "fallback_occurred", False)),
             "fallback_count": int(getattr(self.simulation, "backend_fallback_count", 0)),
-            "agent_traits": {
-                a.name: {
-                    "role": a.role,
-                    "traits": {
-                        "communication_propensity": getattr(a, "communication_propensity", 0.5),
-                        "goal_alignment": getattr(a, "goal_alignment", 0.5),
-                        "help_tendency": getattr(a, "help_tendency", 0.5),
-                        "build_speed": getattr(a, "build_speed", 0.5),
-                        "rule_accuracy": getattr(a, "rule_accuracy", 0.5),
-                    },
-                    "construct_values": dict(getattr(a, "construct_values", {})),
-                    "mechanism_profile": dict(getattr(a, "mechanism_profile", {})),
-                    "packet_access": list(getattr(a, "allowed_packet", [])),
-                }
-                for a in self.simulation.agents
-            },
+            "agent_mechanism_profiles": agent_profiles,
+            "agent_traits": agent_profiles,
         }
 
     def _phase_summary_rows(self):

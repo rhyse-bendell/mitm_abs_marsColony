@@ -503,6 +503,13 @@ class BrainContextBuilder:
             "legal_actions": action_affordances,
         }
 
+        mechanism_profile = {
+            "communication_propensity": getattr(agent, "communication_propensity", 0.5),
+            "goal_alignment": getattr(agent, "goal_alignment", 0.5),
+            "help_tendency": getattr(agent, "help_tendency", 0.5),
+            "build_speed": getattr(agent, "build_speed", 0.5),
+            "rule_accuracy": getattr(agent, "rule_accuracy", 0.5),
+        }
         individual_cognitive_state = {
             "goal_stack": list(agent.goal_stack),
             "active_goal": agent.goal,
@@ -522,13 +529,9 @@ class BrainContextBuilder:
             "recent_failed_attempts": [
                 e for e in history_events if "blocked" in e.lower() or "could not" in e.lower() or "mismatch" in e.lower()
             ],
-            "traits": {
-                "communication_propensity": getattr(agent, "communication_propensity", 0.5),
-                "goal_alignment": getattr(agent, "goal_alignment", 0.5),
-                "help_tendency": getattr(agent, "help_tendency", 0.5),
-                "build_speed": getattr(agent, "build_speed", 0.5),
-                "rule_accuracy": getattr(agent, "rule_accuracy", 0.5),
-            },
+            "mechanism_profile": mechanism_profile,
+            # Legacy alias retained for backward-compatible readers.
+            "traits": mechanism_profile,
             "active_plan": {
                 "plan_id": getattr(active_plan, "plan_id", None),
                 "created_at": getattr(active_plan, "created_at", None),

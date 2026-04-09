@@ -64,6 +64,24 @@ class TestConstructMapping(unittest.TestCase):
         self.assertAlmostEqual(mechanisms["communication_propensity"], 0.1, places=4)
         self.assertGreater(mechanisms["goal_alignment"], 0.2)
 
+    def test_simulation_traits_alias_normalizes_to_mechanism_overrides(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                agent_configs=[
+                    {
+                        "name": "Architect",
+                        "role": "Architect",
+                        "constructs": {"teamwork_potential": 0.5, "taskwork_potential": 0.5},
+                        "traits": {"help_tendency": 0.91},
+                    }
+                ],
+            )
+            agent = sim.agents[0]
+            self.assertAlmostEqual(agent.mechanism_overrides.get("help_tendency", 0.0), 0.91, places=4)
+            self.assertAlmostEqual(agent.mechanism_profile.get("help_tendency", 0.0), 0.91, places=4)
+
     def test_invalid_numeric_row_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Path(tmp)
@@ -157,7 +175,7 @@ class TestConstructMapping(unittest.TestCase):
                         "name": "Architect",
                         "role": "Architect",
                         "constructs": {"teamwork_potential": 1.0, "taskwork_potential": 1.0},
-                        "traits": {
+                        "mechanism_overrides": {
                             "communication_propensity": 0.8,
                             "goal_alignment": 0.8,
                             "help_tendency": 0.8,
@@ -170,8 +188,37 @@ class TestConstructMapping(unittest.TestCase):
             )
             self.assertIn("teamwork_potential", sim.agents[0].construct_values)
             self.assertIn("communication_propensity", sim.agents[0].mechanism_profile)
+            self.assertIn("communication_propensity", sim.agents[0].mechanism_overrides)
             sim.update(0.2)
             self.assertGreater(sim.time, 0.0)
+
+    def test_stalled_teammate_bias_creates_assist_support_goal(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir)
+            agent = sim.agents[0]
+            teammate = sim.agents[1]
+            teammate.loop_counters["action_repeats"] = 4
+            agent.help_tendency = 0.95
+            agent.hook_effects[("decision_bias", "assist_stalled_teammate", "priority_weight")] = 0.95
+            agent._update_goal_states_from_runtime(sim, sim.environment)
+            labels = [g.label for g in agent.goal_registry.values()]
+            self.assertIn("assist_teammate", labels)
+
+    def test_replanning_tendency_hook_can_shift_decision_to_reassess_plan(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir)
+            agent = sim.agents[0]
+            context = SimpleNamespace(team_state={"plan_readiness": "unvalidated"})
+            decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="base", confidence=1.0)
+            agent.hook_effects[("plan_control", "reassess_plan", "utility_weight")] = 0.95
+            import modules.agent as agent_module
+            original_random = agent_module.random.random
+            try:
+                agent_module.random.random = lambda: 0.1
+                changed = agent._apply_trait_bias_to_decision(decision, context, sim, "contradiction_detected")
+            finally:
+                agent_module.random.random = original_random
+            self.assertEqual(changed.selected_action, ExecutableActionType.REASSESS_PLAN)
 
 
 if __name__ == "__main__":

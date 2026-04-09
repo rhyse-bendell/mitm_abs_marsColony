@@ -1745,12 +1745,12 @@ class MarsColonyInterface:
                 team_pot = self.agent_profiles[role]["team"].get()
                 task_pot = self.agent_profiles[role]["task"].get()
 
-                traits = {}
-                traits.update(profile_traits.get(f"{team_pot}_Team", {}))
-                traits.update(profile_traits.get(f"{task_pot}_Task", {}))
+                mechanism_overrides = {}
+                mechanism_overrides.update(profile_traits.get(f"{team_pot}_Team", {}))
+                mechanism_overrides.update(profile_traits.get(f"{task_pot}_Task", {}))
 
                 for trait_key, var in self.agent_traits[role].items():
-                    traits[trait_key] = var.get()  # override with current slider value
+                    mechanism_overrides[trait_key] = var.get()  # override with current slider value
 
                 selected_packets = [
                     packet_name
@@ -1810,8 +1810,7 @@ class MarsColonyInterface:
                         "teamwork_potential": self.agent_profiles[role]["team_value"].get() if team_pot == "Custom" else profile_constructs[team_pot],
                         "taskwork_potential": self.agent_profiles[role]["task_value"].get() if task_pot == "Custom" else profile_constructs[task_pot],
                     },
-                    "mechanism_overrides": dict(traits),
-                    "traits": traits,
+                    "mechanism_overrides": dict(mechanism_overrides),
                     "packet_access": selected_packets,
                     "brain_config": {k: v for k, v in brain_config.items() if v},
                     "planner_config": planner_config,
@@ -2083,7 +2082,7 @@ class MarsColonyInterface:
         agent_configs = settings["agent_configs"]
         for agent in settings["agent_configs"]:
             print(f"\n{agent['name']} ({agent['role']})")
-            for k, v in agent["traits"].items():
+            for k, v in agent.get("mechanism_overrides", agent.get("traits", {})).items():
                 print(f"  {k}: {v}")
             print(f"  Packet Access: {agent['packet_access']}")
 
