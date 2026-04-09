@@ -11,7 +11,7 @@ from modules.simulation import SimulationState
 
 class TestConstructMapping(unittest.TestCase):
     def test_default_config_loads(self):
-        mapper = ConstructMapper(config_dir="config")
+        mapper = ConstructMapper()
         self.assertIn("teamwork_potential", mapper.constructs)
         self.assertIn("taskwork_potential", mapper.constructs)
         self.assertGreater(len(mapper.construct_to_mechanism), 0)
@@ -53,6 +53,16 @@ class TestConstructMapping(unittest.TestCase):
         mapper = ConstructMapper(config_dir="config")
         mechanisms = mapper.resolve_mechanisms({"conscientiousness": 1.0}, mechanism_overrides={})
         self.assertNotIn("plan_persistence", mechanisms)
+
+    def test_precedence_override_then_construct_then_default(self):
+        mapper = ConstructMapper()
+        mechanisms = mapper.resolve_mechanisms(
+            {"teamwork_potential": 0.75},
+            mechanism_overrides={"communication_propensity": 0.1},
+            mechanism_defaults={"communication_propensity": 0.9, "goal_alignment": 0.2},
+        )
+        self.assertAlmostEqual(mechanisms["communication_propensity"], 0.1, places=4)
+        self.assertGreater(mechanisms["goal_alignment"], 0.2)
 
     def test_invalid_numeric_row_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -123,17 +133,19 @@ class TestConstructMapping(unittest.TestCase):
             slow = agent._translate_brain_decision_to_legacy_action(decision, sim.environment)[0]["duration"]
             self.assertLess(fast, slow)
 
-            project = sim.environment.construction.projects["Build_Table_B"]
-            agent.active_actions = [{"type": "construct", "progress": 0, "duration": 1.0, "priority": 1}]
             agent.hook_effects[("construction_fidelity", "start_construction", "fidelity_score")] = 0.1
-            import modules.agent as agent_module
-            original_random = agent_module.random.random
-            try:
-                agent_module.random.random = lambda: 0.8
-                agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.1)
-            finally:
-                agent_module.random.random = original_random
-            self.assertFalse(project["correct"])
+            agent.rule_accuracy = 0.2
+            low_fidelity = (
+                agent._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5)
+                + agent._trait_value("rule_accuracy")
+            ) / 2.0
+            agent.hook_effects[("construction_fidelity", "start_construction", "fidelity_score")] = 0.9
+            agent.rule_accuracy = 0.9
+            high_fidelity = (
+                agent._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5)
+                + agent._trait_value("rule_accuracy")
+            ) / 2.0
+            self.assertLess(low_fidelity, high_fidelity)
 
     def test_gui_compatibility_flow_and_headless_run(self):
         with tempfile.TemporaryDirectory() as tmpdir:

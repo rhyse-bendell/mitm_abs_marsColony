@@ -1,0 +1,11 @@
+construct_id,label,description,scale_min,scale_max,default_value,construct_group,enabled,notes,citation
+teamwork_potential,Teamwork Potential,Composite manipulation of teamwork-relevant tendencies,0.0,1.0,0.5,baseline,true,Current primary teamwork manipulation,internal
+taskwork_potential,Taskwork Potential,Composite manipulation of taskwork-relevant tendencies,0.0,1.0,0.5,baseline,true,Current primary taskwork manipulation,internal
+conscientiousness,Conscientiousness,Tendency toward careful reliable goal-directed behavior,0.0,1.0,0.5,personality,false,Future optional construct,example
+agreeableness,Agreeableness,Tendency toward cooperativeness and interpersonal accommodation,0.0,1.0,0.5,personality,false,Future optional construct,example
+working_memory,Working Memory,Capacity for maintaining and manipulating task-relevant information,0.0,1.0,0.5,cognitive,false,Future optional construct,example
+spatial_skill,Spatial Skill,Ability to reason about layout distance placement and movement constraints,0.0,1.0,0.5,cognitive,false,Future optional construct,example
+cognitive_flexibility,Cognitive Flexibility,Tendency to revise plans and shift strategies under changing demands,0.0,1.0,0.5,cognitive,false,Future optional construct,example
+trust_bias,Trust Bias,Tendency to trust teammate information and shared artifacts,0.0,1.0,0.5,social,false,Future optional construct,example
+fatigue,Fatigue,Temporary reduction in speed persistence and accuracy,0.0,1.0,0.0,state,false,Future optional construct,example
+stress,Stress,Temporary increase in urgency with possible degradation in communication and accuracy,0.0,1.0,0.0,state,false,Future optional construct,example
