@@ -82,6 +82,26 @@ class TestConstructMapping(unittest.TestCase):
             self.assertAlmostEqual(agent.mechanism_overrides.get("help_tendency", 0.0), 0.91, places=4)
             self.assertAlmostEqual(agent.mechanism_profile.get("help_tendency", 0.0), 0.91, places=4)
 
+    def test_traits_alias_merges_with_explicit_mechanism_overrides(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                agent_configs=[
+                    {
+                        "name": "Architect",
+                        "role": "Architect",
+                        "traits": {"help_tendency": 0.2, "goal_alignment": 0.9},
+                        "mechanism_overrides": {"help_tendency": 0.8},
+                    }
+                ],
+            )
+            agent = sim.agents[0]
+            self.assertAlmostEqual(agent.mechanism_overrides["help_tendency"], 0.8, places=4)
+            self.assertAlmostEqual(agent.mechanism_overrides["goal_alignment"], 0.9, places=4)
+            self.assertAlmostEqual(agent.mechanism_profile["help_tendency"], 0.8, places=4)
+            self.assertAlmostEqual(agent.mechanism_profile["goal_alignment"], 0.9, places=4)
+
     def test_invalid_numeric_row_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Path(tmp)
@@ -203,6 +223,7 @@ class TestConstructMapping(unittest.TestCase):
             agent._update_goal_states_from_runtime(sim, sim.environment)
             labels = [g.label for g in agent.goal_registry.values()]
             self.assertIn("assist_teammate", labels)
+            self.assertGreater(agent.active_intent.get("min_commit_until", 0.0), sim.time)
 
     def test_replanning_tendency_hook_can_shift_decision_to_reassess_plan(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -219,6 +240,24 @@ class TestConstructMapping(unittest.TestCase):
             finally:
                 agent_module.random.random = original_random
             self.assertEqual(changed.selected_action, ExecutableActionType.REASSESS_PLAN)
+
+    def test_committed_team_plan_fit_accepts_on_alignment_even_when_help_low(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(phases=[], project_root=tmpdir)
+            agent = sim.agents[0]
+            agent.goal_alignment = 0.95
+            agent.help_tendency = 0.05
+            agent.hook_effects[("action_utility", "consult_team_artifact", "utility_weight")] = 0.95
+            response, reason = agent._evaluate_team_plan_fit(
+                sim,
+                {
+                    "plan_id": "p1",
+                    "status": "committed",
+                    "assignments_by_role": {agent.role: {"task": "repair", "project_target": "greenhouse_build"}},
+                },
+            )
+            self.assertEqual(response, "assignment_accept")
+            self.assertEqual(reason, "committed_plan_alignment")
 
 
 if __name__ == "__main__":
