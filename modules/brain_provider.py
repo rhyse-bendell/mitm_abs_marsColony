@@ -638,12 +638,12 @@ class RuleBrain(BrainProvider):
             normalized["method_state"] = dict(merged.get("method_state") or {})
         return normalized
 
-    def _compute_mode_scores(self, features: dict[str, float], legal_types: set[str], control_state: dict[str, Any], traits: dict[str, float]) -> tuple[dict[str, float], dict[str, bool]]:
+    def _compute_mode_scores(self, features: dict[str, float], legal_types: set[str], control_state: dict[str, Any], mechanism_profile: dict[str, float]) -> tuple[dict[str, float], dict[str, bool]]:
         mode_scores = {m: 0.0 for m in self.MODES}
         mode_scores["BOOTSTRAP"] = 0.3 + 1.4 * features["epistemic_deficit"] + 0.4 * features["readiness_blocked"] - 1.25 * features["shared_source_exhausted"]
         mode_scores["ACQUIRE_DIK"] = 0.4 + 1.5 * features["epistemic_deficit"] + 0.3 * features["coordination_need"] + 0.95 * features.get("need_to_refresh_assumptions", 0.0)
         mode_scores["INTEGRATE_DIK"] = 0.3 + 1.2 * features["dik_change_recency"] + 0.8 * features["artifact_validation_available"]
-        mode_scores["COORDINATE"] = 0.3 + 1.0 * features["coordination_need"] + 0.4 * float(traits.get("communication_propensity", 0.5))
+        mode_scores["COORDINATE"] = 0.3 + 1.0 * features["coordination_need"] + 0.4 * float(mechanism_profile.get("communication_propensity", 0.5))
         mode_scores["LOGISTICS"] = 0.35 + 1.5 * features["build_opportunity"] + 0.9 * features["active_incomplete_projects"]
         mode_scores["CONSTRUCT"] = 0.35 + 1.7 * features["build_opportunity"] + 0.9 * features["active_incomplete_projects"]
         mode_scores["VALIDATE"] = 0.2 + 1.4 * features["artifact_validation_available"] + 0.5 * features["goal_pressure"]
@@ -995,7 +995,7 @@ class RuleBrain(BrainProvider):
         sorted_affordances: list[dict[str, Any]],
         selected_mode: str,
         features: dict[str, float],
-        traits: dict[str, float],
+        mechanism_profile: dict[str, float],
     ) -> dict[str, float]:
         action_scores: dict[str, float] = {}
         concrete_actions = {
@@ -1017,7 +1017,7 @@ class RuleBrain(BrainProvider):
             score = utility + self.MODE_ACTION_PREFERENCES.get(selected_mode, {}).get(action_type, 0.0)
             score += 0.6 * features["goal_pressure"] + 0.4 * features["build_opportunity"]
             if action_type == ExecutableActionType.REQUEST_ASSISTANCE.value:
-                score += 0.9 * features["epistemic_deficit"] + 0.5 * float(traits.get("help_tendency", 0.5))
+                score += 0.9 * features["epistemic_deficit"] + 0.5 * float(mechanism_profile.get("help_tendency", 0.5))
                 score -= 0.8 * features["loop_pressure"]
             if action_type in {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.REQUEST_ASSISTANCE.value}:
                 if not bool(affordance.get("reachable", True)):
@@ -1231,7 +1231,7 @@ class RuleBrain(BrainProvider):
         affordances = list(context_packet.action_affordances if not is_request else context_packet.allowed_actions)
         sorted_affordances = sorted(affordances, key=lambda a: float(a.get("utility", 0.0)), reverse=True)
         legal_types = {a.get("action_type") for a in affordances if a.get("action_type")}
-        traits = (
+        mechanism_profile = (
             context_packet.individual_cognitive_state.get(
                 "mechanism_profile",
                 context_packet.individual_cognitive_state.get("traits", {}),
@@ -1244,7 +1244,7 @@ class RuleBrain(BrainProvider):
         if not control_state:
             control_state = {"mode": "BOOTSTRAP", "mode_dwell_steps": 0}
         control_state["sim_step"] = int((context_packet.world_snapshot.get("sim_time", 0.0) if not is_request else context_packet.sim_time) or 0)
-        mode_scores, mode_guards = self._compute_mode_scores(features, legal_types, control_state, traits)
+        mode_scores, mode_guards = self._compute_mode_scores(features, legal_types, control_state, mechanism_profile)
         mode_scores, guard_notes = self._apply_transition_guards(mode_scores, mode_guards, features, legal_types)
         rng_seed = f"{getattr(context_packet, 'request_id', 'ctx')}-{len(affordances)}-{control_state.get('mode')}-{int(features['goal_pressure']*100)}"
         rng = random.Random(rng_seed)
@@ -1291,7 +1291,7 @@ class RuleBrain(BrainProvider):
             sorted_affordances=sorted_affordances,
             selected_mode=selected_mode,
             features=features,
-            traits=traits,
+            mechanism_profile=mechanism_profile,
         )
         step_action_scores = self._score_actions_for_method_step(
             sorted_affordances=sorted_affordances,

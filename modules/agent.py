@@ -3721,6 +3721,8 @@ class Agent:
         semantic, _project_target = self._normalize_team_plan_assignment(assignment)
         if semantic == "support":
             return "request_clarification", "assignment_underspecified"
+        if plan_status == "committed" and alignment_signal >= 0.55:
+            return "assignment_accept", "committed_plan_alignment"
         if help_signal >= 0.35:
             return "assignment_accept", "assignment_executable_for_role"
         return "assignment_decline", "low_help_tendency"
@@ -3803,8 +3805,10 @@ class Agent:
         self.team_plan_state["last_adopted_at"] = float(sim_state.time)
         self.team_plan_state["last_assignment_signature"] = assignment_signature
         self.team_plan_state["adoption_reasons"][plan_id] = str(reason)
-        self.team_plan_state["team_plan_commit_until"] = float(sim_state.time) + 16.0
-        self.team_plan_state["team_plan_assignment_commit_until"] = float(sim_state.time) + 12.0
+        consult_signal = self._hook_value("action_utility", "consult_team_artifact", "utility_weight", default=0.5)
+        commitment_signal = (self._trait_value("goal_alignment") + consult_signal) / 2.0
+        self.team_plan_state["team_plan_commit_until"] = float(sim_state.time) + (12.0 + 10.0 * commitment_signal)
+        self.team_plan_state["team_plan_assignment_commit_until"] = float(sim_state.time) + (8.0 + 8.0 * commitment_signal)
         self.team_plan_state["commitment_expired_emitted"] = False
         self._emit_event(
             sim_state,
@@ -4215,11 +4219,15 @@ class Agent:
             and self._baseline_epistemic_sources_completed()
             and self._has_meaningful_consultable_artifact(sim_state)
         ):
+            consult_signal = (
+                self._trait_value("artifact_consultation_tendency")
+                + self._trait_value("goal_alignment")
+                + self._hook_value("action_utility", "consult_team_artifact", "utility_weight", default=0.5)
+            ) / 3.0
             consult_priority = min(
-                0.92,
+                0.95,
                 0.5
-                + (0.22 * self._trait_value("artifact_consultation_tendency"))
-                + (0.2 * self._hook_value("action_utility", "consult_team_artifact", "utility_weight", default=0.5)),
+                + (0.3 * consult_signal),
             )
             self._activate_support_goal(
                 "consult_artifact",
@@ -4237,11 +4245,15 @@ class Agent:
 
         stalled_teammates = self._stalled_teammates(sim_state)
         if stalled_teammates:
+            help_signal = (
+                self._trait_value("help_tendency")
+                + self._hook_value("action_utility", "request_assistance", "utility_weight", default=0.5)
+                + self._hook_value("decision_bias", "assist_stalled_teammate", "priority_weight", default=0.5)
+            ) / 3.0
             assist_priority = min(
                 0.95,
                 0.56
-                + (0.2 * self._trait_value("help_tendency"))
-                + (0.2 * self._hook_value("decision_bias", "assist_stalled_teammate", "priority_weight", default=0.5)),
+                + (0.3 * help_signal),
             )
             self._activate_support_goal(
                 "assist_teammate",
@@ -4249,6 +4261,10 @@ class Agent:
                 sim_state=sim_state,
                 priority=assist_priority,
                 source="derived_from_rule",
+            )
+            self.active_intent["min_commit_until"] = max(
+                float(self.active_intent.get("min_commit_until", 0.0) or 0.0),
+                float(sim_state.time) + (8.0 + 8.0 * help_signal),
             )
 
         repeated_stall = any(v >= 3 for v in self.inspect_stall_counts.values())
@@ -5486,6 +5502,18 @@ class Agent:
             selected = ExecutableActionType.CONSULT_TEAM_ARTIFACT
             reason_bits.append("goal_alignment favored validated team artifact consultation")
 
+        active_team_plan = self._get_active_team_plan(sim_state) if sim_state is not None else {}
+        if (
+            selected != ExecutableActionType.CONSULT_TEAM_ARTIFACT
+            and isinstance(active_team_plan, dict)
+            and str(active_team_plan.get("status", "")).lower() == "committed"
+            and self._team_plan_requires_uptake(sim_state)
+            and (align + consult_t + consult_utility) / 3.0 >= 0.62
+            and random.random() < ((align + consult_t + consult_utility) / 3.0)
+        ):
+            selected = ExecutableActionType.CONSULT_TEAM_ARTIFACT
+            reason_bits.append("committed_team_plan_uptake_deference")
+
         if (
             help_t >= 0.7
             and self._help_context_available(sim_state)
@@ -5493,9 +5521,10 @@ class Agent:
             and random.random() < ((help_t + assist_utility + assist_bias) / 3.0)
         ):
             selected = ExecutableActionType.REQUEST_ASSISTANCE
+            assist_commit_s = 6.0 + (10.0 * ((help_t + assist_bias) / 2.0))
             self.active_intent["min_commit_until"] = max(
                 float(self.active_intent.get("min_commit_until", 0.0) or 0.0),
-                float(sim_state.time) + 8.0,
+                float(sim_state.time) + assist_commit_s,
             )
             reason_bits.append("help_tendency redirected toward assistance exchange")
 
@@ -7694,7 +7723,10 @@ class Agent:
                         self._trait_value("artifact_adoption_tendency")
                         + self._hook_value("artifact_use", "adopt_externalized_knowledge", "adoption_weight", default=0.5)
                         + self._trait_value("artifact_consultation_tendency")
-                    ) / 3.0
+                        + self._trait_value("goal_alignment")
+                    ) / 4.0
+                    if preferred.artifact_type == "team_plan" and str((preferred.content or {}).get("status", "")).lower() == "committed":
+                        adopt_prob = min(1.0, adopt_prob + (0.2 * self._trait_value("goal_alignment")))
                     if random.random() <= adopt_prob:
                         sim_state.team_knowledge_manager.adopt_artifact(preferred.artifact_id, self.name, sim_state.time)
                     if planless_consult and preferred.artifact_type != "team_plan":
