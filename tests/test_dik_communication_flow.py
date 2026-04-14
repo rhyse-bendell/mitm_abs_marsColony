@@ -93,6 +93,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         decision = BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=project_id, confidence=0.9)
         owner._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
         owner._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
+        owner._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
         stalled_result = owner._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
         self.assertEqual(stalled_result[0].get("decision_action"), ExecutableActionType.REASSESS_PLAN.value)
         self.assertTrue(any(e.get("event_type") == "closure_episode_epistemic_repair_stalled" for e in sim.logger.recent_events))
@@ -149,6 +150,36 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         )
         owner.communicate_with(helper, sim_state=sim)
         self.assertEqual(sim.environment.construction.projects[project_id].get("closure_owner"), owner.name)
+        sim.stop()
+
+    def test_ready_for_validation_queues_project_state_obligation(self):
+        sim = SimulationState(phases=[])
+        owner = sim.agents[0]
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        queued = owner.team_plan_state.get("pending_outbound_messages", [])
+        self.assertTrue(any(m.get("type") == "TPS" and m.get("content", {}).get("state_event") == "ready_for_validation" for m in queued))
+        self.assertTrue(any(e.get("event_type") == "project_state_communication_obligation_queued" for e in sim.logger.recent_events))
+        sim.stop()
+
+    def test_validation_blocked_queues_project_state_obligation(self):
+        sim = SimulationState(phases=[])
+        owner = sim.agents[0]
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_BLOCKED"]
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        owner._translate_brain_decision_to_legacy_action(
+            BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=project_id, confidence=0.9),
+            sim.environment,
+            sim_state=sim,
+        )
+        queued = owner.team_plan_state.get("pending_outbound_messages", [])
+        self.assertTrue(any(m.get("type") == "TPS" and m.get("content", {}).get("state_event") == "validation_blocked_epistemic" for m in queued))
         sim.stop()
 
     def test_shared_source_inspection_does_not_auto_promote_team_validated_knowledge(self):
@@ -262,6 +293,38 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         outcome = sender.communicate_with(receiver, sim_state=sim)
         self.assertTrue(outcome.get("meaningful"))
         self.assertIn("R_REQ", receiver.mental_model["knowledge"].rules)
+        sim.stop()
+
+    def test_no_exact_rule_can_emit_source_pointer_without_dik_injection(self):
+        sim = SimulationState(phases=[])
+        requester, responder = sim.agents[0], sim.agents[1]
+        requester.position = responder.position = (8.0, 6.6)
+        rules_before = len(requester.mental_model["knowledge"].rules)
+        responder.receive_message(
+            {"type": "TKRQ", "sender": requester.name, "content": ["rule:R_GREENHOUSE_SUPPORT_DEPENDENCY"], "project_id": "Build_Table_A"},
+            from_agent=requester.name,
+            sim_state=sim,
+        )
+        queued = responder.team_plan_state.get("pending_outbound_messages", [])
+        self.assertTrue(any(m.get("type") == "TPS" and m.get("content", {}).get("response_category") in {"source_pointer", "recheck_commitment", "teammate_redirect", "no_useful_response"} for m in queued))
+        responder.communicate_with(requester, sim_state=sim)
+        self.assertEqual(rules_before, len(requester.mental_model["knowledge"].rules))
+        self.assertTrue(any(e.get("event_type") == "closure_repair_response_category" for e in sim.logger.recent_events))
+        sim.stop()
+
+    def test_blocked_project_support_pressure_reroutes_unrelated_inspect(self):
+        sim = SimulationState(phases=[])
+        helper = sim.agents[1]
+        project = sim.environment.construction.projects["Build_Table_A"]
+        project["status"] = "needs_repair"
+        rewritten = helper._apply_policy_pivots(
+            BrainDecision(selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE, target_id="Team_Info", confidence=0.7),
+            sim.environment,
+            sim_state=sim,
+            pivot_origin="unit",
+        )
+        self.assertIn(rewritten.selected_action, {ExecutableActionType.COMMUNICATE, ExecutableActionType.WAIT})
+        self.assertTrue(any(e.get("event_type") == "blocked_project_support_pressure_applied" for e in sim.logger.recent_events))
         sim.stop()
 
 

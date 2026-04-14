@@ -654,6 +654,13 @@ class Agent:
             "project_closure_commitment_started",
             {"project_id": project_id, "reason": reason, "commit_until": state["commit_until"], "attempt_count": int(state.get("attempt_count", 0) or 0)},
         )
+        self._queue_project_state_communication_obligation(
+            project_id=project_id,
+            state_event="ready_for_validation",
+            sim_state=sim_state,
+            detail={"reason": reason, "closure_owner": self.name},
+            priority="high",
+        )
         self._force_recovery_pivot(
             sim_state,
             to_action=ExecutableActionType.VALIDATE_CONSTRUCTION.value,
@@ -682,6 +689,47 @@ class Agent:
             self._clear_project_closure_commitment(sim_state=sim_state, environment=environment, reason="commit_window_expired")
             return None
         return project_id
+
+    def _queue_project_state_communication_obligation(
+        self,
+        *,
+        project_id,
+        state_event,
+        sim_state=None,
+        include_rules=None,
+        detail=None,
+        recipient=None,
+        priority="normal",
+    ):
+        if not project_id:
+            return
+        queue = self.team_plan_state.setdefault("pending_outbound_messages", [])
+        msg = {
+            "type": "TPS",
+            "sender": self.name,
+            "recipient": recipient,
+            "content": {
+                "project_id": str(project_id),
+                "state_event": str(state_event),
+                "missing_rule_ids": sorted({normalize_rule_token(r) for r in (include_rules or []) if normalize_rule_token(r)}),
+                "detail": dict(detail or {}),
+            },
+        }
+        if priority == "high":
+            queue.insert(0, msg)
+        else:
+            queue.append(msg)
+        self._emit_event(
+            sim_state,
+            "project_state_communication_obligation_queued",
+            {
+                "project_id": str(project_id),
+                "state_event": str(state_event),
+                "recipient": recipient,
+                "priority": priority,
+                "missing_rule_ids": msg["content"].get("missing_rule_ids", []),
+            },
+        )
 
     def _intent_window_for_action(self, action_type):
         if action_type == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value:
@@ -4209,6 +4257,39 @@ class Agent:
             else:
                 self._activate_support_goal("repair_detected_mismatch", "construction_mismatch_detected", sim_state=sim_state, priority=0.85, source="derived_from_rule")
                 self._activate_support_goal("validate_externalization", "validation_needed_after_mismatch", sim_state=sim_state, priority=0.8, source="derived_from_rule")
+        blocked_projects = []
+        for project in getattr(environment.construction, "projects", {}).values():
+            if not isinstance(project, dict):
+                continue
+            status = str(project.get("status") or "")
+            if status == "needs_repair":
+                blocked_projects.append(str(project.get("id")))
+                continue
+            if status == "ready_for_validation" and (
+                str(project.get("closure_status") or "") in {"assigned", "in_progress", "failed"}
+                or int(project.get("closure_attempt_count", 0) or 0) >= 1
+            ):
+                blocked_projects.append(str(project.get("id")))
+        if blocked_projects:
+            self._emit_event(
+                sim_state,
+                "blocked_project_support_pressure_applied",
+                {"project_ids": sorted({p for p in blocked_projects if p}), "count": len(blocked_projects)},
+            )
+            self._activate_support_goal(
+                "validate_externalization",
+                "blocked_project_support_pressure",
+                sim_state=sim_state,
+                priority=0.9,
+                source="derived_from_rule",
+            )
+            self._activate_support_goal(
+                "repair_detected_mismatch",
+                "blocked_project_support_pressure",
+                sim_state=sim_state,
+                priority=0.88,
+                source="derived_from_rule",
+            )
 
         if getattr(self, "derivation_events", []):
             last = self.derivation_events[-1]
@@ -6150,6 +6231,41 @@ class Agent:
                     reason_summary=f"Teammate closure support: suppress unrelated {decision.selected_action.value}.",
                     confidence=max(0.74, float(rewritten.confidence or decision.confidence or 0.0)),
                 )
+        blocked_support_project = None
+        for project in getattr(environment.construction, "projects", {}).values():
+            if not isinstance(project, dict):
+                continue
+            status = str(project.get("status") or "")
+            if status == "needs_repair":
+                blocked_support_project = str(project.get("id") or "")
+                break
+            if status == "ready_for_validation" and str(project.get("closure_status") or "") in {"assigned", "in_progress", "failed"}:
+                blocked_support_project = str(project.get("id") or "")
+                break
+        if blocked_support_project and rewritten.selected_action in {
+            ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+            ExecutableActionType.CONSULT_TEAM_ARTIFACT,
+            ExecutableActionType.EXTERNALIZE_PLAN,
+        }:
+            fallback_action = ExecutableActionType.COMMUNICATE if self._can_attempt_verbal_plan_communication(sim_state) else ExecutableActionType.WAIT
+            self._emit_event(
+                sim_state,
+                "blocked_project_support_pressure_applied",
+                {
+                    "origin": pivot_origin,
+                    "project_id": blocked_support_project,
+                    "from_action": rewritten.selected_action.value,
+                    "to_action": fallback_action.value,
+                },
+            )
+            rewritten = BrainDecision(
+                selected_action=fallback_action,
+                target_id=None,
+                target_zone=decision.target_zone,
+                goal_update="support_active_closure",
+                reason_summary=f"Blocked project support pressure rerouted {decision.selected_action.value}.",
+                confidence=max(0.76, float(rewritten.confidence or decision.confidence or 0.0)),
+            )
         handoff = dict(self.post_inspect_handoff or {})
         try:
             blocker_partition = self._partition_action_blockers(self._build_readiness_blockers(environment, sim_state=sim_state))
@@ -6784,6 +6900,14 @@ class Agent:
                 non_epistemic_blockers = list(classified.get("non_epistemic_blockers", []))
                 if blockers and epistemic_blockers and not non_epistemic_blockers:
                     self._record_known_gaps_from_blockers(blockers, sim_state=sim_state, project_id=project_id)
+                    self._queue_project_state_communication_obligation(
+                        project_id=project_id,
+                        state_event="validation_blocked_epistemic",
+                        sim_state=sim_state,
+                        include_rules=[b.split(":", 1)[1] for b in epistemic_blockers if str(b).startswith("missing_expected_rule:")],
+                        detail={"blockers": list(epistemic_blockers), "origin": "translate_validation"},
+                        priority="high",
+                    )
                     self._emit_event(
                         sim_state,
                         "validation_blocked_epistemic",
@@ -6808,7 +6932,7 @@ class Agent:
                             self.project_closure_state.get("active")
                             and project_id
                             and project_id == self.project_closure_state.get("project_id")
-                            and int(self.project_closure_state.get("repair_unchanged_count", 0) or 0) >= 2
+                            and int(self.project_closure_state.get("repair_unchanged_count", 0) or 0) >= 3
                         ):
                             return [{
                                 "type": "idle",
@@ -6818,6 +6942,11 @@ class Agent:
                                 "translation_outcome": "validate_epistemic_repair_stalled",
                                 "project_id": project_id,
                             }]
+                        self._emit_event(
+                            sim_state,
+                            "closure_repair_request_sent",
+                            {"project_id": project_id, "blockers": epistemic_blockers, "origin": "translate_validation"},
+                        )
                         self._emit_event(
                             sim_state,
                             "validate_construction_downgraded_to_communication",
@@ -7875,6 +8004,14 @@ class Agent:
                             "missing_expected_rules": missing_rules,
                         },
                     )
+                    self._queue_project_state_communication_obligation(
+                        project_id=project_id,
+                        state_event="validated" if is_valid else "validation_failed_needs_repair",
+                        sim_state=sim_state,
+                        include_rules=missing_rules,
+                        detail={"status": project.get("status"), "decision_action": action.get("decision_action")},
+                        priority="high",
+                    )
                     if is_valid:
                         self._clear_project_closure_commitment(
                             sim_state=sim_state,
@@ -7890,6 +8027,13 @@ class Agent:
                                 "structure_type": project.get("type", "unknown"),
                                 "completion_mode": "validated",
                             },
+                        )
+                        self._queue_project_state_communication_obligation(
+                            project_id=project_id,
+                            state_event="completed",
+                            sim_state=sim_state,
+                            detail={"completion_mode": "validated"},
+                            priority="high",
                         )
                     else:
                         self._clear_project_closure_commitment(
@@ -8415,6 +8559,13 @@ class Agent:
                             "decision_action": action.get("decision_action"),
                         },
                     )
+                    self._queue_project_state_communication_obligation(
+                        project_id=project_id,
+                        state_event="ready_for_validation",
+                        sim_state=sim_state,
+                        detail={"reason": "resource_delivery_threshold_reached"},
+                        priority="high",
+                    )
                     self._start_project_closure_commitment(
                         project_id,
                         environment=environment,
@@ -8736,7 +8887,19 @@ class Agent:
         state["repair_mode"] = True
         state["repair_blocker_signature"] = signature
         state["repair_unchanged_count"] = unchanged_count
-        stalled = bool(not changed and unchanged_count >= 2 and origin in {"local_refresh", "cached_plan", "translation"})
+        if changed:
+            self._emit_event(
+                sim_state,
+                "closure_repair_episode_started",
+                {"project_id": project_id, "origin": origin, "blockers": sorted({str(b) for b in (blockers or [])})},
+            )
+        elif unchanged_count >= 1:
+            self._emit_event(
+                sim_state,
+                "closure_repair_escalated",
+                {"project_id": project_id, "origin": origin, "unchanged_count": unchanged_count},
+            )
+        stalled = bool(not changed and unchanged_count >= 3 and origin in {"local_refresh", "cached_plan", "translation"})
         if stalled:
             payload = {
                 "project_id": project_id,
@@ -8803,6 +8966,8 @@ class Agent:
             if closure_project_id and closure_missing_rule_ids:
                 req_message["project_id"] = closure_project_id
                 req_message["missing_expected_rules"] = list(closure_missing_rule_ids)
+                if int(self.project_closure_state.get("repair_unchanged_count", 0) or 0) >= 1:
+                    req_message["request_modes"] = ["exact_rule", "precursor_info", "source_pointer", "recheck_commitment", "teammate_redirect"]
             messages.append(req_message)
         if self.current_goal():
             messages.append({"type": "TGTO", "content": self.current_goal()["goal"], "sender": self.name})
@@ -8848,6 +9013,7 @@ class Agent:
         receiver_dik_changed = False
         receiver_gap_reduced = False
         receiver_derivation_triggered = False
+        response_categories = set()
         readiness_before = set(other_agent._build_readiness_blockers(sim_state.environment, sim_state=sim_state)) if sim_state is not None else set()
         closure_blockers_before = set()
         closure_project_id = other_agent.project_closure_state.get("project_id") if other_agent.project_closure_state.get("active") else None
@@ -8866,10 +9032,23 @@ class Agent:
             closure_blockers_before = set(closure_blockers_before or [])
         for msg in messages:
             message_types.append(msg.get("type"))
+            if sim_state is not None and msg.get("type") == "TKRQ" and msg.get("project_id"):
+                self._emit_event(
+                    sim_state,
+                    "closure_repair_request_sent",
+                    {
+                        "project_id": msg.get("project_id"),
+                        "to_agent": other_agent.name,
+                        "requested_ids": list(msg.get("content", []) or []),
+                        "request_modes": list(msg.get("request_modes", []) or ["exact_rule"]),
+                    },
+                )
             outcome = other_agent.receive_message(msg, from_agent=self.name, sim_state=sim_state) or {}
             receiver_dik_changed = receiver_dik_changed or bool(outcome.get("dik_changed"))
             receiver_gap_reduced = receiver_gap_reduced or bool(outcome.get("known_gaps_reduced"))
             receiver_derivation_triggered = receiver_derivation_triggered or bool(outcome.get("derivation_triggered"))
+            if outcome.get("response_category"):
+                response_categories.add(str(outcome.get("response_category")))
         readiness_after = set(other_agent._build_readiness_blockers(sim_state.environment, sim_state=sim_state)) if sim_state is not None else set()
         readiness_unblocked = bool(readiness_before and len(readiness_after) < len(readiness_before))
         closure_blockers_after = set()
@@ -8887,11 +9066,18 @@ class Agent:
             )
             closure_blockers_after = set(closure_blockers_after or [])
         closure_blocker_reduced = bool(closure_blockers_before and len(closure_blockers_after) < len(closure_blockers_before))
-        epistemic_types = {"TDP", "TIP", "TKP", "TKRQ"}
+        epistemic_types = {"TDP", "TIP", "TKP", "TKRQ", "TPS"}
         epistemic_exchange = any(t in epistemic_types for t in message_types)
         meaningful_exchange = bool(
             epistemic_exchange
-            and (receiver_dik_changed or receiver_derivation_triggered or receiver_gap_reduced or readiness_unblocked or closure_blocker_reduced)
+            and (
+                receiver_dik_changed
+                or receiver_derivation_triggered
+                or receiver_gap_reduced
+                or readiness_unblocked
+                or closure_blocker_reduced
+                or bool(response_categories.difference({"no_useful_response", "unknown"}))
+            )
         )
 
         # Update Theory of Mind estimates
@@ -8929,6 +9115,7 @@ class Agent:
                     "receiver_blockers_after": sorted(readiness_after),
                     "receiver_closure_blockers_before": sorted(closure_blockers_before),
                     "receiver_closure_blockers_after": sorted(closure_blockers_after),
+                    "response_categories": sorted(response_categories),
                 },
             )
         self.communication_state["last_exchange_effects"] = {
@@ -8939,6 +9126,7 @@ class Agent:
             "receiver_derivation_triggered": receiver_derivation_triggered,
             "receiver_readiness_unblocked": readiness_unblocked,
             "receiver_closure_blocker_reduced": closure_blocker_reduced,
+            "response_categories": sorted(response_categories),
         }
         other_agent.communication_state["last_exchange_effects"] = dict(self.communication_state["last_exchange_effects"])
         if meaningful_exchange and sim_state is not None:
@@ -8964,6 +9152,7 @@ class Agent:
         dik_changed = False
         self._last_received_dik_changed = False
         direct_rule_additions = 0
+        response_category = None
         known_gaps_before = len(self.known_gaps)
         readiness_before = set(self._build_readiness_blockers(sim_state.environment, sim_state=sim_state)) if sim_state is not None else set()
         rules_before = len(self.mental_model["knowledge"].rules)
@@ -9066,6 +9255,55 @@ class Agent:
                 if rule_payload:
                     entry = {"type": "TKP", "sender": self.name, "recipient": sender, "content": rule_payload}
                     queue.insert(0, entry) if prioritized_for_closure else queue.append(entry)
+                response_category = "exact_rule" if rule_payload else None
+                if not response_category and info_payload:
+                    response_category = "precursor_info"
+                if not response_category and data_payload:
+                    response_category = "precursor_info"
+                if not response_category:
+                    requested_rules = [
+                        normalize_rule_token(item.split(":", 1)[1])
+                        for item in requested_ids
+                        if str(item).startswith("rule:")
+                    ]
+                    role_source = f"{self.role}_Info"
+                    if requested_rules:
+                        pointer_payload = {
+                            "project_id": message.get("project_id"),
+                            "response_category": "source_pointer",
+                            "requested_rule_ids": requested_rules,
+                            "source_id": role_source,
+                            "note": "No exact rule held locally; relevant packet/source identified.",
+                        }
+                        queue.append({"type": "TPS", "sender": self.name, "recipient": sender, "content": pointer_payload})
+                        response_category = "source_pointer"
+                    elif self._has_packet_access(role_source):
+                        recheck_payload = {
+                            "project_id": message.get("project_id"),
+                            "response_category": "recheck_commitment",
+                            "source_id": role_source,
+                            "note": "Will re-check local role packet for requested epistemic support.",
+                        }
+                        queue.append({"type": "TPS", "sender": self.name, "recipient": sender, "content": recheck_payload})
+                        response_category = "recheck_commitment"
+                    else:
+                        redirect = next(
+                            (
+                                teammate
+                                for teammate, model in (self.theory_of_mind or {}).items()
+                                if teammate != sender
+                                and set(model.get("knowledge_ids", set()) or set()).intersection({r for r in requested_rules if r})
+                            ),
+                            None,
+                        )
+                        redirect_payload = {
+                            "project_id": message.get("project_id"),
+                            "response_category": "teammate_redirect" if redirect else "no_useful_response",
+                            "redirect_teammate": redirect,
+                            "requested_ids": sorted(requested_ids),
+                        }
+                        queue.append({"type": "TPS", "sender": self.name, "recipient": sender, "content": redirect_payload})
+                        response_category = "teammate_redirect" if redirect else "no_useful_response"
                 self._emit_event(
                     sim_state,
                     "dik_request_received",
@@ -9075,6 +9313,36 @@ class Agent:
                         "respondable_count": len(data_payload) + len(info_payload) + len(rule_payload),
                     },
                 )
+                self._emit_event(
+                    sim_state,
+                    "closure_repair_response_category",
+                    {
+                        "from_agent": sender,
+                        "project_id": message.get("project_id"),
+                        "response_category": response_category or "no_useful_response",
+                    },
+                )
+
+        elif mtype == "TPS":
+            payload = dict(content or {}) if isinstance(content, dict) else {}
+            category = str(payload.get("response_category") or payload.get("state_event") or "unknown")
+            response_category = category
+            if payload.get("project_id"):
+                self._emit_event(
+                    sim_state,
+                    "project_state_message_received",
+                    {
+                        "from_agent": sender,
+                        "project_id": payload.get("project_id"),
+                        "state_event": payload.get("state_event"),
+                        "response_category": payload.get("response_category"),
+                    },
+                )
+            self._emit_event(
+                sim_state,
+                "closure_repair_response_category",
+                {"from_agent": sender, "project_id": payload.get("project_id"), "response_category": category},
+            )
 
         elif mtype == "TCR":
             self.reevaluate_knowledge()
@@ -9187,6 +9455,7 @@ class Agent:
             "known_gaps_reduced": known_gaps_after < known_gaps_before,
             "readiness_unblocked": bool(readiness_before and len(readiness_after) < len(readiness_before)),
             "derivation_triggered": derivation_triggered,
+            "response_category": response_category,
         }
         self._last_received_comm_effects = effects
         return effects
@@ -9259,6 +9528,14 @@ class Agent:
                             "construction_mismatch_detected",
                             {"agent": self.name, "project_id": project.get("id", "unknown")},
                         )
+                    self._queue_project_state_communication_obligation(
+                        project_id=project_id,
+                        state_event="mismatch_detected",
+                        sim_state=sim_state,
+                        include_rules=sorted(expected_rules),
+                        detail={"readiness_ratio": round(readiness_ratio, 3)},
+                        priority="high",
+                    )
                     self._refresh_construction_provenance(
                         getattr(sim_state, "environment", None),
                         project_id,
@@ -9283,6 +9560,14 @@ class Agent:
                     if random.random() < repair_prob:
                         self.construction_validation_state["repair_last_ts"][project_id] = now_ts
                         project["correct"] = True
+                        self._queue_project_state_communication_obligation(
+                            project_id=project_id,
+                            state_event="repair_needed",
+                            sim_state=sim_state,
+                            include_rules=sorted(expected_rules),
+                            detail={"trigger": "mismatch_repair_episode"},
+                            priority="high",
+                        )
                         self._refresh_construction_provenance(
                             getattr(sim_state, "environment", None),
                             project_id,
