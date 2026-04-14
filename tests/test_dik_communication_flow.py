@@ -312,6 +312,132 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         self.assertTrue(any(e.get("event_type") == "closure_repair_response_category" for e in sim.logger.recent_events))
         sim.stop()
 
+    def test_closure_repair_project_scope_isolated_between_projects(self):
+        sim = SimulationState(phases=[])
+        owner = sim.agents[0]
+        helper = sim.agents[1]
+        owner.position = helper.position = (8.0, 6.6)
+        for project_id, rule_id in [("Build_Table_A", "R_A"), ("Build_Table_B", "R_B")]:
+            project = sim.environment.construction.projects[project_id]
+            project["status"] = "ready_for_validation"
+            project["expected_rules"] = [rule_id]
+            sim.environment.construction.update_project_provenance(project_id, event="unit_setup", held_rule_ids=[], sim_time=sim.time)
+
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment("Build_Table_A", environment=sim.environment, sim_state=sim, reason="unit")
+        owner._translate_brain_decision_to_legacy_action(
+            BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id="Build_Table_A", confidence=0.9),
+            sim.environment,
+            sim_state=sim,
+        )
+        request_a = next((m for m in owner.generate_message(recipient_name=helper.name) if m["type"] == "TKRQ"), {})
+        self.assertEqual(request_a.get("project_id"), "Build_Table_A")
+        self.assertIn("rule:R_A", set(request_a.get("content", [])))
+        self.assertNotIn("rule:R_B", set(request_a.get("content", [])))
+
+        owner._start_project_closure_commitment("Build_Table_B", environment=sim.environment, sim_state=sim, reason="unit_switch")
+        owner._translate_brain_decision_to_legacy_action(
+            BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id="Build_Table_B", confidence=0.9),
+            sim.environment,
+            sim_state=sim,
+        )
+        request_b = next((m for m in owner.generate_message(recipient_name=helper.name) if m["type"] == "TKRQ"), {})
+        self.assertEqual(request_b.get("project_id"), "Build_Table_B")
+        self.assertIn("rule:R_B", set(request_b.get("content", [])))
+        self.assertNotIn("rule:R_A", set(request_b.get("content", [])))
+        sim.stop()
+
+    def test_unsatisfiable_exact_rule_request_is_deduplicated(self):
+        sim = SimulationState(phases=[])
+        owner, helper = sim.agents[0], sim.agents[1]
+        owner.position = helper.position = (8.0, 6.6)
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_MISS"]
+        sim.environment.construction.update_project_provenance(project_id, event="unit_setup", held_rule_ids=[], sim_time=sim.time)
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        decision = BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=project_id, confidence=0.9)
+        owner._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
+
+        owner.communicate_with(helper, sim_state=sim)
+        first_sent = len([e for e in sim.logger.recent_events if e.get("event_type") == "closure_repair_request_sent"])
+        owner.communicate_with(helper, sim_state=sim)
+        second_sent = len([e for e in sim.logger.recent_events if e.get("event_type") == "closure_repair_request_sent"])
+        chosen = [e for e in sim.logger.recent_events if e.get("event_type") == "closure_repair_strategy_chosen"]
+        self.assertGreaterEqual(second_sent, first_sent)
+        chosen_categories = [((e.get("payload_data", {}) or {}).get("request_category")) for e in chosen]
+        self.assertTrue(any(c == "exact_rule" for c in chosen_categories))
+        self.assertLessEqual(sum(1 for c in chosen_categories if c == "exact_rule"), 2)
+        self.assertTrue(any(e.get("event_type") == "closure_repair_exact_rule_unsatisfiable" for e in sim.logger.recent_events))
+        sim.stop()
+
+    def test_closure_repair_response_category_is_explicit(self):
+        sim = SimulationState(phases=[])
+        requester, responder = sim.agents[0], sim.agents[1]
+        requester.position = responder.position = (8.0, 6.6)
+        responder.receive_message(
+            {
+                "type": "TKRQ",
+                "sender": requester.name,
+                "content": ["rule:R_UNKNOWN"],
+                "project_id": "Build_Table_A",
+                "request_modes": ["teammate_redirect"],
+            },
+            from_agent=requester.name,
+            sim_state=sim,
+        )
+        queued = responder.team_plan_state.get("pending_outbound_messages", [])
+        tps = next((m for m in queued if m.get("type") == "TPS"), {})
+        self.assertIn(tps.get("content", {}).get("response_category"), {"teammate_redirect", "no_useful_response"})
+        self.assertIsNotNone(tps.get("content", {}).get("response_category"))
+        sim.stop()
+
+    def test_closure_support_focus_is_bounded_when_unchanged(self):
+        sim = SimulationState(phases=[])
+        helper = sim.agents[1]
+        project = sim.environment.construction.projects["Build_Table_A"]
+        project["status"] = "needs_repair"
+        for _ in range(3):
+            helper._apply_policy_pivots(
+                BrainDecision(selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE, target_id="Team_Info", confidence=0.7),
+                sim.environment,
+                sim_state=sim,
+                pivot_origin="unit",
+            )
+        self.assertTrue(any(e.get("event_type") == "closure_support_focus_skipped_exhausted" for e in sim.logger.recent_events))
+        sim.stop()
+
+    def test_closure_repair_category_escalates_then_exhausts(self):
+        sim = SimulationState(phases=[])
+        owner, helper = sim.agents[0], sim.agents[1]
+        owner.position = helper.position = (8.0, 6.6)
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_NEVER"]
+        sim.environment.construction.update_project_provenance(project_id, event="unit_setup", held_rule_ids=[], sim_time=sim.time)
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        owner._translate_brain_decision_to_legacy_action(
+            BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=project_id, confidence=0.9),
+            sim.environment,
+            sim_state=sim,
+        )
+        for _ in range(8):
+            owner.communicate_with(helper, sim_state=sim)
+            sim.time += 3.5
+        chosen = [e for e in sim.logger.recent_events if e.get("event_type") == "closure_repair_strategy_chosen"]
+        categories = set()
+        for e in chosen:
+            category = (e.get("payload_data", {}) or {}).get("request_category")
+            if category:
+                categories.add(category)
+        self.assertTrue({"exact_rule", "precursor_info", "source_pointer"}.intersection(categories))
+        self.assertTrue(any(e.get("event_type") == "closure_repair_response_category" for e in sim.logger.recent_events))
+        sim.stop()
+
     def test_blocked_project_support_pressure_reroutes_unrelated_inspect(self):
         sim = SimulationState(phases=[])
         helper = sim.agents[1]
