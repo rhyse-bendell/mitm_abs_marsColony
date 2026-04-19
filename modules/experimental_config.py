@@ -21,3 +21,53 @@ def default_experimental_config_dir() -> Path:
 
 def load_experimental_mapper(config_dir: str | Path | None = None) -> ConstructMapper:
     return ConstructMapper(config_dir=config_dir or default_experimental_config_dir())
+
+
+def normalize_mechanism_override_inputs(
+    config: dict | None,
+    *,
+    mechanism_defaults: dict[str, float] | None = None,
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+    """Normalize mechanism override inputs with legacy alias support.
+
+    Returns a tuple:
+      (normalized_overrides, legacy_traits_alias, explicit_mechanism_overrides)
+
+    Precedence:
+      1) legacy traits alias (backward compatibility)
+      2) explicit mechanism_overrides
+
+    Neutral auto-filled defaults are dropped unless explicitly forced via:
+      - mechanism_overrides_explicit: true
+      - preserve_neutral_mechanism_overrides: true
+    """
+    payload = config if isinstance(config, dict) else {}
+    defaults = {
+        str(k): float(v)
+        for k, v in dict(mechanism_defaults or {}).items()
+    }
+    explicit_overrides = {
+        str(k): float(v)
+        for k, v in dict(payload.get("mechanism_overrides", {}) or {}).items()
+        if v is not None
+    }
+    legacy_traits_alias = {
+        str(k): float(v)
+        for k, v in dict(payload.get("traits", {}) or {}).items()
+        if v is not None
+    }
+    normalized = dict(legacy_traits_alias)
+
+    preserve_neutral = bool(
+        payload.get("mechanism_overrides_explicit")
+        or payload.get("preserve_neutral_mechanism_overrides")
+    )
+    for mechanism_id, override_value in explicit_overrides.items():
+        if (
+            not preserve_neutral
+            and mechanism_id in defaults
+            and abs(float(override_value) - float(defaults[mechanism_id])) <= 1e-9
+        ):
+            continue
+        normalized[mechanism_id] = float(override_value)
+    return normalized, legacy_traits_alias, explicit_overrides

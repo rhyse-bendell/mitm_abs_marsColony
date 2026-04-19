@@ -131,6 +131,42 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         self.assertTrue(any(e.get("event_type") == "closure_episode_returned_to_validation" for e in sim.logger.recent_events))
         sim.stop()
 
+    def test_receive_message_dik_change_recomputes_project_state_and_closure_readiness(self):
+        sim = SimulationState(phases=[])
+        owner, helper = sim.agents[0], sim.agents[1]
+        owner.position = helper.position = (8.0, 6.6)
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_MSG"]
+        sim.environment.construction.update_project_provenance(project_id, event="unit_setup", held_rule_ids=[], sim_time=sim.time)
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        owner._translate_brain_decision_to_legacy_action(
+            BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=project_id, confidence=0.9),
+            sim.environment,
+            sim_state=sim,
+        )
+        self.assertTrue(owner.project_closure_state.get("repair_mode"))
+
+        owner.receive_message(
+            {"type": "TKP", "sender": helper.name, "content": ["R_MSG"]},
+            from_agent=helper.name,
+            sim_state=sim,
+        )
+
+        blockers, _ = owner._construction_action_blockers(
+            BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=project_id, confidence=0.9),
+            {"project_id": project_id},
+            sim.environment,
+            sim_state=sim,
+        )
+        self.assertNotIn("missing_expected_rule:R_MSG", blockers)
+        self.assertFalse(owner.project_closure_state.get("repair_mode"))
+        self.assertTrue(any(e.get("event_type") == "project_state_recomputed_after_dik_change" for e in sim.logger.recent_events))
+        self.assertTrue(any(e.get("event_type") == "closure_episode_returned_to_validation" for e in sim.logger.recent_events))
+        sim.stop()
+
     def test_closure_owner_not_reassigned_during_epistemic_repair(self):
         sim = SimulationState(phases=[])
         owner = sim.agents[0]

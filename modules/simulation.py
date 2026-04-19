@@ -14,7 +14,7 @@ from modules.interaction_graph import InteractionTelemetryBridge
 from modules.metrics import MetricsCollector
 from modules.runtime_witness_audit import RuntimeWitnessAudit
 from modules.team_knowledge import TeamKnowledgeManager
-from modules.experimental_config import load_experimental_mapper
+from modules.experimental_config import load_experimental_mapper, normalize_mechanism_override_inputs
 from modules.task_model import load_task_model
 
 LOCAL_BACKEND_ALIASES = {"local_http", "openai_compatible_local", "ollama_local", "ollama"}
@@ -89,12 +89,8 @@ class SimulationState:
         "Fast": 2.0
     }
 
-    def _normalize_mechanism_overrides(self, config):
-        explicit_overrides = dict(config.get("mechanism_overrides", {}) or {})
-        legacy_traits_alias = dict(config.get("traits", {}) or {})
-        normalized = dict(legacy_traits_alias)
-        normalized.update(explicit_overrides)
-        return normalized, legacy_traits_alias, explicit_overrides
+    def _normalize_mechanism_overrides(self, config, mechanism_defaults=None):
+        return normalize_mechanism_override_inputs(config, mechanism_defaults=mechanism_defaults)
 
     def __init__(
         self,
@@ -389,7 +385,17 @@ class SimulationState:
                 initial_goal_seeds=config.get("initial_goal_seeds"),
             )
             construct_values = dict(config.get("constructs", {}))
-            mechanism_overrides, legacy_traits_alias, explicit_overrides = self._normalize_mechanism_overrides(config)
+            mechanism_defaults = {
+                "communication_propensity": float(getattr(agent, "communication_propensity", 0.5)),
+                "goal_alignment": float(getattr(agent, "goal_alignment", 0.5)),
+                "help_tendency": float(getattr(agent, "help_tendency", 0.5)),
+                "build_speed": float(getattr(agent, "build_speed", 0.5)),
+                "rule_accuracy": float(getattr(agent, "rule_accuracy", 0.5)),
+            }
+            mechanism_overrides, legacy_traits_alias, explicit_overrides = self._normalize_mechanism_overrides(
+                config,
+                mechanism_defaults=mechanism_defaults,
+            )
             if legacy_traits_alias:
                 self.logger.log_event(
                     self.time,
@@ -400,13 +406,6 @@ class SimulationState:
                         "explicit_override_size": len(explicit_overrides),
                     },
                 )
-            mechanism_defaults = {
-                "communication_propensity": float(getattr(agent, "communication_propensity", 0.5)),
-                "goal_alignment": float(getattr(agent, "goal_alignment", 0.5)),
-                "help_tendency": float(getattr(agent, "help_tendency", 0.5)),
-                "build_speed": float(getattr(agent, "build_speed", 0.5)),
-                "rule_accuracy": float(getattr(agent, "rule_accuracy", 0.5)),
-            }
             resolved_constructs, resolved_mechanisms, resolved_hooks = self.construct_mapper.resolve_agent_profile(
                 construct_values=construct_values,
                 mechanism_overrides=mechanism_overrides,
