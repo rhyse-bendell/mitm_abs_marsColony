@@ -1012,8 +1012,118 @@ class Agent:
         trigger = str(trigger_source or "").strip()
         if not trigger:
             return
+        before_rule_ids = {normalize_rule_token(r) for r in self.mental_model["knowledge"].rules if normalize_rule_token(r)}
+        before_info_ids = {i.id for i in self.mental_model["information"]}
+        before_data_ids = {d.id for d in self.mental_model["data"]}
         self._apply_task_derivations(sim_state=sim_state, trigger_source=trigger_source)
         self._apply_secondary_rule_inference(sim_state=sim_state, trigger_source=trigger_source)
+        after_rule_ids = {normalize_rule_token(r) for r in self.mental_model["knowledge"].rules if normalize_rule_token(r)}
+        after_info_ids = {i.id for i in self.mental_model["information"]}
+        after_data_ids = {d.id for d in self.mental_model["data"]}
+        if sim_state is not None:
+            self._recompute_project_state_after_dik_change(
+                sim_state=sim_state,
+                trigger_source=trigger,
+                changed_rule_ids=after_rule_ids - before_rule_ids,
+                changed_information_ids=after_info_ids - before_info_ids,
+                changed_data_ids=after_data_ids - before_data_ids,
+            )
+
+    def _recompute_project_state_after_dik_change(
+        self,
+        *,
+        sim_state=None,
+        trigger_source=None,
+        changed_rule_ids=None,
+        changed_information_ids=None,
+        changed_data_ids=None,
+    ):
+        if sim_state is None or not hasattr(sim_state, "environment"):
+            return
+        environment = sim_state.environment
+        changed_rule_ids = {normalize_rule_token(r) for r in (changed_rule_ids or set()) if normalize_rule_token(r)}
+        changed_information_ids = {str(i) for i in (changed_information_ids or set()) if str(i)}
+        changed_data_ids = {str(d) for d in (changed_data_ids or set()) if str(d)}
+
+        readiness_before = set(self.last_build_blockers or [])
+        readiness_after = set(self._build_readiness_blockers(environment, sim_state=sim_state))
+        readiness_changed = readiness_before != readiness_after
+        self.last_build_blockers = sorted(readiness_after)
+        self.last_build_readiness = self._build_readiness_score()
+
+        closure_project_id = self.project_closure_state.get("project_id") if self.project_closure_state.get("active") else None
+        closure_blockers = set()
+        closure_repair_changed = False
+        closure_repair_stalled = False
+        closure_unblocked = False
+        if closure_project_id:
+            closure_decision = BrainDecision(
+                selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION,
+                target_id=closure_project_id,
+                confidence=0.8,
+            )
+            closure_blockers_list, _ = self._construction_action_blockers(
+                closure_decision,
+                {"type": "idle", "decision_action": ExecutableActionType.VALIDATE_CONSTRUCTION.value, "project_id": closure_project_id},
+                environment,
+                sim_state=sim_state,
+            )
+            closure_blockers = set(closure_blockers_list or [])
+            classified = self._classify_validation_blockers(closure_blockers)
+            epistemic_blockers = list(classified.get("epistemic_blockers", []))
+            if epistemic_blockers:
+                repair_update = self._update_closure_repair_state(
+                    closure_project_id,
+                    epistemic_blockers,
+                    environment,
+                    sim_state=sim_state,
+                    origin="dik_update",
+                )
+                closure_repair_changed = bool(repair_update.get("changed"))
+                closure_repair_stalled = bool(repair_update.get("stalled"))
+            elif self.project_closure_state.get("repair_mode"):
+                self.project_closure_state["repair_mode"] = False
+                self.project_closure_state["repair_blocker_signature"] = None
+                self.project_closure_state["repair_unchanged_count"] = 0
+                closure_unblocked = True
+                self._emit_event(
+                    sim_state,
+                    "closure_episode_returned_to_validation",
+                    {"origin": "dik_update", "project_id": closure_project_id, "trigger_source": trigger_source},
+                )
+
+        relevant_project_ids = set()
+        if closure_project_id:
+            relevant_project_ids.add(str(closure_project_id))
+        build_selection = self._select_build_target(
+            environment,
+            require_readiness=False,
+            include_project=True,
+            sim_state=sim_state,
+        )
+        if isinstance(build_selection, dict) and build_selection.get("project_id"):
+            relevant_project_ids.add(str(build_selection.get("project_id")))
+        for project_id in list(relevant_project_ids):
+            self._refresh_construction_provenance(environment, project_id, sim_state=sim_state, event="dik_refresh")
+
+        self._emit_event(
+            sim_state,
+            "project_state_recomputed_after_dik_change",
+            {
+                "trigger_source": trigger_source,
+                "changed_rule_ids": sorted(changed_rule_ids),
+                "changed_information_ids": sorted(changed_information_ids),
+                "changed_data_ids": sorted(changed_data_ids),
+                "readiness_changed": readiness_changed,
+                "readiness_unlocked": not readiness_after,
+                "readiness_blockers": sorted(readiness_after),
+                "closure_project_id": closure_project_id,
+                "closure_blockers": sorted(closure_blockers),
+                "closure_repair_changed": closure_repair_changed,
+                "closure_repair_stalled": closure_repair_stalled,
+                "closure_returned_to_validation": closure_unblocked,
+            },
+        )
 
     def get_runtime_state_snapshot(self):
         current_goals = [g for g in list(self.goal_stack or []) if isinstance(g, dict)]
@@ -7983,6 +8093,10 @@ class Agent:
                                 self._mark_team_plan_response_emitted(sim_state, plan_summary, response_type)
                     self.activity_log.append(f"Consulted shared artifact {preferred.artifact_id}")
                     self._record_artifact_consult(preferred.artifact_id, environment, sim_state=sim_state)
+                    self._recompute_project_state_after_dik_change(
+                        sim_state=sim_state,
+                        trigger_source=f"artifact_consult:{preferred.artifact_id}",
+                    )
                     sim_state.logger.log_event(sim_state.time, "artifact_consulted", {"agent": self.name, "artifact_id": preferred.artifact_id})
                     _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": preferred.artifact_id})
                     if action.get("target") is not None and self.target is not None and tuple(self.target) == tuple(action.get("target")):

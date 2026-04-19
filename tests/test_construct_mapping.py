@@ -101,6 +101,49 @@ class TestConstructMapping(unittest.TestCase):
             self.assertAlmostEqual(agent.mechanism_overrides["goal_alignment"], 0.9, places=4)
             self.assertAlmostEqual(agent.mechanism_profile["help_tendency"], 0.8, places=4)
             self.assertAlmostEqual(agent.mechanism_profile["goal_alignment"], 0.9, places=4)
+            self.assertNotIn("traits", agent.__dict__)
+
+    def test_construct_profile_applies_when_mechanism_overrides_are_neutral_defaults(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                agent_configs=[
+                    {
+                        "name": "Architect",
+                        "role": "Architect",
+                        "constructs": {"teamwork_potential": 0.75, "taskwork_potential": 0.75},
+                        "mechanism_overrides": {
+                            "communication_propensity": 0.5,
+                            "goal_alignment": 0.5,
+                            "help_tendency": 0.5,
+                            "build_speed": 0.5,
+                            "rule_accuracy": 0.5,
+                        },
+                    }
+                ],
+            )
+            agent = sim.agents[0]
+            self.assertEqual(agent.mechanism_overrides, {})
+            self.assertGreater(agent.mechanism_profile["communication_propensity"], 0.5)
+            self.assertGreater(agent.mechanism_profile["help_tendency"], 0.5)
+
+    def test_explicit_mechanism_override_wins_over_construct_mapping(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = SimulationState(
+                phases=[],
+                project_root=tmpdir,
+                agent_configs=[
+                    {
+                        "name": "Architect",
+                        "role": "Architect",
+                        "constructs": {"teamwork_potential": 0.75, "taskwork_potential": 0.75},
+                        "mechanism_overrides": {"communication_propensity": 0.17},
+                    }
+                ],
+            )
+            agent = sim.agents[0]
+            self.assertAlmostEqual(agent.mechanism_profile["communication_propensity"], 0.17, places=4)
 
     def test_invalid_numeric_row_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
