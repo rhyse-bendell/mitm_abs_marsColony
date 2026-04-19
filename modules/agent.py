@@ -1522,7 +1522,8 @@ class Agent:
 
     def _construction_state_signature(self, environment):
         projects = []
-        for project_id, project in sorted((getattr(environment.construction, "projects", {}) or {}).items()):
+        construction = getattr(environment, "construction", None)
+        for project_id, project in sorted((getattr(construction, "projects", {}) or {}).items()):
             projects.append(
                 (
                     project_id,
@@ -3660,6 +3661,8 @@ class Agent:
         return True
 
     def _select_build_target(self, environment, require_readiness=False, include_project=False, action_type=None, requested_project_id=None, sim_state=None):
+        if not hasattr(environment, "interaction_targets") or not hasattr(environment, "construction"):
+            return None
         candidates = []
         seen_sites = set()
         decision_action = str(action_type or "")
@@ -4540,7 +4543,9 @@ class Agent:
             recurrence_key = f"{goal.goal_id}:{reason}"
             nonexec_count = int(self.support_goal_nonexec_counts.get(recurrence_key, 0) or 0) + 1
             self.support_goal_nonexec_counts[recurrence_key] = nonexec_count
-            next_status = "inactive" if nonexec_count >= 3 else "candidate"
+            self.support_goal_nonexec_counts[goal.goal_id] = int(self.support_goal_nonexec_counts.get(goal.goal_id, 0) or 0) + 1
+            demotion_threshold = 2 if str(goal.label or "").strip().lower() == "integrate_new_derivation" else 3
+            next_status = "inactive" if nonexec_count >= demotion_threshold else "candidate"
             if goal.status != next_status:
                 goal.status = next_status
                 goal.last_transition_reason = "support_goal_demoted_non_executable"
@@ -6232,7 +6237,47 @@ class Agent:
                 }
                 and self._can_attempt_verbal_plan_communication(sim_state)
             ):
-                if repair_update and repair_update.get("stalled"):
+                candidate_target = None
+                for candidate in self._candidate_information_sources(environment, sim_state=sim_state):
+                    source_id = candidate[1] if isinstance(candidate, (tuple, list)) and len(candidate) >= 2 else None
+                    if not source_id:
+                        continue
+                    if self._is_closure_relevant_inspect_target(
+                        source_id,
+                        closure_project_id,
+                        environment,
+                        blockers=blocker_classification["epistemic_blockers"],
+                        sim_state=sim_state,
+                    ):
+                        candidate_target = source_id
+                        break
+                support_exhausted = bool(
+                    repair_update
+                    and repair_update.get("signature")
+                    and self._closure_support_focus_exhausted(str(repair_update.get("signature")))
+                )
+                if candidate_target and (support_exhausted or (repair_update and not repair_update.get("changed"))):
+                    self._emit_event(
+                        sim_state,
+                        "closure_repair_bridge_to_targeted_inspect",
+                        {
+                            "origin": pivot_origin,
+                            "project_id": closure_project_id,
+                            "from_action": rewritten.selected_action.value,
+                            "to_action": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
+                            "target_id": candidate_target,
+                            "support_exhausted": support_exhausted,
+                        },
+                    )
+                    rewritten = BrainDecision(
+                        selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                        target_id=candidate_target,
+                        target_zone=decision.target_zone,
+                        goal_update="closure_epistemic_repair",
+                        reason_summary=f"Closure repair retargeted to blocker-relevant source {candidate_target}.",
+                        confidence=max(0.78, float(rewritten.confidence or decision.confidence or 0.0)),
+                    )
+                elif repair_update and repair_update.get("stalled"):
                     rewritten = BrainDecision(
                         selected_action=ExecutableActionType.REASSESS_PLAN,
                         target_id=closure_project_id,

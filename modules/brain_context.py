@@ -107,7 +107,16 @@ class BrainContextBuilder:
         if epistemic and bool(epistemic.get("stale_grounding")):
             blockers.append("stale_epistemic_grounding")
 
-        if score < 4 or blockers:
+        soft_only_blockers = set(blockers).issubset({"missing_role_grounding", "stale_epistemic_grounding"})
+        construction_bootstrap_ready = bool(
+            info_count >= 2
+            and knowledge_count >= 1
+            and inspected_sources >= 1
+            and bool(available_build_targets)
+            and soft_only_blockers
+        )
+
+        if score < 4 or (blockers and not construction_bootstrap_ready):
             status = "premature"
         elif in_progress > 0:
             status = "plausible"
@@ -122,6 +131,7 @@ class BrainContextBuilder:
             "score": score,
             "blockers": blockers,
             "ready_for_build": status == "plausible",
+            "construction_bootstrap_ready": construction_bootstrap_ready,
             "inspected_sources": inspected_sources,
             "build_targets_available": len(available_build_targets),
             "epistemic_sufficiency_score": float(epistemic.get("score", 0.0) or 0.0),
@@ -135,6 +145,7 @@ class BrainContextBuilder:
             build_readiness = self._build_readiness(agent, self._summarize_structures(environment), environment, team_state=team_state or {})
         stage = phase_profile.get("stage", "execution")
         readiness_ok = bool(build_readiness.get("ready_for_build"))
+        bootstrap_bridge_ready = bool(build_readiness.get("construction_bootstrap_ready"))
         epistemic_suff = float(build_readiness.get("epistemic_sufficiency_score", 0.0) or 0.0)
         refresh_pressure = float(build_readiness.get("epistemic_refresh_pressure", 0.0) or 0.0)
         mismatch_pressure = any("mismatch" in e.lower() for e in (agent.activity_log[-6:] if agent.activity_log else []))
@@ -168,9 +179,11 @@ class BrainContextBuilder:
                 penalty = 0.35 if epistemic_suff < 0.45 else (0.15 if epistemic_suff < 0.6 else 0.0)
                 return max(0.08, (0.75 if readiness_ok and stage != "early" else 0.25) - penalty)
             if action in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION}:
-                if not readiness_ok:
+                if not readiness_ok and not bootstrap_bridge_ready:
                     return 0.05
-                penalty = 0.4 if epistemic_suff < 0.5 else (0.2 if epistemic_suff < 0.65 else 0.0)
+                if not readiness_ok and bootstrap_bridge_ready:
+                    return max(0.55, (0.72 if stage in {"execution", "late"} else 0.56) - (0.16 if epistemic_suff < 0.55 else 0.0))
+                penalty = 0.3 if epistemic_suff < 0.5 else (0.15 if epistemic_suff < 0.65 else 0.0)
                 return max(0.08, (0.85 if stage in {"execution", "late"} else 0.3) - penalty)
             if action in {ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, ExecutableActionType.VALIDATE_CONSTRUCTION}:
                 penalty = 0.55 if epistemic_suff < 0.62 else 0.0
