@@ -430,6 +430,131 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         self.assertIsNotNone(tps.get("content", {}).get("response_category"))
         sim.stop()
 
+    def test_source_pointer_creates_closure_scoped_inspect_obligation(self):
+        sim = SimulationState(phases=[])
+        owner = sim.agents[0]
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_PTR"]
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        owner.project_closure_state["repair_mode"] = True
+        owner.project_closure_state["repair_blocker_signature"] = f"{project_id}|missing_expected_rule:R_PTR|R_PTR"
+        owner.receive_message(
+            {
+                "type": "TPS",
+                "sender": sim.agents[1].name,
+                "content": {
+                    "project_id": project_id,
+                    "closure_blocker_signature": owner.project_closure_state["repair_blocker_signature"],
+                    "response_category": "source_pointer",
+                    "source_id": f"{owner.role}_Info",
+                    "requested_rule_ids": ["R_PTR"],
+                },
+            },
+            from_agent=sim.agents[1].name,
+            sim_state=sim,
+        )
+        pointer = owner.project_closure_state.get("source_pointer", {})
+        self.assertEqual(pointer.get("project_id"), project_id)
+        self.assertEqual(pointer.get("source_id"), f"{owner.role}_Info")
+        resolved_source, _ = owner._resolve_inspect_target(
+            BrainDecision(selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE, target_id="Team_Info", confidence=0.7),
+            sim.environment,
+            sim_state=sim,
+        )
+        self.assertEqual(resolved_source, f"{owner.role}_Info")
+        sim.stop()
+
+    def test_source_pointer_inspect_recomputes_closure_and_shrinks_signature(self):
+        sim = SimulationState(phases=[])
+        owner = sim.agents[0]
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_PTR_RECOMP"]
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        owner.project_closure_state["repair_mode"] = True
+        owner.project_closure_state["repair_blocker_signature"] = f"{project_id}|missing_expected_rule:R_PTR_RECOMP|R_PTR_RECOMP"
+        owner._set_closure_source_pointer(
+            project_id=project_id,
+            blocker_signature=owner.project_closure_state["repair_blocker_signature"],
+            source_id=f"{owner.role}_Info",
+            missing_rule_ids=["R_PTR_RECOMP"],
+            sim_state=sim,
+        )
+
+        original_absorb = owner.absorb_packet
+
+        def patched_absorb(packet, accuracy=1.0, sim_state=None, source_id=None):
+            original_absorb(packet, accuracy=accuracy, sim_state=sim_state, source_id=source_id)
+            owner.mental_model["knowledge"].add_rule("R_PTR_RECOMP", [])
+
+        owner.absorb_packet = patched_absorb
+        selection = owner._select_source_access_target(sim.environment, f"{owner.role}_Info", sim_state=sim)
+        if selection and selection.get("position") is not None:
+            owner.position = tuple(selection["position"])
+        owner._inspect_source(sim.environment, f"{owner.role}_Info", sim_state=sim)
+
+        self.assertTrue(any(e.get("event_type") == "project_state_recomputed_after_dik_change" for e in sim.logger.recent_events))
+        self.assertNotIn("R_PTR_RECOMP", str(owner.project_closure_state.get("repair_blocker_signature") or ""))
+        sim.stop()
+
+    def test_live_closure_missing_rules_shrink_without_new_provenance_system(self):
+        sim = SimulationState(phases=[])
+        owner = sim.agents[0]
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_LIVE"]
+        sim.environment.construction.update_project_provenance(project_id, event="unit_setup", held_rule_ids=[], sim_time=sim.time)
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        decision = BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=project_id, confidence=0.9)
+        owner._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
+        self.assertIn("R_LIVE", owner._closure_repair_missing_rules(project_id, sim.environment))
+        owner.mental_model["knowledge"].add_rule("R_LIVE", [])
+        owner._recompute_project_state_after_dik_change(sim_state=sim, trigger_source="unit", changed_rule_ids={"R_LIVE"})
+        self.assertNotIn("R_LIVE", owner._closure_repair_missing_rules(project_id, sim.environment))
+        sim.stop()
+
+    def test_closure_blocker_shrink_returns_to_validation_via_canonical_path(self):
+        sim = SimulationState(phases=[])
+        owner = sim.agents[0]
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["correct"] = True
+        project["expected_rules"] = ["R_CANON"]
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        owner._translate_brain_decision_to_legacy_action(
+            BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=project_id, confidence=0.9),
+            sim.environment,
+            sim_state=sim,
+        )
+        owner.receive_message(
+            {"type": "TKP", "sender": sim.agents[1].name, "content": ["R_CANON"]},
+            from_agent=sim.agents[1].name,
+            sim_state=sim,
+        )
+        owner._translate_brain_decision_to_legacy_action(
+            BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=project_id, confidence=0.9),
+            sim.environment,
+            sim_state=sim,
+        )
+        reroute = owner._apply_policy_pivots(
+            BrainDecision(selected_action=ExecutableActionType.COMMUNICATE, target_id=project_id, confidence=0.6),
+            sim.environment,
+            sim_state=sim,
+            pivot_origin="unit",
+        )
+        self.assertEqual(reroute.selected_action, ExecutableActionType.VALIDATE_CONSTRUCTION)
+        self.assertTrue(any(e.get("event_type") == "closure_episode_returned_to_validation" for e in sim.logger.recent_events))
+        sim.stop()
+
     def test_closure_support_focus_is_bounded_when_unchanged(self):
         sim = SimulationState(phases=[])
         helper = sim.agents[1]

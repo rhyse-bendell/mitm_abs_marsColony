@@ -226,6 +226,7 @@ class Agent:
             "repair_blocker_signature": None,
             "repair_unchanged_count": 0,
             "repair_retry_state": {},
+            "source_pointer": {},
             "support_focus_state": {"last_signature": None, "unchanged_count": 0, "exhausted": False},
         }
         self.last_construction_state_check_time = 0.0
@@ -616,6 +617,7 @@ class Agent:
                 "repair_blocker_signature": None,
                 "repair_unchanged_count": 0,
                 "repair_retry_state": {},
+                "source_pointer": {},
                 "support_focus_state": {"last_signature": None, "unchanged_count": 0, "exhausted": False},
             }
         )
@@ -642,6 +644,7 @@ class Agent:
         state["repair_blocker_signature"] = None
         state["repair_unchanged_count"] = 0
         state["repair_retry_state"] = {}
+        state["source_pointer"] = {}
         state["support_focus_state"] = {"last_signature": None, "unchanged_count": 0, "exhausted": False}
         if hasattr(environment.construction, "update_project_provenance"):
             snapshot = self._snapshot_dik_provenance(sim_state=sim_state)
@@ -2050,6 +2053,13 @@ class Agent:
         explicit_target = decision.target_id
         requested_target_id = explicit_target
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        closure_pointer = None
+        closure_project_id = self.project_closure_state.get("project_id") if self.project_closure_state.get("active") else None
+        if closure_project_id and self.project_closure_state.get("repair_mode"):
+            closure_pointer = self._active_closure_source_pointer(project_id=closure_project_id, sim_state=sim_state)
+            if closure_pointer and closure_pointer.get("source_id"):
+                explicit_target = closure_pointer.get("source_id")
+                requested_target_id = explicit_target
         self._emit_event(sim_state, "target_resolution_started", {"target_type": "information_source", "requested_target_id": explicit_target})
         rerank_explicit_target = False
         explicit_retarget_reason = None
@@ -2119,6 +2129,11 @@ class Agent:
                             return explicit_target, selection.get("position")
 
         candidates = self._candidate_information_sources(environment, sim_state=sim_state)
+        if closure_pointer and closure_pointer.get("source_id"):
+            pointed = str(closure_pointer.get("source_id") or "")
+            filtered = [c for c in candidates if len(c) >= 2 and c[1] == pointed]
+            if filtered:
+                candidates = filtered
         if not candidates:
             self._set_status("Inspect target resolution failed: no accessible information sources")
             self._emit_event(sim_state, "target_resolution_failed", {"target_type": "information_source", "failure_category": "no_information_source_available"})
@@ -2525,6 +2540,23 @@ class Agent:
             )
         team_changed = bool(shared_team_delta["added"] or shared_team_delta["adopted"])
         net_dik_changed = bool(dik_changed or team_changed)
+        closure_pointer = self._active_closure_source_pointer(sim_state=sim_state)
+        if closure_pointer and str(closure_pointer.get("source_id") or "") == str(source_id):
+            pointer_state = self.project_closure_state.setdefault("source_pointer", {})
+            pointer_state["attempt_count"] = int(pointer_state.get("attempt_count", 0) or 0) + 1
+            if net_dik_changed:
+                pointer_state["active"] = False
+            elif int(pointer_state.get("attempt_count", 0) or 0) >= 2:
+                pointer_state["active"] = False
+                self._emit_event(
+                    sim_state,
+                    "closure_source_pointer_exhausted",
+                    {
+                        "project_id": pointer_state.get("project_id"),
+                        "source_id": source_id,
+                        "attempt_count": pointer_state.get("attempt_count"),
+                    },
+                )
         source_state = self.source_exhaustion_state.setdefault(source_id, {"inspect_count": 0, "last_dik_changed": None, "exhausted": False})
         source_state["inspect_count"] = int(source_state.get("inspect_count", 0)) + 1
         source_state["last_dik_changed"] = bool(net_dik_changed)
@@ -6234,6 +6266,19 @@ class Agent:
                 and closure_epistemic_blocked
                 and rewritten.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE
             ):
+                pointer_target = None
+                pointer = self._active_closure_source_pointer(project_id=closure_project_id, sim_state=sim_state)
+                if pointer and pointer.get("source_id"):
+                    pointer_target = str(pointer.get("source_id") or "")
+                if pointer_target:
+                    rewritten = BrainDecision(
+                        selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                        target_id=pointer_target,
+                        target_zone=decision.target_zone,
+                        goal_update="closure_epistemic_repair",
+                        reason_summary=f"Closure repair honoring source pointer to {pointer_target}.",
+                        confidence=max(0.76, float(rewritten.confidence or decision.confidence or 0.0)),
+                    )
                 target_id = rewritten.target_id
                 blocker_relevant = self._is_closure_relevant_inspect_target(
                     target_id,
@@ -8985,6 +9030,18 @@ class Agent:
         held = {normalize_rule_token(r) for r in provenance.get("held_rule_ids_at_build", []) if normalize_rule_token(r)}
         return sorted(set(expected) - held)
 
+    def _closure_live_missing_expected_rules(self, project_id, environment):
+        if not project_id or getattr(environment, "construction", None) is None:
+            return []
+        project = environment.construction.projects.get(project_id)
+        if not isinstance(project, dict):
+            return []
+        expected = {normalize_rule_token(r) for r in project.get("expected_rules", []) if normalize_rule_token(r)}
+        if not expected:
+            return []
+        local_held = {normalize_rule_token(r) for r in self.mental_model["knowledge"].rules if normalize_rule_token(r)}
+        return sorted(expected - local_held)
+
     def _closure_missing_rules_from_blockers(self, blockers):
         missing = set()
         for token in list(blockers or []):
@@ -8997,9 +9054,69 @@ class Agent:
 
     def _closure_repair_missing_rules(self, project_id, environment, blockers=None):
         blocker_rules = self._closure_missing_rules_from_blockers(blockers)
+        live_rules = self._closure_live_missing_expected_rules(project_id, environment)
         if blocker_rules:
+            if live_rules:
+                return sorted(set(blocker_rules).intersection(set(live_rules)))
             return blocker_rules
+        if live_rules:
+            return live_rules
         return self._closure_project_missing_expected_rules(project_id, environment)
+
+    def _set_closure_source_pointer(
+        self,
+        *,
+        project_id,
+        blocker_signature,
+        source_id,
+        missing_rule_ids=None,
+        sim_state=None,
+        ttl_s=10.0,
+    ):
+        state = self.project_closure_state
+        if not (state.get("active") and str(state.get("project_id") or "") == str(project_id or "")):
+            return False
+        source_id = self._normalize_packet_name(source_id)
+        if not source_id:
+            return False
+        now_ts = self._tracker_now(sim_state)
+        state["source_pointer"] = {
+            "project_id": str(project_id),
+            "blocker_signature": str(blocker_signature or ""),
+            "source_id": source_id,
+            "missing_rule_ids": sorted({normalize_rule_token(r) for r in (missing_rule_ids or []) if normalize_rule_token(r)}),
+            "attempt_count": 0,
+            "expires_at": now_ts + max(4.0, float(ttl_s)),
+            "active": True,
+        }
+        self._emit_event(
+            sim_state,
+            "closure_source_pointer_committed",
+            {
+                "project_id": project_id,
+                "blocker_signature": str(blocker_signature or ""),
+                "source_id": source_id,
+                "missing_rule_ids": sorted({normalize_rule_token(r) for r in (missing_rule_ids or []) if normalize_rule_token(r)}),
+            },
+        )
+        return True
+
+    def _active_closure_source_pointer(self, *, project_id=None, blocker_signature=None, sim_state=None):
+        state = self.project_closure_state
+        pointer = dict(state.get("source_pointer") or {})
+        if not pointer or not pointer.get("active"):
+            return None
+        now_ts = self._tracker_now(sim_state)
+        if float(pointer.get("expires_at", 0.0) or 0.0) < now_ts:
+            state["source_pointer"] = {}
+            return None
+        active_project_id = str(project_id or state.get("project_id") or "")
+        if active_project_id and str(pointer.get("project_id") or "") != active_project_id:
+            return None
+        expected_signature = str(blocker_signature or state.get("repair_blocker_signature") or "")
+        if expected_signature and str(pointer.get("blocker_signature") or "") != expected_signature:
+            return None
+        return pointer
 
     def _is_closure_relevant_inspect_target(self, source_id, project_id, environment, *, blockers=None, sim_state=None):
         source_id = self._normalize_packet_name(source_id)
@@ -9180,6 +9297,14 @@ class Agent:
         state["repair_mode"] = True
         state["repair_blocker_signature"] = signature
         state["repair_unchanged_count"] = unchanged_count
+        pointer = dict(state.get("source_pointer") or {})
+        if pointer:
+            if (
+                str(pointer.get("project_id") or "") != str(project_id)
+                or str(pointer.get("blocker_signature") or "") != str(signature)
+                or not self._closure_repair_missing_rules(project_id, environment, blockers=blockers)
+            ):
+                state["source_pointer"] = {}
         if changed:
             state["repair_retry_state"] = {
                 key: value
@@ -9658,6 +9783,49 @@ class Agent:
             response_category = category
             project_id = str(payload.get("project_id") or "")
             signature = str(payload.get("closure_blocker_signature") or self.project_closure_state.get("repair_blocker_signature") or "")
+            if (
+                category == "source_pointer"
+                and project_id
+                and signature
+                and self.project_closure_state.get("active")
+                and str(self.project_closure_state.get("project_id") or "") == project_id
+            ):
+                self._set_closure_source_pointer(
+                    project_id=project_id,
+                    blocker_signature=signature,
+                    source_id=payload.get("source_id"),
+                    missing_rule_ids=payload.get("requested_rule_ids", []),
+                    sim_state=sim_state,
+                )
+                self._force_recovery_pivot(
+                    sim_state,
+                    to_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
+                    reason=f"closure_source_pointer:{project_id}",
+                    ttl_s=8.0,
+                )
+            elif (
+                category == "teammate_redirect"
+                and project_id
+                and signature
+                and self.project_closure_state.get("active")
+                and str(self.project_closure_state.get("project_id") or "") == project_id
+            ):
+                redirect = str(payload.get("redirect_teammate") or "").strip()
+                if redirect:
+                    self.communication_state["preferred_recipient"] = redirect
+            elif (
+                category == "recheck_commitment"
+                and project_id
+                and signature
+                and self.project_closure_state.get("active")
+                and str(self.project_closure_state.get("project_id") or "") == project_id
+            ):
+                self.communication_state["closure_recheck_pending"] = {
+                    "project_id": project_id,
+                    "from_agent": sender,
+                    "signature": signature,
+                    "time": float(getattr(sim_state, "time", getattr(self, "current_time", 0.0))),
+                }
             if (
                 project_id
                 and signature
