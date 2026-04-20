@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from modules.action_schema import BrainDecision, ExecutableActionType
 from modules.construct_mapping import ConstructMapper
+from modules.experimental_config import normalize_mechanism_override_inputs
 from modules.simulation import SimulationState
 
 
@@ -144,6 +145,19 @@ class TestConstructMapping(unittest.TestCase):
             )
             agent = sim.agents[0]
             self.assertAlmostEqual(agent.mechanism_profile["communication_propensity"], 0.17, places=4)
+
+    def test_legacy_traits_alias_normalizes_to_single_override_path(self):
+        normalized, legacy_alias, explicit_overrides = normalize_mechanism_override_inputs(
+            {
+                "traits": {"help_tendency": 0.25},
+                "mechanism_overrides": {"help_tendency": 0.8, "goal_alignment": 0.5},
+            },
+            mechanism_defaults={"goal_alignment": 0.5},
+        )
+        self.assertEqual(legacy_alias, {"help_tendency": 0.25})
+        self.assertEqual(explicit_overrides["help_tendency"], 0.8)
+        self.assertEqual(normalized["help_tendency"], 0.8)
+        self.assertNotIn("goal_alignment", normalized)
 
     def test_invalid_numeric_row_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

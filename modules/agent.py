@@ -1011,7 +1011,14 @@ class Agent:
                             },
                         )
 
-    def _trigger_epistemic_update_pipeline(self, *, sim_state=None, trigger_source=None):
+    def _trigger_epistemic_update_pipeline(
+        self,
+        *,
+        sim_state=None,
+        trigger_source=None,
+        relevant_project_ids=None,
+        blocker_relevant=False,
+    ):
         trigger = str(trigger_source or "").strip()
         if not trigger:
             return
@@ -1024,13 +1031,36 @@ class Agent:
         after_info_ids = {i.id for i in self.mental_model["information"]}
         after_data_ids = {d.id for d in self.mental_model["data"]}
         if sim_state is not None:
-            self._recompute_project_state_after_dik_change(
+            self._refresh_relevant_project_state_after_dik_change(
                 sim_state=sim_state,
                 trigger_source=trigger,
                 changed_rule_ids=after_rule_ids - before_rule_ids,
                 changed_information_ids=after_info_ids - before_info_ids,
                 changed_data_ids=after_data_ids - before_data_ids,
+                relevant_project_ids=relevant_project_ids,
+                blocker_relevant=blocker_relevant,
             )
+
+    def _refresh_relevant_project_state_after_dik_change(
+        self,
+        *,
+        sim_state,
+        trigger_source=None,
+        changed_rule_ids=None,
+        changed_information_ids=None,
+        changed_data_ids=None,
+        relevant_project_ids=None,
+        blocker_relevant=False,
+    ):
+        self._recompute_project_state_after_dik_change(
+            sim_state=sim_state,
+            trigger_source=trigger_source,
+            changed_rule_ids=changed_rule_ids,
+            changed_information_ids=changed_information_ids,
+            changed_data_ids=changed_data_ids,
+            relevant_project_ids_hint=relevant_project_ids,
+            blocker_relevant=blocker_relevant,
+        )
 
     def _recompute_project_state_after_dik_change(
         self,
@@ -1040,6 +1070,8 @@ class Agent:
         changed_rule_ids=None,
         changed_information_ids=None,
         changed_data_ids=None,
+        relevant_project_ids_hint=None,
+        blocker_relevant=False,
     ):
         if sim_state is None or not hasattr(sim_state, "environment"):
             return
@@ -1095,7 +1127,7 @@ class Agent:
                     {"origin": "dik_update", "project_id": closure_project_id, "trigger_source": trigger_source},
                 )
 
-        relevant_project_ids = set()
+        relevant_project_ids = {str(pid) for pid in (relevant_project_ids_hint or set()) if str(pid)}
         if closure_project_id:
             relevant_project_ids.add(str(closure_project_id))
         build_selection = self._select_build_target(
@@ -1114,6 +1146,7 @@ class Agent:
             "project_state_recomputed_after_dik_change",
             {
                 "trigger_source": trigger_source,
+                "blocker_relevant": bool(blocker_relevant),
                 "changed_rule_ids": sorted(changed_rule_ids),
                 "changed_information_ids": sorted(changed_information_ids),
                 "changed_data_ids": sorted(changed_data_ids),
@@ -6226,6 +6259,28 @@ class Agent:
                     sim_state=sim_state,
                     origin=pivot_origin,
                 )
+            pointer = self._active_closure_source_pointer(project_id=closure_project_id, sim_state=sim_state)
+            pointer_target = str(pointer.get("source_id") or "") if pointer else ""
+            if (
+                closure_locked
+                and closure_epistemic_blocked
+                and pointer_target
+                and rewritten.selected_action in {
+                    ExecutableActionType.CONSULT_TEAM_ARTIFACT,
+                    ExecutableActionType.EXTERNALIZE_PLAN,
+                    ExecutableActionType.COMMUNICATE,
+                    ExecutableActionType.REQUEST_ASSISTANCE,
+                    ExecutableActionType.OBSERVE_ENVIRONMENT,
+                }
+            ):
+                rewritten = BrainDecision(
+                    selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                    target_id=pointer_target,
+                    target_zone=decision.target_zone,
+                    goal_update="closure_epistemic_repair",
+                    reason_summary=f"Closure repair honoring active source pointer to {pointer_target}.",
+                    confidence=max(0.8, float(rewritten.confidence or decision.confidence or 0.0)),
+                )
             if (
                 closure_locked
                 and closure_epistemic_blocked
@@ -9335,6 +9390,14 @@ class Agent:
         state = self.project_closure_state
         if not (state.get("active") and project_id and state.get("project_id") == project_id):
             return {"changed": True, "stalled": False, "signature": None, "unchanged_count": 0}
+        previous_missing_rules = []
+        previous_signature = str(state.get("repair_blocker_signature") or "")
+        if previous_signature and "|" in previous_signature:
+            previous_missing_rules = [
+                normalize_rule_token(r)
+                for r in previous_signature.split("|")[-1].split(",")
+                if normalize_rule_token(r)
+            ]
         signature = self._closure_blocker_signature(project_id, blockers, environment)
         last_signature = state.get("repair_blocker_signature")
         changed = bool(signature != last_signature)
@@ -9351,6 +9414,18 @@ class Agent:
             ):
                 state["source_pointer"] = {}
         if changed:
+            current_missing_rules = self._closure_repair_missing_rules(project_id, environment, blockers=blockers)
+            if sorted(set(current_missing_rules)) != sorted(set(previous_missing_rules)):
+                self._emit_event(
+                    sim_state,
+                    "closure_missing_rules_updated",
+                    {
+                        "project_id": project_id,
+                        "origin": origin,
+                        "before_missing_rule_ids": sorted(set(previous_missing_rules)),
+                        "after_missing_rule_ids": sorted(set(current_missing_rules)),
+                    },
+                )
             state["repair_retry_state"] = {
                 key: value
                 for key, value in (state.get("repair_retry_state", {}) or {}).items()
@@ -9626,6 +9701,8 @@ class Agent:
         self._last_received_dik_changed = False
         direct_rule_additions = 0
         response_category = None
+        blocker_relevant_refresh = False
+        relevant_project_ids = set()
         known_gaps_before = len(self.known_gaps)
         readiness_before = set(self._build_readiness_blockers(sim_state.environment, sim_state=sim_state)) if sim_state is not None else set()
         rules_before = len(self.mental_model["knowledge"].rules)
@@ -9848,6 +9925,7 @@ class Agent:
                     reason=f"closure_source_pointer:{project_id}",
                     ttl_s=8.0,
                 )
+                relevant_project_ids.add(project_id)
             elif (
                 category == "teammate_redirect"
                 and project_id
@@ -9858,6 +9936,8 @@ class Agent:
                 redirect = str(payload.get("redirect_teammate") or "").strip()
                 if redirect:
                     self.communication_state["preferred_recipient"] = redirect
+                    blocker_relevant_refresh = True
+                    relevant_project_ids.add(project_id)
             elif (
                 category == "recheck_commitment"
                 and project_id
@@ -9871,6 +9951,8 @@ class Agent:
                     "signature": signature,
                     "time": float(getattr(sim_state, "time", getattr(self, "current_time", 0.0))),
                 }
+                blocker_relevant_refresh = True
+                relevant_project_ids.add(project_id)
             if (
                 project_id
                 and signature
@@ -10016,7 +10098,19 @@ class Agent:
         self.activity_log.append(f"Received {mtype} from {sender}")
         if dik_changed:
             self._last_received_dik_changed = True
-            self._trigger_epistemic_update_pipeline(sim_state=sim_state, trigger_source=f"message:{sender}")
+            self._trigger_epistemic_update_pipeline(
+                sim_state=sim_state,
+                trigger_source=f"message:{sender}",
+                relevant_project_ids=relevant_project_ids,
+                blocker_relevant=blocker_relevant_refresh,
+            )
+        elif blocker_relevant_refresh and sim_state is not None:
+            self._refresh_relevant_project_state_after_dik_change(
+                sim_state=sim_state,
+                trigger_source=f"message:{sender}:closure_signal",
+                relevant_project_ids=relevant_project_ids,
+                blocker_relevant=True,
+            )
         known_gaps_after = len(self.known_gaps)
         readiness_after = set(self._build_readiness_blockers(sim_state.environment, sim_state=sim_state)) if sim_state is not None else set()
         rules_after = len(self.mental_model["knowledge"].rules)
