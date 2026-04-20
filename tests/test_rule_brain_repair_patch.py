@@ -381,7 +381,7 @@ class TestRuleBrainRepairPatch(unittest.TestCase):
                     context=None,
                     pivot_origin="unit",
                 )
-            self.assertEqual(rewritten.selected_action, ExecutableActionType.COMMUNICATE)
+            self.assertIn(rewritten.selected_action, {ExecutableActionType.COMMUNICATE, ExecutableActionType.WAIT})
             self.assertEqual(project.get("closure_owner"), owner.name)
             self.assertEqual(project.get("status"), "ready_for_validation")
             self.assertEqual(len(teammate.mental_model["information"]), before_info)

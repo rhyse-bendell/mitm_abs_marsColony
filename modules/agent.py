@@ -228,6 +228,8 @@ class Agent:
             "repair_missing_rule_ids": [],
             "repair_retry_state": {},
             "source_pointer": {},
+            "source_pointer_exhaustion": {},
+            "last_blocker_relevant_refresh": {},
             "support_focus_state": {"last_signature": None, "unchanged_count": 0, "exhausted": False},
         }
         self.last_construction_state_check_time = 0.0
@@ -622,6 +624,8 @@ class Agent:
                 "repair_missing_rule_ids": [],
                 "repair_retry_state": {},
                 "source_pointer": {},
+                "source_pointer_exhaustion": {},
+                "last_blocker_relevant_refresh": {},
                 "support_focus_state": {"last_signature": None, "unchanged_count": 0, "exhausted": False},
             }
         )
@@ -650,6 +654,7 @@ class Agent:
         state["repair_missing_rule_ids"] = []
         state["repair_retry_state"] = {}
         state["source_pointer"] = {}
+        state["last_blocker_relevant_refresh"] = {}
         state["support_focus_state"] = {"last_signature": None, "unchanged_count": 0, "exhausted": False}
         if hasattr(environment.construction, "update_project_provenance"):
             snapshot = self._snapshot_dik_provenance(sim_state=sim_state)
@@ -1067,6 +1072,56 @@ class Agent:
             blocker_relevant=blocker_relevant,
         )
 
+    def _derive_named_rule_precursor_blockers(self, missing_rule_ids, *, sim_state=None):
+        blockers = []
+        if not missing_rule_ids or not getattr(self, "task_model", None):
+            return blockers
+        info_ids, rule_ids = self._effective_knowledge_for_readiness(sim_state=sim_state)
+        for rid in [normalize_rule_token(r) for r in list(missing_rule_ids or []) if normalize_rule_token(r)]:
+            rule = self.task_model.rules.get(rid) if getattr(self.task_model, "rules", None) else None
+            if rule is None:
+                blockers.append(f"missing_expected_rule_precursor:{rid}:no_rule_binding_after_refresh")
+                continue
+            required_info = [str(i) for i in list(getattr(rule, "required_information", []) or []) if str(i)]
+            missing_info = [iid for iid in required_info if iid not in info_ids]
+            if missing_info:
+                blockers.append(f"missing_expected_rule_precursor:{rid}:missing_info:{missing_info[0]}")
+                continue
+            required_rules = [normalize_rule_token(r) for r in list(getattr(rule, "required_knowledge", []) or []) if normalize_rule_token(r)]
+            missing_rules = [rr for rr in required_rules if rr not in rule_ids]
+            if missing_rules:
+                blockers.append(f"missing_expected_rule_precursor:{rid}:missing_rule:{missing_rules[0]}")
+                continue
+            blockers.append(f"missing_expected_rule_precursor:{rid}:derivation_pending")
+        return sorted(set(blockers))
+
+    def _bind_named_rule_blockers_after_refresh(self, project_id, closure_blockers, *, sim_state=None):
+        blockers = {str(b) for b in list(closure_blockers or []) if str(b)}
+        named_missing_rules = sorted(
+            {
+                normalize_rule_token(str(token).split(":", 1)[1])
+                for token in blockers
+                if str(token).startswith("missing_expected_rule:")
+                and normalize_rule_token(str(token).split(":", 1)[1])
+            }
+        )
+        if not named_missing_rules:
+            return sorted(blockers), {"status": "no_named_missing_rules", "missing_rule_ids": []}
+        has_match, missing_rules_after = self._construction_rule_match(project_id, sim_state=sim_state, include_team=True)
+        missing_rules_after = [normalize_rule_token(r) for r in (missing_rules_after or []) if normalize_rule_token(r)]
+        missing_set = set(missing_rules_after)
+        for rid in named_missing_rules:
+            blockers.discard(f"missing_expected_rule:{rid}")
+        blockers.update({f"missing_expected_rule:{rid}" for rid in missing_rules_after})
+        if has_match and "missing_validation_rule_knowledge" in blockers:
+            blockers.discard("missing_validation_rule_knowledge")
+        precursor = []
+        if missing_rules_after:
+            precursor = self._derive_named_rule_precursor_blockers(missing_rules_after, sim_state=sim_state)
+            blockers.update(precursor)
+        status = "satisfied" if not missing_rules_after else ("shrunk" if set(named_missing_rules) != missing_set else "unchanged")
+        return sorted(blockers), {"status": status, "missing_rule_ids": sorted(missing_set), "precursor_blockers": precursor}
+
     def _recompute_project_state_after_dik_change(
         self,
         *,
@@ -1085,17 +1140,14 @@ class Agent:
         changed_information_ids = {str(i) for i in (changed_information_ids or set()) if str(i)}
         changed_data_ids = {str(d) for d in (changed_data_ids or set()) if str(d)}
 
-        readiness_before = set(self.last_build_blockers or [])
-        readiness_after = set(self._build_readiness_blockers(environment, sim_state=sim_state))
-        readiness_changed = readiness_before != readiness_after
-        self.last_build_blockers = sorted(readiness_after)
-        self.last_build_readiness = self._build_readiness_score()
-
         closure_project_id = self.project_closure_state.get("project_id") if self.project_closure_state.get("active") else None
         closure_blockers = set()
         closure_repair_changed = False
         closure_repair_stalled = False
         closure_unblocked = False
+        named_rule_binding = {"status": "not_applicable", "missing_rule_ids": []}
+        if closure_project_id:
+            self._refresh_construction_provenance(environment, closure_project_id, sim_state=sim_state, event="dik_refresh")
         if closure_project_id:
             closure_decision = BrainDecision(
                 selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION,
@@ -1108,7 +1160,25 @@ class Agent:
                 environment,
                 sim_state=sim_state,
             )
-            closure_blockers = set(closure_blockers_list or [])
+            rebound_blockers, binding_summary = self._bind_named_rule_blockers_after_refresh(
+                closure_project_id,
+                closure_blockers_list or [],
+                sim_state=sim_state,
+            )
+            closure_blockers = set(rebound_blockers)
+            named_rule_binding = dict(binding_summary or {})
+            if named_rule_binding.get("status") in {"shrunk", "satisfied"}:
+                self._emit_event(
+                    sim_state,
+                    "closure_named_rule_binding_refreshed",
+                    {
+                        "project_id": closure_project_id,
+                        "trigger_source": trigger_source,
+                        "status": named_rule_binding.get("status"),
+                        "missing_rule_ids": list(named_rule_binding.get("missing_rule_ids") or []),
+                        "precursor_blockers": list(named_rule_binding.get("precursor_blockers") or []),
+                    },
+                )
             classified = self._classify_validation_blockers(closure_blockers)
             epistemic_blockers = list(classified.get("epistemic_blockers", []))
             if epistemic_blockers:
@@ -1132,6 +1202,12 @@ class Agent:
                     "closure_episode_returned_to_validation",
                     {"origin": "dik_update", "project_id": closure_project_id, "trigger_source": trigger_source},
                 )
+
+        readiness_before = set(self.last_build_blockers or [])
+        readiness_after = set(self._build_readiness_blockers(environment, sim_state=sim_state))
+        readiness_changed = readiness_before != readiness_after
+        self.last_build_blockers = sorted(readiness_after)
+        self.last_build_readiness = self._build_readiness_score()
 
         relevant_project_ids = {str(pid) for pid in (relevant_project_ids_hint or set()) if str(pid)}
         if closure_project_id:
@@ -1164,6 +1240,8 @@ class Agent:
                 "closure_repair_changed": closure_repair_changed,
                 "closure_repair_stalled": closure_repair_stalled,
                 "closure_returned_to_validation": closure_unblocked,
+                "closure_named_rule_binding_status": named_rule_binding.get("status"),
+                "closure_missing_rule_ids_after_binding": list(named_rule_binding.get("missing_rule_ids") or []),
             },
         )
 
@@ -2095,11 +2173,13 @@ class Agent:
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
         closure_pointer = None
         closure_project_id = self.project_closure_state.get("project_id") if self.project_closure_state.get("active") else None
+        hard_pointed_obligation = False
         if closure_project_id and self.project_closure_state.get("repair_mode"):
             closure_pointer = self._active_closure_source_pointer(project_id=closure_project_id, sim_state=sim_state)
             if closure_pointer and closure_pointer.get("source_id"):
                 explicit_target = closure_pointer.get("source_id")
                 requested_target_id = explicit_target
+                hard_pointed_obligation = True
         self._emit_event(sim_state, "target_resolution_started", {"target_type": "information_source", "requested_target_id": explicit_target})
         rerank_explicit_target = False
         explicit_retarget_reason = None
@@ -2129,6 +2209,32 @@ class Agent:
                     and revisitable
                     and (role_missing or role_never_inspected)
                 )
+                if hard_pointed_obligation:
+                    selection = self._select_source_access_target(environment, explicit_target, sim_state=sim_state)
+                    if selection is not None and selection.get("position") is not None:
+                        self._set_status(f"Pointed inspect target selected: {explicit_target}")
+                        self._emit_event(
+                            sim_state,
+                            "target_resolved",
+                            {
+                                "target_type": "information_source",
+                                "target_id": explicit_target,
+                                "candidate_count": 1,
+                                "resolution_mode": "hard_pointed_obligation",
+                            },
+                        )
+                        return explicit_target, selection.get("position")
+                    self._emit_event(
+                        sim_state,
+                        "pointed_source_obligation_deferred",
+                        {
+                            "project_id": closure_project_id,
+                            "blocker_signature": str((closure_pointer or {}).get("blocker_signature") or ""),
+                            "source_id": explicit_target,
+                            "reason": "source_unreachable_this_tick",
+                        },
+                    )
+                    return explicit_target, None
                 if explicit_team_exhausted_verification:
                     rerank_explicit_target = True
                     self._emit_event(
@@ -2174,6 +2280,18 @@ class Agent:
             filtered = [c for c in candidates if len(c) >= 2 and c[1] == pointed]
             if filtered:
                 candidates = filtered
+            elif hard_pointed_obligation:
+                self._emit_event(
+                    sim_state,
+                    "pointed_source_obligation_deferred",
+                    {
+                        "project_id": closure_project_id,
+                        "blocker_signature": str((closure_pointer or {}).get("blocker_signature") or ""),
+                        "source_id": pointed,
+                        "reason": "source_unreachable_this_tick",
+                    },
+                )
+                return pointed, None
         if not candidates:
             self._set_status("Inspect target resolution failed: no accessible information sources")
             self._emit_event(sim_state, "target_resolution_failed", {"target_type": "information_source", "failure_category": "no_information_source_available"})
@@ -2589,6 +2707,13 @@ class Agent:
                 "pointed_source_refresh_triggered",
                 {"project_id": closure_project_id, "source_id": source_id, "trigger_source": trigger_source},
             )
+        if closure_project_id and blocker_relevant_inspect:
+            self.project_closure_state["last_blocker_relevant_refresh"] = {
+                "project_id": str(closure_project_id),
+                "source_id": str(source_id),
+                "trigger_source": str(trigger_source),
+                "expires_at": now_ts + 8.0,
+            }
         self._trigger_epistemic_update_pipeline(
             sim_state=sim_state,
             trigger_source=trigger_source,
@@ -2617,9 +2742,17 @@ class Agent:
             pointer_state = self.project_closure_state.setdefault("source_pointer", {})
             pointer_state["attempt_count"] = int(pointer_state.get("attempt_count", 0) or 0) + 1
             pointer_state["pointed_source_attempt_count"] = int(pointer_state.get("pointed_source_attempt_count", 0) or 0) + 1
+            pointer_state["last_attempt_tick"] = int(getattr(sim_state, "step_count", 0) or 0) if sim_state is not None else None
+            pointer_state["last_attempt_reason"] = "inspect_success" if net_dik_changed else "inspect_no_new_dik"
             if net_dik_changed:
                 pointer_state["active"] = False
                 pointer_state["pointed_source_exhausted"] = False
+                exhaustion_key = self._closure_pointer_exhaustion_key(
+                    pointer_state.get("project_id"),
+                    pointer_state.get("blocker_signature"),
+                    source_id,
+                )
+                self.project_closure_state.setdefault("source_pointer_exhaustion", {}).pop(exhaustion_key, None)
                 self._emit_event(
                     sim_state,
                     "closure_source_pointer_satisfied",
@@ -2633,6 +2766,18 @@ class Agent:
             elif int(pointer_state.get("attempt_count", 0) or 0) >= 2:
                 pointer_state["active"] = False
                 pointer_state["pointed_source_exhausted"] = True
+                exhaustion_key = self._closure_pointer_exhaustion_key(
+                    pointer_state.get("project_id"),
+                    pointer_state.get("blocker_signature"),
+                    source_id,
+                )
+                self.project_closure_state.setdefault("source_pointer_exhaustion", {})[exhaustion_key] = {
+                    "exhausted": True,
+                    "reason": "nonproductive_inspect_attempts",
+                    "attempt_count": int(pointer_state.get("attempt_count", 0) or 0),
+                    "source_id": str(source_id),
+                    "project_id": str(pointer_state.get("project_id") or ""),
+                }
                 self._emit_event(
                     sim_state,
                     "closure_source_pointer_exhausted",
@@ -2640,8 +2785,35 @@ class Agent:
                         "project_id": pointer_state.get("project_id"),
                         "source_id": source_id,
                         "attempt_count": pointer_state.get("attempt_count"),
+                        "reason": "nonproductive_inspect_attempts",
                     },
                 )
+            else:
+                exhaustion_key = self._closure_pointer_exhaustion_key(
+                    pointer_state.get("project_id"),
+                    pointer_state.get("blocker_signature"),
+                    source_id,
+                )
+                ex_state = self.project_closure_state.setdefault("source_pointer_exhaustion", {}).setdefault(
+                    exhaustion_key,
+                    {"attempt_count": 0, "exhausted": False, "reason": None, "source_id": str(source_id), "project_id": str(pointer_state.get("project_id") or "")},
+                )
+                ex_state["attempt_count"] = int(ex_state.get("attempt_count", 0) or 0) + 1
+                if int(ex_state.get("attempt_count", 0) or 0) >= 2:
+                    ex_state["exhausted"] = True
+                    ex_state["reason"] = "nonproductive_inspect_attempts"
+                    pointer_state["active"] = False
+                    pointer_state["pointed_source_exhausted"] = True
+                    self._emit_event(
+                        sim_state,
+                        "pointed_source_obligation_exhausted",
+                        {
+                            "project_id": pointer_state.get("project_id"),
+                            "source_id": source_id,
+                            "attempt_count": ex_state.get("attempt_count"),
+                            "reason": "nonproductive_inspect_attempts",
+                        },
+                    )
         recheck_pending = dict(self.communication_state.get("closure_recheck_pending") or {})
         if recheck_pending and str(self._normalize_packet_name(recheck_pending.get("source_id")) or "") == str(source_id):
             recheck_pending["attempt_count"] = int(recheck_pending.get("attempt_count", 0) or 0) + 1
@@ -3710,6 +3882,14 @@ class Agent:
         blockers = []
         info_ids, rule_ids = self._effective_knowledge_for_readiness(sim_state=sim_state)
         epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
+        closure_project_id = self.project_closure_state.get("project_id") if self.project_closure_state.get("active") else None
+        refresh_state = dict(self.project_closure_state.get("last_blocker_relevant_refresh") or {})
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        project_local_refresh_active = bool(
+            closure_project_id
+            and str(refresh_state.get("project_id") or "") == str(closure_project_id)
+            and float(refresh_state.get("expires_at", 0.0) or 0.0) >= now_ts
+        )
         if len(info_ids) < 2:
             blockers.append("insufficient_information_inspection")
         if len(rule_ids) < 1:
@@ -3718,8 +3898,10 @@ class Agent:
             blockers.append("missing_role_grounding")
         if self._cross_role_engineer_dependency_gap(sim_state=sim_state, environment=environment):
             blockers.append("missing_cross_role_engineer_grounding")
-        if epistemic.get("stale_grounding"):
+        if epistemic.get("stale_grounding") and not project_local_refresh_active:
             blockers.append("stale_epistemic_grounding")
+        elif epistemic.get("stale_grounding") and project_local_refresh_active:
+            blockers.append("stale_epistemic_grounding_project_deferred")
 
         if getattr(self, "task_model", None):
             role_rules = [
@@ -6281,6 +6463,7 @@ class Agent:
                 self._emit_event(sim_state, "recovery_pivot_applied", {"origin": pivot_origin, "forced_action": forced_pivot, "from_action": decision.selected_action.value})
         closure_project_id = self._live_project_closure_commitment(environment, sim_state=sim_state)
         if closure_project_id:
+            closure_owner_active = self._is_active_closure_owner(closure_project_id, environment)
             closure_locked = now_ts <= float(self.project_closure_state.get("commit_until", 0.0) or 0.0)
             closure_validation_probe = BrainDecision(
                 selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION,
@@ -6522,7 +6705,39 @@ class Agent:
                             break
                     comm_available = self._can_attempt_verbal_plan_communication(sim_state)
                     stalled_repair = bool(repair_update and repair_update.get("stalled"))
-                    if comm_available:
+                    if closure_owner_active and (pointer_target or recheck_source_id):
+                        defer_reason = "no_blocker_relevant_target_available"
+                        if pointer_target and target_id and str(target_id) != str(pointer_target):
+                            defer_reason = "inspected_target_not_pointed_source"
+                        self._emit_event(
+                            sim_state,
+                            "pointed_source_obligation_deferred",
+                            {
+                                "project_id": closure_project_id,
+                                "blocker_signature": str((pointer or {}).get("blocker_signature") or self.project_closure_state.get("repair_blocker_signature") or ""),
+                                "source_id": pointer_target or recheck_source_id or target_id,
+                                "reason": defer_reason,
+                            },
+                        )
+                        if candidate_target:
+                            rewritten = BrainDecision(
+                                selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                                target_id=candidate_target,
+                                target_zone=decision.target_zone,
+                                goal_update="closure_epistemic_repair",
+                                reason_summary=f"Closure owner retained inspect priority; retargeted to blocker-relevant source {candidate_target}.",
+                                confidence=max(0.74, float(rewritten.confidence or decision.confidence or 0.0)),
+                            )
+                        else:
+                            rewritten = BrainDecision(
+                                selected_action=ExecutableActionType.REASSESS_PLAN,
+                                target_id=closure_project_id,
+                                target_zone=decision.target_zone,
+                                goal_update="closure_epistemic_repair_stalled",
+                                reason_summary=f"No reachable blocker-relevant inspect target for {closure_project_id}; reassess repair path.",
+                                confidence=max(0.68, float(rewritten.confidence or decision.confidence or 0.0)),
+                            )
+                    elif comm_available:
                         rewritten = BrainDecision(
                             selected_action=ExecutableActionType.COMMUNICATE,
                             target_id=None,
@@ -6613,7 +6828,12 @@ class Agent:
                 )
             )
             if not closure_relevant_inspect:
-                fallback_action = ExecutableActionType.COMMUNICATE if self._can_attempt_verbal_plan_communication(sim_state) else ExecutableActionType.WAIT
+                can_specific_support = self._can_offer_blocker_specific_support(teammate_closure_project_id, environment, sim_state=sim_state)
+                fallback_action = (
+                    ExecutableActionType.COMMUNICATE
+                    if can_specific_support and self._can_attempt_verbal_plan_communication(sim_state)
+                    else ExecutableActionType.WAIT
+                )
                 support_signature = f"{teammate_closure_project_id}|{teammate_closure_owner}|{rewritten.selected_action.value}"
                 if self._closure_support_focus_exhausted(support_signature):
                     self._emit_event(
@@ -6636,6 +6856,7 @@ class Agent:
                         "closure_owner": teammate_closure_owner,
                         "from_action": rewritten.selected_action.value,
                         "to_action": fallback_action.value,
+                        "can_specific_support": bool(can_specific_support),
                     },
                 )
                 rewritten = BrainDecision(
@@ -6671,7 +6892,12 @@ class Agent:
             ExecutableActionType.CONSULT_TEAM_ARTIFACT,
             ExecutableActionType.EXTERNALIZE_PLAN,
         }:
-            fallback_action = ExecutableActionType.COMMUNICATE if self._can_attempt_verbal_plan_communication(sim_state) else ExecutableActionType.WAIT
+            can_specific_support = self._can_offer_blocker_specific_support(blocked_support_project, environment, sim_state=sim_state)
+            fallback_action = (
+                ExecutableActionType.COMMUNICATE
+                if can_specific_support and self._can_attempt_verbal_plan_communication(sim_state)
+                else ExecutableActionType.WAIT
+            )
             support_signature = f"{blocked_support_project}|blocked_support|{rewritten.selected_action.value}"
             if self._closure_support_focus_exhausted(support_signature):
                 self._emit_event(
@@ -6688,6 +6914,7 @@ class Agent:
                     "project_id": blocked_support_project,
                     "from_action": rewritten.selected_action.value,
                     "to_action": fallback_action.value,
+                    "can_specific_support": bool(can_specific_support),
                 },
             )
             rewritten = BrainDecision(
@@ -9283,6 +9510,29 @@ class Agent:
             return live_rules
         return self._closure_project_missing_expected_rules(project_id, environment)
 
+    def _closure_pointer_exhaustion_key(self, project_id, blocker_signature, source_id):
+        return f"{str(project_id or '')}|{str(blocker_signature or '')}|{str(source_id or '')}"
+
+    def _is_active_closure_owner(self, project_id, environment):
+        if not project_id:
+            return False
+        project = (getattr(environment, "construction", None) or object()).projects.get(project_id) if getattr(environment, "construction", None) else None
+        if not isinstance(project, dict):
+            return False
+        owner = str(project.get("closure_owner") or "")
+        closure_status = str(project.get("closure_status") or "")
+        return bool(owner == self.name and closure_status in {"assigned", "in_progress"})
+
+    def _can_offer_blocker_specific_support(self, project_id, environment, sim_state=None):
+        if not project_id:
+            return False
+        _match, missing_rules = self._construction_rule_match(project_id, environment=environment, sim_state=sim_state, include_team=True)
+        missing_rules = {normalize_rule_token(r) for r in (missing_rules or []) if normalize_rule_token(r)}
+        if not missing_rules:
+            return False
+        local_rules = {normalize_rule_token(r) for r in self.mental_model["knowledge"].rules if normalize_rule_token(r)}
+        return bool(local_rules.intersection(missing_rules))
+
     def _set_closure_source_pointer(
         self,
         *,
@@ -9299,6 +9549,20 @@ class Agent:
         source_id = self._normalize_packet_name(source_id)
         if not source_id:
             return False
+        exhaustion_key = self._closure_pointer_exhaustion_key(project_id, blocker_signature, source_id)
+        exhausted_state = (state.get("source_pointer_exhaustion", {}) or {}).get(exhaustion_key, {})
+        if exhausted_state.get("exhausted"):
+            self._emit_event(
+                sim_state,
+                "pointed_source_obligation_deferred",
+                {
+                    "project_id": project_id,
+                    "blocker_signature": str(blocker_signature or ""),
+                    "source_id": source_id,
+                    "reason": exhausted_state.get("reason", "exhausted_for_signature"),
+                },
+            )
+            return False
         now_ts = self._tracker_now(sim_state)
         state["source_pointer"] = {
             "project_id": str(project_id),
@@ -9311,6 +9575,8 @@ class Agent:
             "attempt_count": 0,
             "pointed_source_attempt_count": 0,
             "pointed_source_exhausted": False,
+            "last_attempt_tick": None,
+            "last_attempt_reason": None,
             "expires_at": now_ts + max(4.0, float(ttl_s)),
             "active": True,
         }
@@ -9349,6 +9615,11 @@ class Agent:
             return None
         expected_signature = str(blocker_signature or state.get("repair_blocker_signature") or "")
         if expected_signature and str(pointer.get("blocker_signature") or "") != expected_signature:
+            state["source_pointer"] = {}
+            return None
+        exhaustion_key = self._closure_pointer_exhaustion_key(pointer.get("project_id"), pointer.get("blocker_signature"), pointer.get("source_id"))
+        exhausted_state = (state.get("source_pointer_exhaustion", {}) or {}).get(exhaustion_key, {})
+        if exhausted_state.get("exhausted"):
             state["source_pointer"] = {}
             return None
         if int(pointer.get("attempt_count", 0) or 0) >= 2:

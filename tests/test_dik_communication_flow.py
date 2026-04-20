@@ -578,6 +578,121 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         self.assertNotIn("R_PTR_RECOMP", str(owner.project_closure_state.get("repair_blocker_signature") or ""))
         sim.stop()
 
+    def test_closure_owner_pointed_obligation_is_not_demoted_to_generic_communication(self):
+        sim = SimulationState(phases=[])
+        owner = sim.agents[0]
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_OWNER_PTR"]
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        owner.project_closure_state["repair_mode"] = True
+        owner.project_closure_state["repair_blocker_signature"] = f"{project_id}|missing_expected_rule:R_OWNER_PTR|R_OWNER_PTR"
+        owner._set_closure_source_pointer(
+            project_id=project_id,
+            blocker_signature=owner.project_closure_state["repair_blocker_signature"],
+            source_id=f"{owner.role}_Info",
+            missing_rule_ids=["R_OWNER_PTR"],
+            sim_state=sim,
+        )
+        with patch.object(owner, "_construction_action_blockers", return_value=(["missing_expected_rule:R_OWNER_PTR", "missing_validation_rule_knowledge"], project_id)), patch.object(owner, "_classify_validation_blockers", return_value={"epistemic_blockers": ["missing_expected_rule:R_OWNER_PTR", "missing_validation_rule_knowledge"], "non_epistemic_blockers": []}), patch.object(owner, "_can_attempt_verbal_plan_communication", return_value=True):
+            rewritten = owner._apply_policy_pivots(
+                BrainDecision(selected_action=ExecutableActionType.COMMUNICATE, confidence=0.6),
+                sim.environment,
+                sim_state=sim,
+                pivot_origin="unit",
+            )
+        self.assertNotEqual(rewritten.selected_action, ExecutableActionType.COMMUNICATE)
+        if rewritten.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
+            self.assertEqual(rewritten.target_id, f"{owner.role}_Info")
+        sim.stop()
+
+    def test_blocker_relevant_refresh_uses_project_local_stale_deferral(self):
+        sim = SimulationState(phases=[])
+        owner = sim.agents[0]
+        project_id = "Build_Table_A"
+        sim.environment.construction.projects[project_id]["status"] = "ready_for_validation"
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        owner.project_closure_state["last_blocker_relevant_refresh"] = {
+            "project_id": project_id,
+            "source_id": f"{owner.role}_Info",
+            "trigger_source": "unit",
+            "expires_at": sim.time + 5.0,
+        }
+        with patch.object(owner, "_epistemic_sufficiency", return_value={"stale_grounding": True, "role_missing": False}):
+            blockers = owner._build_readiness_blockers(sim.environment, sim_state=sim)
+        self.assertIn("stale_epistemic_grounding_project_deferred", blockers)
+        self.assertNotIn("stale_epistemic_grounding", blockers)
+        sim.stop()
+
+    def test_named_missing_rule_binding_emits_precursor_after_recompute(self):
+        sim = SimulationState(phases=[])
+        owner = sim.agents[0]
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_GREENHOUSE_SUPPORT_DEPENDENCY"]
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        owner._update_closure_repair_state(
+            project_id,
+            ["missing_expected_rule:R_GREENHOUSE_SUPPORT_DEPENDENCY", "missing_validation_rule_knowledge"],
+            sim.environment,
+            sim_state=sim,
+            origin="unit",
+        )
+        owner._recompute_project_state_after_dik_change(
+            sim_state=sim,
+            trigger_source="unit_recompute",
+            changed_information_ids={"some_new_fact"},
+            blocker_relevant=True,
+        )
+        recompute_event = next(
+            (e for e in reversed(sim.logger.recent_events) if e.get("event_type") == "project_state_recomputed_after_dik_change"),
+            {},
+        )
+        payload = recompute_event.get("payload_data", {}) or {}
+        self.assertIn(payload.get("closure_named_rule_binding_status"), {"shrunk", "unchanged"})
+        self.assertTrue(
+            any(
+                str(b).startswith("missing_expected_rule_precursor:R_GREENHOUSE_SUPPORT_DEPENDENCY:")
+                for b in payload.get("closure_blockers", [])
+            )
+        )
+        sim.stop()
+
+    def test_nonproductive_pointed_source_exhaustion_blocks_recommit_for_same_signature(self):
+        sim = SimulationState(phases=[])
+        owner = sim.agents[0]
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_EXH"]
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        signature = f"{project_id}|missing_expected_rule:R_EXH|R_EXH"
+        owner.project_closure_state["repair_mode"] = True
+        owner.project_closure_state["repair_blocker_signature"] = signature
+        ex_key = owner._closure_pointer_exhaustion_key(project_id, signature, f"{owner.role}_Info")
+        owner.project_closure_state.setdefault("source_pointer_exhaustion", {})[ex_key] = {
+            "exhausted": True,
+            "reason": "nonproductive_inspect_attempts",
+            "attempt_count": 2,
+            "source_id": f"{owner.role}_Info",
+            "project_id": project_id,
+        }
+        committed = owner._set_closure_source_pointer(
+            project_id=project_id,
+            blocker_signature=signature,
+            source_id=f"{owner.role}_Info",
+            missing_rule_ids=["R_EXH"],
+            sim_state=sim,
+        )
+        self.assertFalse(committed)
+        self.assertTrue(any(e.get("event_type") == "pointed_source_obligation_deferred" for e in sim.logger.recent_events))
+        sim.stop()
+
     def test_pointed_inspect_passes_blocker_relevant_project_hint_to_epistemic_pipeline(self):
         sim = SimulationState(phases=[])
         owner = sim.agents[0]
