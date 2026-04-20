@@ -604,6 +604,10 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         relevant_call = trigger_mock.call_args_list[-1]
         self.assertTrue(relevant_call.kwargs.get("blocker_relevant"))
         self.assertIn(project_id, set(relevant_call.kwargs.get("relevant_project_ids") or set()))
+        self.assertEqual(
+            relevant_call.kwargs.get("trigger_source"),
+            f"closure_pointed_source_followthrough:{project_id}:{owner.role}_Info",
+        )
         sim.stop()
 
     def test_live_closure_missing_rules_shrink_without_new_provenance_system(self):
@@ -701,6 +705,38 @@ class TestDIKCommunicationFlow(unittest.TestCase):
                 categories.add(category)
         self.assertTrue({"exact_rule", "precursor_info", "source_pointer"}.intersection(categories))
         self.assertTrue(any(e.get("event_type") == "closure_repair_response_category" for e in sim.logger.recent_events))
+        sim.stop()
+
+    def test_no_useful_response_exhausts_strategy_for_signature(self):
+        sim = SimulationState(phases=[])
+        owner = sim.agents[0]
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_NONE"]
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        owner._update_closure_repair_state(project_id, ["missing_expected_rule:R_NONE"], sim.environment, sim_state=sim, origin="unit")
+        signature = owner.project_closure_state.get("repair_blocker_signature")
+        sender = sim.agents[1].name
+        owner.receive_message(
+            {
+                "type": "TPS",
+                "sender": sender,
+                "content": {
+                    "project_id": project_id,
+                    "closure_blocker_signature": signature,
+                    "response_category": "no_useful_response",
+                    "requested_rule_ids": ["R_NONE"],
+                },
+            },
+            from_agent=sender,
+            sim_state=sim,
+        )
+        bucket = owner._closure_repair_retry_bucket(project_id, signature)
+        failed = set(bucket.get("failed_categories", {}).get(sender, []))
+        self.assertTrue(bucket.get("exhausted"))
+        self.assertTrue({"exact_rule", "precursor_info", "source_pointer", "recheck_commitment", "teammate_redirect"}.issubset(failed))
         sim.stop()
 
     def test_recheck_commitment_creates_bounded_reinspect_next_step_for_responder(self):
