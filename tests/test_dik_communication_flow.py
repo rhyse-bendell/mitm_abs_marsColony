@@ -168,6 +168,39 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         self.assertTrue(any(e.get("event_type") == "closure_episode_returned_to_validation" for e in sim.logger.recent_events))
         sim.stop()
 
+    def test_recheck_commitment_message_triggers_blocker_relevant_refresh(self):
+        sim = SimulationState(phases=[])
+        owner, helper = sim.agents[0], sim.agents[1]
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_PTR_REFRESH"]
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        owner._update_closure_repair_state(project_id, ["missing_expected_rule:R_PTR_REFRESH"], sim.environment, sim_state=sim, origin="unit")
+
+        with patch.object(owner, "_refresh_relevant_project_state_after_dik_change") as refresh_mock:
+            owner.receive_message(
+                {
+                    "type": "TPS",
+                    "sender": helper.name,
+                    "content": {
+                        "project_id": project_id,
+                        "closure_blocker_signature": owner.project_closure_state.get("repair_blocker_signature"),
+                        "response_category": "recheck_commitment",
+                        "source_id": f"{owner.role}_Info",
+                        "requested_rule_ids": ["R_PTR_REFRESH"],
+                    },
+                },
+                from_agent=helper.name,
+                sim_state=sim,
+            )
+        refresh_mock.assert_called_once()
+        self.assertEqual(refresh_mock.call_args.kwargs.get("trigger_source"), f"message:{helper.name}:closure_signal")
+        self.assertTrue(refresh_mock.call_args.kwargs.get("blocker_relevant"))
+        self.assertIn(project_id, set(refresh_mock.call_args.kwargs.get("relevant_project_ids") or set()))
+        sim.stop()
+
     def test_source_pointer_response_creates_pointed_reinspect_obligation(self):
         sim = SimulationState(phases=[])
         owner, helper = sim.agents[0], sim.agents[1]
