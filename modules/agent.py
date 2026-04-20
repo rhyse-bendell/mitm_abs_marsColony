@@ -2264,6 +2264,21 @@ class Agent:
                         "source_revisit_deferred",
                         {"current_source_target": explicit_target, "reason": "revisit_cooldown_active", "cooldown_until": float(source_mem.get("revisit_cooldown_until", 0.0) or 0.0)},
                     )
+                elif self._source_exhausted_without_dependency_change(explicit_target, environment, sim_state=sim_state):
+                    rerank_explicit_target = True
+                    self._emit_event(
+                        sim_state,
+                        "source_revisit_deferred",
+                        {
+                            "current_source_target": explicit_target,
+                            "reason": "source_exhausted_dependency_unchanged",
+                        },
+                    )
+                    self._emit_event(
+                        sim_state,
+                        "exhausted_source_reinspect_suppressed",
+                        {"source_id": explicit_target, "reason": "dependency_unchanged"},
+                    )
                 else:
                     selection = self._select_source_access_target(environment, explicit_target, sim_state=sim_state)
                     if selection is not None and selection.get("position") is not None:
@@ -2296,6 +2311,9 @@ class Agent:
             self._set_status("Inspect target resolution failed: no accessible information sources")
             self._emit_event(sim_state, "target_resolution_failed", {"target_type": "information_source", "failure_category": "no_information_source_available"})
             return None, None
+        candidates = [
+            c for c in candidates if not self._source_exhausted_without_dependency_change(c[1], environment, sim_state=sim_state)
+        ] or candidates
 
         # Conservative retargeting away from repeatedly stalled targets when alternatives exist.
         non_stalled = [
@@ -2831,8 +2849,10 @@ class Agent:
             source_state["no_new_dik_streak"] = int(source_state.get("no_new_dik_streak", 0) or 0) + 1
         source_state["inspected"] = bool(self.source_inspection_state.get(source_id) == "inspected")
         exhausted_for_acquisition = bool((not net_dik_changed) and self.source_inspection_state.get(source_id) == "inspected")
+        dependency_signature = self._readiness_dependency_signature(environment, sim_state=sim_state)
         source_state["exhausted"] = exhausted_for_acquisition
         source_state["exhausted_for_acquisition"] = exhausted_for_acquisition
+        source_state["exhausted_dependency_signature"] = dependency_signature if exhausted_for_acquisition else None
         source_state["revisitable_for_verification"] = True
         memory = self.source_memory_state.setdefault(source_id, {})
         memory["ever_inspected"] = True
@@ -2958,6 +2978,7 @@ class Agent:
             "source_id": source_id,
             "dik_changed": net_dik_changed,
             "readiness_changed": readiness_changed,
+            "dependency_signature": dependency_signature,
             "blockers": sorted(readiness_after),
             "blocker_category": blocker_category,
             "outcome": post_inspect_outcome,
@@ -3102,8 +3123,39 @@ class Agent:
         }
         return mapping.get(blocker_category, "inspect_success_readiness_blocked_missing_rule")
 
+    def _readiness_dependency_signature(self, environment, sim_state=None):
+        blockers = tuple(sorted(self._build_readiness_blockers(environment, sim_state=sim_state)))
+        data_ids, info_ids, knowledge_ids = self._held_dik_ids()
+        phase_idx = int(getattr(getattr(sim_state, "environment", None), "current_phase_index", 0) or 0)
+        return f"phase:{phase_idx}|b:{'|'.join(blockers)}|d:{len(data_ids)}|i:{len(info_ids)}|k:{len(knowledge_ids)}"
+
+    def _source_exhausted_without_dependency_change(self, source_id, environment, sim_state=None):
+        source_state = self.source_exhaustion_state.get(source_id, {})
+        exhausted = bool(source_state.get("exhausted_for_acquisition", source_state.get("exhausted")))
+        if not exhausted:
+            return False
+        signature = self._readiness_dependency_signature(environment, sim_state=sim_state)
+        exhausted_on = str(source_state.get("exhausted_dependency_signature") or "")
+        return bool(exhausted_on and exhausted_on == signature)
+
     def _choose_post_inspect_followup_decision(self, environment, sim_state=None):
         handoff = dict(self.post_inspect_handoff or {})
+        if (
+            handoff.get("pending")
+            and not bool(handoff.get("dik_changed"))
+            and not bool(handoff.get("readiness_changed"))
+            and str(handoff.get("source_id") or "")
+            and self._source_exhausted_without_dependency_change(str(handoff.get("source_id")), environment, sim_state=sim_state)
+        ):
+            self._emit_event(
+                sim_state,
+                "exhausted_source_reinspect_suppressed",
+                {
+                    "source_id": str(handoff.get("source_id")),
+                    "reason": "inspect_success_without_readiness_change_and_dependency_static",
+                },
+            )
+            self.post_inspect_handoff["pending"] = False
         local_evidence = self._local_epistemic_evidence(environment, sim_state=sim_state, handoff=handoff)
         critical_sources = self._critical_unmet_source_targets(sim_state, environment)
         critical_sources = {
@@ -3167,7 +3219,7 @@ class Agent:
         if role_source in environment.knowledge_packets and (role_missing or role_unseen):
             role_mem = self.source_memory_state.get(role_source, {})
             role_cooldown_ready = float(role_mem.get("revisit_cooldown_until", 0.0) or 0.0) <= now_ts
-            if role_cooldown_ready:
+            if role_cooldown_ready and not self._source_exhausted_without_dependency_change(role_source, environment, sim_state=sim_state):
                 return BrainDecision(
                     selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
                     target_id=role_source,
@@ -3186,7 +3238,12 @@ class Agent:
             cooldown_ready = float(preferred_mem.get("revisit_cooldown_until", 0.0) or 0.0) <= now_ts
             revisitable = bool(preferred_mem.get("revisitable_for_verification", True))
             preferred_allowed, _ = self._agent_can_target_information_source(preferred, environment)
-            if preferred in environment.knowledge_packets and preferred_allowed and (cooldown_ready or revisitable):
+            if (
+                preferred in environment.knowledge_packets
+                and preferred_allowed
+                and (cooldown_ready or revisitable)
+                and not self._source_exhausted_without_dependency_change(preferred, environment, sim_state=sim_state)
+            ):
                 return BrainDecision(
                     selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
                     target_id=preferred,
@@ -6829,11 +6886,42 @@ class Agent:
             )
             if not closure_relevant_inspect:
                 can_specific_support = self._can_offer_blocker_specific_support(teammate_closure_project_id, environment, sim_state=sim_state)
+                owner_stalled = False
+                if sim_state is not None:
+                    owner_agent = next((a for a in getattr(sim_state, "agents", []) if a.name == teammate_closure_owner), None)
+                    if owner_agent is not None:
+                        owner_ctx = sim_state.brain_context_builder.build(sim_state, owner_agent)
+                        owner_project_actions = [
+                            a
+                            for a in list(getattr(owner_ctx, "action_affordances", []) or [])
+                            if str(a.get("action_type")) in {
+                                ExecutableActionType.TRANSPORT_RESOURCES.value,
+                                ExecutableActionType.START_CONSTRUCTION.value,
+                                ExecutableActionType.CONTINUE_CONSTRUCTION.value,
+                                ExecutableActionType.VALIDATE_CONSTRUCTION.value,
+                                ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value,
+                            }
+                            and str(a.get("target_id") or "") in {"", str(teammate_closure_project_id)}
+                        ]
+                        owner_stalled = not bool(owner_project_actions)
                 fallback_action = (
                     ExecutableActionType.COMMUNICATE
                     if can_specific_support and self._can_attempt_verbal_plan_communication(sim_state)
                     else ExecutableActionType.WAIT
                 )
+                if owner_stalled and not can_specific_support:
+                    self._emit_event(
+                        sim_state,
+                        "closure_support_focus_deferred_owner_stalled",
+                        {
+                            "origin": pivot_origin,
+                            "closure_project_id": teammate_closure_project_id,
+                            "closure_owner": teammate_closure_owner,
+                            "from_action": rewritten.selected_action.value,
+                            "reason": "owner_has_no_executable_project_action_and_helper_has_no_specific_support",
+                        },
+                    )
+                    fallback_action = rewritten.selected_action
                 support_signature = f"{teammate_closure_project_id}|{teammate_closure_owner}|{rewritten.selected_action.value}"
                 if self._closure_support_focus_exhausted(support_signature):
                     self._emit_event(
@@ -6859,13 +6947,14 @@ class Agent:
                         "can_specific_support": bool(can_specific_support),
                     },
                 )
-                rewritten = BrainDecision(
-                    selected_action=fallback_action,
-                    target_id=teammate_closure_owner if fallback_action == ExecutableActionType.COMMUNICATE else None,
-                    goal_update="support_active_closure",
-                    reason_summary=f"Teammate closure support: suppress unrelated {decision.selected_action.value}.",
-                    confidence=max(0.74, float(rewritten.confidence or decision.confidence or 0.0)),
-                )
+                if fallback_action != rewritten.selected_action:
+                    rewritten = BrainDecision(
+                        selected_action=fallback_action,
+                        target_id=teammate_closure_owner if fallback_action == ExecutableActionType.COMMUNICATE else None,
+                        goal_update="support_active_closure",
+                        reason_summary=f"Teammate closure support: suppress unrelated {decision.selected_action.value}.",
+                        confidence=max(0.74, float(rewritten.confidence or decision.confidence or 0.0)),
+                    )
         blocked_support_project = None
         for project in getattr(environment.construction, "projects", {}).values():
             if not isinstance(project, dict):

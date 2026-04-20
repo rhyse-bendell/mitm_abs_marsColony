@@ -88,6 +88,20 @@ class SimulationState:
         "Normal": 1.0,
         "Fast": 2.0
     }
+    READINESS_RECONCILIATION_TRIGGER_EVENTS = {
+        "source_access_succeeded",
+        "shared_source_access_success",
+        "shared_source_verification_completed",
+        "source_verification_succeeded",
+        "packet_absorption_attempted",
+        "derivation_succeeded",
+        "inspect_success_rule_adopted",
+        "project_state_recomputed_after_dik_change",
+        "construction_progress_updated",
+        "construction_ready_for_validation",
+        "construction_status_updated",
+        "phase_transition",
+    }
 
     def _normalize_mechanism_overrides(self, config, mechanism_defaults=None):
         return normalize_mechanism_override_inputs(config, mechanism_defaults=mechanism_defaults)
@@ -470,6 +484,11 @@ class SimulationState:
         self.logger.register_event_listener(self.metrics.on_event)
         self.interaction_telemetry = InteractionTelemetryBridge(self.logger)
         self.logger.register_event_listener(self.interaction_telemetry.on_event)
+        self._reconciliation_in_progress = False
+        self._readiness_last_executable_actions = {}
+        self._closure_deadlock_state = {}
+        self._closure_deadlock_cycle_limit = int(self.planner_defaults.get("closure_deadlock_cycle_limit", 3) or 3)
+        self.logger.register_event_listener(self._on_readiness_reconciliation_event)
         self.logger.initialize_session_outputs(
             speed=speed,
             flash_mode=self.flash_mode,
@@ -490,6 +509,161 @@ class SimulationState:
                 "execution_metadata": self.execution_metadata,
             },
         )
+
+    def _agent_executable_action_snapshot(self):
+        action_map = {}
+        for agent in self.agents:
+            context = self.brain_context_builder.build(self, agent)
+            action_map[agent.name] = sorted(
+                {
+                    str(a.get("action_type"))
+                    for a in list(getattr(context, "action_affordances", []) or [])
+                    if a.get("action_type")
+                }
+            )
+        return action_map
+
+    def _project_executable_agent_candidates(self, project_id):
+        project_actions = {
+            "transport_resources",
+            "start_construction",
+            "continue_construction",
+            "validate_construction",
+            "repair_or_correct_construction",
+        }
+        candidates = []
+        for agent in self.agents:
+            context = self.brain_context_builder.build(self, agent)
+            affordances = list(getattr(context, "action_affordances", []) or [])
+            project_affordances = [
+                a
+                for a in affordances
+                if str(a.get("action_type")) in project_actions
+                and (str(a.get("target_id") or "") in {"", str(project_id)})
+            ]
+            if project_affordances:
+                score = max(float(a.get("utility", 0.0) or 0.0) for a in project_affordances)
+                candidates.append((score, agent, project_affordances))
+        candidates.sort(key=lambda row: row[0], reverse=True)
+        return candidates
+
+    def _recover_closure_deadlock(self, *, trigger_event=None):
+        recovered = 0
+        reassigned = 0
+        projects = getattr(self.environment.construction, "projects", {})
+        for project_id, project in projects.items():
+            if not isinstance(project, dict):
+                continue
+            if str(project.get("status")) != "ready_for_validation":
+                self._closure_deadlock_state.pop(str(project_id), None)
+                continue
+            owner_name = str(project.get("closure_owner") or "")
+            closure_status = str(project.get("closure_status") or "")
+            if not owner_name or closure_status not in {"assigned", "in_progress"}:
+                self._closure_deadlock_state.pop(str(project_id), None)
+                continue
+            owner = next((a for a in self.agents if a.name == owner_name), None)
+            if owner is None:
+                self._closure_deadlock_state.pop(str(project_id), None)
+                continue
+
+            candidates = self._project_executable_agent_candidates(project_id)
+            owner_can_act = any(row[1] is owner for row in candidates)
+            repair_mode = bool(getattr(owner, "project_closure_state", {}).get("repair_mode"))
+            state = self._closure_deadlock_state.setdefault(str(project_id), {"stagnant_cycles": 0, "last_owner": owner_name})
+            if owner_can_act and not repair_mode:
+                state["stagnant_cycles"] = 0
+                state["last_owner"] = owner_name
+                continue
+            state["stagnant_cycles"] = int(state.get("stagnant_cycles", 0) or 0) + 1
+            state["last_owner"] = owner_name
+            if int(state["stagnant_cycles"]) < max(1, self._closure_deadlock_cycle_limit):
+                continue
+
+            recovered += 1
+            best_candidate = next((row for row in candidates if row[1] is not owner), None)
+            if best_candidate is not None:
+                _, best_agent, affordances = best_candidate
+                self.environment.construction.release_project_closure(project_id, agent_name=owner_name)
+                self.environment.construction.claim_project_closure(project_id, best_agent.name, now_ts=self.time)
+                reassigned += 1
+                self.logger.log_event(
+                    self.time,
+                    "closure_reassignment_performed",
+                    {
+                        "project_id": str(project_id),
+                        "from_owner": owner_name,
+                        "to_owner": best_agent.name,
+                        "trigger_event": trigger_event,
+                        "stagnant_cycles": int(state["stagnant_cycles"]),
+                        "reason": "owner_no_executable_project_action",
+                        "candidate_actions": [str(a.get("action_type")) for a in affordances],
+                    },
+                )
+            else:
+                self.environment.construction.release_project_closure(project_id, agent_name=owner_name)
+                self.logger.log_event(
+                    self.time,
+                    "closure_reopened_for_support",
+                    {
+                        "project_id": str(project_id),
+                        "from_owner": owner_name,
+                        "trigger_event": trigger_event,
+                        "stagnant_cycles": int(state["stagnant_cycles"]),
+                        "reason": "owner_no_executable_project_action_and_no_alternate_ready_owner",
+                    },
+                )
+            state["stagnant_cycles"] = 0
+        return recovered, reassigned
+
+    def _run_readiness_reconciliation(self, trigger_event):
+        before = dict(self._readiness_last_executable_actions or self._agent_executable_action_snapshot())
+        witness_progress = {}
+        for agent in self.agents:
+            if hasattr(agent, "_refresh_goal_stack_view"):
+                agent._refresh_goal_stack_view()
+            if hasattr(agent, "_refresh_relevant_project_state_after_dik_change"):
+                agent._refresh_relevant_project_state_after_dik_change(
+                    sim_state=self,
+                    trigger_source=f"reconciliation:{trigger_event}",
+                    changed_rule_ids=set(),
+                    changed_information_ids=set(),
+                    changed_data_ids=set(),
+                    relevant_project_ids=None,
+                    blocker_relevant=False,
+                )
+            source_state = getattr(agent, "source_inspection_state", {}) or {}
+            witness_progress[agent.name] = int(sum(1 for _, status in source_state.items() if str(status) == "inspected"))
+        after = self._agent_executable_action_snapshot()
+        self._readiness_last_executable_actions = after
+        changed_agents = sorted([name for name in after.keys() if before.get(name) != after.get(name)])
+        recovered, reassigned = self._recover_closure_deadlock(trigger_event=trigger_event)
+        self.logger.log_event(
+            self.time,
+            "readiness_reconciled",
+            {
+                "trigger_event": trigger_event,
+                "changed_agent_count": len(changed_agents),
+                "changed_agents": changed_agents,
+                "unchanged_agent_count": max(0, len(after) - len(changed_agents)),
+                "witness_source_steps_by_agent": witness_progress,
+                "closure_deadlock_recoveries": int(recovered),
+                "closure_reassignments": int(reassigned),
+                "had_change": bool(changed_agents),
+            },
+        )
+
+    def _on_readiness_reconciliation_event(self, event):
+        if self._reconciliation_in_progress:
+            return
+        event_type = str(event.get("event_type") or "")
+        if event_type not in self.READINESS_RECONCILIATION_TRIGGER_EVENTS:
+            return
+        self._reconciliation_in_progress = True
+        try:
+            self._run_readiness_reconciliation(event_type)
+        finally:
+            self._reconciliation_in_progress = False
 
 
     def _agent_manifest_row(self, agent):
