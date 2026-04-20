@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from modules.action_schema import BrainDecision, ExecutableActionType
@@ -241,6 +242,71 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         self.assertEqual(pivoted.selected_action, ExecutableActionType.INSPECT_INFORMATION_SOURCE)
         self.assertEqual(pivoted.target_id, f"{owner.role}_Info")
         self.assertTrue(any(e.get("event_type") == "closure_source_pointer_committed" for e in sim.logger.recent_events))
+        sim.stop()
+
+    def test_simulator_readiness_reconciliation_triggers_on_dik_events(self):
+        sim = SimulationState(phases=[])
+        sim.logger.log_event(sim.time, "derivation_succeeded", {"agent": sim.agents[0].name, "rule_id": "R_UNIT"})
+        reconciliation_events = [e for e in sim.logger.recent_events if e.get("event_type") == "readiness_reconciled"]
+        self.assertTrue(reconciliation_events)
+        self.assertEqual(reconciliation_events[-1]["payload_data"].get("trigger_event"), "derivation_succeeded")
+        sim.stop()
+
+    def test_exhausted_source_reinspect_is_suppressed_until_dependency_changes(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        signature = agent._readiness_dependency_signature(sim.environment, sim_state=sim)
+        agent.source_exhaustion_state["Team_Info"] = {
+            "exhausted": True,
+            "exhausted_for_acquisition": True,
+            "exhausted_dependency_signature": signature,
+        }
+        agent.post_inspect_handoff = {
+            "pending": True,
+            "source_id": "Team_Info",
+            "dik_changed": False,
+            "readiness_changed": False,
+            "expires_at": sim.time + 2.0,
+        }
+        decision = agent._choose_post_inspect_followup_decision(sim.environment, sim_state=sim)
+        self.assertFalse(
+            decision.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE and decision.target_id == "Team_Info"
+        )
+        self.assertTrue(any(e.get("event_type") == "exhausted_source_reinspect_suppressed" for e in sim.logger.recent_events))
+
+        agent.source_exhaustion_state["Team_Info"]["exhausted_dependency_signature"] = "changed"
+        decision_after_dependency_change = agent._choose_post_inspect_followup_decision(sim.environment, sim_state=sim)
+        self.assertIsNotNone(decision_after_dependency_change.selected_action)
+        sim.stop()
+
+    def test_closure_deadlock_recovery_reassigns_when_owner_cannot_act(self):
+        sim = SimulationState(phases=[])
+        owner, helper = sim.agents[0], sim.agents[1]
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["closure_owner"] = owner.name
+        project["closure_status"] = "assigned"
+
+        def _fake_build(_sim_state, agent):
+            if agent.name == owner.name:
+                return SimpleNamespace(action_affordances=[])
+            return SimpleNamespace(
+                action_affordances=[
+                    {"action_type": ExecutableActionType.VALIDATE_CONSTRUCTION.value, "target_id": project_id, "utility": 0.9}
+                ]
+            )
+
+        with patch.object(sim.brain_context_builder, "build", side_effect=_fake_build):
+            for _ in range(3):
+                sim.logger.log_event(sim.time, "construction_ready_for_validation", {"project_id": project_id})
+
+        self.assertTrue(
+            any(
+                e.get("event_type") in {"closure_reassignment_performed", "closure_reopened_for_support"}
+                for e in sim.logger.recent_events
+            )
+        )
         sim.stop()
 
     def test_closure_owner_not_reassigned_during_epistemic_repair(self):

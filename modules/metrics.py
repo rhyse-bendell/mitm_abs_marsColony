@@ -250,6 +250,13 @@ class MetricsCollector:
             self.breakdown_counts["stall_events_by_category"][payload.get("stall_reason", "unknown")] += 1
         if event_type in {"repeated_action_loop_detected", "repeated_plan_loop_detected", "repeated_target_failure_detected", "repeated_backend_fallback_detected"}:
             self.breakdown_counts["loop_detections"][event_type] += 1
+        if event_type == "readiness_reconciled":
+            self.breakdown_counts["readiness_reconciliation"]["triggered"] += 1
+            if bool(payload.get("had_change")):
+                self.breakdown_counts["readiness_reconciliation"]["changed_executable_actions"] += 1
+            else:
+                self.breakdown_counts["readiness_reconciliation"]["no_change"] += 1
+            self.breakdown_counts["readiness_reconciliation"]["closure_deadlock_recoveries"] += int(payload.get("closure_deadlock_recoveries", 0) or 0)
 
         if event_type == "llm_response_received":
             self.breakdown_counts["planner_llm_outcomes"]["llm_response_received"] += 1
@@ -1047,11 +1054,29 @@ class MetricsCollector:
                     "source_access_retargeted_alternate_slot_count": int(self.events_by_type.get("source_access_retargeted_alternate_slot", 0)),
                     "source_access_unstuck_backoff_count": int(self.events_by_type.get("source_access_unstuck_backoff", 0)),
                     "private_source_revisit_suppressed_count": int(self.events_by_type.get("source_revisit_suppressed", 0)),
+                    "exhausted_source_reinspect_suppressed_count": int(self.events_by_type.get("exhausted_source_reinspect_suppressed", 0)),
                     "source_exhausted_count": int(self.events_by_type.get("source_exhausted_for_agent", 0)),
                     "movement_between_knowledge_locations_count": int(self.events_by_type.get("movement_between_knowledge_locations", 0)),
                     "externalization_target_selection_count": int(self.events_by_type.get("moving_to_externalization_site", 0)),
                     "mismatch_detection_suppressed_not_ready_count": int(self.events_by_type.get("mismatch_detection_skipped_not_ready", 0)),
                     "repair_trigger_suppressed_not_ready_count": int(self.events_by_type.get("repair_trigger_suppressed_not_ready", 0)),
+                },
+                "readiness_reconciliation_diagnostics": {
+                    "readiness_reconciliations_triggered": int(self.events_by_type.get("readiness_reconciled", 0)),
+                    "readiness_reconciliations_changed_executable_actions": int(
+                        self.breakdown_counts.get("readiness_reconciliation", {}).get("changed_executable_actions", 0)
+                    ),
+                    "readiness_reconciliations_no_change": int(
+                        self.breakdown_counts.get("readiness_reconciliation", {}).get("no_change", 0)
+                    ),
+                    "closure_deadlock_recoveries": int(
+                        self.breakdown_counts.get("readiness_reconciliation", {}).get("closure_deadlock_recoveries", 0)
+                    ),
+                    "closure_reassignments": int(self.events_by_type.get("closure_reassignment_performed", 0)),
+                    "closure_reopened_for_support_count": int(self.events_by_type.get("closure_reopened_for_support", 0)),
+                    "productive_action_unlocked_after_inspect_source_or_derivation": int(
+                        self.events_by_type.get("inspect_success_readiness_changed", 0)
+                    ),
                 },
                 "readiness_world_state_alignment": {
                     "execution_readiness_passed_count": int(self.events_by_type.get("execution_readiness_passed", 0)),
