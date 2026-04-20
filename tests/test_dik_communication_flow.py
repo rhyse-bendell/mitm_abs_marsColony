@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from modules.action_schema import BrainDecision, ExecutableActionType
 from modules.simulation import SimulationState
@@ -165,6 +166,48 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         self.assertFalse(owner.project_closure_state.get("repair_mode"))
         self.assertTrue(any(e.get("event_type") == "project_state_recomputed_after_dik_change" for e in sim.logger.recent_events))
         self.assertTrue(any(e.get("event_type") == "closure_episode_returned_to_validation" for e in sim.logger.recent_events))
+        sim.stop()
+
+    def test_source_pointer_response_creates_pointed_reinspect_obligation(self):
+        sim = SimulationState(phases=[])
+        owner, helper = sim.agents[0], sim.agents[1]
+        owner.position = helper.position = (8.0, 6.6)
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_PTR"]
+        sim.environment.construction.update_project_provenance(project_id, event="unit_setup", held_rule_ids=[], sim_time=sim.time)
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        owner._update_closure_repair_state(project_id, ["missing_expected_rule:R_PTR"], sim.environment, sim_state=sim, origin="unit")
+        owner.receive_message(
+            {
+                "type": "TPS",
+                "sender": helper.name,
+                "content": {
+                    "project_id": project_id,
+                    "closure_blocker_signature": owner.project_closure_state.get("repair_blocker_signature"),
+                    "response_category": "source_pointer",
+                    "source_id": f"{owner.role}_Info",
+                    "requested_rule_ids": ["R_PTR"],
+                },
+            },
+            from_agent=helper.name,
+            sim_state=sim,
+        )
+        pointer = owner._active_closure_source_pointer(project_id=project_id, sim_state=sim)
+        self.assertIsNotNone(pointer)
+        self.assertEqual(pointer.get("source_id"), f"{owner.role}_Info")
+        with patch.object(owner, "_construction_action_blockers", return_value=(["missing_expected_rule:R_PTR"], project_id)):
+            pivoted = owner._apply_policy_pivots(
+                BrainDecision(selected_action=ExecutableActionType.COMMUNICATE, confidence=0.6),
+                sim.environment,
+                sim_state=sim,
+                pivot_origin="unit",
+            )
+        self.assertEqual(pivoted.selected_action, ExecutableActionType.INSPECT_INFORMATION_SOURCE)
+        self.assertEqual(pivoted.target_id, f"{owner.role}_Info")
+        self.assertTrue(any(e.get("event_type") == "closure_source_pointer_committed" for e in sim.logger.recent_events))
         sim.stop()
 
     def test_closure_owner_not_reassigned_during_epistemic_repair(self):

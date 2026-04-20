@@ -34,8 +34,9 @@ def normalize_mechanism_override_inputs(
       (normalized_overrides, legacy_traits_alias, explicit_mechanism_overrides)
 
     Precedence:
-      1) legacy traits alias (backward compatibility)
-      2) explicit mechanism_overrides
+      1) baseline mechanism defaults (used only to detect neutral UI autofill)
+      2) construct-derived effects (applied by ConstructMapper)
+      3) explicit mechanism_overrides (including legacy traits alias)
 
     Neutral auto-filled defaults are dropped unless explicitly forced via:
       - mechanism_overrides_explicit: true

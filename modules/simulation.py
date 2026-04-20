@@ -92,6 +92,19 @@ class SimulationState:
     def _normalize_mechanism_overrides(self, config, mechanism_defaults=None):
         return normalize_mechanism_override_inputs(config, mechanism_defaults=mechanism_defaults)
 
+    def _normalize_legacy_traits_alias(self, config):
+        if not isinstance(config, dict):
+            return config
+        normalized = dict(config)
+        traits_payload = normalized.pop("traits", None)
+        if isinstance(traits_payload, dict) and traits_payload:
+            merged = dict(normalized.get("mechanism_overrides", {}) or {})
+            for key, value in traits_payload.items():
+                if key not in merged and value is not None:
+                    merged[key] = value
+            normalized["mechanism_overrides"] = merged
+        return normalized
+
     def __init__(
         self,
         agent_configs=None,
@@ -360,6 +373,7 @@ class SimulationState:
 
         for config in agent_configs:
             config = self._resolve_agent_config_with_template(config)
+            config = self._normalize_legacy_traits_alias(config)
             role_id = config.get("role", config.get("label", "Agent"))
             position = self.environment.get_spawn_point(role_id)
             merged_planner_config = dict(self.planner_defaults)
