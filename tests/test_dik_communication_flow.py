@@ -578,6 +578,34 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         self.assertNotIn("R_PTR_RECOMP", str(owner.project_closure_state.get("repair_blocker_signature") or ""))
         sim.stop()
 
+    def test_pointed_inspect_passes_blocker_relevant_project_hint_to_epistemic_pipeline(self):
+        sim = SimulationState(phases=[])
+        owner = sim.agents[0]
+        project_id = "Build_Table_A"
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_PTR_HINT"]
+        self._prime_readiness_without_rules(sim, owner)
+        owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        owner._update_closure_repair_state(project_id, ["missing_expected_rule:R_PTR_HINT"], sim.environment, sim_state=sim, origin="unit")
+        owner._set_closure_source_pointer(
+            project_id=project_id,
+            blocker_signature=owner.project_closure_state.get("repair_blocker_signature"),
+            source_id=f"{owner.role}_Info",
+            missing_rule_ids=["R_PTR_HINT"],
+            sim_state=sim,
+        )
+        selection = owner._select_source_access_target(sim.environment, f"{owner.role}_Info", sim_state=sim)
+        if selection and selection.get("position") is not None:
+            owner.position = tuple(selection["position"])
+        with patch.object(owner, "_trigger_epistemic_update_pipeline") as trigger_mock:
+            owner._inspect_source(sim.environment, f"{owner.role}_Info", sim_state=sim)
+        self.assertGreaterEqual(trigger_mock.call_count, 1)
+        relevant_call = trigger_mock.call_args_list[-1]
+        self.assertTrue(relevant_call.kwargs.get("blocker_relevant"))
+        self.assertIn(project_id, set(relevant_call.kwargs.get("relevant_project_ids") or set()))
+        sim.stop()
+
     def test_live_closure_missing_rules_shrink_without_new_provenance_system(self):
         sim = SimulationState(phases=[])
         owner = sim.agents[0]
@@ -673,6 +701,33 @@ class TestDIKCommunicationFlow(unittest.TestCase):
                 categories.add(category)
         self.assertTrue({"exact_rule", "precursor_info", "source_pointer"}.intersection(categories))
         self.assertTrue(any(e.get("event_type") == "closure_repair_response_category" for e in sim.logger.recent_events))
+        sim.stop()
+
+    def test_recheck_commitment_creates_bounded_reinspect_next_step_for_responder(self):
+        sim = SimulationState(phases=[])
+        requester, responder = sim.agents[0], sim.agents[1]
+        project_id = "Build_Table_A"
+        sim.environment.construction.projects[project_id]["status"] = "ready_for_validation"
+        sim.environment.construction.projects[project_id]["expected_rules"] = ["R_RECHECK"]
+        self._prime_readiness_without_rules(sim, responder)
+        responder._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
+        responder._update_closure_repair_state(project_id, ["missing_expected_rule:R_RECHECK"], sim.environment, sim_state=sim, origin="unit")
+        responder.receive_message(
+            {
+                "type": "TKRQ",
+                "sender": requester.name,
+                "project_id": project_id,
+                "closure_blocker_signature": responder.project_closure_state.get("repair_blocker_signature"),
+                "request_modes": ["recheck_commitment"],
+                "content": ["rule:R_RECHECK"],
+            },
+            from_agent=requester.name,
+            sim_state=sim,
+        )
+        pending = dict(responder.communication_state.get("closure_recheck_pending") or {})
+        self.assertEqual(pending.get("recipient"), requester.name)
+        self.assertEqual(pending.get("source_id"), f"{responder.role}_Info")
+        self.assertEqual(responder.progress_tracker.get("forced_pivot"), ExecutableActionType.INSPECT_INFORMATION_SOURCE.value)
         sim.stop()
 
     def test_blocked_project_support_pressure_reroutes_unrelated_inspect(self):

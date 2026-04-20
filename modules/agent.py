@@ -225,6 +225,7 @@ class Agent:
             "repair_mode": False,
             "repair_blocker_signature": None,
             "repair_unchanged_count": 0,
+            "repair_missing_rule_ids": [],
             "repair_retry_state": {},
             "source_pointer": {},
             "support_focus_state": {"last_signature": None, "unchanged_count": 0, "exhausted": False},
@@ -453,6 +454,8 @@ class Agent:
             "last_exchange_effects": {},
             "last_received_epistemic_time": -1.0,
             "last_received_epistemic_types": [],
+            "preferred_recipient": None,
+            "closure_recheck_pending": {},
         }
         self.team_plan_state = {
             "last_adopted_plan_id": None,
@@ -616,6 +619,7 @@ class Agent:
                 "repair_mode": False,
                 "repair_blocker_signature": None,
                 "repair_unchanged_count": 0,
+                "repair_missing_rule_ids": [],
                 "repair_retry_state": {},
                 "source_pointer": {},
                 "support_focus_state": {"last_signature": None, "unchanged_count": 0, "exhausted": False},
@@ -643,6 +647,7 @@ class Agent:
         state["repair_mode"] = False
         state["repair_blocker_signature"] = None
         state["repair_unchanged_count"] = 0
+        state["repair_missing_rule_ids"] = []
         state["repair_retry_state"] = {}
         state["source_pointer"] = {}
         state["support_focus_state"] = {"last_signature": None, "unchanged_count": 0, "exhausted": False}
@@ -1120,6 +1125,7 @@ class Agent:
                 self.project_closure_state["repair_mode"] = False
                 self.project_closure_state["repair_blocker_signature"] = None
                 self.project_closure_state["repair_unchanged_count"] = 0
+                self.project_closure_state["repair_missing_rule_ids"] = []
                 closure_unblocked = True
                 self._emit_event(
                     sim_state,
@@ -2556,7 +2562,31 @@ class Agent:
         held_data_ids = {d.id for d in self.mental_model["data"]}
         verified_data_ids = sorted(packet_data_ids & held_data_ids)
         verified_information_ids = sorted(packet_info_ids & after_ids)
-        self._trigger_epistemic_update_pipeline(sim_state=sim_state, trigger_source=source_id)
+        closure_project_id = self.project_closure_state.get("project_id") if self.project_closure_state.get("active") else None
+        active_closure_pointer = self._active_closure_source_pointer(project_id=closure_project_id, sim_state=sim_state) if closure_project_id else None
+        pointer_match = bool(
+            active_closure_pointer
+            and str(active_closure_pointer.get("source_id") or "") == str(source_id)
+        )
+        blocker_relevant_inspect = bool(
+            closure_project_id
+            and (
+                pointer_match
+                or self._is_closure_relevant_inspect_target(
+                    source_id,
+                    closure_project_id,
+                    environment,
+                    blockers=self._build_readiness_blockers(environment, sim_state=sim_state),
+                    sim_state=sim_state,
+                )
+            )
+        )
+        self._trigger_epistemic_update_pipeline(
+            sim_state=sim_state,
+            trigger_source=source_id,
+            relevant_project_ids={closure_project_id} if closure_project_id and blocker_relevant_inspect else None,
+            blocker_relevant=blocker_relevant_inspect,
+        )
         derivation_ids_triggered = sorted(set(self.executed_derivations) - derivations_before)
         after_rules = set(self.mental_model["knowledge"].rules)
         new_rule_ids = sorted(after_rules - before_rules)
@@ -2580,6 +2610,16 @@ class Agent:
             pointer_state["attempt_count"] = int(pointer_state.get("attempt_count", 0) or 0) + 1
             if net_dik_changed:
                 pointer_state["active"] = False
+                self._emit_event(
+                    sim_state,
+                    "closure_source_pointer_satisfied",
+                    {
+                        "project_id": pointer_state.get("project_id"),
+                        "source_id": source_id,
+                        "attempt_count": pointer_state.get("attempt_count"),
+                        "dik_changed": True,
+                    },
+                )
             elif int(pointer_state.get("attempt_count", 0) or 0) >= 2:
                 pointer_state["active"] = False
                 self._emit_event(
@@ -2591,6 +2631,13 @@ class Agent:
                         "attempt_count": pointer_state.get("attempt_count"),
                     },
                 )
+        recheck_pending = dict(self.communication_state.get("closure_recheck_pending") or {})
+        if recheck_pending and str(self._normalize_packet_name(recheck_pending.get("source_id")) or "") == str(source_id):
+            recheck_pending["attempt_count"] = int(recheck_pending.get("attempt_count", 0) or 0) + 1
+            if net_dik_changed or int(recheck_pending.get("attempt_count", 0) or 0) >= 2:
+                self.communication_state["closure_recheck_pending"] = {}
+            else:
+                self.communication_state["closure_recheck_pending"] = recheck_pending
         source_state = self.source_exhaustion_state.setdefault(source_id, {"inspect_count": 0, "last_dik_changed": None, "exhausted": False})
         source_state["inspect_count"] = int(source_state.get("inspect_count", 0)) + 1
         source_state["last_dik_changed"] = bool(net_dik_changed)
@@ -6261,6 +6308,30 @@ class Agent:
                 )
             pointer = self._active_closure_source_pointer(project_id=closure_project_id, sim_state=sim_state)
             pointer_target = str(pointer.get("source_id") or "") if pointer else ""
+            recheck_pending = dict(self.communication_state.get("closure_recheck_pending") or {})
+            recheck_active = bool(
+                recheck_pending
+                and str(recheck_pending.get("project_id") or "") == str(closure_project_id)
+                and (not recheck_pending.get("expires_at") or float(recheck_pending.get("expires_at", 0.0) or 0.0) >= now_ts)
+            )
+            if recheck_pending and not recheck_active:
+                self.communication_state["closure_recheck_pending"] = {}
+            recheck_source_id = self._normalize_packet_name(recheck_pending.get("source_id")) if recheck_active else ""
+            if (
+                closure_locked
+                and closure_epistemic_blocked
+                and recheck_active
+                and recheck_source_id
+                and rewritten.selected_action != ExecutableActionType.INSPECT_INFORMATION_SOURCE
+            ):
+                rewritten = BrainDecision(
+                    selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                    target_id=recheck_source_id,
+                    target_zone=decision.target_zone,
+                    goal_update="closure_epistemic_repair_recheck",
+                    reason_summary=f"Closure recheck commitment active; re-inspect {recheck_source_id}.",
+                    confidence=max(0.79, float(rewritten.confidence or decision.confidence or 0.0)),
+                )
             if (
                 closure_locked
                 and closure_epistemic_blocked
@@ -6387,6 +6458,8 @@ class Agent:
                     blockers=blocker_classification["epistemic_blockers"],
                     sim_state=sim_state,
                 )
+                if recheck_active and recheck_source_id and str(target_id or "") == str(recheck_source_id):
+                    blocker_relevant = True
                 if not blocker_relevant:
                     candidate_target = None
                     for candidate in self._candidate_information_sources(environment, sim_state=sim_state):
@@ -6444,6 +6517,7 @@ class Agent:
                 self.project_closure_state["repair_mode"] = False
                 self.project_closure_state["repair_blocker_signature"] = None
                 self.project_closure_state["repair_unchanged_count"] = 0
+                self.project_closure_state["repair_missing_rule_ids"] = []
                 self._emit_event(
                     sim_state,
                     "project_closure_commitment_preserved",
@@ -7376,6 +7450,7 @@ class Agent:
                     self.project_closure_state["repair_mode"] = False
                     self.project_closure_state["repair_blocker_signature"] = None
                     self.project_closure_state["repair_unchanged_count"] = 0
+                    self.project_closure_state["repair_missing_rule_ids"] = []
                 payload = {"planner_action_type": decision.selected_action.value, "project_id": project_id}
                 goal_id = self._canonical_readiness_goal_id()
                 if goal_id:
@@ -9216,6 +9291,18 @@ class Agent:
         expected_signature = str(blocker_signature or state.get("repair_blocker_signature") or "")
         if expected_signature and str(pointer.get("blocker_signature") or "") != expected_signature:
             return None
+        if int(pointer.get("attempt_count", 0) or 0) >= 2:
+            state["source_pointer"] = {}
+            self._emit_event(
+                sim_state,
+                "closure_source_pointer_exhausted",
+                {
+                    "project_id": pointer.get("project_id"),
+                    "source_id": pointer.get("source_id"),
+                    "attempt_count": int(pointer.get("attempt_count", 0) or 0),
+                },
+            )
+            return None
         return pointer
 
     def _is_closure_relevant_inspect_target(self, source_id, project_id, environment, *, blockers=None, sim_state=None):
@@ -9390,14 +9477,15 @@ class Agent:
         state = self.project_closure_state
         if not (state.get("active") and project_id and state.get("project_id") == project_id):
             return {"changed": True, "stalled": False, "signature": None, "unchanged_count": 0}
-        previous_missing_rules = []
+        previous_missing_rules = [normalize_rule_token(r) for r in list(state.get("repair_missing_rule_ids") or []) if normalize_rule_token(r)]
         previous_signature = str(state.get("repair_blocker_signature") or "")
-        if previous_signature and "|" in previous_signature:
+        if not previous_missing_rules and previous_signature and "|" in previous_signature:
             previous_missing_rules = [
                 normalize_rule_token(r)
                 for r in previous_signature.split("|")[-1].split(",")
                 if normalize_rule_token(r)
             ]
+        current_missing_rules = self._closure_repair_missing_rules(project_id, environment, blockers=blockers)
         signature = self._closure_blocker_signature(project_id, blockers, environment)
         last_signature = state.get("repair_blocker_signature")
         changed = bool(signature != last_signature)
@@ -9405,27 +9493,27 @@ class Agent:
         state["repair_mode"] = True
         state["repair_blocker_signature"] = signature
         state["repair_unchanged_count"] = unchanged_count
+        state["repair_missing_rule_ids"] = list(current_missing_rules)
         pointer = dict(state.get("source_pointer") or {})
         if pointer:
             if (
                 str(pointer.get("project_id") or "") != str(project_id)
                 or str(pointer.get("blocker_signature") or "") != str(signature)
-                or not self._closure_repair_missing_rules(project_id, environment, blockers=blockers)
+                or not current_missing_rules
             ):
                 state["source_pointer"] = {}
+        if sorted(set(current_missing_rules)) != sorted(set(previous_missing_rules)):
+            self._emit_event(
+                sim_state,
+                "closure_missing_rules_updated",
+                {
+                    "project_id": project_id,
+                    "origin": origin,
+                    "before_missing_rule_ids": sorted(set(previous_missing_rules)),
+                    "after_missing_rule_ids": sorted(set(current_missing_rules)),
+                },
+            )
         if changed:
-            current_missing_rules = self._closure_repair_missing_rules(project_id, environment, blockers=blockers)
-            if sorted(set(current_missing_rules)) != sorted(set(previous_missing_rules)):
-                self._emit_event(
-                    sim_state,
-                    "closure_missing_rules_updated",
-                    {
-                        "project_id": project_id,
-                        "origin": origin,
-                        "before_missing_rule_ids": sorted(set(previous_missing_rules)),
-                        "after_missing_rule_ids": sorted(set(current_missing_rules)),
-                    },
-                )
             state["repair_retry_state"] = {
                 key: value
                 for key, value in (state.get("repair_retry_state", {}) or {}).items()
@@ -9854,6 +9942,21 @@ class Agent:
                 if response_category == "recheck_commitment":
                     tps_payload["source_id"] = role_source
                     tps_payload["note"] = "Will re-check local role packet for requested epistemic support."
+                    self.communication_state["closure_recheck_pending"] = {
+                        "project_id": str(message.get("project_id") or ""),
+                        "signature": str(message.get("closure_blocker_signature") or ""),
+                        "requested_rule_ids": sorted({normalize_rule_token(r) for r in requested_rules if normalize_rule_token(r)}),
+                        "recipient": sender,
+                        "source_id": role_source,
+                        "attempt_count": 0,
+                        "expires_at": float(getattr(sim_state, "time", getattr(self, "current_time", 0.0))) + 10.0,
+                    }
+                    self._force_recovery_pivot(
+                        sim_state,
+                        to_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
+                        reason=f"closure_recheck_commitment:{message.get('project_id')}",
+                        ttl_s=7.0,
+                    )
                 if response_category == "teammate_redirect":
                     redirect = next(
                         (
@@ -9927,6 +10030,15 @@ class Agent:
                 )
                 relevant_project_ids.add(project_id)
             elif (
+                category in {"exact_rule", "precursor_info"}
+                and project_id
+                and signature
+                and self.project_closure_state.get("active")
+                and str(self.project_closure_state.get("project_id") or "") == project_id
+            ):
+                blocker_relevant_refresh = True
+                relevant_project_ids.add(project_id)
+            elif (
                 category == "teammate_redirect"
                 and project_id
                 and signature
@@ -9938,6 +10050,12 @@ class Agent:
                     self.communication_state["preferred_recipient"] = redirect
                     blocker_relevant_refresh = True
                     relevant_project_ids.add(project_id)
+                    self._force_recovery_pivot(
+                        sim_state,
+                        to_action=ExecutableActionType.COMMUNICATE.value,
+                        reason=f"closure_teammate_redirect:{project_id}:{redirect}",
+                        ttl_s=6.0,
+                    )
             elif (
                 category == "recheck_commitment"
                 and project_id
@@ -9953,6 +10071,12 @@ class Agent:
                 }
                 blocker_relevant_refresh = True
                 relevant_project_ids.add(project_id)
+                self._force_recovery_pivot(
+                    sim_state,
+                    to_action=ExecutableActionType.COMMUNICATE.value,
+                    reason=f"closure_recheck_commitment_received:{project_id}",
+                    ttl_s=5.0,
+                )
             if (
                 project_id
                 and signature
