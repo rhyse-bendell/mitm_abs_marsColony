@@ -2581,9 +2581,17 @@ class Agent:
                 )
             )
         )
+        trigger_source = source_id
+        if closure_project_id and blocker_relevant_inspect and pointer_match:
+            trigger_source = f"closure_pointed_source_followthrough:{closure_project_id}:{source_id}"
+            self._emit_event(
+                sim_state,
+                "pointed_source_refresh_triggered",
+                {"project_id": closure_project_id, "source_id": source_id, "trigger_source": trigger_source},
+            )
         self._trigger_epistemic_update_pipeline(
             sim_state=sim_state,
-            trigger_source=source_id,
+            trigger_source=trigger_source,
             relevant_project_ids={closure_project_id} if closure_project_id and blocker_relevant_inspect else None,
             blocker_relevant=blocker_relevant_inspect,
         )
@@ -2608,8 +2616,10 @@ class Agent:
         if closure_pointer and str(closure_pointer.get("source_id") or "") == str(source_id):
             pointer_state = self.project_closure_state.setdefault("source_pointer", {})
             pointer_state["attempt_count"] = int(pointer_state.get("attempt_count", 0) or 0) + 1
+            pointer_state["pointed_source_attempt_count"] = int(pointer_state.get("pointed_source_attempt_count", 0) or 0) + 1
             if net_dik_changed:
                 pointer_state["active"] = False
+                pointer_state["pointed_source_exhausted"] = False
                 self._emit_event(
                     sim_state,
                     "closure_source_pointer_satisfied",
@@ -2622,6 +2632,7 @@ class Agent:
                 )
             elif int(pointer_state.get("attempt_count", 0) or 0) >= 2:
                 pointer_state["active"] = False
+                pointer_state["pointed_source_exhausted"] = True
                 self._emit_event(
                     sim_state,
                     "closure_source_pointer_exhausted",
@@ -6308,6 +6319,7 @@ class Agent:
                 )
             pointer = self._active_closure_source_pointer(project_id=closure_project_id, sim_state=sim_state)
             pointer_target = str(pointer.get("source_id") or "") if pointer else ""
+            pointer_untried = bool(pointer_target and int(pointer.get("attempt_count", 0) or 0) <= 0)
             recheck_pending = dict(self.communication_state.get("closure_recheck_pending") or {})
             recheck_active = bool(
                 recheck_pending
@@ -6331,6 +6343,38 @@ class Agent:
                     goal_update="closure_epistemic_repair_recheck",
                     reason_summary=f"Closure recheck commitment active; re-inspect {recheck_source_id}.",
                     confidence=max(0.79, float(rewritten.confidence or decision.confidence or 0.0)),
+                )
+            if (
+                closure_locked
+                and closure_epistemic_blocked
+                and pointer_target
+                and pointer_untried
+                and rewritten.selected_action in {
+                    ExecutableActionType.REASSESS_PLAN,
+                    ExecutableActionType.CONSULT_TEAM_ARTIFACT,
+                    ExecutableActionType.EXTERNALIZE_PLAN,
+                    ExecutableActionType.COMMUNICATE,
+                    ExecutableActionType.REQUEST_ASSISTANCE,
+                    ExecutableActionType.OBSERVE_ENVIRONMENT,
+                }
+            ):
+                self._emit_event(
+                    sim_state,
+                    "pointed_source_inspect_selected",
+                    {
+                        "project_id": closure_project_id,
+                        "source_id": pointer_target,
+                        "origin": pivot_origin,
+                        "from_action": rewritten.selected_action.value,
+                    },
+                )
+                rewritten = BrainDecision(
+                    selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+                    target_id=pointer_target,
+                    target_zone=decision.target_zone,
+                    goal_update="closure_epistemic_repair_pointed",
+                    reason_summary=f"Closure pointed-source obligation active; inspect {pointer_target} before broader maintenance.",
+                    confidence=max(0.82, float(rewritten.confidence or decision.confidence or 0.0)),
                 )
             if (
                 closure_locked
@@ -6361,6 +6405,7 @@ class Agent:
                     ExecutableActionType.COMMUNICATE,
                     ExecutableActionType.REQUEST_ASSISTANCE,
                 }
+                and not pointer_untried
                 and self._can_attempt_verbal_plan_communication(sim_state)
             ):
                 candidate_target = None
@@ -9260,7 +9305,12 @@ class Agent:
             "blocker_signature": str(blocker_signature or ""),
             "source_id": source_id,
             "missing_rule_ids": sorted({normalize_rule_token(r) for r in (missing_rule_ids or []) if normalize_rule_token(r)}),
+            "pointed_source_project_id": str(project_id),
+            "pointed_source_blocker_signature": str(blocker_signature or ""),
+            "pointed_source_id": source_id,
             "attempt_count": 0,
+            "pointed_source_attempt_count": 0,
+            "pointed_source_exhausted": False,
             "expires_at": now_ts + max(4.0, float(ttl_s)),
             "active": True,
         }
@@ -9272,6 +9322,15 @@ class Agent:
                 "blocker_signature": str(blocker_signature or ""),
                 "source_id": source_id,
                 "missing_rule_ids": sorted({normalize_rule_token(r) for r in (missing_rule_ids or []) if normalize_rule_token(r)}),
+            },
+        )
+        self._emit_event(
+            sim_state,
+            "pointed_source_obligation_activated",
+            {
+                "project_id": project_id,
+                "blocker_signature": str(blocker_signature or ""),
+                "source_id": source_id,
             },
         )
         return True
@@ -9290,12 +9349,23 @@ class Agent:
             return None
         expected_signature = str(blocker_signature or state.get("repair_blocker_signature") or "")
         if expected_signature and str(pointer.get("blocker_signature") or "") != expected_signature:
+            state["source_pointer"] = {}
             return None
         if int(pointer.get("attempt_count", 0) or 0) >= 2:
+            pointer["pointed_source_exhausted"] = True
             state["source_pointer"] = {}
             self._emit_event(
                 sim_state,
                 "closure_source_pointer_exhausted",
+                {
+                    "project_id": pointer.get("project_id"),
+                    "source_id": pointer.get("source_id"),
+                    "attempt_count": int(pointer.get("attempt_count", 0) or 0),
+                },
+            )
+            self._emit_event(
+                sim_state,
+                "pointed_source_obligation_exhausted",
                 {
                     "project_id": pointer.get("project_id"),
                     "source_id": pointer.get("source_id"),
@@ -10087,6 +10157,11 @@ class Agent:
                 failed = bucket.setdefault("failed_categories", {}).setdefault(str(sender or ""), [])
                 if category not in {"exact_rule"} and category not in failed:
                     failed.append(category)
+                if category == "no_useful_response":
+                    for exhausted_category in ["exact_rule", "precursor_info", "source_pointer", "recheck_commitment", "teammate_redirect"]:
+                        if exhausted_category not in failed:
+                            failed.append(exhausted_category)
+                    bucket["exhausted"] = True
                 if bool(payload.get("exact_rule_unavailable")):
                     requested_ids = sorted({str(item) for item in (payload.get("requested_ids", []) or []) if str(item)})
                     key = f"{sender}|{','.join(requested_ids)}"
