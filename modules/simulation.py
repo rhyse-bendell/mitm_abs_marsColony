@@ -487,6 +487,7 @@ class SimulationState:
         self._reconciliation_in_progress = False
         self._readiness_last_executable_actions = {}
         self._closure_deadlock_state = {}
+        self._validation_discussion_state = {}
         self._closure_deadlock_cycle_limit = int(self.planner_defaults.get("closure_deadlock_cycle_limit", 3) or 3)
         self.logger.register_event_listener(self._on_readiness_reconciliation_event)
         self.logger.initialize_session_outputs(
@@ -638,6 +639,7 @@ class SimulationState:
         self._readiness_last_executable_actions = after
         changed_agents = sorted([name for name in after.keys() if before.get(name) != after.get(name)])
         recovered, reassigned = self._recover_closure_deadlock(trigger_event=trigger_event)
+        discussion_updates, unlocked = self._sync_validation_discussions(trigger_event=trigger_event)
         self.logger.log_event(
             self.time,
             "readiness_reconciled",
@@ -649,9 +651,79 @@ class SimulationState:
                 "witness_source_steps_by_agent": witness_progress,
                 "closure_deadlock_recoveries": int(recovered),
                 "closure_reassignments": int(reassigned),
+                "validation_discussion_updates": int(discussion_updates),
+                "validation_readiness_unlocked_by_externalized_support": int(unlocked),
                 "had_change": bool(changed_agents),
             },
         )
+
+    def _sync_validation_discussions(self, *, trigger_event=None):
+        updates = 0
+        unlocked = 0
+        construction = getattr(self.environment, "construction", None)
+        if construction is None:
+            return updates, unlocked
+        for project_id, project in (construction.projects or {}).items():
+            if not isinstance(project, dict):
+                continue
+            if not bool(project.get("started")) and str(project.get("status") or "") not in {"ready_for_validation", "needs_repair"}:
+                self._validation_discussion_state.pop(str(project_id), None)
+                continue
+            discussion = construction.ensure_validation_discussion(project_id, sim_time=self.time, trigger_reason=trigger_event)
+            if not isinstance(discussion, dict):
+                continue
+            signature = (
+                str(discussion.get("status") or ""),
+                len(discussion.get("support_items") or []),
+                len(discussion.get("conflict_items") or []),
+                len(discussion.get("open_requests") or []),
+                int(discussion.get("stagnation_count", 0) or 0),
+                str(discussion.get("coordinator") or ""),
+            )
+            previous = self._validation_discussion_state.get(str(project_id))
+            if previous != signature:
+                updates += 1
+                event_name = "validation_question_opened" if previous is None else "validation_question_updated"
+                self.logger.log_event(
+                    self.time,
+                    event_name,
+                    {
+                        "project_id": str(project_id),
+                        "status": discussion.get("status"),
+                        "coordinator": discussion.get("coordinator"),
+                        "support_count": len(discussion.get("support_items") or []),
+                        "conflict_count": len(discussion.get("conflict_items") or []),
+                        "open_request_count": len(discussion.get("open_requests") or []),
+                        "trigger_event": trigger_event,
+                    },
+                )
+            if (
+                str(project.get("status")) == "ready_for_validation"
+                and str(discussion.get("status")) in {"provisionally_supported", "resolved"}
+                and len(discussion.get("conflict_items") or []) == 0
+            ):
+                unlocked += 1
+                self.logger.log_event(
+                    self.time,
+                    "validation_readiness_unlocked_by_externalized_support",
+                    {
+                        "project_id": str(project_id),
+                        "support_count": len(discussion.get("support_items") or []),
+                        "trigger_event": trigger_event,
+                    },
+                )
+            if int(discussion.get("stagnation_count", 0) or 0) >= max(3, self._closure_deadlock_cycle_limit):
+                self.logger.log_event(
+                    self.time,
+                    "validation_question_stagnation_detected",
+                    {
+                        "project_id": str(project_id),
+                        "stagnation_count": int(discussion.get("stagnation_count", 0) or 0),
+                        "coordinator": discussion.get("coordinator"),
+                    },
+                )
+            self._validation_discussion_state[str(project_id)] = signature
+        return updates, unlocked
 
     def _on_readiness_reconciliation_event(self, event):
         if self._reconciliation_in_progress:

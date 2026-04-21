@@ -2685,6 +2685,7 @@ class Agent:
             self.source_inspection_state[source_id] = "inspected"
             self.inspect_session["state"] = "inspection_completed"
             self.inspect_session["last_updated_at"] = now_ts
+            self._emit_event(sim_state, "inspect_started", {"source_id": source_id, "target": target_pos, "goal": self.goal, "slot_id": slot_id, "reasserted_on_completion": True})
             self._emit_event(sim_state, "inspect_completed", {"source_id": source_id, "target": target_pos, "goal": self.goal})
         else:
             if shared_source:
@@ -3932,6 +3933,15 @@ class Agent:
             if not has_match:
                 blockers.append("missing_validation_rule_knowledge")
                 blockers.extend([f"missing_expected_rule:{rid}" for rid in missing_rules[:3]])
+            discussion = dict(project.get("validation_discussion") or {})
+            support_items = list(discussion.get("support_items") or [])
+            conflict_items = list(discussion.get("conflict_items") or [])
+            if str(project.get("status")) == "ready_for_validation":
+                claim_externalized = bool(discussion.get("candidate_claim"))
+                grounded_support = len(support_items) >= 1
+                unresolved_conflict = len(conflict_items) > 0
+                if not claim_externalized or not grounded_support or unresolved_conflict:
+                    blockers.append("insufficient_externalized_validation_support")
 
         return sorted(set(blockers)), project_id
 
@@ -4895,6 +4905,45 @@ class Agent:
                 kind="support_goal_non_executable",
                 detail={"goal_id": goal.goal_id, "reason": reason, "nonexec_count": nonexec_count},
             )
+            if (
+                nonexec_count >= 3
+                and self.project_closure_state.get("active")
+                and str(goal.label or "").strip().lower() in {
+                    "acquire_missing_dik",
+                    "consult_artifact",
+                    "refresh_assumptions",
+                    "validate_externalization",
+                    "repair_detected_mismatch",
+                    "assist_teammate",
+                }
+            ):
+                project_id = self.project_closure_state.get("project_id")
+                self._queue_project_state_communication_obligation(
+                    project_id=project_id,
+                    state_event="validation_uncertainty",
+                    sim_state=sim_state,
+                    detail={"goal_id": goal.goal_id, "reason": reason, "nonexec_count": nonexec_count},
+                    priority="high",
+                )
+                if sim_state is not None and hasattr(sim_state.environment, "construction"):
+                    sim_state.environment.construction.record_validation_dialogue_event(
+                        project_id,
+                        event_type="validation_uncertainty_externalized",
+                        actor=self.name,
+                        payload={"goal_id": goal.goal_id, "reason": reason, "nonexec_count": nonexec_count},
+                        sim_time=float(getattr(sim_state, "time", getattr(self, "current_time", 0.0))),
+                    )
+                self._force_recovery_pivot(
+                    sim_state,
+                    to_action=ExecutableActionType.COMMUNICATE.value,
+                    reason=f"support_goal_stagnation_recovery:{goal.goal_id}",
+                    ttl_s=5.0,
+                )
+                self._emit_event(
+                    sim_state,
+                    "validation_question_stagnation_detected",
+                    {"project_id": project_id, "goal_id": goal.goal_id, "nonexec_reason": reason, "nonexec_count": nonexec_count},
+                )
 
         if info_pressure > 0:
             self._emit_event(
@@ -10098,6 +10147,14 @@ class Agent:
             if sim_state is not None and msg.get("type") == "TKRQ" and msg.get("project_id"):
                 if not self._should_send_closure_repair_request(msg, other_agent.name, sim_state=sim_state):
                     continue
+                if hasattr(sim_state.environment, "construction"):
+                    sim_state.environment.construction.record_validation_dialogue_event(
+                        msg.get("project_id"),
+                        event_type="validation_request_externalized",
+                        actor=self.name,
+                        payload={"to_agent": other_agent.name, "requested_ids": list(msg.get("content", []) or [])},
+                        sim_time=float(getattr(sim_state, "time", getattr(self, "current_time", 0.0))),
+                    )
                 self._emit_event(
                     sim_state,
                     "closure_repair_request_sent",
@@ -10331,15 +10388,9 @@ class Agent:
                     if str(item).startswith("rule:")
                 ]
                 role_source = f"{self.role}_Info"
-                response_category = "no_useful_response"
+                response_category = "state_uncertainty"
                 if rule_payload:
-                    response_category = "exact_rule"
-                elif preferred_mode == "precursor_info" and (info_payload or data_payload):
-                    response_category = "precursor_info"
-                elif preferred_mode == "source_pointer" and requested_rules:
-                    response_category = "source_pointer"
-                elif preferred_mode == "recheck_commitment" and self._has_packet_access(role_source):
-                    response_category = "recheck_commitment"
+                    response_category = "state_support"
                 elif preferred_mode == "teammate_redirect":
                     redirect = next(
                         (
@@ -10350,13 +10401,13 @@ class Agent:
                         ),
                         None,
                     )
-                    response_category = "teammate_redirect" if redirect else "no_useful_response"
+                    response_category = "propose_source_check" if redirect else "state_uncertainty"
                 elif info_payload or data_payload:
-                    response_category = "precursor_info"
+                    response_category = "partial_support"
                 elif requested_rules:
-                    response_category = "source_pointer"
+                    response_category = "propose_source_check"
                 elif self._has_packet_access(role_source):
-                    response_category = "recheck_commitment"
+                    response_category = "propose_source_check"
 
                 tps_payload = {
                     "project_id": message.get("project_id"),
@@ -10369,7 +10420,7 @@ class Agent:
                 if response_category == "source_pointer":
                     tps_payload["source_id"] = role_source
                     tps_payload["note"] = "No exact rule held locally; relevant packet/source identified."
-                if response_category == "recheck_commitment":
+                if response_category == "propose_source_check":
                     tps_payload["source_id"] = role_source
                     tps_payload["note"] = "Will re-check local role packet for requested epistemic support."
                     self.communication_state["closure_recheck_pending"] = {
@@ -10398,7 +10449,7 @@ class Agent:
                         None,
                     )
                     tps_payload["redirect_teammate"] = redirect
-                if preferred_mode == "exact_rule" and not rule_payload:
+                if preferred_mode == "exact_rule" and not rule_payload and response_category != "state_support":
                     tps_payload["exact_rule_unavailable"] = True
                     self._emit_event(
                         sim_state,
@@ -10431,6 +10482,23 @@ class Agent:
                         "closure_blocker_signature": message.get("closure_blocker_signature"),
                     },
                 )
+                if sim_state is not None and message.get("project_id") and hasattr(sim_state.environment, "construction"):
+                    c_mgr = sim_state.environment.construction
+                    evt_map = {
+                        "state_support": "validation_support_externalized",
+                        "partial_support": "validation_support_externalized",
+                        "state_conflict": "validation_conflict_externalized",
+                        "state_uncertainty": "validation_uncertainty_externalized",
+                        "propose_source_check": "validation_source_check_proposed",
+                    }
+                    evt = evt_map.get(response_category, "validation_request_externalized")
+                    c_mgr.record_validation_dialogue_event(
+                        message.get("project_id"),
+                        event_type=evt,
+                        actor=self.name,
+                        payload={"from_agent": sender, "requested_ids": sorted(requested_ids), "response_category": response_category},
+                        sim_time=float(getattr(sim_state, "time", getattr(self, "current_time", 0.0))),
+                    )
 
         elif mtype == "TPS":
             payload = dict(content or {}) if isinstance(content, dict) else {}
@@ -10439,7 +10507,7 @@ class Agent:
             project_id = str(payload.get("project_id") or "")
             signature = str(payload.get("closure_blocker_signature") or self.project_closure_state.get("repair_blocker_signature") or "")
             if (
-                category == "source_pointer"
+                category in {"source_pointer", "propose_source_check"}
                 and project_id
                 and signature
                 and self.project_closure_state.get("active")
@@ -10460,7 +10528,7 @@ class Agent:
                 )
                 relevant_project_ids.add(project_id)
             elif (
-                category in {"exact_rule", "precursor_info"}
+                category in {"exact_rule", "precursor_info", "state_support", "partial_support"}
                 and project_id
                 and signature
                 and self.project_closure_state.get("active")
@@ -10469,7 +10537,7 @@ class Agent:
                 blocker_relevant_refresh = True
                 relevant_project_ids.add(project_id)
             elif (
-                category == "teammate_redirect"
+                category in {"teammate_redirect", "propose_source_check"}
                 and project_id
                 and signature
                 and self.project_closure_state.get("active")
@@ -10487,7 +10555,7 @@ class Agent:
                         ttl_s=6.0,
                     )
             elif (
-                category == "recheck_commitment"
+                category in {"recheck_commitment", "state_uncertainty"}
                 and project_id
                 and signature
                 and self.project_closure_state.get("active")
@@ -10515,7 +10583,7 @@ class Agent:
             ):
                 bucket = self._closure_repair_retry_bucket(project_id, signature)
                 failed = bucket.setdefault("failed_categories", {}).setdefault(str(sender or ""), [])
-                if category not in {"exact_rule"} and category not in failed:
+                if category not in {"exact_rule", "state_support"} and category not in failed:
                     failed.append(category)
                 if category == "no_useful_response":
                     for exhausted_category in ["exact_rule", "precursor_info", "source_pointer", "recheck_commitment", "teammate_redirect"]:
@@ -10555,6 +10623,22 @@ class Agent:
                 "closure_repair_response_category",
                 {"from_agent": sender, "project_id": payload.get("project_id"), "response_category": category, "closure_blocker_signature": signature},
             )
+            if sim_state is not None and project_id and hasattr(sim_state.environment, "construction"):
+                evt_map = {
+                    "state_support": "validation_support_externalized",
+                    "partial_support": "validation_support_externalized",
+                    "state_conflict": "validation_conflict_externalized",
+                    "state_uncertainty": "validation_uncertainty_externalized",
+                    "propose_source_check": "validation_source_check_proposed",
+                    "source_pointer": "validation_source_check_proposed",
+                }
+                sim_state.environment.construction.record_validation_dialogue_event(
+                    project_id,
+                    event_type=evt_map.get(category, "validation_question_updated"),
+                    actor=sender,
+                    payload={"closure_blocker_signature": signature, "response_category": category},
+                    sim_time=float(getattr(sim_state, "time", getattr(self, "current_time", 0.0))),
+                )
 
         elif mtype == "TCR":
             self.reevaluate_knowledge()
@@ -10719,12 +10803,21 @@ class Agent:
                 and str(project.get("closure_status")) in {"assigned", "in_progress"}
                 and bool(project.get("correct", True))
             ):
-                self._emit_event(
-                    sim_state,
-                    "mismatch_detection_deferred_for_closure",
-                    {"project_id": project_id, "reason": "project_closure_owner_active", "closure_owner": project.get("closure_owner")},
-                )
-                continue
+                discussion = dict(project.get("validation_discussion") or {})
+                discussion_open = str(discussion.get("status") or "") in {"open", "active_discussion", "provisionally_supported", "blocked"}
+                if discussion_open and str(project.get("closure_owner") or "") != self.name:
+                    self._emit_event(
+                        sim_state,
+                        "mismatch_detection_allowed_during_validation_discussion",
+                        {"project_id": project_id, "closure_owner": project.get("closure_owner")},
+                    )
+                else:
+                    self._emit_event(
+                        sim_state,
+                        "mismatch_detection_deferred_for_closure",
+                        {"project_id": project_id, "reason": "project_closure_owner_active", "closure_owner": project.get("closure_owner")},
+                    )
+                    continue
             readiness_ratio = delivered / max(1, required)
             if readiness_ratio < 0.5:
                 self._emit_event(sim_state, "mismatch_detection_skipped_not_ready", {"project_id": project_id, "reason": "build_state_below_validation_threshold", "readiness_ratio": round(readiness_ratio, 3)})

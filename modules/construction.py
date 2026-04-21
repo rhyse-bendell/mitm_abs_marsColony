@@ -287,9 +287,87 @@ class ConstructionManager:
                 "missing_expected_rules": list(expected_rules),
                 "team_rule_snapshot_ids": [],
             },
+            "validation_discussion": {},
         }
+        project["validation_discussion"] = self._default_validation_discussion(project)
         self.projects[project_id] = project
         return project_id, "created"
+
+    def _default_validation_discussion(self, project):
+        project_id = str((project or {}).get("id") or "")
+        target = str((project or {}).get("name") or project_id or "project")
+        expected = [normalize_rule_token(r) for r in ((project or {}).get("expected_rules") or []) if normalize_rule_token(r)]
+        unresolved = [f"Need team-grounded justification for {target} compliance."]
+        if expected:
+            unresolved.append("Need evidence for expected rule satisfaction from teammate statements, inspected sources, or artifacts.")
+        return {
+            "project_id": project_id,
+            "candidate_claim": f"{target} is compliant for validation.",
+            "validation_target": target,
+            "unresolved_topics": unresolved,
+            "support_items": [],
+            "conflict_items": [],
+            "open_requests": [],
+            "coordinator": str((project or {}).get("closure_owner") or ""),
+            "status": "blocked",
+            "stagnation_count": 0,
+            "last_meaningful_update_tick": None,
+            "last_support_update_time": None,
+        }
+
+    def ensure_validation_discussion(self, project_id, *, sim_time=None, trigger_reason=None):
+        project = self.projects.get(str(project_id or ""))
+        if not isinstance(project, dict):
+            return None
+        discussion = dict(project.get("validation_discussion") or self._default_validation_discussion(project))
+        discussion["project_id"] = str(project.get("id") or discussion.get("project_id") or "")
+        discussion["coordinator"] = str(project.get("closure_owner") or discussion.get("coordinator") or "")
+        status = str(project.get("status") or "")
+        if status == "complete":
+            discussion["status"] = "resolved"
+        elif status == "ready_for_validation":
+            if not discussion.get("open_requests"):
+                discussion.setdefault("open_requests", []).append(
+                    {"request_type": "request_validation_help", "note": "Any teammate-held support or conflict evidence?", "time": sim_time}
+                )
+            discussion["status"] = "active_discussion" if (discussion.get("support_items") or discussion.get("conflict_items")) else "open"
+        elif status == "needs_repair":
+            discussion["status"] = "blocked"
+        else:
+            discussion["status"] = "blocked"
+        if trigger_reason:
+            discussion["last_trigger_reason"] = str(trigger_reason)
+        project["validation_discussion"] = discussion
+        return discussion
+
+    def record_validation_dialogue_event(self, project_id, *, event_type, actor=None, payload=None, sim_time=None):
+        discussion = self.ensure_validation_discussion(project_id, sim_time=sim_time, trigger_reason=event_type)
+        if not isinstance(discussion, dict):
+            return None
+        payload = dict(payload or {})
+        evt = str(event_type or "")
+        if evt in {"validation_request_externalized", "request_validation_help", "ask_if_knows"}:
+            discussion.setdefault("open_requests", []).append({"request_type": evt, "actor": actor, "time": sim_time, **payload})
+        elif evt in {"validation_support_externalized", "state_support", "externalize_evidence"}:
+            discussion.setdefault("support_items", []).append({"event": evt, "actor": actor, "time": sim_time, **payload})
+        elif evt in {"validation_conflict_externalized", "state_conflict", "reject_compliance"}:
+            discussion.setdefault("conflict_items", []).append({"event": evt, "actor": actor, "time": sim_time, **payload})
+        elif evt in {"validation_uncertainty_externalized", "state_uncertainty", "propose_source_check"}:
+            discussion.setdefault("open_requests", []).append({"request_type": evt, "actor": actor, "time": sim_time, **payload})
+        if evt.startswith("validation_") or evt.startswith("state_") or evt in {"externalize_evidence", "confirm_compliance", "reject_compliance"}:
+            discussion["last_meaningful_update_tick"] = sim_time
+            discussion["stagnation_count"] = 0
+        support_count = len(discussion.get("support_items") or [])
+        conflict_count = len(discussion.get("conflict_items") or [])
+        if support_count >= 2 and conflict_count == 0:
+            discussion["status"] = "provisionally_supported"
+            discussion["last_support_update_time"] = sim_time
+        elif conflict_count > 0:
+            discussion["status"] = "active_discussion"
+        project = self.projects.get(str(project_id or ""))
+        if isinstance(project, dict):
+            project["validation_discussion"] = discussion
+        return discussion
 
     def resolve_project_id(self, project_or_target_id, *, create_if_missing=False):
         requested = str(project_or_target_id or "").strip()
@@ -465,6 +543,7 @@ class ConstructionManager:
         self._advance_transports()
         self.sites["site_c"].buildable = self._is_site_buildable("site_c")
         for project in self.projects.values():
+            self.ensure_validation_discussion(project.get("id"))
             prior_status = str(project.get("status") or "")
             required = int(project["required_resources"].get("bricks", 0) or 0)
             delivered = int(project["delivered_resources"].get("bricks", 0) or 0)
@@ -509,6 +588,13 @@ class ConstructionManager:
                 project["closure_started_at"] = None
                 project["closure_attempt_count"] = 0
                 self._closure_reservations.pop(project.get("id"), None)
+            discussion = project.get("validation_discussion") or {}
+            if isinstance(discussion, dict):
+                if str(project.get("status")) == "ready_for_validation":
+                    discussion["stagnation_count"] = int(discussion.get("stagnation_count", 0) or 0) + 1
+                else:
+                    discussion["stagnation_count"] = 0
+                project["validation_discussion"] = discussion
 
     def get_active_projects(self):
         return [p for p in self.projects.values() if p.get("started") and p["status"] != "complete"]
