@@ -109,6 +109,7 @@ class TestRuleBrainRepairPatch(unittest.TestCase):
         sim = SimulationState(phases=[], flash_mode=True)
         try:
             agent = sim.agents[0]
+            agent.metacognitive_state["mode_entered_tick"] = int(agent.sim_step_count) - 10
             agent.support_goal_nonexec_counts = {"support_a:stale": 4}
             agent.communication_state["no_effect_streak"] = 3
             decision = BrainDecision(
@@ -139,6 +140,33 @@ class TestRuleBrainRepairPatch(unittest.TestCase):
             events = [e.get("event_type") for e in sim.logger.get_recent_events(120)]
             self.assertIn("metacognitive_execution_window_started", events)
             self.assertIn("metacognitive_switch_to_execution", events)
+            self.assertIn("metacognitive_handoff_to_execution", events)
+            self.assertIn("metacognitive_execution_bias_applied_after_readiness_unlock", events)
+        finally:
+            sim.stop()
+
+    def test_stagnation_deferred_when_project_has_recent_progress(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            agent.support_goal_nonexec_counts = {"support_a:stale": 4}
+            project_id = "Build_Table_A"
+            agent.metacognitive_state["project_commitment"]["project_id"] = project_id
+            agent.metacognitive_state["project_progress_ticks"][project_id] = 1
+            rewritten = agent._apply_policy_pivots(
+                BrainDecision(selected_action=ExecutableActionType.CONSULT_TEAM_ARTIFACT, target_id=project_id, confidence=0.6),
+                environment=sim.environment,
+                sim_state=sim,
+                context=None,
+                pivot_origin="unit",
+            )
+            self.assertNotEqual(agent.metacognitive_state.get("mode"), "RECOVER_REGROUND")
+            self.assertTrue(
+                any(
+                    e.get("event_type") == "metacognitive_stagnation_deferred_due_to_recent_progress"
+                    for e in sim.logger.get_recent_events(120)
+                )
+            )
         finally:
             sim.stop()
 
@@ -149,7 +177,7 @@ class TestRuleBrainRepairPatch(unittest.TestCase):
             blocked_project = "Build_Table_A"
             alt_candidate = BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES, target_id="Build_Table_B", confidence=0.8)
             decision = BrainDecision(selected_action=ExecutableActionType.START_CONSTRUCTION, target_id=blocked_project, confidence=0.7)
-            with patch.object(agent, "_metacognitive_execution_candidate", return_value=alt_candidate), patch.object(agent, "_construction_action_blockers", return_value=(["missing_validation_rule_knowledge"], blocked_project)):
+            with patch.object(agent, "_metacognitive_execution_candidate", side_effect=[alt_candidate, None]), patch.object(agent, "_construction_action_blockers", return_value=(["missing_validation_rule_knowledge"], blocked_project)):
                 rewritten = agent._apply_policy_pivots(decision, environment=sim.environment, sim_state=sim, context=None, pivot_origin="unit")
             self.assertEqual(rewritten.target_id, "Build_Table_B")
             self.assertIn(blocked_project, agent.metacognitive_state.get("deferred_projects", {}))
