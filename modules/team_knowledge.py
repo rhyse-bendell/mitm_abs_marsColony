@@ -85,10 +85,14 @@ class TeamKnowledgeManager:
         artifact_id = f"construction:{project_id}"
         structure_type = project.get("type", "unknown")
         delivered = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
+        staged = int(project.get("staged_resources", {}).get("bricks", 0) or 0)
         required = int(project.get("required_resources", {}).get("bricks", 0) or 0)
         status = project.get("status", "in_progress")
         resource_complete = bool(project.get("resource_complete", False)) or (required > 0 and delivered >= required)
-        progress_ratio = min(1.0, (delivered / required)) if required > 0 else 0.0
+        build_ready = bool(project.get("build_ready", False))
+        physically_complete = bool(project.get("structurally_complete", False))
+        epistemically_supported = bool(project.get("epistemically_supported", False))
+        progress_ratio = float(project.get("progress", min(1.0, (delivered / required)) if required > 0 else 0.0) or 0.0)
         validated = bool(project.get("validated_complete", False))
         validation_state = "validated" if project.get("correct", True) and status == "complete" else (
             "mismatch" if project.get("correct") is False else "in_progress"
@@ -105,6 +109,9 @@ class TeamKnowledgeManager:
             "structure_type": structure_type,
             "status": status,
             "resource_complete": resource_complete,
+            "build_ready": build_ready,
+            "physically_complete": physically_complete,
+            "epistemically_supported": epistemically_supported,
             "progress_ratio": round(progress_ratio, 4),
             "validated": validated,
             "correct": project.get("correct", True),
@@ -120,7 +127,11 @@ class TeamKnowledgeManager:
             "last_update_time": provenance.get("last_update_time", sim_time),
             "provenance_timeline": list(provenance.get("timeline", [])),
             "delivered_resources": dict(project.get("delivered_resources", {})),
+            "staged_resources": dict(project.get("staged_resources", {})),
             "required_resources": dict(project.get("required_resources", {})),
+            "build_steps": list(project.get("build_steps", [])),
+            "connections": list(project.get("connections", [])),
+            "epistemic_workspace": dict(project.get("epistemic_workspace", {})),
             "last_status_event": "construction_externalized",
             "status_changed_at": sim_time,
         }
@@ -180,6 +191,11 @@ class TeamKnowledgeManager:
                     "status_after": status,
                     "time": sim_time,
                 }
+            )
+        prev_staged = int(previous.get("staged_resources", {}).get("bricks", 0) or 0)
+        if staged > prev_staged:
+            self.recent_updates.append(
+                {"event": "project_materials_staged", "artifact_id": artifact_id, "project_id": project_id, "staged_before": prev_staged, "staged_after": staged, "time": sim_time}
             )
         if (not previous_resource_complete) and resource_complete:
             status_event = "construction_materials_satisfied"

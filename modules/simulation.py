@@ -100,6 +100,11 @@ class SimulationState:
         "construction_progress_updated",
         "construction_ready_for_validation",
         "construction_status_updated",
+        "project_materials_staged",
+        "project_build_step_completed",
+        "project_epistemic_externalization_updated",
+        "project_connection_added",
+        "project_progress_recomputed",
         "phase_transition",
     }
 

@@ -8084,6 +8084,8 @@ class Agent:
                 if goal_id:
                     payload["goal_id"] = goal_id
                 self._emit_event(sim_state, "execution_readiness_passed", payload)
+                if decision.selected_action in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION, ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION}:
+                    self._emit_event(sim_state, "build_action_selected", {"agent": self.name, "project_id": project_id, "decision_action": decision.selected_action.value})
                 if decision.selected_action == ExecutableActionType.VALIDATE_CONSTRUCTION:
                     self._emit_event(
                         sim_state,
@@ -8103,6 +8105,31 @@ class Agent:
 
         if decision.selected_action in {ExecutableActionType.EXTERNALIZE_PLAN, ExecutableActionType.CONSULT_TEAM_ARTIFACT}:
             action["artifact_action"] = decision.selected_action.value
+            if decision.selected_action == ExecutableActionType.EXTERNALIZE_PLAN:
+                selected_project = self._select_build_target(
+                    environment,
+                    require_readiness=False,
+                    include_project=True,
+                    action_type=ExecutableActionType.START_CONSTRUCTION.value,
+                    sim_state=sim_state,
+                )
+                if isinstance(selected_project, dict) and selected_project.get("project_id"):
+                    action["project_id"] = selected_project.get("project_id")
+                epistemic_action = "externalize_design_note"
+                project = (getattr(environment, "construction", None) or object()).projects.get(action.get("project_id")) if getattr(environment, "construction", None) is not None else None
+                if isinstance(project, dict):
+                    workspace = dict(project.get("epistemic_workspace") or {})
+                    covered = {str(e.get("entry_type") or "") for e in list(workspace.get("entries") or [])}
+                    if "claim" not in covered:
+                        epistemic_action = "externalize_claim"
+                    elif "evidence" not in covered:
+                        epistemic_action = "externalize_evidence"
+                    elif "uncertainty" not in covered:
+                        epistemic_action = "externalize_uncertainty"
+                action["epistemic_action"] = epistemic_action
+                self._emit_event(sim_state, "artifact_externalization_action_selected", {"agent": self.name, "project_id": action.get("project_id"), "epistemic_action": epistemic_action})
+            else:
+                self._emit_event(sim_state, "artifact_externalization_action_selected", {"agent": self.name, "epistemic_action": "consult_shared_artifact"})
             self._emit_event(sim_state, "moving_to_externalization_site", {"selected_next_action": decision.selected_action.value, "current_location": self.position})
         if decision.selected_action == ExecutableActionType.REQUEST_ASSISTANCE:
             action["assist_action"] = decision.selected_action.value
@@ -8752,6 +8779,8 @@ class Agent:
                         self.target = None
                     continue
                 _set_action_stage(action, "mutation_execution_started", {"target_id": "whiteboard"})
+                epistemic_action = str(action.get("epistemic_action") or "externalize_design_note")
+                project_id = action.get("project_id")
                 artifact_id = f"whiteboard:{self.name}:{int(sim_state.time*10)}"
                 rules = list(self.mental_model["knowledge"].rules)[-3:]
                 fidelity = (self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5) + self._trait_value("rule_accuracy")) / 2.0
@@ -8792,7 +8821,26 @@ class Agent:
                         knowledge_summary=rules,
                         validation_state="validated" if fidelity >= 0.7 else "tentative",
                     )
+                if project_id and getattr(environment, "construction", None) is not None:
+                    note = f"{self.name} {epistemic_action} for {project_id}"
+                    references = list(rules[:2])
+                    entry_type_map = {
+                        "externalize_claim": "claim",
+                        "externalize_evidence": "evidence",
+                        "externalize_uncertainty": "uncertainty",
+                        "externalize_design_note": "design_note",
+                    }
+                    environment.construction.record_project_epistemic_externalization(
+                        project_id,
+                        entry_type=entry_type_map.get(epistemic_action, "design_note"),
+                        note=note,
+                        references=references,
+                        actor=self.name,
+                        sim_time=sim_state.time if sim_state is not None else None,
+                    )
+                    self._emit_event(sim_state, "project_epistemic_externalization_updated", {"agent": self.name, "project_id": project_id, "epistemic_action": epistemic_action})
                 _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": artifact_id})
+                self._emit_event(sim_state, "artifact_externalization_action_executed", {"agent": self.name, "project_id": project_id, "epistemic_action": epistemic_action, "artifact_id": artifact_id})
                 self._record_plan_externalization(environment, sim_state=sim_state)
                 if action.get("target") is not None and self.target is not None and tuple(self.target) == tuple(action.get("target")):
                     self.target = None
@@ -8946,6 +8994,7 @@ class Agent:
                         trigger_source=f"artifact_consult:{preferred.artifact_id}",
                     )
                     sim_state.logger.log_event(sim_state.time, "artifact_consulted", {"agent": self.name, "artifact_id": preferred.artifact_id})
+                    self._emit_event(sim_state, "artifact_externalization_action_executed", {"agent": self.name, "epistemic_action": "consult_shared_artifact", "artifact_id": preferred.artifact_id})
                     _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": preferred.artifact_id})
                     if action.get("target") is not None and self.target is not None and tuple(self.target) == tuple(action.get("target")):
                         self.target = None
@@ -9109,11 +9158,28 @@ class Agent:
                     )
                     environment.construction.assign_builder(project_id, self.name)
                     self._refresh_construction_provenance(environment, project_id, sim_state=sim_state, event="build_attempt")
+                    steps_before = sum(1 for step in list(project.get("build_steps") or []) if bool(step.get("completed")))
                     delivered_before = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
 
                     fidelity = (self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5) + self._trait_value("rule_accuracy")) / 2.0
                     if random.random() > fidelity:
                         project["correct"] = False
+
+                    build_ok, build_reason, completed_step = environment.construction.execute_build_step(
+                        project_id,
+                        actor=self.name,
+                        sim_time=sim_state.time if sim_state is not None else None,
+                    )
+                    if not build_ok and decision_action != ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value:
+                        _log_mutation_blocked(
+                            "construction_progress_blocked",
+                            {
+                                "project_id": project_id,
+                                "failure_category": build_reason,
+                                "project_status": project.get("status"),
+                            },
+                        )
+                        continue
 
                     if decision_action == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value:
                         if project.get("status") not in {"needs_repair", "ready_for_validation", "in_progress"}:
@@ -9127,7 +9193,7 @@ class Agent:
                             )
                             continue
                         project["correct"] = True
-                        if project.get("resource_complete", False):
+                        if project.get("structurally_complete", False) and project.get("epistemically_supported", False):
                             environment.construction.mark_validated(project_id, is_valid=True)
                         self._refresh_construction_provenance(environment, project_id, sim_state=sim_state, event="repair")
                     sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
@@ -9171,12 +9237,17 @@ class Agent:
                             },
                         )
                     delivered_after = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
-                    if delivered_after > delivered_before:
+                    steps_after = sum(1 for step in list(project.get("build_steps") or []) if bool(step.get("completed")))
+                    if steps_after > steps_before:
+                        self._emit_event(sim_state, "project_build_step_completed", {"agent": self.name, "project_id": project_id, "component": (completed_step or {}).get("component"), "step_id": (completed_step or {}).get("step_id")})
+                        if "connector" in str((completed_step or {}).get("component") or ""):
+                            self._emit_event(sim_state, "project_connection_added", {"agent": self.name, "project_id": project_id, "component": (completed_step or {}).get("component")})
+                        self._emit_event(sim_state, "build_action_executed", {"agent": self.name, "project_id": project_id, "decision_action": decision_action})
                         self.progress_tracker.setdefault("project_no_progress", {})[project_id] = 0
                         self._register_progress(
                             sim_state,
                             kind="construction_progress_updated",
-                            detail={"project_id": project_id, "delivered_before": delivered_before, "delivered_after": delivered_after},
+                            detail={"project_id": project_id, "steps_before": steps_before, "steps_after": steps_after},
                         )
                     else:
                         project_streaks = self.progress_tracker.setdefault("project_no_progress", {})
@@ -9328,6 +9399,7 @@ class Agent:
                             "decision_action": action.get("decision_action"),
                         },
                     )
+                    self._emit_event(sim_state, "transport_suppressed_stale_or_unbound", {"agent": self.name, "failure_category": "missing_project_binding"})
                     _terminal_transport_abort(
                         project_id=None,
                         failure_category="missing_project_binding",
@@ -9346,6 +9418,7 @@ class Agent:
                             "decision_action": action.get("decision_action"),
                         },
                     )
+                    self._emit_event(sim_state, "transport_suppressed_stale_or_unbound", {"agent": self.name, "project_id": project_id, "failure_category": "unknown_project"})
                     _terminal_transport_abort(
                         project_id=project_id,
                         failure_category="unknown_project",
