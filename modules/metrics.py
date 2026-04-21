@@ -145,6 +145,8 @@ class MetricsCollector:
                 "construction_attempt_started": 0,
                 "construction_resource_delivered": 0,
                 "construction_build_episode": 0,
+                "construction_material_progress_updated": 0,
+                "construction_build_progress_updated": 0,
                 "construction_progress_updated": 0,
                 "construction_externalization_updated": 0,
                 "construction_ready_for_validation": 0,
@@ -348,6 +350,8 @@ class MetricsCollector:
             "construction_attempt_started",
             "construction_resource_delivered",
             "construction_build_episode",
+            "construction_material_progress_updated",
+            "construction_build_progress_updated",
             "construction_progress_updated",
             "construction_externalization_updated",
             "construction_ready_for_validation",
@@ -568,6 +572,8 @@ class MetricsCollector:
             "attempt_started_events": int(self.construction_event_counts.get("construction_attempt_started", 0)),
             "resource_delivery_events": int(self.construction_event_counts.get("construction_resource_delivered", 0)),
             "build_episode_events": int(self.construction_event_counts.get("construction_build_episode", 0)),
+            "material_progress_update_events": int(self.construction_event_counts.get("construction_material_progress_updated", 0)),
+            "build_progress_update_events": int(self.construction_event_counts.get("construction_build_progress_updated", 0)),
             "progress_update_events": int(self.construction_event_counts.get("construction_progress_updated", 0)),
             "ready_for_validation_events": int(self.construction_event_counts.get("construction_ready_for_validation", 0)),
             "externalization_update_events": int(self.construction_event_counts.get("construction_externalization_updated", 0)),
@@ -848,6 +854,8 @@ class MetricsCollector:
                     "construction_attempt_started": phase["construction_attempt_started"],
                     "construction_resource_delivered": phase["construction_resource_delivered"],
                     "construction_build_episode": phase["construction_build_episode"],
+                    "construction_material_progress_updated": phase["construction_material_progress_updated"],
+                    "construction_build_progress_updated": phase["construction_build_progress_updated"],
                     "construction_progress_updated": phase["construction_progress_updated"],
                     "construction_externalization_updated": phase["construction_externalization_updated"],
                     "construction_ready_for_validation": phase["construction_ready_for_validation"],
@@ -947,10 +955,25 @@ class MetricsCollector:
                 },
                 "colony_support_capacity_proxy": support_capacity_proxy,
                 "phase_objective_completion": {
+                    # Outcome-based objective completion: progress/externalization activity
+                    # alone should not satisfy phase objectives.
                     phase["phase_name"]: (
-                        phase["construction_progress_updated"] > 0
+                        phase["structures_completed"] > 0
+                        or phase["structures_validated_correct"] > 0
                         or phase["construction_completed"] > 0
+                        or phase["construction_validated_correct"] > 0
+                    )
+                    for phase in self.phase_stats
+                },
+                # Backward-compatible diagnostic view of event-driven "activity happened"
+                # semantics from prior runs/reports.
+                "phase_activity_detected": {
+                    phase["phase_name"]: (
+                        phase["construction_material_progress_updated"] > 0
+                        or phase["construction_build_progress_updated"] > 0
+                        or phase["construction_progress_updated"] > 0
                         or phase["construction_externalization_updated"] > 0
+                        or phase["construction_completed"] > 0
                     )
                     for phase in self.phase_stats
                 },
@@ -1082,6 +1105,8 @@ class MetricsCollector:
                     "execution_readiness_passed_count": int(self.events_by_type.get("execution_readiness_passed", 0)),
                     "execution_readiness_failed_count": int(self.events_by_type.get("execution_readiness_failed", 0)),
                     "construction_progress_updated_count": int(self.construction_event_counts.get("construction_progress_updated", 0)),
+                    "construction_material_progress_updated_count": int(self.construction_event_counts.get("construction_material_progress_updated", 0)),
+                    "construction_build_progress_updated_count": int(self.construction_event_counts.get("construction_build_progress_updated", 0)),
                     "construction_completed_count": int(self.construction_event_counts.get("construction_completed", 0)),
                     "construction_externalization_updated_count": int(self.construction_event_counts.get("construction_externalization_updated", 0)),
                 },
