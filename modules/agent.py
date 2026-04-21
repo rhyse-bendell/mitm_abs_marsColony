@@ -534,6 +534,18 @@ class Agent:
             },
             "project_progress_ticks": {},
         }
+        self.execution_lock_state = {
+            "execution_lock_active": False,
+            "locked_project_id": None,
+            "lock_started_tick": -1,
+            "lock_reason": None,
+            "lock_target_site_or_zone": None,
+            "lock_progress_baseline": 0,
+            "lock_last_progress_tick": -1,
+            "lock_step_count": 0,
+            "lock_interrupt_reason": None,
+            "move_to_site_started": False,
+        }
         self.task_model = None
 
 
@@ -593,34 +605,19 @@ class Agent:
             meta["last_meaningful_epistemic_change_tick"] = tick
         if any(tok in kind_s for tok in {"construction", "transport", "project_validated", "execution", "closure"}):
             meta["last_meaningful_execution_change_tick"] = tick
-        progress_project = None
-        if isinstance(detail, dict):
-            progress_project = detail.get("project_id") or detail.get("target_id")
-        commitment = meta.setdefault("project_commitment", {})
-        if not progress_project:
-            progress_project = commitment.get("project_id")
-        if progress_project:
-            progress_project = str(progress_project)
-            commitment["last_progress_tick"] = tick
-            meta.setdefault("project_progress_ticks", {})[progress_project] = tick
-        meaningful_progress = any(
-            token in kind_s
-            for token in {
-                "construction_progress",
-                "transport_dropoff",
-                "validation",
-                "readiness",
-                "artifact_uptake",
-                "externalization",
-                "connection",
-            }
-        )
-        if meaningful_progress:
-            self._emit_event(
-                sim_state,
-                "metacognitive_progress_signal_registered",
-                {"kind": str(kind), "project_id": progress_project, "tick": tick},
-            )
+        if self._execution_lock_active_for_project():
+            detail_payload = dict(detail or {})
+            locked_project_id = str(self.execution_lock_state.get("locked_project_id") or "")
+            progress_project_id = str(detail_payload.get("project_id") or "")
+            if (not progress_project_id or progress_project_id == locked_project_id) and any(
+                tok in kind_s for tok in {"construction_progress", "build_step", "construction_build_progress", "project_validated", "project_connection_added"}
+            ):
+                self.execution_lock_state["lock_last_progress_tick"] = tick
+                self._emit_event(
+                    sim_state,
+                    "execution_lock_progress_registered",
+                    {"project_id": locked_project_id, "kind": kind_s, "detail": detail_payload},
+                )
         self._emit_event(sim_state, "progress_registered", {"kind": str(kind), "detail": dict(detail or {}), "no_progress_streak": 0})
 
     def _register_no_progress(self, sim_state=None, *, kind, detail=None, category=None, key=None):
@@ -818,6 +815,7 @@ class Agent:
         else:
             stagnation["wait"] = 0
 
+        execution_candidate = self._metacognitive_execution_candidate(environment, sim_state=sim_state, context=context)
         readiness_unlocked = not bool(self._build_readiness_blockers(environment, sim_state=sim_state))
         newly_unlocked = readiness_unlocked and bool(self.last_build_blockers)
         if newly_unlocked and int(meta.get("last_readiness_unlock_tick", -1)) != tick:
@@ -830,6 +828,13 @@ class Agent:
             self._emit_event(sim_state, "metacognitive_handoff_to_execution", {"reason": "readiness_unlocked", "project_id": unlocked_target})
             self._emit_event(sim_state, "metacognitive_execution_bias_applied_after_readiness_unlock", {"project_id": unlocked_target})
             self._emit_event(sim_state, "metacognitive_switch_to_execution", {"reason": "readiness_unlocked"})
+            if execution_candidate is not None and execution_candidate.target_id:
+                self._start_execution_lock(
+                    environment,
+                    execution_candidate.target_id,
+                    sim_state=sim_state,
+                    reason="readiness_unlock_handoff",
+                )
 
         if float(meta.get("execution_window_until", 0.0) or 0.0) < now_ts and meta.get("execution_window_origin"):
             self._emit_event(sim_state, "metacognitive_execution_window_expired", {"origin": meta.get("execution_window_origin"), "project_id": meta.get("execution_window_project_id")})
@@ -851,23 +856,6 @@ class Agent:
                     self._set_metacognitive_mode("SWITCH_REPRIORITIZE", sim_state=sim_state, reason="reactivated_project", focus_target=project_id, profile="execution_heavy")
                     return candidate
 
-        execution_candidate = self._metacognitive_execution_candidate(environment, sim_state=sim_state, context=context)
-        focus_project = decision.target_id or (self.project_closure_state.get("project_id") if self.project_closure_state.get("active") else None) or (execution_candidate.target_id if execution_candidate is not None else None)
-        if focus_project:
-            self._update_project_commitment(focus_project, action, environment, sim_state=sim_state, reason="decision_focus")
-        commitment = meta.get("project_commitment", {})
-        commitment_project = str(commitment.get("project_id") or "")
-        project_progress_ticks = meta.setdefault("project_progress_ticks", {})
-        recent_progress_tick = int(project_progress_ticks.get(commitment_project, commitment.get("last_progress_tick", 0)) or 0)
-        recent_progress = bool(commitment_project) and recent_progress_tick > 0 and (tick - recent_progress_tick) <= 8
-        if (stagnation["support"] >= 3 or stagnation["epistemic"] >= 4) and recent_progress:
-            self._emit_event(
-                sim_state,
-                "metacognitive_stagnation_deferred_due_to_recent_progress",
-                {"project_id": commitment_project, "ticks_since_progress": int(tick - recent_progress_tick), "support_stagnation": int(stagnation["support"]), "epistemic_stagnation": int(stagnation["epistemic"])},
-            )
-            stagnation["support"] = max(0, int(stagnation["support"]) - 1)
-            stagnation["epistemic"] = max(0, int(stagnation["epistemic"]) - 1)
         teammate_closure_active = False
         for project in getattr(environment.construction, "projects", {}).values():
             if not isinstance(project, dict):
@@ -4426,6 +4414,179 @@ class Agent:
         delivered = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
         return bool(project.get("resource_complete", False)) or (required > 0 and delivered >= required)
 
+    def _execution_lock_active_for_project(self, project_id=None):
+        state = self.execution_lock_state
+        if not bool(state.get("execution_lock_active")):
+            return False
+        if project_id is None:
+            return True
+        return str(state.get("locked_project_id") or "") == str(project_id or "")
+
+    def _release_execution_lock(self, sim_state=None, *, reason):
+        state = self.execution_lock_state
+        if not bool(state.get("execution_lock_active")):
+            return
+        state["lock_interrupt_reason"] = str(reason or "released")
+        self._emit_event(
+            sim_state,
+            "execution_lock_interrupted",
+            {"project_id": state.get("locked_project_id"), "reason": state["lock_interrupt_reason"]},
+        )
+        self._emit_event(
+            sim_state,
+            "execution_lock_released",
+            {"project_id": state.get("locked_project_id"), "reason": state["lock_interrupt_reason"]},
+        )
+        state.update(
+            {
+                "execution_lock_active": False,
+                "locked_project_id": None,
+                "lock_started_tick": -1,
+                "lock_reason": None,
+                "lock_target_site_or_zone": None,
+                "lock_progress_baseline": 0,
+                "lock_last_progress_tick": -1,
+                "lock_step_count": 0,
+                "move_to_site_started": False,
+            }
+        )
+
+    def _start_execution_lock(self, environment, project_id, *, sim_state=None, reason="project_actionable"):
+        project = environment.construction.projects.get(project_id) if project_id else None
+        if not isinstance(project, dict):
+            return False
+        target = environment.get_interaction_target_position(project_id, from_position=self.position)
+        if target is None:
+            return False
+        now_tick = int(self.sim_step_count)
+        state = self.execution_lock_state
+        if self._execution_lock_active_for_project(project_id):
+            state["lock_step_count"] = int(state.get("lock_step_count", 0) or 0) + 1
+            self._emit_event(
+                sim_state,
+                "execution_lock_extended",
+                {"project_id": project_id, "reason": reason, "lock_step_count": state["lock_step_count"]},
+            )
+            return True
+        if bool(state.get("execution_lock_active")):
+            self._release_execution_lock(sim_state, reason="switch_project")
+        completed_steps = sum(1 for step in list(project.get("build_steps") or []) if bool(step.get("completed")))
+        state.update(
+            {
+                "execution_lock_active": True,
+                "locked_project_id": str(project_id),
+                "lock_started_tick": now_tick,
+                "lock_reason": str(reason),
+                "lock_target_site_or_zone": str(project.get("site_id") or project.get("target_id") or ""),
+                "lock_progress_baseline": completed_steps,
+                "lock_last_progress_tick": now_tick,
+                "lock_step_count": 0,
+                "lock_interrupt_reason": None,
+                "move_to_site_started": False,
+            }
+        )
+        self._emit_event(
+            sim_state,
+            "execution_lock_started",
+            {"project_id": project_id, "reason": reason, "target": target},
+        )
+        distance = math.hypot(float(target[0]) - float(self.position[0]), float(target[1]) - float(self.position[1]))
+        if distance > 0.65:
+            state["move_to_site_started"] = True
+            self._emit_event(
+                sim_state,
+                "execution_lock_move_to_site_started",
+                {"project_id": project_id, "distance": round(distance, 3)},
+            )
+        return True
+
+    def _execution_lock_viable_project(self, environment, project_id, *, sim_state=None):
+        project = environment.construction.projects.get(project_id) if project_id else None
+        if not isinstance(project, dict):
+            return False
+        if str(project.get("status") or "") in {"complete", "ready_for_validation"}:
+            return False
+        if not self._project_has_incomplete_build_steps(project):
+            return False
+        if not self._project_materially_ready_for_build(project):
+            return False
+        probe = BrainDecision(selected_action=ExecutableActionType.CONTINUE_CONSTRUCTION, target_id=project_id, confidence=0.8)
+        blockers, _ = self._construction_action_blockers(
+            probe,
+            {"type": "idle", "decision_action": ExecutableActionType.CONTINUE_CONSTRUCTION.value, "project_id": project_id},
+            environment,
+            sim_state=sim_state,
+        )
+        partitioned = self._partition_action_blockers(blockers)
+        return not bool(partitioned["hard_blockers"])
+
+    def _maintain_execution_lock(self, environment, *, sim_state=None):
+        state = self.execution_lock_state
+        if not bool(state.get("execution_lock_active")):
+            return
+        project_id = state.get("locked_project_id")
+        project = environment.construction.projects.get(project_id) if project_id else None
+        if not isinstance(project, dict):
+            self._release_execution_lock(sim_state, reason="project_invalid_or_unbound")
+            return
+        if str(project.get("status") or "") in {"complete", "ready_for_validation"}:
+            self._release_execution_lock(sim_state, reason=f"project_phase_changed:{project.get('status')}")
+            return
+        if not self._project_has_incomplete_build_steps(project):
+            self._release_execution_lock(sim_state, reason="build_sequence_exhausted")
+            return
+        if not self._execution_lock_viable_project(environment, project_id, sim_state=sim_state):
+            self._release_execution_lock(sim_state, reason="real_blocker_or_nonviable_path")
+            return
+        no_progress_limit = 8
+        last_progress_tick = int(state.get("lock_last_progress_tick", state.get("lock_started_tick", 0)) or 0)
+        if int(self.sim_step_count) - last_progress_tick >= no_progress_limit:
+            self._release_execution_lock(sim_state, reason="bounded_no_progress_timeout")
+
+    def _apply_execution_lock_bias(self, decision, environment, *, sim_state=None):
+        state = self.execution_lock_state
+        if not bool(state.get("execution_lock_active")):
+            return decision
+        project_id = state.get("locked_project_id")
+        if not project_id:
+            return decision
+        self._emit_event(sim_state, "execution_lock_build_bias_applied", {"project_id": project_id, "selected_action": decision.selected_action.value})
+        if decision.selected_action == ExecutableActionType.TRANSPORT_RESOURCES and str(decision.target_id or "") == str(project_id):
+            project = environment.construction.projects.get(project_id)
+            if self._project_materially_ready_for_build(project) and self._project_has_incomplete_build_steps(project):
+                self._emit_event(sim_state, "execution_lock_transport_suppressed", {"project_id": project_id})
+                return BrainDecision(
+                    selected_action=ExecutableActionType.CONTINUE_CONSTRUCTION,
+                    target_id=project_id,
+                    target_zone=decision.target_zone,
+                    goal_update="execution_lock_continue_build",
+                    reason_summary=f"Execution lock suppresses transport for materially ready {project_id}.",
+                    confidence=max(0.81, float(decision.confidence or 0.0)),
+                )
+        if decision.selected_action in {
+            ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+            ExecutableActionType.CONSULT_TEAM_ARTIFACT,
+            ExecutableActionType.EXTERNALIZE_PLAN,
+            ExecutableActionType.REASSESS_PLAN,
+            ExecutableActionType.REQUEST_ASSISTANCE,
+            ExecutableActionType.WAIT,
+        }:
+            if self._execution_lock_viable_project(environment, project_id, sim_state=sim_state):
+                self._emit_event(
+                    sim_state,
+                    "execution_lock_switch_suppressed",
+                    {"project_id": project_id, "from_action": decision.selected_action.value, "to_action": ExecutableActionType.CONTINUE_CONSTRUCTION.value},
+                )
+                return BrainDecision(
+                    selected_action=ExecutableActionType.CONTINUE_CONSTRUCTION,
+                    target_id=project_id,
+                    target_zone=decision.target_zone,
+                    goal_update="execution_lock_continue_build",
+                    reason_summary=f"Execution lock preserves project-bound build continuity for {project_id}.",
+                    confidence=max(0.79, float(decision.confidence or 0.0)),
+                )
+        return decision
+
     def _select_build_target(self, environment, require_readiness=False, include_project=False, action_type=None, requested_project_id=None, sim_state=None):
         if not hasattr(environment, "interaction_targets") or not hasattr(environment, "construction"):
             return None
@@ -6976,6 +7137,7 @@ class Agent:
         context = context or (sim_state.brain_context_builder.build(sim_state, self) if sim_state is not None else None)
         rewritten = decision
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        self._maintain_execution_lock(environment, sim_state=sim_state)
         live_commitment, live_source_id, live_reason = self._has_live_epistemic_commitment(
             environment,
             sim_state=sim_state,
@@ -7778,6 +7940,7 @@ class Agent:
                 reason_summary=f"Preserve live inspect pursuit for {live_source_id}",
                 confidence=max(0.8, float(rewritten.confidence or decision.confidence or 0.0)),
             )
+        rewritten = self._apply_execution_lock_bias(rewritten, environment, sim_state=sim_state)
         rewritten = self._apply_metacognitive_regulation(
             rewritten,
             environment,
@@ -7785,9 +7948,37 @@ class Agent:
             context=context,
             pivot_origin=pivot_origin,
         )
+        rewritten = self._apply_execution_lock_bias(rewritten, environment, sim_state=sim_state)
+        if rewritten.selected_action in {
+            ExecutableActionType.START_CONSTRUCTION,
+            ExecutableActionType.CONTINUE_CONSTRUCTION,
+            ExecutableActionType.TRANSPORT_RESOURCES,
+        }:
+            lock_project_id = rewritten.target_id
+            if not lock_project_id:
+                selected = self._select_build_target(
+                    environment,
+                    require_readiness=False,
+                    include_project=True,
+                    action_type=rewritten.selected_action.value,
+                    requested_project_id=rewritten.target_id,
+                    sim_state=sim_state,
+                )
+                lock_project_id = selected.get("project_id") if isinstance(selected, dict) else None
+            if (
+                lock_project_id
+                and self._execution_lock_viable_project(environment, lock_project_id, sim_state=sim_state)
+            ):
+                self._start_execution_lock(
+                    environment,
+                    lock_project_id,
+                    sim_state=sim_state,
+                    reason=f"actionable_{rewritten.selected_action.value}",
+                )
         if rewritten.selected_action == ExecutableActionType.VALIDATE_CONSTRUCTION:
             closure_target = rewritten.target_id or self._construction_project_for_action(rewritten, {"project_id": None}, environment)
             if closure_target:
+                self._release_execution_lock(sim_state, reason="phase_shift_validation")
                 rewritten = BrainDecision(
                     selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION,
                     target_id=closure_target,
@@ -9413,6 +9604,8 @@ class Agent:
                         sim_time=sim_state.time if sim_state is not None else None,
                     )
                     if not build_ok and decision_action != ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value:
+                        if self._execution_lock_active_for_project(project_id):
+                            self._release_execution_lock(sim_state, reason=f"real_blocker:{build_reason}")
                         _log_mutation_blocked(
                             "construction_progress_blocked",
                             {
@@ -9530,12 +9723,19 @@ class Agent:
                             key=project_id,
                         )
                         if streak >= 2:
-                            self._force_recovery_pivot(
-                                sim_state,
-                                to_action=ExecutableActionType.TRANSPORT_RESOURCES.value,
-                                reason=f"construct_stalled:{project_id}",
-                                ttl_s=15.0,
-                            )
+                            if self._execution_lock_active_for_project(project_id):
+                                self._emit_event(
+                                    sim_state,
+                                    "execution_lock_extended",
+                                    {"project_id": project_id, "reason": "construct_stall_within_lock", "streak": streak},
+                                )
+                            else:
+                                self._force_recovery_pivot(
+                                    sim_state,
+                                    to_action=ExecutableActionType.TRANSPORT_RESOURCES.value,
+                                    reason=f"construct_stalled:{project_id}",
+                                    ttl_s=15.0,
+                                )
 
             if action["type"] == "transport_resources":
                 def _reset_transport_episode():
