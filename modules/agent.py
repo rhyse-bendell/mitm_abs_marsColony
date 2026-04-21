@@ -3542,6 +3542,22 @@ class Agent:
             "blocker_category": blocker_category,
         }
 
+    def _workspace_externalization_gap_exists(self, environment):
+        construction = getattr(environment, "construction", None)
+        projects = getattr(construction, "projects", {}) if construction is not None else {}
+        required_categories = {"claim", "evidence", "uncertainty"}
+        for project in projects.values():
+            if not isinstance(project, dict):
+                continue
+            status = str(project.get("status") or "")
+            if status in {"complete", "ready_for_validation"}:
+                continue
+            entries = list((project.get("epistemic_workspace") or {}).get("entries") or [])
+            covered = {str(entry.get("entry_type") or "").strip().lower() for entry in entries}
+            if len(required_categories - covered) > 0:
+                return True
+        return False
+
     def _artifact_action_is_redundant(self, action_type, environment, sim_state=None, artifact_id=None):
         state = self.artifact_coordination_state
         context = self._artifact_coordination_context_signature(environment, sim_state=sim_state)
@@ -4210,6 +4226,25 @@ class Agent:
         if required > 0 and delivered >= required:
             return False
         return True
+
+    def _project_has_incomplete_build_steps(self, project):
+        if not isinstance(project, dict):
+            return False
+        if str(project.get("status") or "") == "complete":
+            return False
+        steps = list(project.get("build_steps") or [])
+        if not steps:
+            # If explicit steps are unavailable, treat any non-complete
+            # materially ready project as still needing structural work.
+            return True
+        return any(not bool(step.get("completed")) for step in steps)
+
+    def _project_materially_ready_for_build(self, project):
+        if not isinstance(project, dict):
+            return False
+        required = int(project.get("required_resources", {}).get("bricks", 0) or 0)
+        delivered = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
+        return bool(project.get("resource_complete", False)) or (required > 0 and delivered >= required)
 
     def _select_build_target(self, environment, require_readiness=False, include_project=False, action_type=None, requested_project_id=None, sim_state=None):
         if not hasattr(environment, "interaction_targets") or not hasattr(environment, "construction"):
@@ -7426,12 +7461,18 @@ class Agent:
                 project = environment.construction.projects.get(project_id) if project_id else None
                 if not self._project_needs_transport(project):
                     next_action = ExecutableActionType.VALIDATE_CONSTRUCTION if isinstance(project, dict) and str(project.get("status")) == "ready_for_validation" else ExecutableActionType.REASSESS_PLAN
+                    if (
+                        isinstance(project, dict)
+                        and self._project_materially_ready_for_build(project)
+                        and self._project_has_incomplete_build_steps(project)
+                    ):
+                        next_action = ExecutableActionType.CONTINUE_CONSTRUCTION
                     rewritten = BrainDecision(
                         selected_action=next_action,
-                        target_id=project_id if next_action == ExecutableActionType.VALIDATE_CONSTRUCTION else None,
+                        target_id=project_id if next_action in {ExecutableActionType.VALIDATE_CONSTRUCTION, ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION} else None,
                         target_zone=decision.target_zone,
                         goal_update="maintain_forward_progress",
-                        reason_summary="Policy pivot: suppress transport to materially satisfied or complete project.",
+                        reason_summary="Policy pivot: suppress transport to materially satisfied or complete project; prefer direct build continuation when ready.",
                         confidence=max(0.75, float(decision.confidence or 0.0)),
                     )
                     self._emit_event(
@@ -7445,6 +7486,7 @@ class Agent:
                             "required_resources": int(project.get("required_resources", {}).get("bricks", 0) or 0) if isinstance(project, dict) else 0,
                             "delivered_resources": int(project.get("delivered_resources", {}).get("bricks", 0) or 0) if isinstance(project, dict) else 0,
                             "next_action_hint": next_action.value,
+                            "incomplete_build_steps": self._project_has_incomplete_build_steps(project) if isinstance(project, dict) else None,
                         },
                     )
         if context is not None and rewritten.selected_action in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION}:
@@ -7493,6 +7535,26 @@ class Agent:
                     self._emit_event(sim_state, "observe_suppressed_due_to_no_effect_streak", {"observe_no_effect_streak": observe_streak, "pivot_to": fallback.selected_action.value})
                     rewritten = fallback
         if rewritten.selected_action in {ExecutableActionType.CONSULT_TEAM_ARTIFACT, ExecutableActionType.EXTERNALIZE_PLAN}:
+            if (
+                rewritten.selected_action == ExecutableActionType.CONSULT_TEAM_ARTIFACT
+                and self._has_meaningful_consultable_artifact(sim_state)
+            ):
+                last_consult = float((self.artifact_coordination_state or {}).get("last_consulted_time", -999.0) or -999.0)
+                consulted_recently = (float(getattr(sim_state, "time", 0.0)) - last_consult) <= 6.0
+                if consulted_recently and self._workspace_externalization_gap_exists(environment):
+                    self._emit_event(
+                        sim_state,
+                        "consult_deprioritized_for_workspace_gap_externalization",
+                        {"origin": pivot_origin, "last_consulted_time": last_consult},
+                    )
+                    rewritten = BrainDecision(
+                        selected_action=ExecutableActionType.EXTERNALIZE_PLAN,
+                        target_id=rewritten.target_id,
+                        target_zone=rewritten.target_zone,
+                        goal_update=rewritten.goal_update,
+                        reason_summary="Recent consult already performed; slight policy rebalance toward epistemic workspace coverage.",
+                        confidence=max(0.7, float(rewritten.confidence or 0.0)),
+                    )
             is_redundant = self._artifact_action_is_redundant(rewritten.selected_action.value, environment, sim_state=sim_state, artifact_id="whiteboard")
             if is_redundant:
                 self._record_artifact_suppression("whiteboard", sim_state=sim_state)
@@ -9249,6 +9311,32 @@ class Agent:
                             kind="construction_progress_updated",
                             detail={"project_id": project_id, "steps_before": steps_before, "steps_after": steps_after},
                         )
+                        self._emit_event(
+                            sim_state,
+                            "construction_build_progress_updated",
+                            {
+                                "agent": self.name,
+                                "project_id": project_id,
+                                "steps_before": steps_before,
+                                "steps_after": steps_after,
+                                "decision_action": decision_action,
+                            },
+                        )
+                        # Backward-compatible alias: historically this event mixed
+                        # material and build progress. Keep emitting while providing
+                        # explicit build/material variants.
+                        self._emit_event(
+                            sim_state,
+                            "construction_progress_updated",
+                            {
+                                "agent": self.name,
+                                "project_id": project_id,
+                                "progress_kind": "build_step",
+                                "steps_before": steps_before,
+                                "steps_after": steps_after,
+                                "decision_action": decision_action,
+                            },
+                        )
                     else:
                         project_streaks = self.progress_tracker.setdefault("project_no_progress", {})
                         project_streaks[project_id] = int(project_streaks.get(project_id, 0) or 0) + 1
@@ -9614,7 +9702,7 @@ class Agent:
                     )
                     self._emit_event(
                         sim_state,
-                        "construction_progress_updated",
+                        "construction_material_progress_updated",
                         {
                             "agent": self.name,
                             "project_id": project_id,
@@ -9635,6 +9723,25 @@ class Agent:
                             ),
                             "current_action_type": action.get("type"),
                             "transport_state": dict(self.transport_state),
+                            "legality_checks_passed": True,
+                        },
+                    )
+                    # Backward-compatible alias retained for existing downstream
+                    # consumers that currently listen to construction_progress_updated.
+                    self._emit_event(
+                        sim_state,
+                        "construction_progress_updated",
+                        {
+                            "agent": self.name,
+                            "project_id": project_id,
+                            "progress_kind": "material_delivery",
+                            "delivered_before": delivered_before,
+                            "delivered_after": delivered_after,
+                            "required_total": required_after,
+                            "progress_before": round(progress_before, 4),
+                            "progress_after": round(progress_after, 4),
+                            "status_after": status_after,
+                            "decision_action": action.get("decision_action"),
                             "legality_checks_passed": True,
                         },
                     )

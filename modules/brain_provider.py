@@ -555,6 +555,12 @@ class RuleBrain(BrainProvider):
         stale_grounding_pressure = max(0.0, min(1.0, (1.0 - ((team_freshness + role_freshness) / 2.0)) + refresh_pressure))
         plan_state = self._detect_team_plan_state(team_shared_knowledge, externalized)
         ready_for_validation = any(bool(p.get("ready_for_validation")) for p in built_state)
+        materially_ready_incomplete = any(
+            bool(p.get("resource_complete"))
+            and str(p.get("project_status") or "").lower() not in {"complete", "ready_for_validation"}
+            and float(p.get("progress", 0.0) or 0.0) >= 1.0
+            for p in built_state
+        )
         active_work_remains = bool(active_projects or ready_for_validation)
         no_active_reason = any(
             "no_active_plan" in str(reason or "")
@@ -608,6 +614,7 @@ class RuleBrain(BrainProvider):
             "no_active_plan_pressure": no_active_plan_pressure,
             "coordination_deadlock_pressure": coordination_deadlock_pressure,
             "construction_decision_pressure": construction_decision_pressure,
+            "materially_ready_incomplete_projects": 1.0 if materially_ready_incomplete else 0.0,
             **plan_state,
         }
 
@@ -693,6 +700,13 @@ class RuleBrain(BrainProvider):
             if ExecutableActionType.TRANSPORT_RESOURCES.value in legal_types:
                 guarded_scores["LOGISTICS"] = guarded_scores.get("LOGISTICS", mode_scores.get("LOGISTICS", 0.0)) + 1.05
                 notes.append("build_ready_incomplete_projects_bias_logistics")
+            # Narrow override: if at least one project is materially ready but still
+            # not structurally complete, prefer actual build-step execution over
+            # additional transport loops.
+            if features.get("materially_ready_incomplete_projects", 0.0) > 0.0:
+                guarded_scores["CONSTRUCT"] = guarded_scores.get("CONSTRUCT", mode_scores.get("CONSTRUCT", 0.0)) + 1.05
+                guarded_scores["LOGISTICS"] = guarded_scores.get("LOGISTICS", mode_scores.get("LOGISTICS", 0.0)) - 0.95
+                notes.append("materially_ready_projects_bias_construct_over_transport")
             for mode in ("BOOTSTRAP", "ACQUIRE_DIK"):
                 if mode in guarded_scores:
                     guarded_scores[mode] -= 1.1
@@ -1042,6 +1056,16 @@ class RuleBrain(BrainProvider):
             ):
                 score += 1.25
             if (
+                features.get("materially_ready_incomplete_projects", 0.0) > 0.0
+                and action_type in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value}
+            ):
+                score += 0.95
+            if (
+                features.get("materially_ready_incomplete_projects", 0.0) > 0.0
+                and action_type == ExecutableActionType.TRANSPORT_RESOURCES.value
+            ):
+                score -= 1.35
+            if (
                 features["shared_source_exhausted"] > 0.0
                 and features["dik_change_recency"] <= 0.0
                 and action_type in {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, ExecutableActionType.REQUEST_ASSISTANCE.value}
@@ -1071,6 +1095,19 @@ class RuleBrain(BrainProvider):
                 # scored as a remedy when the deficit is specifically
                 # "no_active_plan" and no team-plan artifact is available.
                 score -= 3.0
+            if (
+                action_type == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value
+                and features.get("dik_change_recency", 0.0) > 0.0
+                and features.get("team_plan_available", 0.0) > 0.0
+            ):
+                # Mildly reduce repeated consult cycles right after recent DIK updates.
+                score -= 0.35
+            if (
+                action_type == ExecutableActionType.EXTERNALIZE_PLAN.value
+                and features.get("coordination_deadlock_pressure", 0.0) >= 0.45
+                and features.get("team_plan_available", 0.0) <= 0.0
+            ):
+                score += 0.45
             if action_type == ExecutableActionType.REASSESS_PLAN.value:
                 score -= 2.4
             if action_type in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value} and features.get("readiness_blocked", 0.0) > 0.0:
@@ -1124,6 +1161,7 @@ class RuleBrain(BrainProvider):
             features["build_opportunity"] > 0.0
             and features["active_incomplete_projects"] > 0.0
             and features["dik_change_recency"] > 0.0
+            and features.get("materially_ready_incomplete_projects", 0.0) <= 0.0
             and (
                 not step_allowed_actions
                 or ExecutableActionType.TRANSPORT_RESOURCES.value in step_allowed_actions

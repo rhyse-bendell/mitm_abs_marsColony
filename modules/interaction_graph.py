@@ -152,7 +152,14 @@ class InteractionTelemetryBridge:
             mapped = make_interaction_event(time=t, interaction_id=self._next_id(event), source_node=src, target_node="World:MovementPathing", interaction_type="movement_plan", status="started", agent_id=payload.get("agent_id"), payload_summary="movement plan")
         elif et in {"movement_progress", "movement_retried"}:
             mapped = make_interaction_event(time=t, interaction_id=self._next_id(event), source_node="World:MovementPathing", target_node="World:Environment", interaction_type="movement_progress", status="progressed", agent_id=payload.get("agent_id"), payload_summary="movement progress")
-        elif et in {"construction_progress_updated", "construction_externalization_updated", "construction_resource_delivered", "construction_completed"}:
+        elif et in {
+            "construction_progress_updated",
+            "construction_material_progress_updated",
+            "construction_build_progress_updated",
+            "construction_externalization_updated",
+            "construction_resource_delivered",
+            "construction_completed",
+        }:
             mapped = make_interaction_event(time=t, interaction_id=self._next_id(event), source_node=src, target_node="World:ConstructionProjects", interaction_type="construction_update", status="progressed", agent_id=payload.get("agent_id"), payload_summary=str(payload.get("project_id") or "construction"))
         elif et in {"source_access_blocked", "witness_step_blocked", "witness_expectation_failed"}:
             mapped = make_interaction_event(time=t, interaction_id=self._next_id(event), source_node="Audit:RuntimeWitness", target_node=src, interaction_type="witness_block", status="failed", agent_id=payload.get("agent_id"), payload_summary=str(payload.get("failure_category") or "witness block"), severity="warning")
