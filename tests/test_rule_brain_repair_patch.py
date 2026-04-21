@@ -39,6 +39,88 @@ class _Logger:
 
 
 class TestRuleBrainRepairPatch(unittest.TestCase):
+    def test_metacognitive_breaks_stale_support_loop(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            agent.support_goal_nonexec_counts = {"support_a:stale": 4}
+            agent.communication_state["no_effect_streak"] = 3
+            decision = BrainDecision(
+                selected_action=ExecutableActionType.CONSULT_TEAM_ARTIFACT,
+                target_id="whiteboard",
+                confidence=0.7,
+            )
+            with patch.object(agent, "_choose_post_inspect_followup_decision", return_value=BrainDecision(selected_action=ExecutableActionType.REASSESS_PLAN, confidence=0.8)):
+                rewritten = agent._apply_policy_pivots(decision, environment=sim.environment, sim_state=sim, context=None, pivot_origin="unit")
+            self.assertEqual(rewritten.selected_action, ExecutableActionType.REASSESS_PLAN)
+            self.assertEqual(agent.metacognitive_state.get("mode"), "RECOVER_REGROUND")
+            self.assertTrue(any(e.get("event_type") == "metacognitive_support_loop_broken" for e in sim.logger.get_recent_events(120)))
+        finally:
+            sim.stop()
+
+    def test_metacognitive_readiness_unlock_starts_execution_window_and_biases_execution(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            agent.last_build_blockers = ["insufficient_rule_knowledge"]
+            decision = BrainDecision(selected_action=ExecutableActionType.CONSULT_TEAM_ARTIFACT, confidence=0.6)
+            candidate = BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES, target_id="Build_Table_A", confidence=0.9)
+            with patch.object(agent, "_build_readiness_blockers", return_value=[]), patch.object(agent, "_metacognitive_execution_candidate", return_value=candidate):
+                rewritten = agent._apply_policy_pivots(decision, environment=sim.environment, sim_state=sim, context=None, pivot_origin="unit")
+            self.assertEqual(rewritten.selected_action, ExecutableActionType.TRANSPORT_RESOURCES)
+            self.assertGreater(float(agent.metacognitive_state.get("execution_window_until", 0.0)), float(sim.time))
+            events = [e.get("event_type") for e in sim.logger.get_recent_events(120)]
+            self.assertIn("metacognitive_execution_window_started", events)
+            self.assertIn("metacognitive_switch_to_execution", events)
+        finally:
+            sim.stop()
+
+    def test_metacognitive_defers_blocked_project_and_reactivates_on_new_support(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            blocked_project = "Build_Table_A"
+            alt_candidate = BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES, target_id="Build_Table_B", confidence=0.8)
+            decision = BrainDecision(selected_action=ExecutableActionType.START_CONSTRUCTION, target_id=blocked_project, confidence=0.7)
+            with patch.object(agent, "_metacognitive_execution_candidate", return_value=alt_candidate), patch.object(agent, "_construction_action_blockers", return_value=(["missing_validation_rule_knowledge"], blocked_project)):
+                rewritten = agent._apply_policy_pivots(decision, environment=sim.environment, sim_state=sim, context=None, pivot_origin="unit")
+            self.assertEqual(rewritten.target_id, "Build_Table_B")
+            self.assertIn(blocked_project, agent.metacognitive_state.get("deferred_projects", {}))
+            self.assertTrue(any(e.get("event_type") == "metacognitive_project_deferred" for e in sim.logger.get_recent_events(120)))
+
+            agent.metacognitive_state["deferred_projects"] = {blocked_project: {"deferred_at": sim.time, "reason": "project_blocked"}}
+            with patch.object(agent, "_metacognitive_execution_candidate", side_effect=[BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=blocked_project, confidence=0.9), BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=blocked_project, confidence=0.9)]):
+                rewritten_2 = agent._apply_policy_pivots(
+                    BrainDecision(selected_action=ExecutableActionType.WAIT, confidence=0.4),
+                    environment=sim.environment,
+                    sim_state=sim,
+                    context=None,
+                    pivot_origin="unit",
+                )
+            self.assertEqual(rewritten_2.target_id, blocked_project)
+            self.assertNotIn(blocked_project, agent.metacognitive_state.get("deferred_projects", {}))
+            self.assertTrue(any(e.get("event_type") == "metacognitive_project_reactivated" for e in sim.logger.get_recent_events(240)))
+        finally:
+            sim.stop()
+
+    def test_metacognitive_suppresses_wait_when_viable_execution_exists(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            candidate = BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES, target_id="Build_Table_A", confidence=0.9)
+            with patch.object(agent, "_metacognitive_execution_candidate", return_value=candidate):
+                rewritten = agent._apply_policy_pivots(
+                    BrainDecision(selected_action=ExecutableActionType.WAIT, confidence=0.2),
+                    environment=sim.environment,
+                    sim_state=sim,
+                    context=None,
+                    pivot_origin="unit",
+                )
+            self.assertEqual(rewritten.selected_action, ExecutableActionType.TRANSPORT_RESOURCES)
+            self.assertTrue(any(e.get("event_type") == "metacognitive_wait_suppressed_due_to_viable_action" for e in sim.logger.get_recent_events(120)))
+        finally:
+            sim.stop()
+
     def test_build_brain_request_includes_compact_control_state_fields(self):
         agent = Agent("Engineer", "Engineer")
         agent.control_state.update(
