@@ -1628,6 +1628,24 @@ class Agent:
                 "closure_missing_rule_ids_after_binding": list(named_rule_binding.get("missing_rule_ids") or []),
             },
         )
+        if not readiness_after:
+            promoted = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
+            if promoted.selected_action in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION, ExecutableActionType.VALIDATE_CONSTRUCTION}:
+                self._force_recovery_pivot(
+                    sim_state,
+                    to_action=promoted.selected_action.value,
+                    reason=f"readiness_recompute_handoff:{trigger_source}",
+                    ttl_s=6.0,
+                )
+                self._emit_event(
+                    sim_state,
+                    "readiness_handoff_promoted_execution",
+                    {
+                        "trigger_source": trigger_source,
+                        "promoted_action": promoted.selected_action.value,
+                        "project_id": promoted.target_id,
+                    },
+                )
 
     def get_runtime_state_snapshot(self):
         current_goals = [g for g in list(self.goal_stack or []) if isinstance(g, dict)]
@@ -3386,6 +3404,27 @@ class Agent:
             "role_packet_dik_ids": role_packet_dik_ids if source_id == role_source_id else [],
             "expires_at": now_ts + 5.0,
         }
+        focused_project = self._select_build_target(environment, require_readiness=False, include_project=True, sim_state=sim_state)
+        focused_project_id = str((focused_project or {}).get("project_id") or "")
+        if net_dik_changed and focused_project_id and (blocker_relevant_inspect or source_id in {"Team_Info", role_source_id}):
+            refresh_expires = now_ts + 12.0
+            self.project_closure_state["last_blocker_relevant_refresh"] = {
+                "project_id": focused_project_id,
+                "source_id": str(source_id),
+                "trigger_source": f"inspect_success:{source_id}",
+                "expires_at": refresh_expires,
+            }
+            self._emit_event(
+                sim_state,
+                "epistemic_grounding_refreshed_after_inspect",
+                {"project_id": focused_project_id, "source_id": source_id, "expires_at": refresh_expires, "dik_changed": True},
+            )
+            if "stale_epistemic_grounding" in readiness_before and "stale_epistemic_grounding" not in readiness_after:
+                self._emit_event(
+                    sim_state,
+                    "stale_epistemic_grounding_cleared",
+                    {"project_id": focused_project_id, "source_id": source_id},
+                )
         if sim_state is not None:
             self._emit_event(
                 sim_state,
@@ -3679,11 +3718,30 @@ class Agent:
                 confidence=0.77,
             )
         if self._is_build_eligible(environment):
-            build_selection = self._select_build_target(environment, require_readiness=True, include_project=True)
+            build_selection = self._select_build_target(environment, require_readiness=True, include_project=True, sim_state=sim_state)
             if isinstance(build_selection, dict):
+                project_id = build_selection.get("project_id")
+                project = (getattr(environment, "construction", None) or object()).projects.get(project_id) if getattr(environment, "construction", None) is not None else None
+                if isinstance(project, dict) and self._project_materially_ready_for_build(project):
+                    if self._project_has_incomplete_build_steps(project):
+                        return BrainDecision(
+                            selected_action=ExecutableActionType.CONTINUE_CONSTRUCTION,
+                            target_id=project_id,
+                            reason_summary="Post-inspect readiness unlocked; continue executable construction handoff.",
+                            confidence=0.84,
+                        )
+                    if bool(project.get("structurally_complete")):
+                        has_rules, missing_rules = self._construction_rule_match(project_id, environment=environment, sim_state=sim_state, include_team=True)
+                        if has_rules:
+                            return BrainDecision(
+                                selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION,
+                                target_id=project_id,
+                                reason_summary="Post-inspect readiness unlocked; project physically complete and ready for validation.",
+                                confidence=0.83,
+                            )
                 return BrainDecision(
                     selected_action=ExecutableActionType.START_CONSTRUCTION,
-                    target_id=build_selection.get("project_id"),
+                    target_id=project_id,
                     reason_summary="Post-inspect readiness unlocked; pivoting to construction.",
                     confidence=0.81,
                 )
@@ -4146,6 +4204,30 @@ class Agent:
             return build_selection.get("project_id")
         return None
 
+    def _rule_dependency_support_class(self, rule_id):
+        rid = normalize_rule_token(rule_id)
+        if not rid:
+            return ""
+        if rid.endswith("_SUPPORT_DEPENDENCY"):
+            return "SUPPORT_DEPENDENCY"
+        return ""
+
+    def _project_semantic_support_rule_ids(self, project, *, local_rules=None, team_rules=None):
+        support_rule_ids = set()
+        support_rule_ids.update({normalize_rule_token(r) for r in (local_rules or set()) if normalize_rule_token(r)})
+        support_rule_ids.update({normalize_rule_token(r) for r in (team_rules or set()) if normalize_rule_token(r)})
+        provenance = (project or {}).get("provenance") or {}
+        support_rule_ids.update({normalize_rule_token(r) for r in provenance.get("held_rule_ids_at_build", []) if normalize_rule_token(r)})
+        workspace = dict((project or {}).get("epistemic_workspace") or {})
+        for entry in list(workspace.get("entries") or []):
+            refs = list((entry or {}).get("references") or [])
+            support_rule_ids.update({normalize_rule_token(r) for r in refs if normalize_rule_token(r)})
+        discussion = dict((project or {}).get("validation_discussion") or {})
+        for item in list(discussion.get("support_items") or []):
+            refs = list((item or {}).get("references") or [])
+            support_rule_ids.update({normalize_rule_token(r) for r in refs if normalize_rule_token(r)})
+        return {r for r in support_rule_ids if r}
+
     def _construction_rule_match(self, project_id, environment=None, sim_state=None, include_team=True):
         project = None
         if environment is not None and getattr(environment, "construction", None) is not None:
@@ -4159,14 +4241,35 @@ class Agent:
         }
         if not expected:
             return True, []
-        local_rules = {normalize_rule_token(r) for r in self.mental_model["knowledge"].rules}
+        local_rules = {normalize_rule_token(r) for r in self.mental_model["knowledge"].rules if normalize_rule_token(r)}
         team_rules = set()
         if include_team:
             _, _, team_rule_ids = self._team_validated_ids(sim_state=sim_state)
-            team_rules = {normalize_rule_token(r) for r in team_rule_ids}
+            team_rules = {normalize_rule_token(r) for r in team_rule_ids if normalize_rule_token(r)}
         held_rules = local_rules | team_rules
-        missing = sorted(expected - held_rules)
-        return len(missing) == 0, missing
+        semantic_support = self._project_semantic_support_rule_ids(project, local_rules=local_rules, team_rules=team_rules)
+        semantic_classes = {self._rule_dependency_support_class(r) for r in semantic_support if self._rule_dependency_support_class(r)}
+        missing = []
+        semantically_satisfied = []
+        for expected_rule in sorted(expected):
+            if expected_rule in held_rules:
+                continue
+            support_class = self._rule_dependency_support_class(expected_rule)
+            if support_class and support_class in semantic_classes:
+                semantically_satisfied.append(expected_rule)
+                continue
+            missing.append(expected_rule)
+        if semantically_satisfied and sim_state is not None:
+            self._emit_event(
+                sim_state,
+                "validation_semantic_dependency_support_applied",
+                {
+                    "project_id": project_id,
+                    "expected_rule_ids": sorted(semantically_satisfied),
+                    "support_classes": sorted({self._rule_dependency_support_class(r) for r in semantically_satisfied if self._rule_dependency_support_class(r)}),
+                },
+            )
+        return len(missing) == 0, sorted(missing)
 
 
     def _cross_role_engineer_dependency_gap(self, sim_state=None, environment=None):
@@ -4368,9 +4471,12 @@ class Agent:
         closure_project_id = self.project_closure_state.get("project_id") if self.project_closure_state.get("active") else None
         refresh_state = dict(self.project_closure_state.get("last_blocker_relevant_refresh") or {})
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        active_project = self._select_build_target(environment, require_readiness=False, include_project=True, sim_state=sim_state)
+        active_project_id = str((active_project or {}).get("project_id") or "")
+        refresh_project_id = str(refresh_state.get("project_id") or "")
         project_local_refresh_active = bool(
-            closure_project_id
-            and str(refresh_state.get("project_id") or "") == str(closure_project_id)
+            refresh_project_id
+            and refresh_project_id in {str(closure_project_id or ""), active_project_id}
             and float(refresh_state.get("expires_at", 0.0) or 0.0) >= now_ts
         )
         if len(info_ids) < 2:
@@ -4653,8 +4759,15 @@ class Agent:
                         "resource_complete": bool(project.get("resource_complete", False)),
                         "required_resources": int(project.get("required_resources", {}).get("bricks", 0) or 0),
                         "delivered_resources": int(project.get("delivered_resources", {}).get("bricks", 0) or 0),
+                        "failure_category": "materially_satisfied_pruned",
                     },
                 )
+                if requested_project_id and str(requested_project_id) == str(project_id):
+                    self._emit_event(
+                        sim_state,
+                        "transport_suppressed_stale_or_unbound",
+                        {"agent": self.name, "project_id": project_id, "failure_category": "materials_already_satisfied_pruned"},
+                    )
                 continue
             required = project.get("required_resources", {}).get("bricks", 0)
             delivered = project.get("delivered_resources", {}).get("bricks", 0)
@@ -8356,6 +8469,11 @@ class Agent:
             if isinstance(build_selection, dict):
                 action["project_id"] = build_selection.get("project_id")
                 action["target"] = build_selection.get("target")
+            if not action.get("project_id"):
+                fallback = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
+                if fallback.selected_action in {ExecutableActionType.CONTINUE_CONSTRUCTION, ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.VALIDATE_CONSTRUCTION}:
+                    self._emit_event(sim_state, "transport_pruned_materially_satisfied", {"requested_project_id": decision.target_id, "fallback_action": fallback.selected_action.value})
+                    return self._translate_brain_decision_to_legacy_action(fallback, environment, sim_state=sim_state)
 
         if decision.selected_action in {
             ExecutableActionType.START_CONSTRUCTION,
@@ -11279,7 +11397,21 @@ class Agent:
                         None,
                     )
                     tps_payload["redirect_teammate"] = redirect
-                if preferred_mode == "exact_rule" and not rule_payload and response_category != "state_support":
+                semantic_support_available = False
+                project_id = str(message.get("project_id") or "")
+                if preferred_mode == "exact_rule" and not rule_payload and requested_rules and sim_state is not None and project_id:
+                    project = (getattr(sim_state.environment, "construction", None) or object()).projects.get(project_id) if getattr(sim_state.environment, "construction", None) is not None else None
+                    semantic_support_ids = self._project_semantic_support_rule_ids(project, local_rules={normalize_rule_token(r) for r in self.mental_model["knowledge"].rules if normalize_rule_token(r)}, team_rules=set())
+                    semantic_support_classes = {self._rule_dependency_support_class(r) for r in semantic_support_ids if self._rule_dependency_support_class(r)}
+                    for rid in requested_rules:
+                        support_class = self._rule_dependency_support_class(rid)
+                        if support_class and support_class in semantic_support_classes:
+                            semantic_support_available = True
+                            break
+                if semantic_support_available and response_category not in {"state_support", "partial_support"}:
+                    response_category = "partial_support"
+                    tps_payload["semantic_support_available"] = True
+                if preferred_mode == "exact_rule" and not rule_payload and response_category != "state_support" and not semantic_support_available:
                     tps_payload["exact_rule_unavailable"] = True
                     self._emit_event(
                         sim_state,

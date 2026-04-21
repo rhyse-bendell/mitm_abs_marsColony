@@ -1,0 +1,15 @@
+{
+  "log": "Outputs/experiment_20260421_212411/logs/experiment_20260421_212411.csv",
+  "counts": {
+    "stale_epistemic_grounding": 0,
+    "stale_epistemic_grounding_cleared": 0,
+    "epistemic_grounding_refreshed_after_inspect": 0,
+    "closure_repair_exact_rule_unsatisfiable": 0,
+    "validate_construction_downgraded_to_communication": 0,
+    "transport_suppressed_stale_or_unbound": 0,
+    "construction_build_progress_updated": 0,
+    "construction_validation_attempted": 0,
+    "construction_completed": 0,
+    "transport_pruned_materially_satisfied": 0
+  }
+}
