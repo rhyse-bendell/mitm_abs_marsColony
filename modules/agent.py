@@ -506,6 +506,21 @@ class Agent:
             "communication_no_effect": 0,
             "observe_no_effect": 0,
         }
+        self.metacognitive_state = {
+            "mode": "MONITOR",
+            "focus_target": None,
+            "mode_entered_at": 0.0,
+            "mode_dwell_ticks": 0,
+            "stagnation_counters": {"epistemic": 0, "support": 0, "closure": 0, "wait": 0},
+            "last_meaningful_epistemic_change_tick": 0,
+            "last_meaningful_execution_change_tick": 0,
+            "budgets": {"deliberation": 3, "support": 3, "closure": 2},
+            "regulation_profile": "discussion_heavy",
+            "execution_window_until": 0.0,
+            "execution_window_origin": None,
+            "deferred_projects": {},
+            "last_readiness_unlock_tick": -1,
+        }
         self.task_model = None
 
 
@@ -538,6 +553,7 @@ class Agent:
     def _register_progress(self, sim_state=None, *, kind, detail=None):
         now_ts = self._tracker_now(sim_state)
         tracker = self.progress_tracker
+        meta = self.metacognitive_state
         tracker["last_progress_time"] = now_ts
         tracker["last_progress_kind"] = str(kind)
         tracker["no_progress_streak"] = 0
@@ -558,11 +574,18 @@ class Agent:
             if str(kind) in {"inspection_success", "construction_progress", "transport_dropoff", "project_validated"}:
                 self._emit_event(sim_state, "intent_completed", {"intent_id": self.active_intent.get("intent_id"), "target": self.active_intent.get("target"), "progress_kind": str(kind)})
                 self.active_intent["intent_id"] = None
+        kind_s = str(kind or "")
+        tick = int(self.sim_step_count)
+        if any(tok in kind_s for tok in {"inspection", "derivation", "validation_support", "communication", "readiness"}):
+            meta["last_meaningful_epistemic_change_tick"] = tick
+        if any(tok in kind_s for tok in {"construction", "transport", "project_validated", "execution", "closure"}):
+            meta["last_meaningful_execution_change_tick"] = tick
         self._emit_event(sim_state, "progress_registered", {"kind": str(kind), "detail": dict(detail or {}), "no_progress_streak": 0})
 
     def _register_no_progress(self, sim_state=None, *, kind, detail=None, category=None, key=None):
         now_ts = self._tracker_now(sim_state)
         tracker = self.progress_tracker
+        meta = self.metacognitive_state
         tracker["no_progress_streak"] = int(tracker.get("no_progress_streak", 0) or 0) + 1
         counts = tracker.setdefault("counts", {})
         count_key = f"no_progress::{kind}"
@@ -577,14 +600,202 @@ class Agent:
         payload = {"kind": str(kind), "detail": dict(detail or {}), "no_progress_streak": streak}
         if category and key:
             payload.update({"category": category, "key": str(key)})
+        kind_s = str(kind or "")
+        if "support_goal" in kind_s:
+            meta["stagnation_counters"]["support"] = int(meta["stagnation_counters"].get("support", 0) or 0) + 1
+        if any(tok in kind_s for tok in {"communication", "observe", "inspect", "epistemic"}):
+            meta["stagnation_counters"]["epistemic"] = int(meta["stagnation_counters"].get("epistemic", 0) or 0) + 1
+        if "wait" in kind_s:
+            meta["stagnation_counters"]["wait"] = int(meta["stagnation_counters"].get("wait", 0) or 0) + 1
         self._emit_event(sim_state, "no_progress_registered", payload)
         return streak
+
+    def _set_metacognitive_mode(self, mode, *, sim_state=None, reason="", focus_target=None, profile=None):
+        meta = self.metacognitive_state
+        previous_mode = str(meta.get("mode") or "MONITOR")
+        if previous_mode != str(mode):
+            self._emit_event(
+                sim_state,
+                "metacognitive_mode_exited",
+                {"mode": previous_mode, "reason": str(reason), "dwell_ticks": int(meta.get("mode_dwell_ticks", 0) or 0)},
+            )
+            meta["mode"] = str(mode)
+            meta["mode_entered_at"] = self._tracker_now(sim_state)
+            meta["mode_dwell_ticks"] = 0
+            self._emit_event(
+                sim_state,
+                "metacognitive_mode_entered",
+                {"mode": str(mode), "reason": str(reason), "focus_target": focus_target},
+            )
+        else:
+            meta["mode_dwell_ticks"] = int(meta.get("mode_dwell_ticks", 0) or 0) + 1
+        if focus_target is not None:
+            meta["focus_target"] = focus_target
+        if profile is not None:
+            meta["regulation_profile"] = str(profile)
+
+    def _phase_tempo_profile(self, sim_state=None):
+        env = getattr(sim_state, "environment", None)
+        phase = env.get_current_phase() if env is not None and hasattr(env, "get_current_phase") else None
+        if not isinstance(phase, dict):
+            return "mid"
+        elapsed = float(getattr(sim_state, "time", 0.0))
+        total_before = 0.0
+        phases = list(getattr(env, "phases", []) or [])
+        for idx, p in enumerate(phases):
+            duration_s = 60.0 * float(p.get("duration_minutes", 0.0) or 0.0)
+            if idx == int(getattr(env, "current_phase_index", 0) or 0):
+                if duration_s <= 0.0:
+                    return "mid"
+                progress = min(1.0, max(0.0, (elapsed - total_before) / duration_s))
+                if progress < 0.34:
+                    return "early"
+                if progress > 0.72:
+                    return "late"
+                return "mid"
+            total_before += duration_s
+        return "mid"
+
+    def _metacognitive_execution_candidate(self, environment, sim_state=None, context=None, preferred_project_id=None):
+        order = [
+            ExecutableActionType.VALIDATE_CONSTRUCTION,
+            ExecutableActionType.TRANSPORT_RESOURCES,
+            ExecutableActionType.START_CONSTRUCTION,
+            ExecutableActionType.CONTINUE_CONSTRUCTION,
+            ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
+        ]
+        affordances = list(getattr(context, "action_affordances", []) or [])
+        for action_type in order:
+            aff = next((a for a in affordances if str(a.get("action_type")) == action_type.value and (not preferred_project_id or str(a.get("target_id") or "") == str(preferred_project_id))), None)
+            target_id = aff.get("target_id") if isinstance(aff, dict) else preferred_project_id
+            probe = BrainDecision(selected_action=action_type, target_id=target_id, confidence=0.8)
+            blockers, project_id = self._construction_action_blockers(probe, {"type": "idle", "decision_action": action_type.value, "project_id": target_id}, environment, sim_state=sim_state)
+            if not blockers:
+                return BrainDecision(selected_action=action_type, target_id=project_id or target_id, confidence=0.85)
+        return None
 
     def _force_recovery_pivot(self, sim_state=None, *, to_action, reason, ttl_s=12.0):
         now_ts = self._tracker_now(sim_state)
         self.progress_tracker["forced_pivot"] = str(to_action)
         self.progress_tracker["forced_pivot_until"] = now_ts + max(1.0, float(ttl_s))
         self._emit_event(sim_state, "recovery_pivot_applied", {"to_action": str(to_action), "reason": str(reason), "ttl_s": ttl_s})
+
+    def _apply_metacognitive_regulation(self, decision, environment, *, sim_state=None, context=None, pivot_origin="runtime"):
+        meta = self.metacognitive_state
+        now_ts = self._tracker_now(sim_state)
+        tick = int(self.sim_step_count)
+        phase_tempo = self._phase_tempo_profile(sim_state=sim_state)
+        action = decision.selected_action
+        stagnation = meta.setdefault("stagnation_counters", {"epistemic": 0, "support": 0, "closure": 0, "wait": 0})
+        support_stale = max([int(v or 0) for v in self.support_goal_nonexec_counts.values()] + [0])
+        stagnation["support"] = max(int(stagnation.get("support", 0) or 0), support_stale)
+        if int(self.communication_state.get("no_effect_streak", 0) or 0) >= 3:
+            stagnation["epistemic"] = int(stagnation.get("epistemic", 0) or 0) + 1
+        if int(self.progress_tracker.get("observe_no_effect", 0) or 0) >= 3:
+            stagnation["epistemic"] = int(stagnation.get("epistemic", 0) or 0) + 1
+        if int(self.artifact_coordination_state.get("consecutive_same_artifact_consults", 0) or 0) >= 2:
+            stagnation["epistemic"] = int(stagnation.get("epistemic", 0) or 0) + 1
+        if action == ExecutableActionType.WAIT:
+            stagnation["wait"] = int(stagnation.get("wait", 0) or 0) + 1
+        else:
+            stagnation["wait"] = 0
+
+        readiness_unlocked = not bool(self._build_readiness_blockers(environment, sim_state=sim_state))
+        newly_unlocked = readiness_unlocked and bool(self.last_build_blockers)
+        if newly_unlocked and int(meta.get("last_readiness_unlock_tick", -1)) != tick:
+            meta["last_readiness_unlock_tick"] = tick
+            meta["execution_window_until"] = now_ts + 10.0
+            meta["execution_window_origin"] = "readiness_unlocked"
+            self._emit_event(sim_state, "metacognitive_execution_window_started", {"origin": "readiness_unlocked", "until": meta["execution_window_until"]})
+            self._emit_event(sim_state, "metacognitive_switch_to_execution", {"reason": "readiness_unlocked"})
+
+        if float(meta.get("execution_window_until", 0.0) or 0.0) < now_ts and meta.get("execution_window_origin"):
+            self._emit_event(sim_state, "metacognitive_execution_window_expired", {"origin": meta.get("execution_window_origin")})
+            meta["execution_window_origin"] = None
+
+        closure_project_id = self.project_closure_state.get("project_id") if self.project_closure_state.get("active") else None
+        if closure_project_id and int(self.project_closure_state.get("repair_unchanged_count", 0) or 0) >= 2:
+            stagnation["closure"] = int(stagnation.get("closure", 0) or 0) + 1
+            self._emit_event(sim_state, "metacognitive_stagnation_detected", {"kind": "closure", "project_id": closure_project_id, "repair_unchanged_count": int(self.project_closure_state.get("repair_unchanged_count", 0) or 0)})
+
+        deferred = meta.setdefault("deferred_projects", {})
+        for project_id in list(deferred.keys()):
+            candidate = self._metacognitive_execution_candidate(environment, sim_state=sim_state, context=context, preferred_project_id=project_id)
+            if candidate is not None:
+                self._emit_event(sim_state, "metacognitive_project_reactivated", {"project_id": project_id, "reason": "new_support_or_actionability"})
+                deferred.pop(project_id, None)
+                if action in {ExecutableActionType.WAIT, ExecutableActionType.REASSESS_PLAN}:
+                    self._set_metacognitive_mode("SWITCH_REPRIORITIZE", sim_state=sim_state, reason="reactivated_project", focus_target=project_id, profile="execution_heavy")
+                    return candidate
+
+        execution_candidate = self._metacognitive_execution_candidate(environment, sim_state=sim_state, context=context)
+        teammate_closure_active = False
+        for project in getattr(environment.construction, "projects", {}).values():
+            if not isinstance(project, dict):
+                continue
+            if str(project.get("status")) == "ready_for_validation" and str(project.get("closure_owner") or "") not in {"", self.name} and str(project.get("closure_status") or "") in {"assigned", "in_progress"}:
+                teammate_closure_active = True
+                break
+        if action == ExecutableActionType.WAIT and execution_candidate is not None and not teammate_closure_active:
+            self._emit_event(sim_state, "metacognitive_wait_suppressed_due_to_viable_action", {"from_action": action.value, "to_action": execution_candidate.selected_action.value, "target_id": execution_candidate.target_id})
+            self._set_metacognitive_mode("EXECUTE", sim_state=sim_state, reason="wait_suppressed_viable_action", focus_target=execution_candidate.target_id, profile="execution_heavy")
+            return execution_candidate
+
+        if (
+            meta.get("execution_window_origin")
+            and float(meta.get("execution_window_until", 0.0) or 0.0) > now_ts
+            and action in {
+            ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+            ExecutableActionType.CONSULT_TEAM_ARTIFACT,
+            ExecutableActionType.EXTERNALIZE_PLAN,
+            ExecutableActionType.COMMUNICATE,
+            ExecutableActionType.REQUEST_ASSISTANCE,
+            ExecutableActionType.WAIT,
+        }
+            and execution_candidate is not None
+        ):
+            self._set_metacognitive_mode("EXECUTE", sim_state=sim_state, reason="execution_window", focus_target=execution_candidate.target_id, profile="execution_heavy")
+            return execution_candidate
+
+        if stagnation["support"] >= 3 or stagnation["epistemic"] >= 4:
+            self._emit_event(sim_state, "metacognitive_support_loop_broken", {"support_stagnation": int(stagnation["support"]), "epistemic_stagnation": int(stagnation["epistemic"])})
+            self._emit_event(sim_state, "metacognitive_switch_to_regrounding", {"reason": "stagnation"})
+            self._set_metacognitive_mode("RECOVER_REGROUND", sim_state=sim_state, reason="stagnation", profile="recovery")
+            if phase_tempo == "late" and execution_candidate is not None:
+                return execution_candidate
+            fallback = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
+            if fallback.selected_action in {ExecutableActionType.INSPECT_INFORMATION_SOURCE, ExecutableActionType.REASSESS_PLAN, ExecutableActionType.COMMUNICATE}:
+                return fallback
+
+        if phase_tempo == "late" and execution_candidate is not None and action in {
+            ExecutableActionType.CONSULT_TEAM_ARTIFACT,
+            ExecutableActionType.EXTERNALIZE_PLAN,
+            ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+        }:
+            self._set_metacognitive_mode("EXECUTE", sim_state=sim_state, reason="late_phase_tempo", focus_target=execution_candidate.target_id, profile="execution_heavy")
+            return execution_candidate
+        if phase_tempo == "early":
+            self._set_metacognitive_mode("EXPLORE_GROUND", sim_state=sim_state, reason="early_phase_tempo", profile="discussion_heavy")
+        elif phase_tempo == "mid":
+            self._set_metacognitive_mode("MONITOR", sim_state=sim_state, reason="mid_phase_balance", profile="balanced")
+        else:
+            self._set_metacognitive_mode("EXECUTE", sim_state=sim_state, reason="late_phase_bias", profile="execution_heavy")
+
+        focus_project = decision.target_id or (self.project_closure_state.get("project_id") if self.project_closure_state.get("active") else None)
+        if focus_project and action in {
+            ExecutableActionType.START_CONSTRUCTION,
+            ExecutableActionType.CONTINUE_CONSTRUCTION,
+            ExecutableActionType.TRANSPORT_RESOURCES,
+            ExecutableActionType.VALIDATE_CONSTRUCTION,
+        }:
+            blockers, _ = self._construction_action_blockers(decision, {"type": "idle", "decision_action": action.value, "project_id": focus_project}, environment, sim_state=sim_state)
+            if blockers and execution_candidate is not None and str(execution_candidate.target_id or "") != str(focus_project):
+                entry = deferred.setdefault(str(focus_project), {"deferred_at": now_ts, "reason": "project_blocked", "return_condition": "new_externalized_support_or_actionability"})
+                entry["last_blockers"] = list(blockers[:6])
+                self._emit_event(sim_state, "metacognitive_project_deferred", {"project_id": focus_project, "reason": "blocked_with_viable_alternative", "blockers": blockers[:6], "return_condition": entry["return_condition"]})
+                self._set_metacognitive_mode("SWITCH_REPRIORITIZE", sim_state=sim_state, reason="blocked_project_switch", focus_target=execution_candidate.target_id, profile="execution_heavy")
+                return execution_candidate
+        return decision
 
     def _project_closure_ready(self, project):
         return isinstance(project, dict) and str(project.get("status")) == "ready_for_validation"
@@ -7325,6 +7536,13 @@ class Agent:
                 reason_summary=f"Preserve live inspect pursuit for {live_source_id}",
                 confidence=max(0.8, float(rewritten.confidence or decision.confidence or 0.0)),
             )
+        rewritten = self._apply_metacognitive_regulation(
+            rewritten,
+            environment,
+            sim_state=sim_state,
+            context=context,
+            pivot_origin=pivot_origin,
+        )
         if rewritten.selected_action == ExecutableActionType.VALIDATE_CONSTRUCTION:
             closure_target = rewritten.target_id or self._construction_project_for_action(rewritten, {"project_id": None}, environment)
             if closure_target:
