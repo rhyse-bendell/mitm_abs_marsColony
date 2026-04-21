@@ -801,6 +801,11 @@ class Agent:
         tick = int(self.sim_step_count)
         phase_tempo = self._phase_tempo_profile(sim_state=sim_state)
         action = decision.selected_action
+        commitment = dict(meta.get("project_commitment", {}) or {})
+        commitment_project = str(commitment.get("project_id") or "") or None
+        focus_project = str(decision.target_id or commitment_project or "") or None
+        last_progress_time = float(self.progress_tracker.get("last_progress_time", -1.0) or -1.0)
+        recent_progress = last_progress_time >= 0.0 and (now_ts - last_progress_time) <= 8.0
         stagnation = meta.setdefault("stagnation_counters", {"epistemic": 0, "support": 0, "closure": 0, "wait": 0})
         support_stale = max([int(v or 0) for v in self.support_goal_nonexec_counts.values()] + [0])
         stagnation["support"] = max(int(stagnation.get("support", 0) or 0), support_stale)
@@ -1867,6 +1872,22 @@ class Agent:
             reason_summary="bootstrap mode awaiting source accessibility",
             confidence=0.7,
         )
+
+    def _startup_grounding_incomplete(self):
+        return not bool(self.startup_state.get("first_productive_action_started"))
+
+    def _startup_bootstrap_guard(self, decision=None, sim_state=None):
+        mode = str((self.control_state or {}).get("mode") or "BOOTSTRAP")
+        if mode == "BOOTSTRAP":
+            return True
+        if not self._startup_grounding_incomplete():
+            return False
+        has_runtime_target = bool(self.target) or bool(self.current_inspect_target_id)
+        has_focus = bool((self.team_plan_state or {}).get("assignment_target")) or bool(
+            (self.metacognitive_state.get("project_commitment", {}) or {}).get("project_id")
+        )
+        decision_has_target = bool(getattr(decision, "target_id", None))
+        return (not has_runtime_target) and (not has_focus) and (not decision_has_target)
 
     def _trait_value(self, name, default=0.5):
         value = getattr(self, name, default)
@@ -7137,6 +7158,20 @@ class Agent:
         context = context or (sim_state.brain_context_builder.build(sim_state, self) if sim_state is not None else None)
         rewritten = decision
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        if self._startup_bootstrap_guard(decision=decision, sim_state=sim_state):
+            if self._execution_lock_active_for_project():
+                self._release_execution_lock(sim_state, reason="startup_bootstrap_guard")
+            self._emit_event(
+                sim_state,
+                "startup_bootstrap_commitment_guard_bypassed",
+                {
+                    "origin": pivot_origin,
+                    "mode": str((self.control_state or {}).get("mode") or "BOOTSTRAP"),
+                    "decision_action": decision.selected_action.value,
+                    "decision_target_id": decision.target_id,
+                },
+            )
+            return rewritten
         self._maintain_execution_lock(environment, sim_state=sim_state)
         live_commitment, live_source_id, live_reason = self._has_live_epistemic_commitment(
             environment,
@@ -8043,6 +8078,7 @@ class Agent:
         if provider is None or (provider.__class__.__name__ != "RuleBrain" and backend != "rule_brain"):
             return False
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        startup_guard_runtime = self._startup_bootstrap_guard(sim_state=sim_state)
         if self.post_acquisition_stabilization_until and now_ts > self.post_acquisition_stabilization_until:
             self._emit_event(sim_state, "post_acquisition_stabilization_expired", {"expired_at": now_ts})
             self.post_acquisition_stabilization_until = 0.0
@@ -8050,11 +8086,12 @@ class Agent:
             self.active_intent.get("intent_id")
             and now_ts < float(self.active_intent.get("min_commit_until", 0.0) or 0.0)
             and int(self.progress_tracker.get("no_progress_streak", 0) or 0) < 4
+            and not startup_guard_runtime
         )
         if intent_locked and self.current_action:
             self._emit_event(sim_state, "controller_recalculation_skipped_due_to_commitment", {"intent_id": self.active_intent.get("intent_id"), "planner_reason": planner_reason})
             return True
-        if now_ts < float(self.next_rulebrain_recalc_time or 0.0) and self.current_action:
+        if now_ts < float(self.next_rulebrain_recalc_time or 0.0) and self.current_action and not startup_guard_runtime:
             self._emit_event(sim_state, "controller_recalculation_skipped_due_to_commitment", {"intent_id": self.active_intent.get("intent_id"), "planner_reason": "cadence_hold"})
             return True
         live_commitment, live_source_id, live_reason = self._has_live_epistemic_commitment(
@@ -8087,6 +8124,21 @@ class Agent:
         context.individual_cognitive_state.setdefault("control_state", dict(self.control_state or {}))
         context.individual_cognitive_state["control_state"]["post_acquisition_until"] = int(self.post_acquisition_stabilization_until)
         decision = provider.decide(context)
+        if self._startup_bootstrap_guard(decision=decision, sim_state=sim_state):
+            self.activate_fallback_bootstrap(sim_state=sim_state, reason="startup_bootstrap_grounding_guard")
+            override = self._bootstrap_override_decision(environment, sim_state=sim_state)
+            if override is not None:
+                self._emit_event(
+                    sim_state,
+                    "startup_bootstrap_grounding_forced",
+                    {
+                        "planner_reason": planner_reason,
+                        "from_action": decision.selected_action.value,
+                        "to_action": override.selected_action.value,
+                        "target_id": override.target_id,
+                    },
+                )
+                decision = override
         decision = self._apply_policy_pivots(decision, environment, sim_state=sim_state, context=context, pivot_origin="local_refresh")
         updated_control_state = context.individual_cognitive_state.get("control_state", {})
         if isinstance(updated_control_state, dict) and updated_control_state:
