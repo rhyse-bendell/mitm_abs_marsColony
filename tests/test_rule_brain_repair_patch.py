@@ -39,6 +39,72 @@ class _Logger:
 
 
 class TestRuleBrainRepairPatch(unittest.TestCase):
+    def test_execution_lock_enters_for_actionable_build_project(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            decision = BrainDecision(selected_action=ExecutableActionType.CONTINUE_CONSTRUCTION, target_id="Build_Table_A", confidence=0.8)
+            with patch.object(agent, "_execution_lock_viable_project", return_value=True), patch.object(agent, "_apply_metacognitive_regulation", side_effect=lambda d, *_args, **_kwargs: d):
+                rewritten = agent._apply_policy_pivots(decision, environment=sim.environment, sim_state=sim, context=None, pivot_origin="unit")
+            self.assertEqual(rewritten.selected_action, ExecutableActionType.CONTINUE_CONSTRUCTION)
+            self.assertTrue(agent.execution_lock_state.get("execution_lock_active"))
+            self.assertEqual(agent.execution_lock_state.get("locked_project_id"), "Build_Table_A")
+            self.assertTrue(any(e.get("event_type") == "execution_lock_started" for e in sim.logger.get_recent_events(200)))
+        finally:
+            sim.stop()
+
+    def test_execution_lock_biases_away_from_transport_and_consult(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            agent.execution_lock_state.update({"execution_lock_active": True, "locked_project_id": "Build_Table_A", "lock_last_progress_tick": int(agent.sim_step_count)})
+            project = sim.environment.construction.projects["Build_Table_A"]
+            project["resource_complete"] = True
+            project["status"] = "in_progress"
+            transport = BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES, target_id="Build_Table_A", confidence=0.6)
+            consult = BrainDecision(selected_action=ExecutableActionType.CONSULT_TEAM_ARTIFACT, target_id="whiteboard", confidence=0.6)
+            biased_transport = agent._apply_execution_lock_bias(transport, sim.environment, sim_state=sim)
+            with patch.object(agent, "_execution_lock_viable_project", return_value=True):
+                biased_consult = agent._apply_execution_lock_bias(consult, sim.environment, sim_state=sim)
+            self.assertEqual(biased_transport.selected_action, ExecutableActionType.CONTINUE_CONSTRUCTION)
+            self.assertEqual(biased_consult.selected_action, ExecutableActionType.CONTINUE_CONSTRUCTION)
+            events = [e.get("event_type") for e in sim.logger.get_recent_events(240)]
+            self.assertIn("execution_lock_transport_suppressed", events)
+            self.assertIn("execution_lock_switch_suppressed", events)
+        finally:
+            sim.stop()
+
+    def test_execution_lock_releases_on_timeout_and_blocker(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            agent.execution_lock_state.update(
+                {
+                    "execution_lock_active": True,
+                    "locked_project_id": "Build_Table_A",
+                    "lock_started_tick": 0,
+                    "lock_last_progress_tick": 0,
+                }
+            )
+            agent.sim_step_count = 12
+            agent._maintain_execution_lock(sim.environment, sim_state=sim)
+            self.assertFalse(agent.execution_lock_state.get("execution_lock_active"))
+
+            agent.execution_lock_state.update(
+                {
+                    "execution_lock_active": True,
+                    "locked_project_id": "Build_Table_A",
+                    "lock_started_tick": 1,
+                    "lock_last_progress_tick": 1,
+                }
+            )
+            with patch.object(agent, "_execution_lock_viable_project", return_value=False):
+                agent._maintain_execution_lock(sim.environment, sim_state=sim)
+            self.assertFalse(agent.execution_lock_state.get("execution_lock_active"))
+            self.assertTrue(any(e.get("event_type") == "execution_lock_released" for e in sim.logger.get_recent_events(300)))
+        finally:
+            sim.stop()
+
     def test_metacognitive_breaks_stale_support_loop(self):
         sim = SimulationState(phases=[], flash_mode=True)
         try:
@@ -69,6 +135,7 @@ class TestRuleBrainRepairPatch(unittest.TestCase):
                 rewritten = agent._apply_policy_pivots(decision, environment=sim.environment, sim_state=sim, context=None, pivot_origin="unit")
             self.assertEqual(rewritten.selected_action, ExecutableActionType.TRANSPORT_RESOURCES)
             self.assertGreater(float(agent.metacognitive_state.get("execution_window_until", 0.0)), float(sim.time))
+            self.assertTrue(agent.execution_lock_state.get("execution_lock_active"))
             events = [e.get("event_type") for e in sim.logger.get_recent_events(120)]
             self.assertIn("metacognitive_execution_window_started", events)
             self.assertIn("metacognitive_switch_to_execution", events)
@@ -118,6 +185,28 @@ class TestRuleBrainRepairPatch(unittest.TestCase):
                 )
             self.assertEqual(rewritten.selected_action, ExecutableActionType.TRANSPORT_RESOURCES)
             self.assertTrue(any(e.get("event_type") == "metacognitive_wait_suppressed_due_to_viable_action" for e in sim.logger.get_recent_events(120)))
+        finally:
+            sim.stop()
+
+    def test_execution_lock_progress_updates_and_no_legality_bypass(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            agent.execution_lock_state.update(
+                {
+                    "execution_lock_active": True,
+                    "locked_project_id": "Build_Table_A",
+                    "lock_started_tick": 1,
+                    "lock_last_progress_tick": 1,
+                }
+            )
+            agent.sim_step_count = 5
+            agent._register_progress(sim_state=sim, kind="construction_progress_updated", detail={"project_id": "Build_Table_A"})
+            self.assertEqual(int(agent.execution_lock_state.get("lock_last_progress_tick", -1)), 5)
+            blocked = BrainDecision(selected_action=ExecutableActionType.CONTINUE_CONSTRUCTION, target_id="Build_Table_A", confidence=0.7)
+            with patch.object(agent, "_construction_action_blockers", return_value=(["missing_project_binding"], "Build_Table_A")):
+                translated = agent._translate_brain_decision_to_legacy_action(blocked, sim.environment, sim_state=sim)
+            self.assertTrue(any(a.get("type") == "idle" for a in translated))
         finally:
             sim.stop()
 
