@@ -510,7 +510,11 @@ class Agent:
             "mode": "MONITOR",
             "focus_target": None,
             "mode_entered_at": 0.0,
+            "mode_entered_tick": 0,
             "mode_dwell_ticks": 0,
+            "mode_min_dwell_ticks": 3,
+            "last_mode_change_reason": "init",
+            "last_mode_override_reason": None,
             "stagnation_counters": {"epistemic": 0, "support": 0, "closure": 0, "wait": 0},
             "last_meaningful_epistemic_change_tick": 0,
             "last_meaningful_execution_change_tick": 0,
@@ -518,8 +522,17 @@ class Agent:
             "regulation_profile": "discussion_heavy",
             "execution_window_until": 0.0,
             "execution_window_origin": None,
+            "execution_window_project_id": None,
             "deferred_projects": {},
             "last_readiness_unlock_tick": -1,
+            "project_commitment": {
+                "project_id": None,
+                "focus_started_tick": 0,
+                "phase": "epistemic_grounding",
+                "last_progress_tick": 0,
+                "role": "helper",
+            },
+            "project_progress_ticks": {},
         }
         self.task_model = None
 
@@ -580,6 +593,34 @@ class Agent:
             meta["last_meaningful_epistemic_change_tick"] = tick
         if any(tok in kind_s for tok in {"construction", "transport", "project_validated", "execution", "closure"}):
             meta["last_meaningful_execution_change_tick"] = tick
+        progress_project = None
+        if isinstance(detail, dict):
+            progress_project = detail.get("project_id") or detail.get("target_id")
+        commitment = meta.setdefault("project_commitment", {})
+        if not progress_project:
+            progress_project = commitment.get("project_id")
+        if progress_project:
+            progress_project = str(progress_project)
+            commitment["last_progress_tick"] = tick
+            meta.setdefault("project_progress_ticks", {})[progress_project] = tick
+        meaningful_progress = any(
+            token in kind_s
+            for token in {
+                "construction_progress",
+                "transport_dropoff",
+                "validation",
+                "readiness",
+                "artifact_uptake",
+                "externalization",
+                "connection",
+            }
+        )
+        if meaningful_progress:
+            self._emit_event(
+                sim_state,
+                "metacognitive_progress_signal_registered",
+                {"kind": str(kind), "project_id": progress_project, "tick": tick},
+            )
         self._emit_event(sim_state, "progress_registered", {"kind": str(kind), "detail": dict(detail or {}), "no_progress_streak": 0})
 
     def _register_no_progress(self, sim_state=None, *, kind, detail=None, category=None, key=None):
@@ -613,7 +654,42 @@ class Agent:
     def _set_metacognitive_mode(self, mode, *, sim_state=None, reason="", focus_target=None, profile=None):
         meta = self.metacognitive_state
         previous_mode = str(meta.get("mode") or "MONITOR")
+        reason_s = str(reason or "")
+        tick = int(self.sim_step_count)
+        min_dwell = max(0, int(meta.get("mode_min_dwell_ticks", 3) or 0))
+        dwell_ticks = int(tick - int(meta.get("mode_entered_tick", 0) or 0))
+        override_reasons = {
+            "readiness_unlocked",
+            "wait_suppressed_viable_action",
+            "reactivated_project",
+            "execution_window",
+            "late_phase_tempo",
+            "closure_commitment_override",
+            "no_viable_actions_under_commitment",
+        }
+        override = reason_s in override_reasons or reason_s.startswith("override:")
         if previous_mode != str(mode):
+            if dwell_ticks < min_dwell and not override:
+                self._emit_event(
+                    sim_state,
+                    "metacognitive_mode_switch_suppressed_by_hysteresis",
+                    {
+                        "from_mode": previous_mode,
+                        "to_mode": str(mode),
+                        "reason": reason_s,
+                        "dwell_ticks": dwell_ticks,
+                        "required_min_dwell_ticks": min_dwell,
+                    },
+                )
+                meta["mode_dwell_ticks"] = int(meta.get("mode_dwell_ticks", 0) or 0) + 1
+                return False
+            if override:
+                meta["last_mode_override_reason"] = reason_s
+                self._emit_event(
+                    sim_state,
+                    "metacognitive_mode_override_applied",
+                    {"from_mode": previous_mode, "to_mode": str(mode), "reason": reason_s, "dwell_ticks": dwell_ticks},
+                )
             self._emit_event(
                 sim_state,
                 "metacognitive_mode_exited",
@@ -621,7 +697,9 @@ class Agent:
             )
             meta["mode"] = str(mode)
             meta["mode_entered_at"] = self._tracker_now(sim_state)
+            meta["mode_entered_tick"] = tick
             meta["mode_dwell_ticks"] = 0
+            meta["last_mode_change_reason"] = reason_s
             self._emit_event(
                 sim_state,
                 "metacognitive_mode_entered",
@@ -633,6 +711,46 @@ class Agent:
             meta["focus_target"] = focus_target
         if profile is not None:
             meta["regulation_profile"] = str(profile)
+        return True
+
+    def _project_phase_for_action(self, action_type):
+        if action_type in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION, ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION}:
+            return "build"
+        if action_type == ExecutableActionType.TRANSPORT_RESOURCES:
+            return "staging"
+        if action_type == ExecutableActionType.VALIDATE_CONSTRUCTION:
+            return "validation"
+        if action_type == ExecutableActionType.EXTERNALIZE_PLAN:
+            return "discussion_justification"
+        if action_type == ExecutableActionType.CONSULT_TEAM_ARTIFACT:
+            return "validation_prep"
+        return "epistemic_grounding"
+
+    def _update_project_commitment(self, project_id, action_type, environment, *, sim_state=None, reason="focus"):
+        if not project_id:
+            return
+        meta = self.metacognitive_state
+        tick = int(self.sim_step_count)
+        project_id = str(project_id)
+        commitment = meta.setdefault("project_commitment", {})
+        previous = str(commitment.get("project_id") or "")
+        role = "helper"
+        project = getattr(getattr(environment, "construction", None), "projects", {}).get(project_id, {})
+        if isinstance(project, dict) and str(project.get("owner") or "") == str(self.name):
+            role = "owner"
+        phase = self._project_phase_for_action(action_type)
+        if previous and previous != project_id:
+            self._emit_event(sim_state, "metacognitive_project_commitment_released", {"project_id": previous, "reason": "focus_changed"})
+        if previous != project_id:
+            self._emit_event(sim_state, "metacognitive_project_commitment_started", {"project_id": project_id, "phase": phase, "reason": reason, "role": role})
+            commitment["focus_started_tick"] = tick
+        commitment.update(
+            {
+                "project_id": project_id,
+                "phase": phase,
+                "role": role,
+            }
+        )
 
     def _phase_tempo_profile(self, sim_state=None):
         env = getattr(sim_state, "environment", None)
@@ -706,12 +824,17 @@ class Agent:
             meta["last_readiness_unlock_tick"] = tick
             meta["execution_window_until"] = now_ts + 10.0
             meta["execution_window_origin"] = "readiness_unlocked"
-            self._emit_event(sim_state, "metacognitive_execution_window_started", {"origin": "readiness_unlocked", "until": meta["execution_window_until"]})
+            unlocked_target = decision.target_id or (execution_candidate.target_id if (execution_candidate := self._metacognitive_execution_candidate(environment, sim_state=sim_state, context=context)) else None)
+            meta["execution_window_project_id"] = unlocked_target
+            self._emit_event(sim_state, "metacognitive_execution_window_started", {"origin": "readiness_unlocked", "until": meta["execution_window_until"], "project_id": unlocked_target})
+            self._emit_event(sim_state, "metacognitive_handoff_to_execution", {"reason": "readiness_unlocked", "project_id": unlocked_target})
+            self._emit_event(sim_state, "metacognitive_execution_bias_applied_after_readiness_unlock", {"project_id": unlocked_target})
             self._emit_event(sim_state, "metacognitive_switch_to_execution", {"reason": "readiness_unlocked"})
 
         if float(meta.get("execution_window_until", 0.0) or 0.0) < now_ts and meta.get("execution_window_origin"):
-            self._emit_event(sim_state, "metacognitive_execution_window_expired", {"origin": meta.get("execution_window_origin")})
+            self._emit_event(sim_state, "metacognitive_execution_window_expired", {"origin": meta.get("execution_window_origin"), "project_id": meta.get("execution_window_project_id")})
             meta["execution_window_origin"] = None
+            meta["execution_window_project_id"] = None
 
         closure_project_id = self.project_closure_state.get("project_id") if self.project_closure_state.get("active") else None
         if closure_project_id and int(self.project_closure_state.get("repair_unchanged_count", 0) or 0) >= 2:
@@ -729,6 +852,22 @@ class Agent:
                     return candidate
 
         execution_candidate = self._metacognitive_execution_candidate(environment, sim_state=sim_state, context=context)
+        focus_project = decision.target_id or (self.project_closure_state.get("project_id") if self.project_closure_state.get("active") else None) or (execution_candidate.target_id if execution_candidate is not None else None)
+        if focus_project:
+            self._update_project_commitment(focus_project, action, environment, sim_state=sim_state, reason="decision_focus")
+        commitment = meta.get("project_commitment", {})
+        commitment_project = str(commitment.get("project_id") or "")
+        project_progress_ticks = meta.setdefault("project_progress_ticks", {})
+        recent_progress_tick = int(project_progress_ticks.get(commitment_project, commitment.get("last_progress_tick", 0)) or 0)
+        recent_progress = bool(commitment_project) and recent_progress_tick > 0 and (tick - recent_progress_tick) <= 8
+        if (stagnation["support"] >= 3 or stagnation["epistemic"] >= 4) and recent_progress:
+            self._emit_event(
+                sim_state,
+                "metacognitive_stagnation_deferred_due_to_recent_progress",
+                {"project_id": commitment_project, "ticks_since_progress": int(tick - recent_progress_tick), "support_stagnation": int(stagnation["support"]), "epistemic_stagnation": int(stagnation["epistemic"])},
+            )
+            stagnation["support"] = max(0, int(stagnation["support"]) - 1)
+            stagnation["epistemic"] = max(0, int(stagnation["epistemic"]) - 1)
         teammate_closure_active = False
         for project in getattr(environment.construction, "projects", {}).values():
             if not isinstance(project, dict):
@@ -781,20 +920,61 @@ class Agent:
         else:
             self._set_metacognitive_mode("EXECUTE", sim_state=sim_state, reason="late_phase_bias", profile="execution_heavy")
 
-        focus_project = decision.target_id or (self.project_closure_state.get("project_id") if self.project_closure_state.get("active") else None)
         if focus_project and action in {
             ExecutableActionType.START_CONSTRUCTION,
             ExecutableActionType.CONTINUE_CONSTRUCTION,
             ExecutableActionType.TRANSPORT_RESOURCES,
             ExecutableActionType.VALIDATE_CONSTRUCTION,
         }:
+            if str(meta.get("execution_window_project_id") or "") != str(focus_project):
+                meta["execution_window_project_id"] = str(focus_project)
+            if float(meta.get("execution_window_until", 0.0) or 0.0) < (now_ts + 6.0):
+                prior_until = float(meta.get("execution_window_until", 0.0) or 0.0)
+                meta["execution_window_until"] = now_ts + 8.0
+                meta["execution_window_origin"] = str(meta.get("execution_window_origin") or "productive_action")
+                evt = "metacognitive_execution_window_extended" if prior_until > now_ts else "metacognitive_execution_window_started"
+                self._emit_event(sim_state, evt, {"origin": meta["execution_window_origin"], "project_id": focus_project, "until": meta["execution_window_until"]})
             blockers, _ = self._construction_action_blockers(decision, {"type": "idle", "decision_action": action.value, "project_id": focus_project}, environment, sim_state=sim_state)
             if blockers and execution_candidate is not None and str(execution_candidate.target_id or "") != str(focus_project):
+                same_project_candidate = self._metacognitive_execution_candidate(environment, sim_state=sim_state, context=context, preferred_project_id=focus_project)
+                in_execution_window = (
+                    str(meta.get("execution_window_project_id") or "") == str(focus_project)
+                    and float(meta.get("execution_window_until", 0.0) or 0.0) > now_ts
+                )
+                if (same_project_candidate is not None) or (in_execution_window and recent_progress):
+                    self._emit_event(
+                        sim_state,
+                        "metacognitive_project_switch_suppressed_due_to_commitment",
+                        {"project_id": focus_project, "reason": "active_commitment_window", "same_project_candidate": bool(same_project_candidate)},
+                    )
+                    if same_project_candidate is not None:
+                        return same_project_candidate
+                    return decision
                 entry = deferred.setdefault(str(focus_project), {"deferred_at": now_ts, "reason": "project_blocked", "return_condition": "new_externalized_support_or_actionability"})
                 entry["last_blockers"] = list(blockers[:6])
+                if (
+                    str(meta.get("execution_window_project_id") or "") == str(focus_project)
+                    and float(meta.get("execution_window_until", 0.0) or 0.0) > now_ts
+                ):
+                    self._emit_event(
+                        sim_state,
+                        "metacognitive_execution_window_interrupted",
+                        {"project_id": focus_project, "reason": "true_blocker_with_viable_alternative", "blockers": blockers[:6]},
+                    )
+                self._emit_event(sim_state, "metacognitive_project_switch_allowed_due_to_true_block", {"project_id": focus_project, "blockers": blockers[:6], "alternative_project_id": execution_candidate.target_id})
                 self._emit_event(sim_state, "metacognitive_project_deferred", {"project_id": focus_project, "reason": "blocked_with_viable_alternative", "blockers": blockers[:6], "return_condition": entry["return_condition"]})
                 self._set_metacognitive_mode("SWITCH_REPRIORITIZE", sim_state=sim_state, reason="blocked_project_switch", focus_target=execution_candidate.target_id, profile="execution_heavy")
                 return execution_candidate
+        if action == ExecutableActionType.EXTERNALIZE_PLAN and commitment_project:
+            prior_until = float(meta.get("execution_window_until", 0.0) or 0.0)
+            meta["execution_window_until"] = max(prior_until, now_ts + 6.0)
+            meta["execution_window_origin"] = str(meta.get("execution_window_origin") or "project_externalization")
+            meta["execution_window_project_id"] = commitment_project
+            self._emit_event(
+                sim_state,
+                "metacognitive_execution_window_extended",
+                {"origin": "project_externalization", "project_id": commitment_project, "until": meta["execution_window_until"]},
+            )
         return decision
 
     def _project_closure_ready(self, project):
