@@ -260,10 +260,25 @@ class ConstructionManager:
             "correct": True,
             "required_resources": {"bricks": required},
             "delivered_resources": {"bricks": 0},
+            "staged_resources": {"bricks": 0},
             "expected_rules": list(expected_rules),
             "resource_complete": False,
+            "build_ready": False,
             "structurally_complete": False,
+            "epistemically_supported": False,
             "validated_complete": False,
+            "build_steps": [
+                {"step_id": f"{project_id}:step:{idx+1}", "component": component, "completed": False, "completed_at": None, "completed_by": None}
+                for idx, component in enumerate(self._project_component_templates({"type": resolved_structure_type}))
+            ],
+            "connections": [],
+            "epistemic_workspace": {
+                "candidate_claim": f"{template.get('name') or resolved_structure_type} meets mission constraints",
+                "entries": [],
+                "uncertainties": [],
+                "last_updated_at": None,
+                "last_updated_by": None,
+            },
             "builders": set(),
             "author": author,
             "artifact_type": str(template.get("artifact_type") or f"{resolved_structure_type}_construction"),
@@ -445,11 +460,59 @@ class ConstructionManager:
         project["last_event_time"] = sim_time
 
     def _project_progress(self, project):
-        req = float(project.get("required_resources", {}).get("bricks", 0) or 0)
-        if req <= 0:
+        if not isinstance(project, dict):
             return 0.0
-        delivered = float(project.get("delivered_resources", {}).get("bricks", 0) or 0)
-        return max(0.0, min(1.0, delivered / req))
+        if "progress" in project:
+            return float(project.get("progress", 0.0) or 0.0)
+        return float(self._recompute_project_progress(project))
+
+    def _project_component_templates(self, project):
+        structure_type = str((project or {}).get("type") or "").strip().lower()
+        templates = {
+            "house": ["place_housing_floor", "place_housing_wall_or_ceiling", "place_airlock"],
+            "housing": ["place_housing_floor", "place_housing_wall_or_ceiling", "place_airlock"],
+            "greenhouse": ["place_greenhouse_soil", "place_greenhouse_cover", "place_food_connector"],
+            "water_generator": ["place_water_generator_foundation", "place_water_generator_body", "cap_water_generator", "place_water_connector"],
+        }
+        return list(templates.get(structure_type, [f"place_{structure_type or 'structure'}_core"]))
+
+    def _required_epistemic_entries(self, project):
+        required = {"claim", "evidence"}
+        expected_rules = list((project or {}).get("expected_rules") or [])
+        if expected_rules:
+            required.add("design_note")
+        return required
+
+    def _project_physical_completeness(self, project):
+        steps = list((project or {}).get("build_steps") or [])
+        if not steps:
+            return False
+        completed = [step for step in steps if bool(step.get("completed"))]
+        return len(completed) >= len(steps)
+
+    def _project_epistemic_completeness(self, project):
+        workspace = dict((project or {}).get("epistemic_workspace") or {})
+        entries = workspace.get("entries") or []
+        covered = {str(e.get("entry_type") or "").strip() for e in entries if str(e.get("entry_type") or "").strip()}
+        required = self._required_epistemic_entries(project)
+        if not required:
+            return True
+        return required.issubset(covered)
+
+    def _recompute_project_progress(self, project):
+        required = int((project or {}).get("required_resources", {}).get("bricks", 0) or 0)
+        staged = int((project or {}).get("staged_resources", {}).get("bricks", 0) or 0)
+        staging_ratio = min(1.0, staged / max(1, required)) if required > 0 else 0.0
+        build_steps = list((project or {}).get("build_steps") or [])
+        completed_steps = sum(1 for step in build_steps if bool(step.get("completed")))
+        physical_ratio = min(1.0, completed_steps / max(1, len(build_steps))) if build_steps else 0.0
+        epistemic_workspace = dict((project or {}).get("epistemic_workspace") or {})
+        entries = list(epistemic_workspace.get("entries") or [])
+        epistemic_required = max(1, len(self._required_epistemic_entries(project)))
+        epistemic_ratio = min(1.0, len({str(e.get("entry_type") or "") for e in entries if str(e.get("entry_type") or "")}) / epistemic_required)
+        progress = max(0.0, min(1.0, (0.2 * staging_ratio) + (0.6 * physical_ratio) + (0.2 * epistemic_ratio)))
+        (project or {})["progress"] = progress
+        return progress
 
     def _site_has_capacity(self, site_id):
         site = self.sites.get(site_id)
@@ -547,19 +610,23 @@ class ConstructionManager:
             prior_status = str(project.get("status") or "")
             required = int(project["required_resources"].get("bricks", 0) or 0)
             delivered = int(project["delivered_resources"].get("bricks", 0) or 0)
+            staged = int(project.get("staged_resources", {}).get("bricks", 0) or 0)
             project["resource_complete"] = required > 0 and delivered >= required
-            project["structurally_complete"] = project["resource_complete"]
+            project["build_ready"] = required > 0 and staged >= required
+            project["structurally_complete"] = self._project_physical_completeness(project)
+            project["epistemically_supported"] = self._project_epistemic_completeness(project)
+            self._recompute_project_progress(project)
             if not project.get("started"):
                 project["status"] = "not_started"
                 project["in_progress"] = False
-            elif project["resource_complete"] and project.get("validated_complete"):
+            elif project["structurally_complete"] and project.get("validated_complete"):
                 project["status"] = "complete"
                 project["in_progress"] = False
-            elif project["resource_complete"] and not bool(project.get("correct", True)):
+            elif project["structurally_complete"] and not bool(project.get("correct", True)):
                 project["status"] = "needs_repair"
                 project["in_progress"] = True
                 project["validated_complete"] = False
-            elif project["resource_complete"]:
+            elif project["structurally_complete"] and project.get("epistemically_supported", False):
                 project["status"] = "ready_for_validation"
                 project["in_progress"] = True
                 project["validated_complete"] = False
@@ -608,6 +675,8 @@ class ConstructionManager:
         if not self._is_site_buildable(site_id):
             return False, "site_not_buildable"
         if not project.get("started"):
+            if not self._site_has_capacity(site_id):
+                return False, "site_capacity_reached"
             project["started"] = True
             if resolved_id not in self.sites[site_id].started_structures:
                 self.sites[site_id].started_structures.append(resolved_id)
@@ -627,9 +696,92 @@ class ConstructionManager:
             return False
         required = int(project["required_resources"].get(resource_type, 0) or 0)
         current = int(project["delivered_resources"].get(resource_type, 0) or 0)
-        project["delivered_resources"][resource_type] = min(required, current + int(quantity))
+        delivered_next = min(required, current + int(quantity))
+        project["delivered_resources"][resource_type] = delivered_next
+        staged_state = dict(project.get("staged_resources") or {})
+        staged_state[resource_type] = min(required, int(staged_state.get(resource_type, 0) or 0) + int(quantity))
+        project["staged_resources"] = staged_state
         self.update()
-        self.update_project_provenance(resolved_id, event="resource_delivered", sim_time=None)
+        self.update_project_provenance(resolved_id, event="project_materials_staged", sim_time=None)
+        return True
+
+
+    def execute_build_step(self, project_id, *, actor=None, sim_time=None, requested_component=None):
+        resolved_id = self.resolve_project_id(project_id, create_if_missing=True)
+        project = self.projects.get(resolved_id)
+        if not project:
+            return False, "project_not_found", None
+        started, reason = self.start_project(resolved_id)
+        if not started:
+            return False, reason, None
+        if not bool(project.get("build_ready", False)):
+            return False, "materials_not_staged", None
+        steps = list(project.get("build_steps") or [])
+        pending = [step for step in steps if not bool(step.get("completed"))]
+        if not pending:
+            return False, "already_physically_complete", None
+        step = pending[0]
+        if requested_component:
+            matched = next((candidate for candidate in pending if str(candidate.get("component")) == str(requested_component)), None)
+            if matched is not None:
+                step = matched
+        step["completed"] = True
+        step["completed_at"] = sim_time
+        step["completed_by"] = actor
+        project["build_steps"] = steps
+        if "connector" in str(step.get("component") or ""):
+            project.setdefault("connections", []).append(
+                {
+                    "connection_id": f"{resolved_id}:conn:{len(project.get('connections', []))+1}",
+                    "component": step.get("component"),
+                    "added_by": actor,
+                    "added_at": sim_time,
+                }
+            )
+        self.update()
+        self.update_project_provenance(resolved_id, event="project_build_step_completed", actor=actor, sim_time=sim_time)
+        return True, "build_step_completed", dict(step)
+
+    def record_project_epistemic_externalization(self, project_id, *, entry_type, note=None, references=None, actor=None, sim_time=None):
+        resolved_id = self.resolve_project_id(project_id, create_if_missing=True)
+        project = self.projects.get(resolved_id)
+        if not project:
+            return False
+        workspace = dict(project.get("epistemic_workspace") or {})
+        entries = list(workspace.get("entries") or [])
+        payload = {
+            "entry_type": str(entry_type or "claim"),
+            "note": str(note or "").strip(),
+            "references": list(references or []),
+            "actor": actor,
+            "time": sim_time,
+        }
+        entries.append(payload)
+        workspace["entries"] = entries[-20:]
+        if payload["entry_type"] == "claim" and payload["note"]:
+            workspace["candidate_claim"] = payload["note"]
+        if payload["entry_type"] == "uncertainty" and payload["note"]:
+            uncertainties = list(workspace.get("uncertainties") or [])
+            uncertainties.append(payload["note"])
+            workspace["uncertainties"] = uncertainties[-10:]
+        workspace["last_updated_at"] = sim_time
+        workspace["last_updated_by"] = actor
+        project["epistemic_workspace"] = workspace
+        evt_map = {
+            "claim": "validation_request_externalized",
+            "evidence": "validation_support_externalized",
+            "uncertainty": "validation_uncertainty_externalized",
+            "design_note": "validation_support_externalized",
+        }
+        self.record_validation_dialogue_event(
+            resolved_id,
+            event_type=evt_map.get(str(entry_type or "").strip(), "validation_support_externalized"),
+            actor=actor,
+            payload={"note": payload.get("note"), "references": list(payload.get("references") or [])},
+            sim_time=sim_time,
+        )
+        self.update()
+        self.update_project_provenance(resolved_id, event="project_epistemic_externalization_updated", actor=actor, sim_time=sim_time)
         return True
 
     def mark_validated(
@@ -669,7 +821,7 @@ class ConstructionManager:
             )
             return
         project["correct"] = True
-        if project.get("resource_complete"):
+        if project.get("structurally_complete") and project.get("epistemically_supported"):
             project["validated_complete"] = True
             project["status"] = "complete"
             project["in_progress"] = False
