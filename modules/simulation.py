@@ -545,7 +545,7 @@ class SimulationState:
                 a
                 for a in affordances
                 if str(a.get("action_type")) in project_actions
-                and (str(a.get("target_id") or "") in {"", str(project_id)})
+                and str(a.get("target_id") or "") == str(project_id)
             ]
             if project_affordances:
                 score = max(float(a.get("utility", 0.0) or 0.0) for a in project_affordances)

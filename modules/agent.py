@@ -4204,6 +4204,95 @@ class Agent:
             return build_selection.get("project_id")
         return None
 
+    def _project_still_viable_for_binding(self, environment, project_id, *, include_complete=False):
+        project = environment.construction.projects.get(project_id) if project_id else None
+        if not isinstance(project, dict):
+            return False
+        status = str(project.get("status") or "")
+        if status == "complete" and not include_complete:
+            return False
+        return True
+
+    def _acquire_project_focus_for_action(self, environment, *, action_type=None, requested_project_id=None, sim_state=None, reason=None):
+        reason_tag = str(reason or "project_focus_acquire")
+        candidates = []
+        locked_project_id = str(self.execution_lock_state.get("locked_project_id") or "")
+        if locked_project_id:
+            candidates.append(("execution_lock", locked_project_id))
+        bound_project_id = str(self.transport_state.get("bound_project_id") or "")
+        if bound_project_id:
+            candidates.append(("transport_bound", bound_project_id))
+        current_project_id = str((self.current_action or {}).get("project_id") or "")
+        if current_project_id:
+            candidates.append(("current_action", current_project_id))
+        if requested_project_id:
+            candidates.append(("requested", str(requested_project_id)))
+        for source, candidate_id in candidates:
+            if self._project_still_viable_for_binding(environment, candidate_id):
+                self._emit_event(
+                    sim_state,
+                    "project_focus_preserved_on_refresh" if source != "requested" else "project_focus_reacquired_for_action",
+                    {"project_id": candidate_id, "source": source, "reason": reason_tag},
+                )
+                return candidate_id
+        selected = self._select_build_target(
+            environment,
+            require_readiness=False,
+            include_project=True,
+            action_type=action_type,
+            requested_project_id=requested_project_id,
+            sim_state=sim_state,
+        )
+        selected_project_id = selected.get("project_id") if isinstance(selected, dict) else None
+        if selected_project_id and self._project_still_viable_for_binding(environment, selected_project_id):
+            self._emit_event(
+                sim_state,
+                "project_focus_reacquired_for_action",
+                {"project_id": selected_project_id, "source": "target_selection", "reason": reason_tag},
+            )
+            return selected_project_id
+        return None
+
+    def _bind_project_to_decision_if_needed(self, decision, environment, *, sim_state=None, reason=None):
+        project_actions = {
+            ExecutableActionType.TRANSPORT_RESOURCES,
+            ExecutableActionType.START_CONSTRUCTION,
+            ExecutableActionType.CONTINUE_CONSTRUCTION,
+            ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
+            ExecutableActionType.VALIDATE_CONSTRUCTION,
+        }
+        if decision.selected_action not in project_actions:
+            return decision
+        project_id = decision.target_id
+        if not self._project_still_viable_for_binding(environment, project_id):
+            project_id = self._acquire_project_focus_for_action(
+                environment,
+                action_type=decision.selected_action.value,
+                requested_project_id=decision.target_id,
+                sim_state=sim_state,
+                reason=reason,
+            )
+        if project_id and str(project_id) != str(decision.target_id or ""):
+            if reason == "readiness_unlocked":
+                self._emit_event(
+                    sim_state,
+                    "readiness_unlock_bound_to_project",
+                    {"project_id": project_id, "selected_action": decision.selected_action.value},
+                )
+            return BrainDecision(
+                selected_action=decision.selected_action,
+                target_id=project_id,
+                target_zone=decision.target_zone,
+                goal_update=decision.goal_update,
+                reason_summary=decision.reason_summary,
+                confidence=decision.confidence,
+                next_steps=list(decision.next_steps or []),
+                plan_steps=list(decision.plan_steps or []),
+                assumptions=list(decision.assumptions or []),
+                requests_for_context=list(decision.requests_for_context or []),
+            )
+        return decision
+
     def _rule_dependency_support_class(self, rule_id):
         rid = normalize_rule_token(rule_id)
         if not rid:
@@ -7899,6 +7988,12 @@ class Agent:
                         )
                         if rerouted is not None:
                             rewritten = rerouted
+                    rewritten = self._bind_project_to_decision_if_needed(
+                        rewritten,
+                        environment,
+                        sim_state=sim_state,
+                        reason="readiness_unlocked",
+                    )
         if context is not None and rewritten.selected_action in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION, ExecutableActionType.TRANSPORT_RESOURCES, ExecutableActionType.VALIDATE_CONSTRUCTION, ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION}:
             epistemic = context.individual_cognitive_state.get("epistemic_sufficiency", {})
             refresh_pressure = float(epistemic.get("refresh_pressure", 0.0) or 0.0)
@@ -8089,6 +8184,12 @@ class Agent:
                 confidence=max(0.8, float(rewritten.confidence or decision.confidence or 0.0)),
             )
         rewritten = self._apply_execution_lock_bias(rewritten, environment, sim_state=sim_state)
+        rewritten = self._bind_project_to_decision_if_needed(
+            rewritten,
+            environment,
+            sim_state=sim_state,
+            reason=f"{pivot_origin}_finalize",
+        )
         rewritten = self._apply_metacognitive_regulation(
             rewritten,
             environment,
@@ -8097,6 +8198,12 @@ class Agent:
             pivot_origin=pivot_origin,
         )
         rewritten = self._apply_execution_lock_bias(rewritten, environment, sim_state=sim_state)
+        rewritten = self._bind_project_to_decision_if_needed(
+            rewritten,
+            environment,
+            sim_state=sim_state,
+            reason=f"{pivot_origin}_post_regulation",
+        )
         if rewritten.selected_action in {
             ExecutableActionType.START_CONSTRUCTION,
             ExecutableActionType.CONTINUE_CONSTRUCTION,
@@ -8237,6 +8344,13 @@ class Agent:
         context.individual_cognitive_state.setdefault("control_state", dict(self.control_state or {}))
         context.individual_cognitive_state["control_state"]["post_acquisition_until"] = int(self.post_acquisition_stabilization_until)
         decision = provider.decide(context)
+        if planner_reason in {"no_active_plan", "plan_invalidated", "plan_completed"}:
+            decision = self._bind_project_to_decision_if_needed(
+                decision,
+                environment,
+                sim_state=sim_state,
+                reason="local_refresh_no_active_plan",
+            )
         if self._startup_bootstrap_guard(decision=decision, sim_state=sim_state):
             self.activate_fallback_bootstrap(sim_state=sim_state, reason="startup_bootstrap_grounding_guard")
             override = self._bootstrap_override_decision(environment, sim_state=sim_state)
@@ -8474,6 +8588,25 @@ class Agent:
                 if fallback.selected_action in {ExecutableActionType.CONTINUE_CONSTRUCTION, ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.VALIDATE_CONSTRUCTION}:
                     self._emit_event(sim_state, "transport_pruned_materially_satisfied", {"requested_project_id": decision.target_id, "fallback_action": fallback.selected_action.value})
                     return self._translate_brain_decision_to_legacy_action(fallback, environment, sim_state=sim_state)
+                rebound_project = self._acquire_project_focus_for_action(
+                    environment,
+                    action_type=decision.selected_action.value,
+                    requested_project_id=decision.target_id,
+                    sim_state=sim_state,
+                    reason="translate_transport_missing_project_binding",
+                )
+                if rebound_project:
+                    action["project_id"] = rebound_project
+                    selected = self._select_build_target(
+                        environment,
+                        require_readiness=False,
+                        include_project=True,
+                        action_type=decision.selected_action.value,
+                        requested_project_id=rebound_project,
+                        sim_state=sim_state,
+                    )
+                    if isinstance(selected, dict) and selected.get("target") is not None:
+                        action["target"] = selected.get("target")
 
         if decision.selected_action in {
             ExecutableActionType.START_CONSTRUCTION,
@@ -8501,6 +8634,36 @@ class Agent:
                 action["project_id"] = selected.get("project_id")
                 if not action.get("target"):
                     action["target"] = selected.get("target")
+
+        if decision.selected_action in {
+            ExecutableActionType.TRANSPORT_RESOURCES,
+            ExecutableActionType.START_CONSTRUCTION,
+            ExecutableActionType.CONTINUE_CONSTRUCTION,
+            ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
+            ExecutableActionType.VALIDATE_CONSTRUCTION,
+        } and not action.get("project_id"):
+            rebound_project = self._acquire_project_focus_for_action(
+                environment,
+                action_type=decision.selected_action.value,
+                requested_project_id=decision.target_id,
+                sim_state=sim_state,
+                reason="translate_missing_project_binding_guard",
+            )
+            if rebound_project:
+                action["project_id"] = rebound_project
+            if not action.get("project_id"):
+                self._emit_event(
+                    sim_state,
+                    "project_action_blocked_missing_binding_guard",
+                    {"decision_action": decision.selected_action.value, "target_id": decision.target_id},
+                )
+                return [{
+                    "type": "idle",
+                    "duration": 1.0,
+                    "priority": 1,
+                    "decision_action": ExecutableActionType.REASSESS_PLAN.value,
+                    "translation_outcome": "project_reacquisition_required",
+                }]
 
         if decision.selected_action in {
             ExecutableActionType.START_CONSTRUCTION,
@@ -9961,6 +10124,22 @@ class Agent:
                     )
 
                     next_action = ExecutableActionType.REASSESS_PLAN.value
+                    if failure_category == "missing_project_binding":
+                        rebound_project = self._acquire_project_focus_for_action(
+                            environment,
+                            action_type=ExecutableActionType.TRANSPORT_RESOURCES.value,
+                            requested_project_id=None,
+                            sim_state=sim_state,
+                            reason="recovery_missing_project_binding",
+                        )
+                        if rebound_project:
+                            self.transport_state["bound_project_id"] = rebound_project
+                            next_action = ExecutableActionType.TRANSPORT_RESOURCES.value
+                            self._emit_event(
+                                sim_state,
+                                "recovery_pivot_to_project_reacquisition",
+                                {"project_id": rebound_project, "failure_category": failure_category},
+                            )
                     if isinstance(project, dict) and str(project.get("status")) == "ready_for_validation":
                         next_action = ExecutableActionType.VALIDATE_CONSTRUCTION.value
                         self._start_project_closure_commitment(
