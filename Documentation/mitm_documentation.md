@@ -16,6 +16,10 @@
 ### Abstract
 This document specifies the Mars Colony MITM agent-based testbed as an executable scientific environment for studying team macrocognition. The platform operationalizes distributed DIK (Data–Information–Knowledge), role-constrained access, communication, artifact externalization, construction taskwork, and validation loops inside a dynamic environment. It combines theory-grounded abstractions (MITM, shared mental models, transactive memory) with concrete software architecture (task packages, modular brain providers, event logging, and metrics), enabling controlled manipulations and causal analysis.
 
+As implemented in this repository, the simulator is explicitly an executable research testbed: it links theory, runtime behavior, and measurement in a single instrumentation surface; supports controlled experimentation; and allows backend-policy comparisons between RuleBrain and modular external planner providers under shared task and environment constraints. It is intended for both engineering debugging and scientific experimentation.
+
+**Status:** Implemented baseline with active refinement.
+
 ### Background and motivation
 Team cognition research often captures static snapshots; this simulator captures process. It is designed to expose temporal emergence, misalignment, repair, and adaptation under realistic coordination constraints.
 
@@ -39,6 +43,20 @@ Supports deterministic RuleBrain baselines and local OpenAI-compatible backends,
 
 ### Keywords
 Macrocognition in Teams; team cognition; collaborative problem solving; agent-based simulation; shared mental models; transactive memory; external cognition; externalization; taskwork; teamwork; human-AI teaming.
+
+---
+
+## How to Read This Document
+
+Sections in this document intentionally mix four content categories:
+1. **Implemented behavior** (what executes in the current codebase).
+2. **Partially implemented scaffolds** (present in code but still being tuned/validated).
+3. **Conceptual mapping** (theory-to-code alignment where implementation is incomplete).
+4. **Planned roadmap features** (not yet implemented).
+
+The simulator is under active development, so some sections are deliberately dual-purpose: they serve as both documentation of current behavior and specification guidance for near-term improvements.
+
+Status labels are used where helpful: **Implemented**, **Partially Implemented**, **Experimental**, **Planned**, and **Conceptual Mapping Only**.
 
 ---
 
@@ -279,74 +297,173 @@ RuleBrain and modular provider routing for alternative planners.
 Event logger, rollups, summaries, and downstream analysis modules.
 
 ### 14. Runtime Control Flow
+**Status:** Implemented baseline with active tuning for asynchronous planner operation and degraded-mode handling.
+
 #### 14.1 Tick-level lifecycle
-Per tick: observe/context build → plan/decision → action translate → execute → log/measure.
-#### 14.2 Order of updates
-Environment and phase context update, then agent decisions/actions, then reconciliation metrics.
-#### 14.3 Action translation and execution
-Brain decisions are validated against legal affordances and translated to executable actions.
-#### 14.4 Event emission and reconciliation
-Subsystems emit structured events; readiness and project status can be recomputed on trigger events.
-#### 14.5 Where authority resides in the simulator
+Current runtime behavior follows this authoritative sequence each tick:
+1. Phase/time update inputs are prepared (`dt` scaled by speed multiplier).
+2. For non-RuleBrain backends, inflight planner and DIK-integration requests are polled.
+3. Planner barrier state is refreshed; simulation can pause when barrier policy requires it.
+4. Environment updates phase context and emits `phase_transition` when index changes.
+5. Construction projects are synchronized into team artifacts (`upsert_construction_artifact`).
+6. Agent-local context is built; each agent decides whether planning should fire based on cadence/trigger state.
+7. RuleBrain or external provider is queried.
+8. Provider output is validated against schema and normalized decision contracts.
+9. Decision intent is translated into simulator-executable action types/targets.
+10. Movement/inspection/communication/construction/validation/repair actions execute.
+11. Structured events are emitted for transitions, errors, and outcomes.
+12. Readiness reconciliation can be triggered by DIK/construction/phase events.
+13. Metrics rollups are updated from event stream and authoritative snapshots.
+14. Tick time advances and periodic log persistence occurs.
+
+#### 14.2 Cadence controls
+Cadence includes step and wall-clock intervals, trigger masks, retries, degraded mode intervals, and backend-specific timeout/token settings.
+
+#### 14.3 Fallback logic and failure recovery
+When provider calls timeout/fail/return invalid payloads, fallback behavior can demote to rule-based execution and emit backend/fallback telemetry.
+
+#### 14.4 Action translation and execution
+Brain decisions are advisory. Simulator-side legality checks prevent direct world mutation by planner output and protect against malformed or impossible actions.
+
+#### 14.5 Event emission and reconciliation
+Subsystems emit structured events; readiness and project status are recomputed on trigger events rather than guessed from narrative assumptions.
+
+#### 14.6 Where authority resides in the simulator
 Simulator is authoritative; brains propose actions, engine adjudicates legality/effects.
 
 ### 15. Repository / Module Organization
-#### 15.1 simulation.py
-SimulationState runtime orchestration and subsystem wiring.
-#### 15.2 agent.py
-Agent cognition, planning, communication, and action logic.
-#### 15.3 construction.py
-Project lifecycle, build/repair/validation mechanics.
-#### 15.4 environment.py
-Map objects, phases, movement affordances.
-#### 15.5 team_knowledge.py
-Shared artifacts and team-level knowledge utilities.
-#### 15.6 brain_provider.py
-RuleBrain plus backend routing/fallback.
-#### 15.7 metrics.py
-Event-driven metrics accumulation and summaries.
-#### 15.8 tests, configs, task package files
-Verification assets and task-driven configuration schemas.
-#### 15.9 UI / experiment control surfaces
-`interface.py` and analysis tools provide control and inspection workflows.
+
+#### 15.0 Ownership and interaction framing
+For each module below, read descriptions as ownership boundaries:
+- *Owns state* means authoritative data should be maintained there.
+- *Should not own* means avoid hidden cross-layer side effects.
+- Cross-module interactions should flow through explicit simulator actions/events.
+
+#### 15.1 `modules/simulation.py`
+- **Core responsibility:** authoritative runtime orchestration (`SimulationState`), including per-tick update ordering, planner barrier handling, backend-state refresh, and subsystem wiring.
+- **Owns state:** simulation time, configured/effective backend state, planner executor/barrier state, logger and metrics lifecycle control.
+- **Should never own:** role-specific domain content (task rules/templates), or private agent cognitive truth beyond explicit agent snapshots.
+- **Critical interactions:** `Agent.update`, `Environment.update`, `MetricsCollector.on_step`, `TeamKnowledgeManager.upsert_construction_artifact`.
+
+#### 15.2 `modules/agent.py`
+- **Core responsibility:** bounded local cognition, plan/goal management, action selection, communication behavior, and metacognitive regulation.
+- **Owns state:** DIK memories, goal stack/registry, planner request state, support/stagnation counters, teammate model approximations, commitment/closure state.
+- **Should never own:** direct mutation of global world/project truth outside simulator-executed action pathways.
+- **Critical interactions:** brain contract/provider, environment affordances, goal manager/state utilities, task-model rule normalization.
+
+#### 15.3 `modules/construction.py`
+- **Core responsibility:** project/site/resource/bridge lifecycle and readiness/validation-relevant project bookkeeping.
+- **Owns state:** site capacities/buildability, resource piles, bridge progress, project dictionaries and template instantiation.
+- **Should never own:** agent-level policy logic or message semantics.
+- **Critical interactions:** environment embedding, transport/build/validate actions, team-knowledge artifact projection.
+
+#### 15.4 `modules/environment.py`
+- **Core responsibility:** spatial map, interaction targets/zones, movement and access affordances, phase transitions.
+- **Owns state:** geometry/blocked regions, object metadata, source access constraints, task-model-backed layout overrides.
+- **Should never own:** planner policy decisions.
+
+#### 15.5 `modules/team_knowledge.py`
+- **Core responsibility:** shared artifact and validated-knowledge ledger.
+- **Owns state:** externalized artifacts, uptake counts, recent team-level update stream.
+- **Should never own:** movement/construction execution logic.
+
+#### 15.6 `modules/brain_provider.py`
+- **Core responsibility:** RuleBrain deterministic baseline plus pluggable provider pathways for local/OpenAI-compatible planning.
+- **Owns state:** backend configuration, response parsing/normalization, provider-level fallback strategy.
+- **Should never own:** authoritative legality enforcement or world mutation.
+
+#### 15.7 `modules/metrics.py`
+- **Core responsibility:** event-driven accumulation of run/phase/agent metrics and reason distributions.
+- **Owns state:** breakdown counters, phase rollups, planner fallback summaries, movement/construction/communication tallies.
+- **Should never own:** primary event-truth generation.
+
+#### 15.8 `interface.py`, `tests/*`, `scripts/*`, and `config/tasks/mars_colony/*`
+- **`interface.py` (Implemented):** Tk control/observability surface for interactive experiments.
+- **`tests/*` (Implemented):** regression checks for runtime, contracts, backend fallback, construction/readiness behavior, interface resilience, and analysis tools.
+- **`scripts/*` (Implemented):** operational validation and audit utilities (`preflight_check.py`, bottleneck/consistency auditors).
+- **`config/tasks/mars_colony/*` (Implemented task package):** role defaults, rules, source contents, zones/targets, construction templates, action availability, and manifest defaults.
+
+#### 15.9 Architectural invariants
+- Simulator remains authoritative over world state mutations.
+- Brains are advisory policy layers and do not directly mutate environment/project state.
+- Task packages contain domain-specific truth tables and scenario content.
+- Metrics derive from events or authoritative snapshots.
+- Logging should represent actual transitions, not inferred guesses.
 
 ---
 
 ## Part VI. Agent Cognition and Internal Architecture
 
 ### 16. Agent State
-#### 16.1 Identity and role
-Named role-bound agents with role-scoped source access.
-#### 16.2 Physical state
-Position, target, movement/stall status.
+**Status:** Implemented core state model with partially implemented/experimental regulation tuning.
+
+#### 16.1 Role identity
+Named role-bound agents with role-scoped source access, display labels/template IDs, and per-agent brain/communication parameter overlays.
+
+#### 16.2 Position and movement state
+Continuous position/orientation with target/detour tracking, stall counters, blocked movement diagnostics, and path mode settings.
+
 #### 16.3 Inventory / carrying / transport state
-Carry capacity and transport commitments.
-#### 16.4 Goal state
-Mission/project/support goals with activation hierarchy.
-#### 16.5 Plan state
-Current plan, method, steps, and adoption status.
-#### 16.6 Knowledge state / mental model
-Agent DIK inventory and derived rule beliefs.
-#### 16.7 Metaknowledge / teammate model
-Beliefs about teammate expertise and expected contributions.
-#### 16.8 Trait parameters
-Mechanism profile values (communication, help tendency, build speed, etc.).
-#### 16.9 Current commitments and focused project
-Focused project/workspace and closure status.
+Carry state and transport occupancy constraints gate simultaneous action possibilities and affect logistics throughput.
+
+#### 16.4 Current target state
+Action target IDs/site bindings/current inspect target state prevent ambiguous execution intent.
+
+#### 16.5 Goal stack / hierarchical goals
+Mission/project/support/repair goals are represented through goal stack plus goal registry/order and goal-manager transitions.
+
+#### 16.6 Current plan / adopted plan
+Planner state tracks request lifecycle (queued/inflight/completed), adopted method/step, fallback counters, and invalidation events.
+
+#### 16.7 DIK memory
+Data/information/knowledge memory sets coexist with source inspection memory, source exhaustion state, known gaps, and post-inspect handoff bookkeeping.
+
+#### 16.8 Rule beliefs
+Rule tokens/rule candidates are maintained as action constraints and readiness/validation support evidence.
+
+#### 16.9 Teammate model / expertise beliefs
+Theory-of-mind and communication history act as transactive-memory approximations for request routing and deferral.
+
+#### 16.10 Commitment state
+Project closure state tracks focused project, commit windows, repair mode, blocker signatures, retry history, and support-focus fatigue.
+
+#### 16.11 Stagnation counters / recovery triggers
+Epistemic/support/closure/wait stagnation counters trigger regrounding, support-loop breaks, and controlled switching.
+
+#### 16.12 Trait parameters
+Taskwork/teamwork-relevant trait parameters (e.g., help tendency, build speed, communication propensity, rule accuracy) shape behavior and downstream metrics.
+
+#### 16.13 Bounded rationality statement
+Agents are non-omniscient: behavior emerges from constraints + planner outputs + available local knowledge + artifact/communication uptake.
 
 ### 17. DIK Representation
+**Status:** Implemented with active refinement of semantic quality and lineage analytics.
+
 #### 17.1 Data objects
-Raw observations/source elements.
+Discrete observed facts from source packets, environment observations, project states, messages, and action outcomes.
+
 #### 17.2 Information objects
-Contextualized elements with local interpretation.
+Contextualized relevance-bearing interpretations of data relative to role, phase, and current goals.
+
 #### 17.3 Knowledge objects
-Integrated, action-relevant statements/rules.
+Integrated action-relevant understanding sufficient to guide communication, planning, and execution choices.
+
 #### 17.4 Rule structures
-Canonical `R_*` rule IDs linked to prerequisites.
+Canonical `R_*` rule IDs used as operational decision constraints/procedures and validation expectations.
+
 #### 17.5 Confidence / uncertainty / freshness
-Decision confidence and stale knowledge are model-level concepts for planning cadence.
+Confidence/freshness concepts are represented indirectly via planning cadence, fallback/reassessment behavior, and stale-loop diagnostics.
+
 #### 17.6 Provenance and lineage tracking
-Events record source, derivation, sharing, and adoption lineage.
+Events and project provenance snapshots should allow tracing source→derivation→sharing→adoption→construction outcomes.
+
+#### 17.7 DIK failure points explicitly modeled
+- missed data acquisition,
+- incorrect contextualization,
+- weak integration,
+- stale beliefs,
+- contradictory rules,
+- unshared knowledge with no team uptake.
 
 ### 18. Internalized Knowledge and Mental Models
 #### 18.1 Task mental models
@@ -381,34 +498,45 @@ Knowledge objects mature via new evidence and correction episodes.
 ## Part VII. Team Knowledge Building and Communication
 
 ### 20. Team Knowledge Building Processes
+**Status:** Implemented baseline with partial scaffolds for richer negotiation semantics.
+
 #### 20.1 Team information exchange
-Role-specific content is communicated through explicit message intents.
+Role-specific content is communicated through explicit message intents and logged as causal runtime events.
 #### 20.2 Team knowledge sharing
-Rule/knowledge payload sharing supports convergence.
+Rule/knowledge payload sharing supports convergence when recipients actually integrate received content.
 #### 20.3 Team solution option generation
-Plan proposals produce alternative action pathways.
+Plan proposals and externalized artifacts create explicit alternative pathways.
 #### 20.4 Team evaluation and negotiation of alternatives
-Agreement/repair acts and artifact updates negotiate plans.
+Agreement/repair acts and artifact updates negotiate plans; multi-turn deep negotiation remains partially implemented.
 #### 20.5 Team process and plan regulation
-Meta-level coordination actions guide sequencing and commitment.
+Meta-level coordination actions guide sequencing and commitment windows.
 #### 20.6 Consensus and co-validation
-Consensus is indicated by joint artifact adoption and validated outcomes.
+Consensus is indicated by joint artifact adoption, coordinated execution, and validated outcomes (not message volume alone).
 #### 20.7 Knowledge interoperability and repair
-Mismatch detection triggers clarification/repair loops.
+Mismatch detection triggers clarification/repair loops with possible fallback to source reinspection.
 
 ### 21. Communication System
+**Status:** Implemented core executable communication intents; extended discourse taxonomy partly analytic; richer discourse planned.
+
 #### 21.1 Why communication is modeled as cognitive processing
-Messages change knowledge state and future decisions.
+Messages can alter DIK state, teammate models, and subsequent action selection.
 #### 21.2 Communication as observable and causal
-Communication events are explicit in logs and impact execution.
+Communication events are explicit in logs and can be linked to downstream execution outcomes.
 #### 21.3 Conditions for speaking, listening, acknowledging, adopting
-Action legality, proximity, timing, and state determine communication opportunities.
+Action legality, proximity, timing, and state determine opportunities for send/receive/adopt behavior.
 #### 21.4 Communication timing, proximity, and access
-Spatial and temporal context mediates message production/uptake.
+Spatial and temporal context mediates message production and uptake lag.
 #### 21.5 Directed versus broadcast communication
-System supports sender/recipient addressing and team-level effects.
+System supports sender/recipient targeting while preserving team-level artifact pathways.
 #### 21.6 One-way, acknowledged, and integrated communication
-Not all messages are adopted; uptake must occur for cognitive effect.
+Not all messages are adopted; uptake and integration determine whether communication changes team cognition.
+
+#### 21.7 Communication failure modes
+- message not sent,
+- message ignored,
+- delayed uptake,
+- misunderstood payload,
+- not integrated into plan/action policy.
 
 ### 22. Full Communication Coding Taxonomy
 #### 22.1 Interpersonal and communication management
@@ -445,6 +573,13 @@ Not all messages are adopted; uptake must occur for cognitive effect.
 - **TPSO:** team problem-solving outcome summary.
 #### 22.7 Mapping codes to simulation functions
 Core implemented communication intents are `TDP`, `TIP`, `TKP`, `TGTO`, `TKRQ`, `TCR`, `TPP`, and `TPA`; additional taxonomy codes are a measurement-facing extension scaffold. Core codes change DIK/team state directly; optional codes enrich discourse realism and analytic granularity.
+
+**Status split:**
+- **Implemented:** core executable communication intents tied to simulator state transitions and measurable uptake effects.
+- **Partially Implemented:** extended analytic taxonomy labels with limited direct execution semantics.
+- **Planned:** richer multi-turn discourse and negotiation state tracking.
+
+Communication quality should be interpreted by uptake/integration outcomes, not emission counts alone.
 
 ### 23. Shared Mental Models and Convergence
 #### 23.1 What counts as convergence
@@ -766,13 +901,23 @@ Combine end-state summaries with time-ordered traces.
 Ordered events reveal mechanism pathways and failure points.
 
 ### 44. Event Logging Architecture
+**Status:** Implemented event architecture with ongoing semantic tightening of labels and derived metrics.
+
 #### 44.1 Event philosophy
 Every meaningful state transition should emit inspectable events.
+
 #### 44.2 Categories of events
-movement; source access; DIK; communication; planning; artifact creation; construction; validation; metacognition; errors/failures.
+movement; source access; DIK; communication; planning; artifact creation; construction; readiness reconciliation; validation; repair; metacognition; backend events; errors/failures.
+
 #### 44.3 Run artifacts
-summary files; line-oriented logs; rollups; planner traces; backend traces; project dumps.
-#### 44.4 Event trace consolidation and multimodal compatibility
+summary files; line-oriented logs; rollups; planner traces; backend traces; project dumps; session outputs/manifests.
+
+#### 44.4 Metric separation for analysis
+1. **Already implemented:** direct counters/rollups in summaries and metrics collector.
+2. **Derivable now:** sequence/network/window analyses from existing event traces.
+3. **Conceptual future metrics:** richer semantic and discourse quality metrics not yet fully operationalized.
+
+#### 44.5 Event trace consolidation and multimodal compatibility
 Outputs are structured to support cross-tool integration and downstream fusion.
 
 ### 45. Measurement Framework by MITM Component
@@ -920,26 +1065,47 @@ Metric labels interpreted beyond supported meaning.
 ### 55. How to Diagnose Runs
 #### 55.1 Read run summary first
 Establish top-level outcome signature.
-#### 55.2 Then event log
-Locate critical transitions and blockers.
-#### 55.3 Then rollup metrics
-Quantify where process deviated.
+#### 55.2 Inspect major counters and reason distributions
+Use rollups to locate dominant failure classes before line-by-line trace reading.
+#### 55.3 Then event log timeline
+Locate first divergence point and subsequent blocker propagation.
 #### 55.4 Then planner/backend traces
-Inspect decision-level causes.
-#### 55.5 Distinguish failure types rather than collapsing them
-Separate epistemic, coordination, execution, and environment failures.
+Inspect decision-level causes and malformed/fallback patterns.
+#### 55.5 Classify failure type
+Separate epistemic, coordination, execution, environment/infrastructure failures.
+#### 55.6 Patch responsible subsystem and re-run controlled comparison
+Confirm fixes by rerunning same condition with minimal parameter drift.
 
 ---
 
 ## Part XV. Current Status, Open Issues, and Roadmap
 
 ### 56. Current Implemented Capabilities
-#### 56.1 What is already present
-Task-driven Mars package, DIK derivation pipeline, communication intents, construction/validation loops, modular backends, logging/metrics, and broad tests.
-#### 56.2 What is partially realized
-Advanced commitment dynamics, richer negotiation discourse, and deeper semantic validation.
-#### 56.3 What remains planned
-Expanded communication taxonomy implementation and additional task packages.
+
+#### 56.1 Stable Core (**Status: Implemented**)
+- Task-driven Mars package ingestion and environment/construction instantiation.
+- Authoritative simulator tick loop with event emission.
+- DIK acquisition/derivation scaffolding and core communication intents.
+- Construction/readiness/validation loop with artifact publication.
+- RuleBrain baseline and pluggable brain provider pathway.
+- Logging/metrics/test scaffolding sufficient for repeatable experimentation.
+
+#### 56.2 Actively Tuned (**Status: Partially Implemented**)
+- Metacognitive switching thresholds and successor-policy handoffs.
+- Async planner cadence/degraded mode behavior under high latency.
+- Readiness reconciliation timing and semantic sufficiency balancing.
+- Artifact uptake quality and communication-effectiveness interpretation.
+
+#### 56.3 Experimental (**Status: Experimental**)
+- Extended communication taxonomy as executable behavior (beyond core intents).
+- Richer convergence and discourse quality metrics.
+- Some advanced commitment and closure heuristics under diverse stressors.
+
+#### 56.4 Planned (**Status: Planned**)
+- Richer dialogue/negotiation state machines.
+- Additional CPS task packages beyond Mars Colony.
+- Stronger semantic validation and cross-domain transfer utilities.
+- Human-in-the-loop and adaptive support-agent workflows.
 
 ### 57. Current Bottlenecks
 #### 57.1 Successor policy handoffs
@@ -954,6 +1120,8 @@ Some runs exhibit unnecessary path churn.
 Uptake delays can leave teams fragmented.
 #### 57.6 Balancing epistemic richness with completion
 Richer cognition can increase runtime complexity and slower completion.
+#### 57.7 Fallback overuse patterns
+Under unstable provider conditions, repeated fallback can mask deeper planner-contract issues.
 
 ### 58. Future Directions
 #### 58.1 Stronger dialogue and negotiation
