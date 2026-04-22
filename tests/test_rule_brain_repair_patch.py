@@ -785,6 +785,105 @@ class TestRuleBrainRepairPatch(unittest.TestCase):
         finally:
             sim.stop()
 
+    def test_no_active_plan_materially_satisfied_prefers_construction_successor(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            project_id = "Build_Table_A"
+            project = sim.environment.construction.projects[project_id]
+            required = int(project["required_resources"]["bricks"] or 0)
+            sim.environment.construction.deliver_resource(project_id, "bricks", quantity=max(1, required))
+            decision = BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES, target_id=project_id, confidence=0.8)
+            with patch.object(agent, "_construction_action_blockers", return_value=([], project_id)):
+                rewritten = agent._no_active_plan_successor_for_materially_satisfied_project(
+                    decision,
+                    sim.environment,
+                    sim_state=sim,
+                )
+            self.assertEqual(rewritten.selected_action, ExecutableActionType.CONTINUE_CONSTRUCTION)
+            self.assertEqual(rewritten.target_id, project_id)
+        finally:
+            sim.stop()
+
+    def test_no_active_plan_materially_satisfied_prefers_validation_when_build_not_viable(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            project_id = "Build_Table_A"
+            project = sim.environment.construction.projects[project_id]
+            required = int(project["required_resources"]["bricks"] or 0)
+            sim.environment.construction.deliver_resource(project_id, "bricks", quantity=max(1, required))
+            project["structurally_complete"] = True
+            project["status"] = "ready_for_validation"
+            decision = BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES, target_id=project_id, confidence=0.8)
+
+            def _blockers(decision, _action, _env, sim_state=None):
+                if decision.selected_action in {ExecutableActionType.CONTINUE_CONSTRUCTION, ExecutableActionType.START_CONSTRUCTION}:
+                    return (["epistemic_sufficiency_low_for_construction"], project_id)
+                return ([], project_id)
+
+            with patch.object(agent, "_construction_action_blockers", side_effect=_blockers):
+                rewritten = agent._no_active_plan_successor_for_materially_satisfied_project(
+                    decision,
+                    sim.environment,
+                    sim_state=sim,
+                )
+            self.assertEqual(rewritten.selected_action, ExecutableActionType.VALIDATE_CONSTRUCTION)
+            self.assertEqual(rewritten.target_id, project_id)
+        finally:
+            sim.stop()
+
+    def test_no_active_plan_materially_satisfied_prefers_epistemic_successor_when_build_validate_not_viable(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            project_id = "Build_Table_A"
+            project = sim.environment.construction.projects[project_id]
+            required = int(project["required_resources"]["bricks"] or 0)
+            sim.environment.construction.deliver_resource(project_id, "bricks", quantity=max(1, required))
+            project["structurally_complete"] = True
+            project["status"] = "ready_for_validation"
+            project["build_steps"] = [{"step_id": "s1", "completed": True}]
+            decision = BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES, target_id=project_id, confidence=0.8)
+            epistemic_successor = BrainDecision(selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE, target_id="Team_Info", confidence=0.81)
+            def _blockers(decision, _action, _env, sim_state=None):
+                if decision.selected_action in {
+                    ExecutableActionType.START_CONSTRUCTION,
+                    ExecutableActionType.VALIDATE_CONSTRUCTION,
+                }:
+                    return (["missing_validation_rule_knowledge"], project_id)
+                return ([], project_id)
+
+            with patch.object(agent, "_construction_action_blockers", side_effect=_blockers), patch.object(agent, "_partition_action_blockers", return_value={"hard_blockers": ["blocked"], "epistemic_advisories": []}), patch.object(agent, "_choose_post_inspect_followup_decision", return_value=epistemic_successor):
+                rewritten = agent._no_active_plan_successor_for_materially_satisfied_project(
+                    decision,
+                    sim.environment,
+                    sim_state=sim,
+                )
+            self.assertEqual(rewritten.selected_action, ExecutableActionType.INSPECT_INFORMATION_SOURCE)
+        finally:
+            sim.stop()
+
+    def test_no_active_plan_transport_remains_when_focused_project_needs_materials(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            project_id = "Build_Table_A"
+            project = sim.environment.construction.projects[project_id]
+            project["resource_complete"] = False
+            project["delivered_resources"]["bricks"] = 0
+            project["status"] = "in_progress"
+            decision = BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES, target_id=project_id, confidence=0.8)
+            rewritten = agent._no_active_plan_successor_for_materially_satisfied_project(
+                decision,
+                sim.environment,
+                sim_state=sim,
+            )
+            self.assertEqual(rewritten.selected_action, ExecutableActionType.TRANSPORT_RESOURCES)
+            self.assertEqual(rewritten.target_id, project_id)
+        finally:
+            sim.stop()
+
     def test_project_candidate_snapshot_requires_bound_target_id(self):
         sim = SimulationState(phases=[], flash_mode=True)
         try:
