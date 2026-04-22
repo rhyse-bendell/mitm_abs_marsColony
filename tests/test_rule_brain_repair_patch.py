@@ -705,6 +705,103 @@ class TestRuleBrainRepairPatch(unittest.TestCase):
         finally:
             sim.stop()
 
+    def test_local_refresh_no_active_plan_preserves_viable_project_focus(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            agent.execution_lock_state.update({"execution_lock_active": True, "locked_project_id": "Build_Table_A"})
+            mock_provider = SimpleNamespace(decide=lambda _ctx: BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES, target_id=None, confidence=0.8))
+            sim.get_agent_brain_runtime = lambda _a: {"provider": mock_provider, "configured_backend": "rule_brain"}
+            with patch.object(agent, "_apply_metacognitive_regulation", side_effect=lambda d, *_args, **_kwargs: d):
+                refreshed = agent._run_rule_brain_controller(sim, sim.environment, "no_active_plan")
+            self.assertTrue(refreshed)
+            self.assertTrue(any(e.get("event_type") == "project_focus_preserved_on_refresh" for e in sim.logger.get_recent_events(240)))
+        finally:
+            sim.stop()
+
+    def test_readiness_unlock_binds_project_before_project_action(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            agent.transport_state["bound_project_id"] = "Build_Table_B"
+            decision = BrainDecision(selected_action=ExecutableActionType.START_CONSTRUCTION, target_id=None, confidence=0.7)
+            rebound = agent._bind_project_to_decision_if_needed(
+                decision,
+                sim.environment,
+                sim_state=sim,
+                reason="readiness_unlocked",
+            )
+            self.assertEqual(rebound.target_id, "Build_Table_B")
+            self.assertTrue(any(e.get("event_type") == "readiness_unlock_bound_to_project" for e in sim.logger.get_recent_events(240)))
+        finally:
+            sim.stop()
+
+    def test_project_specific_action_guard_blocks_missing_binding(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            decision = BrainDecision(selected_action=ExecutableActionType.CONTINUE_CONSTRUCTION, target_id=None, confidence=0.9)
+            with patch.object(agent, "_acquire_project_focus_for_action", return_value=None), patch.object(agent, "_select_build_target", return_value=None):
+                translated = agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
+            self.assertEqual(translated[0].get("decision_action"), ExecutableActionType.REASSESS_PLAN.value)
+            self.assertEqual(translated[0].get("translation_outcome"), "project_reacquisition_required")
+            self.assertTrue(any(e.get("event_type") == "project_action_blocked_missing_binding_guard" for e in sim.logger.get_recent_events(240)))
+        finally:
+            sim.stop()
+
+    def test_missing_binding_recovery_prefers_project_reacquisition(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            agent.active_actions = [{
+                "type": "transport_resources",
+                "duration": 30.0,
+                "progress": 0.0,
+                "decision_action": ExecutableActionType.TRANSPORT_RESOURCES.value,
+                "project_id": None,
+            }]
+            with patch.object(agent, "_acquire_project_focus_for_action", return_value="Build_Table_B"):
+                agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.1)
+            self.assertEqual(agent.transport_state.get("bound_project_id"), "Build_Table_B")
+            self.assertEqual(agent.progress_tracker.get("forced_pivot"), ExecutableActionType.TRANSPORT_RESOURCES.value)
+            self.assertTrue(any(e.get("event_type") == "recovery_pivot_to_project_reacquisition" for e in sim.logger.get_recent_events(300)))
+        finally:
+            sim.stop()
+
+    def test_project_focus_does_not_preserve_completed_project(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            agent = sim.agents[0]
+            sim.environment.construction.projects["Build_Table_A"]["status"] = "complete"
+            agent.execution_lock_state.update({"execution_lock_active": True, "locked_project_id": "Build_Table_A"})
+            focus = agent._acquire_project_focus_for_action(
+                sim.environment,
+                action_type=ExecutableActionType.TRANSPORT_RESOURCES.value,
+                requested_project_id="Build_Table_A",
+                sim_state=sim,
+                reason="unit_test_completed_project",
+            )
+            self.assertNotEqual(focus, "Build_Table_A")
+        finally:
+            sim.stop()
+
+    def test_project_candidate_snapshot_requires_bound_target_id(self):
+        sim = SimulationState(phases=[], flash_mode=True)
+        try:
+            ctx = BrainContextPacket(
+                static_task_context={"role": "Engineer"},
+                world_snapshot={"sim_time": 1.0, "phase_profile": {"name": "execution"}, "built_state": []},
+                individual_cognitive_state={},
+                team_state={},
+                history_bands={},
+                action_affordances=[{"action_type": "transport_resources", "target_id": "", "utility": 1.0}],
+            )
+            sim.brain_context_builder = SimpleNamespace(build=lambda *_args, **_kwargs: ctx)
+            candidates = sim._project_executable_agent_candidates("Build_Table_A")
+            self.assertEqual(candidates, [])
+        finally:
+            sim.stop()
+
 
 if __name__ == "__main__":
     unittest.main()
