@@ -204,6 +204,15 @@ class Agent:
             "target_kind": None,
             "blocked_attempts": 0,
         }
+        self.blocked_source_slot_state = {}
+        self.blocked_zone_recovery = {
+            "active_source_id": None,
+            "active_slot_id": None,
+            "active_target": None,
+            "consecutive_failures": 0,
+            "threshold": 3,
+            "slot_cooldown_s": 10.0,
+        }
         self.post_inspect_handoff = {
             "pending": False,
             "source_id": None,
@@ -2430,8 +2439,21 @@ class Agent:
         if not hasattr(environment, "select_source_access_point"):
             point = environment.get_interaction_target_position(source_id, from_position=self.position)
             return {"kind": "slot", "slot_id": None, "position": point, "reason": "legacy_selection"} if point is not None else None
-
-        selection = environment.select_source_access_point(source_id, agent_id=self.agent_id, from_position=self.position)
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        slot_state = self.blocked_source_slot_state.get(source_id, {})
+        active_blocked = {
+            slot_id
+            for slot_id, expires_at in slot_state.items()
+            if float(expires_at or 0.0) > now_ts
+        }
+        if slot_state:
+            self.blocked_source_slot_state[source_id] = {slot_id: exp for slot_id, exp in slot_state.items() if float(exp or 0.0) > now_ts}
+        selection = environment.select_source_access_point(
+            source_id,
+            agent_id=self.agent_id,
+            from_position=self.position,
+            avoid_slot_ids=active_blocked,
+        )
         if selection is None:
             return None
         slot_id = selection.get("slot_id")
@@ -2450,7 +2472,68 @@ class Agent:
             self._emit_event(sim_state, "source_slot_reserved", {"source_id": source_id, "slot_id": slot_id})
         else:
             self._emit_event(sim_state, "source_access_queue_wait", {"source_id": source_id, "slot_id": slot_id, "queue_index": selection.get("queue_index", 1)})
+        if active_blocked and slot_id is not None and str(slot_id) not in {str(s) for s in active_blocked}:
+            self._emit_event(
+                sim_state,
+                "source_alternate_slot_selected_after_blocked_zone",
+                {"source_id": source_id, "slot_id": slot_id, "blocked_slot_count": len(active_blocked)},
+            )
         return selection
+
+    def _register_blocked_zone_failure(self, target, sim_state=None, environment=None):
+        source_id = self.current_inspect_target_id
+        slot_id = self.source_access_state.get("slot_id")
+        if not source_id or slot_id is None:
+            self.blocked_zone_recovery["consecutive_failures"] = 0
+            return
+        signature = (source_id, str(slot_id), round(float(target[0]), 3), round(float(target[1]), 3))
+        active_sig = self.blocked_zone_recovery.get("active_target")
+        if active_sig == signature:
+            self.blocked_zone_recovery["consecutive_failures"] = int(self.blocked_zone_recovery.get("consecutive_failures", 0)) + 1
+        else:
+            self.blocked_zone_recovery["active_source_id"] = source_id
+            self.blocked_zone_recovery["active_slot_id"] = str(slot_id)
+            self.blocked_zone_recovery["active_target"] = signature
+            self.blocked_zone_recovery["consecutive_failures"] = 1
+        failures = int(self.blocked_zone_recovery.get("consecutive_failures", 0))
+        threshold = int(self.blocked_zone_recovery.get("threshold", 3))
+        if failures < threshold:
+            return
+
+        now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        cooldown_s = float(self.blocked_zone_recovery.get("slot_cooldown_s", 10.0))
+        expires_at = now_ts + max(0.0, cooldown_s)
+        self.blocked_source_slot_state.setdefault(source_id, {})[str(slot_id)] = expires_at
+        self._emit_event(
+            sim_state,
+            "movement_target_temporarily_blacklisted",
+            {"source_id": source_id, "slot_id": slot_id, "target": target, "cooldown_until": expires_at, "failures": failures},
+        )
+
+        if environment is not None and hasattr(environment, "invalidate_path_cache_entry"):
+            if environment.invalidate_path_cache_entry(self.position, target, mode=self.navigation.get("path_mode", "grid_astar")):
+                self._emit_event(
+                    sim_state,
+                    "movement_cached_path_invalidated_after_blocked_zone",
+                    {"source_id": source_id, "slot_id": slot_id, "target": target},
+                )
+        self.navigation["active_path"] = []
+        self.navigation["path_target"] = None
+        self.navigation["path_index"] = 0
+
+        self._emit_event(
+            sim_state,
+            "movement_retarget_after_repeated_blocked_zone",
+            {"source_id": source_id, "slot_id": slot_id, "target": target, "failures": failures},
+        )
+        self._clear_inspect_pursuit(
+            reason="repeated_blocked_zone_target",
+            sim_state=sim_state,
+            release_slot=True,
+            environment=environment,
+        )
+        self.target = None
+        self.blocked_zone_recovery["consecutive_failures"] = 0
 
     def _critical_unmet_source_targets(self, sim_state, environment):
         audit = getattr(sim_state, "runtime_witness_audit", None)
@@ -9414,6 +9497,7 @@ class Agent:
             self.position = (new_x, new_y)
             nav["last_position"] = tuple(self.position)
             nav["last_target"] = tuple(target)
+            self.blocked_zone_recovery["consecutive_failures"] = 0
             target_sig = f"{round(target[0],2)}:{round(target[1],2)}"
             self.progress_tracker.setdefault("target_arrival_no_effect", {}).pop(target_sig, None)
             _emit("movement_progressed", {"remaining_distance": round(max(0.0, dist - step), 3), "waypoint_index": nav.get("path_index", 0)})
@@ -9434,6 +9518,8 @@ class Agent:
                 self._emit_event(sim_state, "first_movement_blocked", {"destination": target, "blocker_category": block_cat})
             if self.current_inspect_target_id:
                 self.inspect_stall_counts[self.current_inspect_target_id] = self.inspect_stall_counts.get(self.current_inspect_target_id, 0) + 1
+            if block_cat == "blocked_zone":
+                self._register_blocked_zone_failure(target, sim_state=sim_state, environment=environment)
 
         self.heart_rate += 1
 

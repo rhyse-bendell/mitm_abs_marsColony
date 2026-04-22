@@ -111,6 +111,21 @@ class TestSourceAccessSlots(unittest.TestCase):
         event_types = [e[0] for e in sim.logger.events]
         self.assertIn("same_source_slot_reselected", event_types)
 
+    def test_blocked_zone_blacklisted_slot_is_avoided_on_retarget(self):
+        env = Environment(phases=[])
+        agent = Agent(name="Engineer", role="Engineer", position=(8.0, 6.5), agent_id="A1")
+        sim = _Sim()
+        slots = env.get_source_access_slots("Team_Info")
+        self.assertGreaterEqual(len(slots), 2)
+        blocked_slot = slots[0]["slot_id"]
+        agent.blocked_source_slot_state["Team_Info"] = {blocked_slot: 100.0}
+
+        selection = agent._select_source_access_target(env, "Team_Info", sim_state=sim)
+        self.assertIsNotNone(selection)
+        self.assertNotEqual(selection.get("slot_id"), blocked_slot)
+        event_types = [e[0] for e in sim.logger.events]
+        self.assertIn("source_alternate_slot_selected_after_blocked_zone", event_types)
+
     def test_pursuit_expires_after_bounded_lease(self):
         env = Environment(phases=[])
         agent = Agent(name="Engineer", role="Engineer", position=(8.0, 6.5), agent_id="A1")
