@@ -4293,6 +4293,119 @@ class Agent:
             )
         return decision
 
+    def _no_active_plan_successor_for_materially_satisfied_project(self, decision, environment, *, sim_state=None):
+        if decision.selected_action != ExecutableActionType.TRANSPORT_RESOURCES:
+            return decision
+        project_id = decision.target_id or self._acquire_project_focus_for_action(
+            environment,
+            action_type=ExecutableActionType.TRANSPORT_RESOURCES.value,
+            requested_project_id=decision.target_id,
+            sim_state=sim_state,
+            reason="no_active_plan_successor_probe",
+        )
+        if not self._project_still_viable_for_binding(environment, project_id):
+            return decision
+        project = environment.construction.projects.get(project_id) if project_id else None
+        if self._project_needs_transport(project):
+            return decision
+
+        self._emit_event(
+            sim_state,
+            "materially_satisfied_transport_fallback_blocked",
+            {"project_id": project_id, "selected_action": decision.selected_action.value},
+        )
+
+        def _project_action_viable(action_type):
+            probe = BrainDecision(selected_action=action_type, target_id=project_id, confidence=max(0.74, float(decision.confidence or 0.0)))
+            translated_probe = {
+                "type": "construct" if action_type in {
+                    ExecutableActionType.START_CONSTRUCTION,
+                    ExecutableActionType.CONTINUE_CONSTRUCTION,
+                    ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
+                    ExecutableActionType.VALIDATE_CONSTRUCTION,
+                } else "idle",
+                "decision_action": action_type.value,
+                "project_id": project_id,
+            }
+            blockers, _ = self._construction_action_blockers(probe, translated_probe, environment, sim_state=sim_state)
+            partitioned = self._partition_action_blockers(blockers)
+            return not bool(partitioned["hard_blockers"])
+
+        next_action = None
+        if (
+            self._project_materially_ready_for_build(project)
+            and self._project_has_incomplete_build_steps(project)
+            and _project_action_viable(ExecutableActionType.CONTINUE_CONSTRUCTION)
+        ):
+            next_action = ExecutableActionType.CONTINUE_CONSTRUCTION
+        elif (
+            self._project_materially_ready_for_build(project)
+            and self._project_has_incomplete_build_steps(project)
+            and _project_action_viable(ExecutableActionType.START_CONSTRUCTION)
+        ):
+            next_action = ExecutableActionType.START_CONSTRUCTION
+        elif (
+            isinstance(project, dict)
+            and (
+                bool(project.get("structurally_complete"))
+                or str(project.get("status") or "") in {"ready_for_validation", "needs_repair"}
+            )
+            and _project_action_viable(ExecutableActionType.VALIDATE_CONSTRUCTION)
+        ):
+            next_action = ExecutableActionType.VALIDATE_CONSTRUCTION
+        else:
+            epistemic_fallback = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
+            if epistemic_fallback.selected_action != ExecutableActionType.TRANSPORT_RESOURCES:
+                self._emit_event(
+                    sim_state,
+                    "project_phase_successor_selected",
+                    {
+                        "project_id": project_id,
+                        "from_action": decision.selected_action.value,
+                        "to_action": epistemic_fallback.selected_action.value,
+                        "successor_phase": "epistemic_fallback",
+                    },
+                )
+                self._emit_event(
+                    sim_state,
+                    "no_active_plan_transport_replaced_by_successor_phase",
+                    {"project_id": project_id, "successor_action": epistemic_fallback.selected_action.value},
+                )
+                return epistemic_fallback
+            next_action = ExecutableActionType.REASSESS_PLAN
+
+        self._emit_event(
+            sim_state,
+            "project_phase_successor_selected",
+            {
+                "project_id": project_id,
+                "from_action": decision.selected_action.value,
+                "to_action": next_action.value,
+                "successor_phase": "construction_or_validation" if next_action in {
+                    ExecutableActionType.START_CONSTRUCTION,
+                    ExecutableActionType.CONTINUE_CONSTRUCTION,
+                    ExecutableActionType.VALIDATE_CONSTRUCTION,
+                } else "fallback",
+            },
+        )
+        self._emit_event(
+            sim_state,
+            "no_active_plan_transport_replaced_by_successor_phase",
+            {"project_id": project_id, "successor_action": next_action.value},
+        )
+        return BrainDecision(
+            selected_action=next_action,
+            target_id=project_id if next_action in {
+                ExecutableActionType.START_CONSTRUCTION,
+                ExecutableActionType.CONTINUE_CONSTRUCTION,
+                ExecutableActionType.VALIDATE_CONSTRUCTION,
+            } else None,
+            target_zone=decision.target_zone,
+            goal_update="advance_project_phase_after_material_satisfaction",
+            reason_summary="No-active-plan transport fallback replaced by project-phase successor for materially satisfied focus.",
+            confidence=max(0.78, float(decision.confidence or 0.0)),
+        )
+
     def _rule_dependency_support_class(self, rule_id):
         rid = normalize_rule_token(rule_id)
         if not rid:
@@ -8367,6 +8480,12 @@ class Agent:
                 )
                 decision = override
         decision = self._apply_policy_pivots(decision, environment, sim_state=sim_state, context=context, pivot_origin="local_refresh")
+        if planner_reason == "no_active_plan":
+            decision = self._no_active_plan_successor_for_materially_satisfied_project(
+                decision,
+                environment,
+                sim_state=sim_state,
+            )
         updated_control_state = context.individual_cognitive_state.get("control_state", {})
         if isinstance(updated_control_state, dict) and updated_control_state:
             self.control_state.update(updated_control_state)
