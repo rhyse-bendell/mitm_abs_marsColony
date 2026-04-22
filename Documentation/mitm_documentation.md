@@ -59,6 +59,84 @@ The simulator is under active development, so some sections are deliberately dua
 Status labels are used where helpful: **Implemented**, **Partially Implemented**, **Experimental**, **Planned**, and **Conceptual Mapping Only**.
 
 ---
+## Documentation Governance
+
+This file serves both as:
+
+1. **Technical documentation** for current repository behavior.
+2. **Scientific specification** linking implementation to MITM theory.
+3. **Design control artifact** for future development.
+4. **Interpretation guide** for researchers using simulator outputs.
+
+Because the simulator evolves actively, documentation changes should classify content into one of the following states:
+
+- **Implemented** — Present and functioning in current codebase.
+- **Partially Implemented** — Present in scaffolded or incomplete form.
+- **Experimental** — Available but under active tuning or unstable semantics.
+- **Planned** — Intended future functionality.
+- **Conceptual Mapping Only** — Theory mapping not yet operationalized.
+
+### Update Rule
+When code behavior changes in ways that alter:
+- runtime logic,
+- metrics semantics,
+- task rules,
+- planner interfaces,
+- file outputs,
+- subsystem ownership,
+
+this document should be updated in the same change cycle.
+
+### Preferred Truth Hierarchy
+When documentation and code disagree:
+
+1. Authoritative runtime behavior in code  
+2. Task package configuration files  
+3. Tests validating behavior  
+4. This documentation text  
+5. Historical planning notes
+
+## Quickstart: Running the Simulator
+
+### Typical Workflow
+
+1. Select the `mars_colony` task package.
+2. Choose a brain backend:
+   - `rule_brain` (deterministic baseline)
+   - local/OpenAI-compatible provider
+3. Configure run parameters:
+   - team size
+   - tick speed
+   - planner cadence
+   - seed (if applicable)
+4. Launch via GUI or headless execution path.
+5. Inspect outputs:
+   - run summary
+   - event logs
+   - metrics rollups
+   - planner traces
+   - project state snapshots
+
+### Recommended First Run
+Use:
+
+- backend: `rule_brain`
+- default task package
+- default agent count
+- logging enabled
+
+This establishes baseline behavior before testing alternative planners.
+
+### Recommended Debug Sequence
+
+If a run fails:
+
+1. Read summary artifact  
+2. Inspect dominant counters  
+3. Review first major divergence in event log  
+4. Inspect planner traces  
+5. Patch subsystem  
+6. Re-run same condition
 
 ## Part I. Motivation, Scope, and Scientific Positioning
 
@@ -383,6 +461,29 @@ For each module below, read descriptions as ownership boundaries:
 - **`scripts/*` (Implemented):** operational validation and audit utilities (`preflight_check.py`, bottleneck/consistency auditors).
 - **`config/tasks/mars_colony/*` (Implemented task package):** role defaults, rules, source contents, zones/targets, construction templates, action availability, and manifest defaults.
 
+### 15.8a Task Package Contract
+
+A task package is the mechanism for adapting the simulator to new domains while preserving core architecture.
+
+A complete task package should define:
+
+- environment layout
+- zones / coordinates / access rules
+- information sources
+- role definitions
+- structure templates
+- rule catalog
+- scoring logic
+- phase timing and transitions
+- action affordances
+- default planner parameters
+- metrics overlays (optional)
+
+### Design Intent
+
+Core simulator code should remain domain-general.  
+Task-specific truth belongs in task packages whenever feasible.
+
 #### 15.9 Architectural invariants
 - Simulator remains authoritative over world state mutations.
 - Brains are advisory policy layers and do not directly mutate environment/project state.
@@ -390,6 +491,19 @@ For each module below, read descriptions as ownership boundaries:
 - Metrics derive from events or authoritative snapshots.
 - Logging should represent actual transitions, not inferred guesses.
 
+### 15.10 Runtime Invariants
+
+The following assumptions should remain true unless intentionally redesigned:
+
+- Agents do not teleport.
+- Brains do not directly mutate world state.
+- Construction progress must occur through simulator actions.
+- Validation is determined by simulator-side rules.
+- Metrics should derive from events or authoritative snapshots.
+- Communication emission is not equivalent to communication success.
+- Shared knowledge requires uptake, not mere broadcast.
+- Task packages define domain truth; planners adapt within those rules.
+- Failure states are analytically meaningful and should not be hidden.
 ---
 
 ## Part VI. Agent Cognition and Internal Architecture
@@ -809,6 +923,30 @@ Supports attribution and debugging without model stochasticity confounds.
 `create_brain_provider` routes backend implementations behind a stable contract.
 #### 38.4 Local model / OpenAI-compatible backends
 Supports local HTTP and OpenAI-compatible model endpoints with fallback controls.
+#### 38.4a Planner Decision Contract
+
+External planners should return structured decisions rather than free-form prose.
+
+Preferred decision fields include:
+
+- `action_type`
+- `target_id`
+- `goal_id`
+- `reason`
+- `confidence`
+- `requested_followup`
+- `notes`
+
+Example:
+
+```json
+{
+  "action_type": "inspect_source",
+  "target_id": "Engineer_Info",
+  "goal_id": "acquire_water_rules",
+  "reason": "Need missing constraints for generator readiness",
+  "confidence": 0.82
+}
 #### 38.5 Why backend is an experimental variable
 Backend differences affect planning latency, robustness, and cognitive behavior.
 
@@ -910,7 +1048,29 @@ Every meaningful state transition should emit inspectable events.
 movement; source access; DIK; communication; planning; artifact creation; construction; readiness reconciliation; validation; repair; metacognition; backend events; errors/failures.
 
 #### 44.3 Run artifacts
-summary files; line-oriented logs; rollups; planner traces; backend traces; project dumps; session outputs/manifests.
+
+Typical run outputs include:
+
+- **run_summary.json / csv**  
+  Final outcomes, counters, durations, reason distributions.
+
+- **events.jsonl / csv**  
+  Time-ordered structured event stream.
+
+- **metrics_rollup.json / csv**  
+  Aggregated agent/team/process metrics.
+
+- **planner_trace.jsonl**  
+  Planner requests, responses, retries, fallback outcomes.
+
+- **backend_trace.jsonl**  
+  Provider latency, parse failures, invalid payloads, timeout telemetry.
+
+- **project_state_dump.json**  
+  Final and intermediate project states.
+
+- **config_snapshot.json**  
+  Effective settings used for reproducibility.
 
 #### 44.4 Metric separation for analysis
 1. **Already implemented:** direct counters/rollups in summaries and metrics collector.
@@ -1194,6 +1354,31 @@ Higher fidelity can reduce tractability and reproducibility.
 Some conceptual components are scaffolds rather than fully realized modules.
 #### 62.4 domain specificity vs generalizability
 Mars construction is one CPS domain; transfer requires cautious adaptation.
+#### 62.5 What is simulated vs abstracted
+
+The simulator models many constructs functionally rather than biologically or phenomenologically.
+
+Examples:
+
+Modeled directly:
+- movement
+- access constraints
+- communication events
+- planning decisions
+- resource transport
+- build progress
+- validation outcomes
+
+Abstracted proxies:
+- motivation
+- trust
+- stress
+- confidence
+- shared understanding
+- theory of mind
+- affect
+
+These constructs are represented through state variables, tendencies, event patterns, or decision consequences rather than literal human cognition.
 
 ### 63. Conclusion
 MITM can function as executable science; Mars Colony offers an embodied epistemic teamwork testbed; simulation bridges theory, measurement, and intervention.
@@ -1248,3 +1433,18 @@ MITM can function as executable science; Mars Colony offers an embodied epistemi
 - **configuration:** choose task package, backend, planner, and manipulation profiles.
 - **running experiments:** GUI or headless batch paths.
 - **reading outputs:** session summaries, event logs, rollups, and planner/backend traces.
+
+## Glossary
+
+**Agent** — Autonomous simulated team member.  
+**Artifact** — Persistent external representation used cognitively.  
+**Backend** — Decision provider used by planner layer.  
+**DIK** — Data, Information, Knowledge.  
+**Goal** — Desired future state driving behavior.  
+**MITM** — Macrocognition in Teams Model.  
+**Project** — Structure objective with requirements and lifecycle state.  
+**Readiness** — Condition indicating a project may be validated.  
+**RuleBrain** — Deterministic baseline planner.  
+**Task Package** — Domain-specific configuration set.  
+**Tick** — One simulator update cycle.  
+**Validation** — Rule-based confirmation of acceptable completion.
