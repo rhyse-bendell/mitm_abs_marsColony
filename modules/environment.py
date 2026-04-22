@@ -848,10 +848,15 @@ class Environment:
         }
         return released
 
-    def select_source_access_point(self, packet_name, agent_id=None, from_position=None):
+    def select_source_access_point(self, packet_name, agent_id=None, from_position=None, avoid_slot_ids=None):
         slots = self.get_source_access_slots(packet_name)
         if not slots:
             return None
+        blocked_slots = {str(s) for s in (avoid_slot_ids or []) if s is not None}
+        if blocked_slots:
+            preferred_slots = [slot for slot in slots if str(slot.get("slot_id")) not in blocked_slots]
+            if preferred_slots:
+                slots = preferred_slots
 
         def _distance(p):
             if from_position is None:
@@ -898,6 +903,12 @@ class Environment:
             "queue_index": queue_index + 1,
             "reason": "all_slots_occupied",
         }
+
+    def invalidate_path_cache_entry(self, start, target, mode="grid_astar", grid_step=0.35):
+        q_start = self._quantize_point((float(start[0]), float(start[1])), step=grid_step)
+        q_target = self._quantize_point((float(target[0]), float(target[1])), step=grid_step)
+        cache_key = (q_start, q_target, float(grid_step), mode)
+        return self._path_cache.pop(cache_key, None) is not None
 
     def can_agent_use_source_slot(self, packet_name, agent_id, position, slot_id=None, role=None):
         info_access = self.evaluate_information_access(position, packet_name, role=role)

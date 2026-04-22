@@ -97,6 +97,58 @@ class TestMovementPathing(unittest.TestCase):
         self.assertIn("no_path_found", categories)
         sim.stop()
 
+    def test_repeated_blocked_zone_blacklists_slot_and_clears_target(self):
+        class _Logger:
+            def __init__(self):
+                self.events = []
+
+            def log_event(self, t, event_type, payload):
+                self.events.append((event_type, payload))
+
+        class _Sim:
+            def __init__(self):
+                self.time = 0.0
+                self.logger = _Logger()
+
+        class _BlockedEnv:
+            def __init__(self):
+                self.objects = {"Blocked_Test": {"type": "blocked", "passable": False}}
+                self.agents = []
+                self.invalidate_calls = 0
+
+            def plan_path(self, start, target, mode="grid_astar"):
+                return {"status": "ok", "waypoints": [target], "from_cache": True, "path_mode": mode, "blocker_category": None}
+
+            def is_near_object(self, point, name, threshold=0.15):
+                return True
+
+            def release_source_access_slot(self, packet_name, agent_id=None, slot_id=None):
+                return [slot_id] if slot_id is not None else []
+
+            def invalidate_path_cache_entry(self, start, target, mode="grid_astar", grid_step=0.35):
+                self.invalidate_calls += 1
+                return True
+
+        env = _BlockedEnv()
+        agent = Agent(name="Architect", role="Architect", position=(1.0, 1.0), agent_id="A1")
+        sim = _Sim()
+        env.agents = [agent]
+        agent.current_inspect_target_id = "Team_Info"
+        agent.source_access_state.update({"source_id": "Team_Info", "slot_id": "top_left", "slot_position": (2.0, 1.0), "target_kind": "slot"})
+        agent._commit_inspect_pursuit("Team_Info", (2.0, 1.0), now_ts=0.0, slot_id="top_left", sim_state=sim)
+
+        for i in range(3):
+            sim.time = float(i)
+            agent.move_toward((2.0, 1.0), dt=0.5, environment=env, sim_state=sim)
+
+        events = [e[0] for e in sim.logger.events]
+        self.assertIn("movement_target_temporarily_blacklisted", events)
+        self.assertIn("movement_retarget_after_repeated_blocked_zone", events)
+        self.assertIn("movement_cached_path_invalidated_after_blocked_zone", events)
+        self.assertEqual(env.invalidate_calls, 1)
+        self.assertIsNone(agent.target)
+        self.assertIsNone(agent.inspect_pursuit.get("source_id"))
+
 
 if __name__ == "__main__":
     unittest.main()
