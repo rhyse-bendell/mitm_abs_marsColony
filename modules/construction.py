@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import Dict, List, Optional, Tuple
 
 from modules.task_model import normalize_rule_token
@@ -38,6 +39,7 @@ class BridgeState:
 
 
 class ConstructionManager:
+    LOGGER = logging.getLogger(__name__)
     DEFAULT_PARAMETERS = {
         "pile_a_quantity": 100,
         "pile_c_quantity": 100,
@@ -45,7 +47,7 @@ class ConstructionManager:
         "greenhouse_cost": 10,
         "water_generator_cost": 10,
         "bridge_bc_cost": 20,
-        "site_a_capacity": 4,
+        "site_a_capacity": 0,
         "site_b_capacity": 8,
         "site_c_capacity": 16,
         "move_time_per_unit": 4,
@@ -61,6 +63,8 @@ class ConstructionManager:
         "Build_Site_A": "site_a",
         "Build_Site_B": "site_b",
         "Build_Site_C": "site_c",
+    }
+    LEGACY_PROJECT_TO_SITE = {
         "Build_Table_A": "site_a",
         "Build_Table_B": "site_b",
         "Build_Table_C": "site_c",
@@ -93,16 +97,16 @@ class ConstructionManager:
         self.site_resource_inventory["site_c"] = self.resource_nodes["pile_c"].quantity
         self.bridges = {
             "bridge_ab": BridgeState("bridge_ab", "site_a", "site_b", "complete", 0, 0),
-            "bridge_bc": BridgeState("bridge_bc", "site_b", "site_c", "not_started", 0, max(1, int(self.parameters["bridge_bc_cost"]))),
+            "bridge_bc": BridgeState("bridge_bc", "site_b", "site_c", "not_started", 0, max(0, int(self.parameters["bridge_bc_cost"]))),
         }
         self.connectors: List[Dict] = []
         self._active_transports: Dict[str, Dict] = {}
         self._closure_reservations: Dict[str, Dict] = {}
         self.project_templates = self._build_project_templates()
         self._project_counters: Dict[Tuple[str, str], int] = {}
+        self._warned_legacy_targets = set()
 
         self.projects = {}
-        self._seed_initial_projects()
         self.update()
 
     def _load_site_definitions(self):
@@ -127,87 +131,61 @@ class ConstructionManager:
                 site_id=site_id,
                 label=str(conf.get("label", site_id.replace("_", " ").title())),
                 position=(float(pos[0]), float(pos[1])),
-                capacity=max(1, int(raw_capacity)),
+                capacity=max(0, int(raw_capacity)),
                 buildable=bool(conf.get("buildable", True)),
             )
         return sites
 
     def _build_project_templates(self):
         defaults = {
-            "template_site_a_greenhouse": {
-                "name": "Greenhouse at Site A",
+            "template_greenhouse": {
+                "name": "Greenhouse",
                 "type": "greenhouse",
                 "artifact_type": "greenhouse_construction",
                 "expected_rules": [normalize_rule_token("rule:greenhouse_requires_water")],
                 "required": int(self.parameters["greenhouse_cost"]),
-                "site_id": "site_a",
             },
-            "template_site_b_house": {
-                "name": "Housing at Site B",
+            "template_house": {
+                "name": "House",
                 "type": "house",
                 "artifact_type": "house_construction",
                 "expected_rules": [normalize_rule_token("rule:house_enclosed")],
                 "required": int(self.parameters["housing_cost"]),
-                "site_id": "site_b",
             },
-            "template_site_c_water_generator": {
-                "name": "Water Generator at Site C",
+            "template_water_generator": {
+                "name": "Water Generator",
                 "type": "water_generator",
                 "artifact_type": "water_generator_construction",
                 "expected_rules": [normalize_rule_token("rule:water_generator_2x2")],
                 "required": int(self.parameters["water_generator_cost"]),
-                "site_id": "site_c",
             },
         }
         templates = {}
         if self.task_model and getattr(self.task_model, "construction_templates", None):
             for template in self.task_model.construction_templates.values():
-                target_id = str(template.target_id or "").strip()
-                site_id = self.PROJECT_TO_SITE.get(target_id)
-                if site_id not in self.sites:
-                    continue
+                template_key = str(template.project_id or "").strip() or f"template_{template.structure_type}"
                 templates[template.project_id] = {
-                    "name": template.name or f"{template.structure_type} @ {site_id}",
+                    "name": template.name or f"{template.structure_type}",
                     "type": template.structure_type,
                     "artifact_type": template.artifact_type,
                     "expected_rules": [normalize_rule_token(r) for r in template.expected_rules if normalize_rule_token(r)],
                     "required": int((template.required_resources or {}).get("bricks", 1) or 1),
-                    "site_id": site_id,
-                    "target_id": self.SITE_TO_BUILD_TARGET.get(site_id, target_id),
                 }
+                templates[template_key] = templates.pop(template.project_id)
         if templates:
             return templates
         for key, row in defaults.items():
-            row = dict(row)
-            row["target_id"] = self.SITE_TO_BUILD_TARGET.get(row["site_id"], "")
-            templates[key] = row
+            templates[key] = dict(row)
         return templates
 
-    def _site_templates(self, site_id):
-        return [t for t in self.project_templates.values() if t.get("site_id") == site_id]
-
-    def _default_template_for_site(self, site_id):
-        templates = self._site_templates(site_id)
-        return templates[0] if templates else None
-
-    def _legacy_project_id_for_site(self, site_id):
-        for legacy_id, mapped_site in self.PROJECT_TO_SITE.items():
-            if mapped_site == site_id and legacy_id.startswith("Build_Table_"):
-                return legacy_id
+    def _template_for_structure_type(self, structure_type):
+        normalized = str(structure_type or "").strip().lower()
+        if not normalized:
+            return None
+        for template in self.project_templates.values():
+            if str(template.get("type") or "").strip().lower() == normalized:
+                return template
         return None
-
-    def _seed_initial_projects(self):
-        for site_id in self.sites:
-            template = self._default_template_for_site(site_id)
-            if template:
-                legacy_id = self._legacy_project_id_for_site(site_id)
-                self.create_project(
-                    site_id=site_id,
-                    structure_type=template["type"],
-                    template=template,
-                    author="system",
-                    project_id_override=legacy_id,
-                )
 
     def _site_project_ids(self, site_id):
         return [p.get("id") for p in self.projects.values() if p.get("site_id") == site_id]
@@ -240,14 +218,14 @@ class ConstructionManager:
             return None, "unknown_site"
         if len(self._site_project_ids(site_id)) >= site.capacity:
             return None, "site_capacity_reached"
-        template = dict(template or self._default_template_for_site(site_id) or {})
+        template = dict(template or self._template_for_structure_type(structure_type) or {})
         resolved_structure_type = str(structure_type or template.get("type") or "house").strip().lower()
         project_id = str(project_id_override or self._next_project_id(site_id, resolved_structure_type))
         if project_id in self.projects:
             return project_id, "exists"
         expected_rules = [normalize_rule_token(r) for r in template.get("expected_rules", []) if normalize_rule_token(r)]
         required = max(1, int(template.get("required", 1)))
-        canonical_target_id = str(target_id or template.get("target_id") or self.SITE_TO_BUILD_TARGET.get(site_id, ""))
+        canonical_target_id = str(target_id or self.SITE_TO_BUILD_TARGET.get(site_id, ""))
         project = {
             "id": project_id,
             "name": str(template.get("name") or f"{resolved_structure_type.replace('_', ' ').title()} at {self.sites[site_id].label}"),
@@ -389,6 +367,11 @@ class ConstructionManager:
         if requested in self.projects:
             return requested
         site_id = self.PROJECT_TO_SITE.get(requested)
+        if site_id is None and requested in self.LEGACY_PROJECT_TO_SITE:
+            site_id = self.LEGACY_PROJECT_TO_SITE.get(requested)
+            if requested not in self._warned_legacy_targets:
+                self.LOGGER.warning("Deprecated project/target alias '%s' used; migrate to canonical Build_Site_* ids.", requested)
+                self._warned_legacy_targets.add(requested)
         if site_id is None:
             return None
         site_projects = [p for p in self.projects.values() if p.get("site_id") == site_id]
@@ -398,9 +381,7 @@ class ConstructionManager:
             return unfinished[0].get("id")
         if not create_if_missing:
             return None
-        template = self._default_template_for_site(site_id)
-        legacy_id = requested if requested.startswith("Build_Table_") else None
-        project_id, _ = self.create_project(site_id=site_id, template=template, author="system", project_id_override=legacy_id)
+        project_id, _ = self.create_project(site_id=site_id, structure_type="house", author="system")
         return project_id
 
     def update_project_provenance(self, project_id, *, event, actor=None, sim_time=None, held_data_ids=None, held_information_ids=None, held_rule_ids=None, team_rule_snapshot_ids=None):

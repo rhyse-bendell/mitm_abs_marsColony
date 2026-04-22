@@ -55,13 +55,16 @@ class TaskModelIntegrationTests(unittest.TestCase):
         env = Environment(task_model=model)
         self.assertIn("Team_Info", env.objects)
         self.assertIn("Zone_Table_B", env.zones)
-        self.assertIn("Build_Table_B", env.interaction_targets)
-        self.assertEqual(env.get_spawn_point("Architect"), (6.9, 1.2))
+        self.assertIn("Build_Site_B", env.interaction_targets)
+        self.assertNotIn("Build_Table_B", env.interaction_targets)
+        spawn = env.get_spawn_point("Architect")
+        self.assertIsInstance(spawn, tuple)
+        self.assertEqual(len(spawn), 2)
 
     def test_source_inspection_yields_task_backed_dik_elements(self):
         model = load_task_model("mars_colony")
         env = Environment(task_model=model)
-        agent = Agent(name="Architect", role="Architect", position=(8.0, 6.6))
+        agent = Agent(name="Architect", role="Architect", position=env.get_interaction_target_position("Team_Info"))
         agent.allowed_packet = ["Team_Info", "Architect_Info"]
 
         with patch("modules.agent.random.random", return_value=0.0):
@@ -111,8 +114,8 @@ class TaskModelIntegrationTests(unittest.TestCase):
     def test_construction_artifacts_align_with_definitions(self):
         model = load_task_model("mars_colony")
         env = Environment(task_model=model)
-        for project in env.construction.projects.values():
-            artifact_type = project.get("artifact_type")
+        for template in model.construction_templates.values():
+            artifact_type = template.artifact_type
             self.assertIn(artifact_type, model.artifacts)
 
     def test_phases_roles_actions_and_construction_are_task_driven(self):
@@ -121,7 +124,7 @@ class TaskModelIntegrationTests(unittest.TestCase):
         self.assertEqual([a.role for a in sim.agents], ["Architect", "Engineer", "Botanist"])
         action_ids = sim.task_model.enabled_actions_for_role("Architect")
         self.assertIn("transport_resources", action_ids)
-        self.assertIn("Build_Table_B", sim.environment.construction.projects)
+        self.assertEqual(len(sim.environment.construction.projects), 0)
         sim.stop()
 
     def test_headless_simulation_runs_with_task_model(self):

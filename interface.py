@@ -1874,9 +1874,9 @@ class MarsColonyInterface:
             "greenhouse_cost": max(1, int(self.construction_param_vars["greenhouse_cost"].get())),
             "water_generator_cost": max(1, int(self.construction_param_vars["water_generator_cost"].get())),
             "bridge_bc_cost": max(1, int(self.construction_param_vars["bridge_bc_cost"].get())),
-            "site_a_capacity": max(1, int(self.construction_param_vars["site_a_capacity"].get())),
-            "site_b_capacity": max(1, int(self.construction_param_vars["site_b_capacity"].get())),
-            "site_c_capacity": max(1, int(self.construction_param_vars["site_c_capacity"].get())),
+            "site_a_capacity": max(0, int(self.construction_param_vars["site_a_capacity"].get())),
+            "site_b_capacity": max(0, int(self.construction_param_vars["site_b_capacity"].get())),
+            "site_c_capacity": max(0, int(self.construction_param_vars["site_c_capacity"].get())),
             "move_time_per_unit": max(1, int(self.construction_param_vars["move_time_per_unit"].get())),
             "carry_capacity": max(1, int(self.construction_param_vars["carry_capacity"].get())),
         }

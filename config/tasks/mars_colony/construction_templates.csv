@@ -1,4 +1,4 @@
 project_id,name,structure_type,target_id,location_x,location_y,required_resources_json,expected_rules,artifact_type,enabled
-Build_Table_A,Site A Greenhouse Template,greenhouse,Build_Site_A,6.5,3.4,"{""bricks"": 10}",R_GREENHOUSE_SUPPORT_DEPENDENCY,greenhouse_construction,True
-Build_Table_B,Site B House Template,house,Build_Site_B,5.0,4.4,"{""bricks"": 10}",R_HOUSE_VALIDITY,house_construction,True
-Build_Table_C,Site C Water Generator Template,water_generator,Build_Site_C,3.5,3.4,"{""bricks"": 10}",R_WATERGEN_VALIDITY,water_generator_construction,True
+template_house,House Structure Archetype,house,,0,0,"{""bricks"": 10}",R_HOUSE_VALIDITY,house_construction,True
+template_greenhouse,Greenhouse Structure Archetype,greenhouse,,0,0,"{""bricks"": 10}",R_GREENHOUSE_SUPPORT_DEPENDENCY,greenhouse_construction,True
+template_water_generator,Water Generator Structure Archetype,water_generator,,0,0,"{""bricks"": 10}",R_WATERGEN_VALIDITY,water_generator_construction,True

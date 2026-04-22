@@ -1,6 +1,7 @@
 # File: modules/environment.py
 
 import math
+import logging
 import heapq
 from modules.construction import ConstructionManager
 from modules.task_model import TaskModel
@@ -158,6 +159,7 @@ INTERACTION_TARGETS = {
     "Build_Site_B": {"kind": "build", "zone": "Zone_Table_B", "object": "Table_B", "site_id": "site_b"},
     "Build_Site_C": {"kind": "build", "zone": "Zone_Table_C", "object": "Table_C", "site_id": "site_c"},
 }
+LOGGER = logging.getLogger(__name__)
 
 OBJECTS = RAW_OBJECTS
 
@@ -342,20 +344,10 @@ class Environment:
         self._path_cache = {}
         self._source_slot_reservations = {}
         self._source_queue_reservations = {}
+        self._warned_legacy_build_targets = set()
 
     def _normalize_build_targets(self):
         targets = dict(self.interaction_targets or {})
-        for legacy_id, canonical in self.LEGACY_BUILD_TARGET_ALIASES.items():
-            legacy_target = targets.get(legacy_id, {})
-            if canonical not in targets and legacy_target:
-                canonical_target = dict(legacy_target)
-                canonical_target["site_id"] = self.construction.PROJECT_TO_SITE.get(legacy_id)
-                targets[canonical] = canonical_target
-            if legacy_target:
-                legacy_target = dict(legacy_target)
-                legacy_target["kind"] = "build_alias"
-                legacy_target["site_id"] = self.construction.PROJECT_TO_SITE.get(legacy_id)
-                targets[legacy_id] = legacy_target
         for canonical in self.LEGACY_BUILD_TARGET_ALIASES.values():
             row = targets.get(canonical)
             if not row:
@@ -369,6 +361,9 @@ class Environment:
     def _canonical_build_target(self, target_name):
         name = str(target_name or "").strip()
         if name in self.LEGACY_BUILD_TARGET_ALIASES:
+            if name not in self._warned_legacy_build_targets:
+                LOGGER.warning("Deprecated build target alias '%s' used; canonical target is '%s'.", name, self.LEGACY_BUILD_TARGET_ALIASES[name])
+                self._warned_legacy_build_targets.add(name)
             return self.LEGACY_BUILD_TARGET_ALIASES[name]
         if name in self.interaction_targets:
             return name

@@ -5,7 +5,7 @@
   "greenhouse_cost": 10,
   "water_generator_cost": 10,
   "bridge_bc_cost": 20,
-  "site_a_capacity": 4,
+  "site_a_capacity": 0,
   "site_b_capacity": 8,
   "site_c_capacity": 16,
   "move_time_per_unit": 4,

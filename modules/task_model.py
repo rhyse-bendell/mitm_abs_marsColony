@@ -901,8 +901,16 @@ def validate_task_model(task_model: TaskModel) -> TaskModelValidationReport:
                 _append_issue(errors, warnings, severity="error", code="PLAN_METHOD_DATA_TYPE_MISMATCH", message=f"Plan method '{method.method_id}' expects data '{element_id}' but element type is '{element.element_type}'.")
 
     for template in task_model.construction_templates.values():
-        if template.target_id not in task_model.interaction_targets:
+        if template.target_id and template.target_id not in task_model.interaction_targets:
             _append_issue(errors, warnings, severity="error", code="MISSING_CONSTRUCTION_TARGET", message=f"Construction template '{template.project_id}' target_id '{template.target_id}' is not defined in interaction_targets.")
+        if not template.target_id:
+            _append_issue(
+                errors,
+                warnings,
+                severity="warning",
+                code="CONSTRUCTION_ARCHETYPE_TEMPLATE",
+                message=f"Construction template '{template.project_id}' has no target_id and will be treated as a dynamic structure archetype.",
+            )
         if template.artifact_type not in task_model.artifacts:
             _append_issue(errors, warnings, severity="error", code="MISSING_CONSTRUCTION_ARTIFACT_TYPE", message=f"Construction template '{template.project_id}' artifact_type '{template.artifact_type}' is not defined in artifact_definitions.")
         for rule_token in template.expected_rules:
