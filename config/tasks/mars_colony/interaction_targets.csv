@@ -7,6 +7,3 @@ Architect_Info,information,Zone_Architect_Info,Architect_Info,all,True
 Build_Site_A,build,Zone_Table_A,Table_A,all,True
 Build_Site_B,build,Zone_Table_B,Table_B,all,True
 Build_Site_C,build,Zone_Table_C,Table_C,all,True
-Build_Table_A,build,Zone_Table_A,Table_A,all,True
-Build_Table_B,build,Zone_Table_B,Table_B,all,True
-Build_Table_C,build,Zone_Table_C,Table_C,all,True
