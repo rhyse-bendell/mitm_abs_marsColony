@@ -89,6 +89,27 @@ class ConstructionLifecycleOrderingTests(unittest.TestCase):
         self.assertEqual(project.get("status"), "ready_for_validation")
         sim.stop()
 
+    def test_post_inspect_recheck_does_not_validate_when_materials_only(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        project_id = sim.environment.construction.resolve_project_id("Build_Table_B", create_if_missing=True)
+        project = sim.environment.construction.projects[project_id]
+        required = int(project["required_resources"]["bricks"])
+        sim.environment.construction.deliver_resource(project_id, "bricks", quantity=required)
+
+        with mock.patch.object(
+            agent,
+            "_epistemic_sufficiency",
+            return_value={
+                "construction_state_needs_recheck": True,
+                "sufficient_for_construction": True,
+                "sufficient_for_validation": True,
+            },
+        ):
+            decision = agent._choose_post_inspect_followup_decision(sim.environment, sim_state=sim)
+        self.assertNotEqual(decision.selected_action, ExecutableActionType.VALIDATE_CONSTRUCTION)
+        sim.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

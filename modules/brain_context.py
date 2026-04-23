@@ -157,8 +157,17 @@ class BrainContextBuilder:
         built_state = self._summarize_structures(environment)
         validation_live = any(
             (float(item.get("physical_build_progress", item.get("progress", 0.0)) or 0.0) > 0.0)
-            or bool(item.get("ready_for_validation"))
             or str(item.get("project_status") or "") in {"needs_repair", "complete"}
+            or (
+                bool(item.get("ready_for_validation"))
+                and float(item.get("physical_build_progress", item.get("progress", 0.0)) or 0.0) > 0.0
+            )
+            for item in built_state
+        )
+        materially_ready_unbuilt = any(
+            bool(item.get("resource_complete"))
+            and str(item.get("project_status") or "") not in {"ready_for_validation", "needs_repair", "complete"}
+            and float(item.get("physical_build_progress", item.get("progress", 0.0)) or 0.0) <= 0.0
             for item in built_state
         )
         has_artifacts = bool((team_state or {}).get("externalized_artifacts"))
@@ -198,6 +207,8 @@ class BrainContextBuilder:
                 penalty = 0.3 if epistemic_suff < 0.5 else (0.15 if epistemic_suff < 0.65 else 0.0)
                 return max(0.08, (0.85 if stage in {"execution", "late"} else 0.3) - penalty)
             if action in {ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, ExecutableActionType.VALIDATE_CONSTRUCTION}:
+                if materially_ready_unbuilt:
+                    return 0.01
                 if not validation_live:
                     return 0.02
                 penalty = 0.55 if epistemic_suff < 0.62 else 0.0
