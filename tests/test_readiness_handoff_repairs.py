@@ -46,7 +46,7 @@ class ReadinessHandoffRepairTests(unittest.TestCase):
         sim = SimulationState(phases=[])
         agent = sim.agents[0]
         self._prime_min_readiness(sim, agent)
-        project_id = "Build_Table_B"
+        project_id = sim.environment.construction.resolve_project_id("Build_Table_B", create_if_missing=True)
         project = sim.environment.construction.projects[project_id]
         required = int(project["required_resources"]["bricks"])
         sim.environment.construction.deliver_resource(project_id, "bricks", quantity=required)
@@ -57,7 +57,7 @@ class ReadinessHandoffRepairTests(unittest.TestCase):
         self.assertNotIn("stale_epistemic_grounding", blockers)
         with mock.patch.object(agent, "_critical_unmet_source_targets", return_value={}), mock.patch.object(agent, "_cross_role_engineer_dependency_gap", return_value=False), mock.patch.object(agent, "_team_plan_requires_uptake", return_value=False):
             decision = agent._choose_post_inspect_followup_decision(sim.environment, sim_state=sim)
-        self.assertIn(decision.selected_action, {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION, ExecutableActionType.VALIDATE_CONSTRUCTION})
+        self.assertIn(decision.selected_action, {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION})
 
         for _ in range(len(project.get("build_steps") or [])):
             sim.environment.construction.execute_build_step(project_id, actor=agent.name, sim_time=sim.time)
