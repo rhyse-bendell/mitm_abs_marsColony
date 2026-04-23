@@ -3795,11 +3795,32 @@ class Agent:
                 confidence=0.8,
             )
         if epistemic.get("construction_state_needs_recheck"):
+            build_selection = self._select_build_target(environment, require_readiness=False, include_project=True, sim_state=sim_state)
+            project = None
+            if isinstance(build_selection, dict):
+                project_id = build_selection.get("project_id")
+                project = (getattr(environment, "construction", None) or object()).projects.get(project_id) if getattr(environment, "construction", None) is not None else None
             self.last_construction_state_check_time = now_ts
+            if isinstance(project, dict) and (
+                self._project_has_physical_build_progress(project) or bool(project.get("structurally_complete", False))
+            ):
+                return BrainDecision(
+                    selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION,
+                    target_id=project.get("id"),
+                    reason_summary="Post-inspect verification pivot: re-check physically progressed construction state and assumptions.",
+                    confidence=0.77,
+                )
+            if isinstance(project, dict) and self._project_materially_ready_for_build(project) and self._project_has_incomplete_build_steps(project):
+                return BrainDecision(
+                    selected_action=ExecutableActionType.CONTINUE_CONSTRUCTION,
+                    target_id=project.get("id"),
+                    reason_summary="Post-inspect verification pivot: materials are staged but physical build has not started, so continue construction first.",
+                    confidence=0.79,
+                )
             return BrainDecision(
-                selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION,
-                reason_summary="Post-inspect verification pivot: re-check project material state and assumptions.",
-                confidence=0.77,
+                selected_action=ExecutableActionType.REASSESS_PLAN,
+                reason_summary="Post-inspect verification pivot deferred: no physically progressed project is ready to validate yet.",
+                confidence=0.73,
             )
         if self._is_build_eligible(environment):
             build_selection = self._select_build_target(environment, require_readiness=True, include_project=True, sim_state=sim_state)
@@ -8275,7 +8296,18 @@ class Agent:
                     project_id = selected.get("project_id") if isinstance(selected, dict) else None
                 project = environment.construction.projects.get(project_id) if project_id else None
                 if not self._project_needs_transport(project):
-                    next_action = ExecutableActionType.VALIDATE_CONSTRUCTION if isinstance(project, dict) and str(project.get("status")) == "ready_for_validation" else ExecutableActionType.REASSESS_PLAN
+                    next_action = (
+                        ExecutableActionType.VALIDATE_CONSTRUCTION
+                        if (
+                            isinstance(project, dict)
+                            and str(project.get("status")) == "ready_for_validation"
+                            and (
+                                self._project_has_physical_build_progress(project)
+                                or bool(project.get("structurally_complete", False))
+                            )
+                        )
+                        else ExecutableActionType.REASSESS_PLAN
+                    )
                     if (
                         isinstance(project, dict)
                         and self._project_materially_ready_for_build(project)

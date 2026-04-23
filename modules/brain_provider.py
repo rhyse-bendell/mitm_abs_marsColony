@@ -569,7 +569,7 @@ class RuleBrain(BrainProvider):
         materially_ready_incomplete = any(
             bool(p.get("resource_complete"))
             and str(p.get("project_status") or "").lower() not in {"complete", "ready_for_validation"}
-            and float(p.get("progress", 0.0) or 0.0) >= 1.0
+            and float(p.get("physical_build_progress", p.get("progress", 0.0)) or 0.0) < 1.0
             for p in built_state
         )
         active_work_remains = bool(active_projects or ready_for_validation)
