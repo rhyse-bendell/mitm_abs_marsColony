@@ -32,7 +32,10 @@ class BrainContextBuilder:
             usable = raw_status == "complete" and bool(project.get("correct", True))
             required = project.get("required_resources", {}).get("bricks", 0)
             delivered = project.get("delivered_resources", {}).get("bricks", 0)
-            progress = min(1.0, delivered / required) if required else 0.0
+            material_progress = min(1.0, delivered / required) if required else 0.0
+            build_steps = list(project.get("build_steps") or [])
+            completed_steps = sum(1 for step in build_steps if bool(step.get("completed")))
+            build_progress = min(1.0, completed_steps / max(1, len(build_steps))) if build_steps else 0.0
             resource_complete = bool(project.get("resource_complete", False)) or (required > 0 and delivered >= required)
             summaries.append(
                 {
@@ -43,7 +46,9 @@ class BrainContextBuilder:
                     "state": state,
                     "validated_correctness": bool(project.get("correct", True)),
                     "usable": usable,
-                    "progress": round(progress, 2),
+                    "progress": round(build_progress, 2),
+                    "material_progress": round(material_progress, 2),
+                    "physical_build_progress": round(build_progress, 2),
                     "project_status": raw_status,
                     "resource_complete": resource_complete,
                     "required_resources": int(required or 0),
@@ -149,6 +154,13 @@ class BrainContextBuilder:
         epistemic_suff = float(build_readiness.get("epistemic_sufficiency_score", 0.0) or 0.0)
         refresh_pressure = float(build_readiness.get("epistemic_refresh_pressure", 0.0) or 0.0)
         mismatch_pressure = any("mismatch" in e.lower() for e in (agent.activity_log[-6:] if agent.activity_log else []))
+        built_state = self._summarize_structures(environment)
+        validation_live = any(
+            (float(item.get("physical_build_progress", item.get("progress", 0.0)) or 0.0) > 0.0)
+            or bool(item.get("ready_for_validation"))
+            or str(item.get("project_status") or "") in {"needs_repair", "complete"}
+            for item in built_state
+        )
         has_artifacts = bool((team_state or {}).get("externalized_artifacts"))
         nearby_teammates = sum(
             1
@@ -186,6 +198,8 @@ class BrainContextBuilder:
                 penalty = 0.3 if epistemic_suff < 0.5 else (0.15 if epistemic_suff < 0.65 else 0.0)
                 return max(0.08, (0.85 if stage in {"execution", "late"} else 0.3) - penalty)
             if action in {ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, ExecutableActionType.VALIDATE_CONSTRUCTION}:
+                if not validation_live:
+                    return 0.02
                 penalty = 0.55 if epistemic_suff < 0.62 else 0.0
                 return max(0.05, (0.9 if mismatch_pressure or stage == "late" or target_kind == "build" else 0.3) - penalty)
             if action in {ExecutableActionType.REASSESS_PLAN, ExecutableActionType.OBSERVE_ENVIRONMENT}:

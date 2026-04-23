@@ -4732,6 +4732,8 @@ class Agent:
             if not mismatch_detected and not closure_active_for_project:
                 blockers.append("no_detected_mismatch")
         elif action_type == ExecutableActionType.VALIDATE_CONSTRUCTION:
+            if not self._project_has_physical_build_progress(project) and not bool(project.get("structurally_complete", False)):
+                blockers.append("physical_build_not_started")
             if not epistemic.get("sufficient_for_validation", False) and not closure_active_for_project:
                 blockers.append("epistemic_sufficiency_low_for_validation")
             has_match, missing_rules = self._construction_rule_match(project_id, environment=environment, sim_state=sim_state, include_team=True)
@@ -4826,6 +4828,14 @@ class Agent:
         required = int(project.get("required_resources", {}).get("bricks", 0) or 0)
         delivered = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
         return bool(project.get("resource_complete", False)) or (required > 0 and delivered >= required)
+
+    def _project_has_physical_build_progress(self, project):
+        if not isinstance(project, dict):
+            return False
+        steps = list(project.get("build_steps") or [])
+        if not steps:
+            return bool(project.get("structurally_complete", False))
+        return any(bool(step.get("completed")) for step in steps)
 
     def _execution_lock_active_for_project(self, project_id=None):
         state = self.execution_lock_state
@@ -10693,25 +10703,6 @@ class Agent:
                             "legality_checks_passed": True,
                         },
                     )
-                    # Backward-compatible alias retained for existing downstream
-                    # consumers that currently listen to construction_progress_updated.
-                    self._emit_event(
-                        sim_state,
-                        "construction_progress_updated",
-                        {
-                            "agent": self.name,
-                            "project_id": project_id,
-                            "progress_kind": "material_delivery",
-                            "delivered_before": delivered_before,
-                            "delivered_after": delivered_after,
-                            "required_total": required_after,
-                            "progress_before": round(progress_before, 4),
-                            "progress_after": round(progress_after, 4),
-                            "status_after": status_after,
-                            "decision_action": action.get("decision_action"),
-                            "legality_checks_passed": True,
-                        },
-                    )
                 else:
                     self._register_no_progress(
                         sim_state,
@@ -10720,7 +10711,10 @@ class Agent:
                         category="project",
                         key=project_id,
                     )
-                if required_after > 0 and delivered_before < required_after <= delivered_after:
+                if (
+                    status_before != "ready_for_validation"
+                    and status_after == "ready_for_validation"
+                ):
                     self._emit_event(
                         sim_state,
                         "construction_ready_for_validation",
@@ -10736,7 +10730,7 @@ class Agent:
                         project_id=project_id,
                         state_event="ready_for_validation",
                         sim_state=sim_state,
-                        detail={"reason": "resource_delivery_threshold_reached"},
+                        detail={"reason": "physical_build_and_epistemic_threshold_reached"},
                         priority="high",
                     )
                     self._start_project_closure_commitment(
@@ -10744,7 +10738,7 @@ class Agent:
                         environment=environment,
                         sim_state=sim_state,
                         ttl_s=14.0,
-                        reason="resource_delivery_ready_for_validation",
+                        reason="project_ready_for_validation_status_transition",
                     )
                 if status_before != "complete" and status_after == "complete":
                     self._emit_event(
@@ -12172,6 +12166,13 @@ class Agent:
             delivered = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
             if required <= 0 or delivered <= 0:
                 self._emit_event(sim_state, "mismatch_detection_skipped_not_ready", {"project_id": project_id, "reason": "insufficient_build_state", "required": required, "delivered": delivered})
+                continue
+            if not self._project_has_physical_build_progress(project):
+                self._emit_event(
+                    sim_state,
+                    "mismatch_detection_skipped_not_ready",
+                    {"project_id": project_id, "reason": "physical_build_not_started"},
+                )
                 continue
             if closure_project_id and project_id == closure_project_id and str(project.get("status")) == "ready_for_validation":
                 self._emit_event(sim_state, "mismatch_detection_deferred_for_closure", {"project_id": project_id, "reason": "closure_commitment_active"})
