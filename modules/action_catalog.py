@@ -8,8 +8,7 @@ from modules.action_schema import ExecutableActionType
 
 @dataclass(frozen=True)
 class ActionCatalogEntry:
-    action_id: str
-    enum_name: str
+    action: ExecutableActionType
     label: str
     category: str
     planner_visible: bool
@@ -24,27 +23,35 @@ class ActionCatalogEntry:
     execution_owner: str
     status: str
 
+    @property
+    def action_id(self) -> str:
+        return self.action.value
+
+    @property
+    def enum_name(self) -> str:
+        return self.action.name
+
 
 _ACTIONS: tuple[ActionCatalogEntry, ...] = (
-    ActionCatalogEntry("move_to_target", "MOVE_TO_TARGET", "Move to target", "movement", True, True, True, ("information", "build", "artifact", "team", "self"), False, ("move", "move_to", "navigate", "go_to_target"), (), (), "agent.translate -> type=move_to", "modules/agent.py::_translate_brain_decision_to_legacy_action", "partial"),
-    ActionCatalogEntry("inspect_information_source", "INSPECT_INFORMATION_SOURCE", "Inspect information source", "inspection", True, True, True, ("information",), True, ("inspect", "inspect_info", "inspect_information_source", "inspect_source"), ("BOOTSTRAP", "ACQUIRE_DIK", "RECOVERY"), ("move_to_shared_source", "inspect_shared_source", "identify_role_source", "move_to_role_source", "inspect_role_source"), "agent.translate -> type=move_to + source_target_id", "modules/agent.py::_translate_brain_decision_to_legacy_action + _inspect_source", "implemented"),
-    ActionCatalogEntry("communicate", "COMMUNICATE", "Communicate", "communication", True, True, False, ("team",), True, ("communicate", "communicate_with_team", "share", "message_teammate"), ("COORDINATE",), ("select_teammate_or_artifact", "communicate_critical_dik", "formulate_team_plan", "adopt_team_plan_direction"), "agent.translate -> type=communicate", "modules/agent.py::_translate_brain_decision_to_legacy_action + _advance_active_actions", "implemented"),
-    ActionCatalogEntry("request_assistance", "REQUEST_ASSISTANCE", "Request assistance", "communication", True, True, False, ("team",), True, ("request_assistance", "ask_for_help", "request_help", "ask_help"), ("COORDINATE", "ACQUIRE_DIK"), ("communicate_critical_dik",), "agent.translate -> type=communicate + assist_action", "modules/agent.py::_translate_brain_decision_to_legacy_action + _advance_active_actions", "implemented"),
-    ActionCatalogEntry("meeting", "MEETING", "Meeting", "communication", True, True, False, ("team",), False, ("meeting", "team_meeting"), (), (), "agent.translate -> type=communicate", "modules/agent.py::_translate_brain_decision_to_legacy_action", "experimental"),
-    ActionCatalogEntry("externalize_plan", "EXTERNALIZE_PLAN", "Externalize plan", "artifact use", True, True, True, ("artifact", "build"), True, ("externalize", "externalize_plan", "write_plan", "propose_plan"), ("COORDINATE", "INTEGRATE_DIK"), ("integrate_role_dik", "select_teammate_or_artifact", "formulate_team_plan", "externalize_team_plan", "consult_artifact"), "agent.translate -> type=idle + artifact_action", "modules/agent.py::_translate_brain_decision_to_legacy_action + _apply_externalization_and_construction_effects", "implemented"),
-    ActionCatalogEntry("consult_team_artifact", "CONSULT_TEAM_ARTIFACT", "Consult team artifact", "artifact use", True, True, True, ("artifact",), True, ("consult_team_artifact", "consult_artifact", "inspect_artifact", "read_whiteboard"), ("INTEGRATE_DIK", "COORDINATE"), ("integrate_shared_dik", "integrate_role_dik", "diagnose_deadlock", "consult_team_plan", "adopt_team_plan_direction", "consult_artifact"), "agent.translate -> type=idle + artifact_action", "modules/agent.py::_translate_brain_decision_to_legacy_action + _apply_externalization_and_construction_effects", "implemented"),
-    ActionCatalogEntry("transport_resources", "TRANSPORT_RESOURCES", "Transport resources", "logistics", True, True, True, ("logistics", "build"), True, ("transport", "transport_resources", "deliver_resources", "carry_resources"), ("LOGISTICS",), ("identify_viable_project", "bind_project_target", "ensure_project_binding", "choose_accessible_pile", "move_to_pile", "pickup", "move_to_project", "dropoff", "ensure_build_ready"), "agent.translate -> type=transport_resources", "modules/agent.py::_translate_brain_decision_to_legacy_action + _apply_externalization_and_construction_effects", "implemented"),
-    ActionCatalogEntry("start_construction", "START_CONSTRUCTION", "Start construction", "construction", True, True, True, ("build",), True, ("start_construction", "build_start", "start_build"), ("CONSTRUCT",), ("bind_project_target", "start_or_continue_construction"), "agent.translate -> type=construct", "modules/agent.py::_translate_brain_decision_to_legacy_action + _apply_externalization_and_construction_effects", "implemented"),
-    ActionCatalogEntry("continue_construction", "CONTINUE_CONSTRUCTION", "Continue construction", "construction", True, True, True, ("build",), True, ("continue_construction", "continue_build", "build_continue"), ("CONSTRUCT",), ("start_or_continue_construction",), "agent.translate -> type=construct", "modules/agent.py::_translate_brain_decision_to_legacy_action + _apply_externalization_and_construction_effects", "implemented"),
-    ActionCatalogEntry("repair_or_correct_construction", "REPAIR_OR_CORRECT_CONSTRUCTION", "Repair or correct construction", "repair", True, True, True, ("build",), True, ("repair", "repair_or_correct_construction", "correct_construction"), ("REPAIR",), ("attempt_repair",), "agent.translate -> type=construct", "modules/agent.py::_translate_brain_decision_to_legacy_action + _apply_externalization_and_construction_effects", "implemented"),
-    ActionCatalogEntry("validate_construction", "VALIDATE_CONSTRUCTION", "Validate construction", "validation", True, True, True, ("build",), True, ("validate", "validate_construction", "check_construction"), ("VALIDATE", "REPAIR"), ("perform_validation", "revalidate"), "agent.translate -> type=idle (validation branch)", "modules/agent.py::_translate_brain_decision_to_legacy_action + _apply_externalization_and_construction_effects", "implemented"),
-    ActionCatalogEntry("observe_environment", "OBSERVE_ENVIRONMENT", "Observe environment", "inspection", True, True, False, ("self",), False, ("observe", "observe_environment", "scan_environment"), ("MONITOR", "RECOVERY", "VALIDATE"), ("identify_role_source", "diagnose_deadlock", "perform_validation"), "agent.translate -> type=idle", "modules/agent.py::_translate_brain_decision_to_legacy_action", "implemented"),
-    ActionCatalogEntry("reassess_plan", "REASSESS_PLAN", "Reassess plan", "regulation", True, True, False, ("self",), False, ("reassess", "reassess_plan", "replan"), ("RECOVERY", "INTEGRATE_DIK", "MONITOR"), ("integrate_shared_dik", "reassess_plan_with_rules"), "agent.translate -> type=idle", "modules/agent.py::_translate_brain_decision_to_legacy_action", "implemented"),
-    ActionCatalogEntry("wait", "WAIT", "Wait", "passive", True, True, False, ("self",), True, ("wait", "idle", "hold"), ("MONITOR",), (), "agent.translate -> type=idle", "modules/agent.py::_translate_brain_decision_to_legacy_action", "implemented"),
+    ActionCatalogEntry(ExecutableActionType.MOVE_TO_TARGET, "Move to target", "movement", True, True, True, ("information", "build", "artifact", "team", "self"), False, ("move", "move_to", "navigate", "go_to_target"), (), (), "agent.translate -> type=move_to", "modules/agent.py::_translate_brain_decision_to_legacy_action", "partial"),
+    ActionCatalogEntry(ExecutableActionType.INSPECT_INFORMATION_SOURCE, "Inspect information source", "inspection", True, True, True, ("information",), True, ("inspect", "inspect_info", "inspect_information_source", "inspect_source"), ("BOOTSTRAP", "ACQUIRE_DIK", "RECOVERY"), ("move_to_shared_source", "inspect_shared_source", "identify_role_source", "move_to_role_source", "inspect_role_source"), "agent.translate -> type=move_to + source_target_id", "modules/agent.py::_translate_brain_decision_to_legacy_action + _inspect_source", "implemented"),
+    ActionCatalogEntry(ExecutableActionType.COMMUNICATE, "Communicate", "communication", True, True, False, ("team",), True, ("communicate", "communicate_with_team", "share", "message_teammate"), ("COORDINATE",), ("select_teammate_or_artifact", "communicate_critical_dik", "formulate_team_plan", "adopt_team_plan_direction"), "agent.translate -> type=communicate", "modules/agent.py::_translate_brain_decision_to_legacy_action + _advance_active_actions", "implemented"),
+    ActionCatalogEntry(ExecutableActionType.REQUEST_ASSISTANCE, "Request assistance", "communication", True, True, False, ("team",), True, ("request_assistance", "ask_for_help", "request_help", "ask_help"), ("COORDINATE", "ACQUIRE_DIK"), ("communicate_critical_dik",), "agent.translate -> type=communicate + assist_action", "modules/agent.py::_translate_brain_decision_to_legacy_action + _advance_active_actions", "implemented"),
+    ActionCatalogEntry(ExecutableActionType.MEETING, "Meeting", "communication", True, True, False, ("team",), False, ("meeting", "team_meeting"), (), (), "agent.translate -> type=communicate", "modules/agent.py::_translate_brain_decision_to_legacy_action", "experimental"),
+    ActionCatalogEntry(ExecutableActionType.EXTERNALIZE_PLAN, "Externalize plan", "artifact use", True, True, True, ("artifact", "build"), True, ("externalize", "externalize_plan", "write_plan", "propose_plan"), ("COORDINATE", "INTEGRATE_DIK"), ("integrate_role_dik", "select_teammate_or_artifact", "formulate_team_plan", "externalize_team_plan", "consult_artifact"), "agent.translate -> type=idle + artifact_action", "modules/agent.py::_translate_brain_decision_to_legacy_action + _apply_externalization_and_construction_effects", "implemented"),
+    ActionCatalogEntry(ExecutableActionType.CONSULT_TEAM_ARTIFACT, "Consult team artifact", "artifact use", True, True, True, ("artifact",), True, ("consult_team_artifact", "consult_artifact", "inspect_artifact", "read_whiteboard"), ("INTEGRATE_DIK", "COORDINATE"), ("integrate_shared_dik", "integrate_role_dik", "diagnose_deadlock", "consult_team_plan", "adopt_team_plan_direction", "consult_artifact"), "agent.translate -> type=idle + artifact_action", "modules/agent.py::_translate_brain_decision_to_legacy_action + _apply_externalization_and_construction_effects", "implemented"),
+    ActionCatalogEntry(ExecutableActionType.TRANSPORT_RESOURCES, "Transport resources", "logistics", True, True, True, ("logistics", "build"), True, ("transport", "transport_resources", "deliver_resources", "carry_resources"), ("LOGISTICS",), ("identify_viable_project", "bind_project_target", "ensure_project_binding", "choose_accessible_pile", "move_to_pile", "pickup", "move_to_project", "dropoff", "ensure_build_ready"), "agent.translate -> type=transport_resources", "modules/agent.py::_translate_brain_decision_to_legacy_action + _apply_externalization_and_construction_effects", "implemented"),
+    ActionCatalogEntry(ExecutableActionType.START_CONSTRUCTION, "Start construction", "construction", True, True, True, ("build",), True, ("start_construction", "build_start", "start_build"), ("CONSTRUCT",), ("bind_project_target", "start_or_continue_construction"), "agent.translate -> type=construct", "modules/agent.py::_translate_brain_decision_to_legacy_action + _apply_externalization_and_construction_effects", "implemented"),
+    ActionCatalogEntry(ExecutableActionType.CONTINUE_CONSTRUCTION, "Continue construction", "construction", True, True, True, ("build",), True, ("continue_construction", "continue_build", "build_continue"), ("CONSTRUCT",), ("start_or_continue_construction",), "agent.translate -> type=construct", "modules/agent.py::_translate_brain_decision_to_legacy_action + _apply_externalization_and_construction_effects", "implemented"),
+    ActionCatalogEntry(ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, "Repair or correct construction", "repair", True, True, True, ("build",), True, ("repair", "repair_or_correct_construction", "correct_construction"), ("REPAIR",), ("attempt_repair",), "agent.translate -> type=construct", "modules/agent.py::_translate_brain_decision_to_legacy_action + _apply_externalization_and_construction_effects", "implemented"),
+    ActionCatalogEntry(ExecutableActionType.VALIDATE_CONSTRUCTION, "Validate construction", "validation", True, True, True, ("build",), True, ("validate", "validate_construction", "check_construction"), ("VALIDATE", "REPAIR"), ("perform_validation", "revalidate"), "agent.translate -> type=idle (validation branch)", "modules/agent.py::_translate_brain_decision_to_legacy_action + _apply_externalization_and_construction_effects", "implemented"),
+    ActionCatalogEntry(ExecutableActionType.OBSERVE_ENVIRONMENT, "Observe environment", "inspection", True, True, False, ("self",), False, ("observe", "observe_environment", "scan_environment"), ("MONITOR", "RECOVERY", "VALIDATE"), ("identify_role_source", "diagnose_deadlock", "perform_validation"), "agent.translate -> type=idle", "modules/agent.py::_translate_brain_decision_to_legacy_action", "implemented"),
+    ActionCatalogEntry(ExecutableActionType.REASSESS_PLAN, "Reassess plan", "regulation", True, True, False, ("self",), False, ("reassess", "reassess_plan", "replan"), ("RECOVERY", "INTEGRATE_DIK", "MONITOR"), ("integrate_shared_dik", "reassess_plan_with_rules"), "agent.translate -> type=idle", "modules/agent.py::_translate_brain_decision_to_legacy_action", "implemented"),
+    ActionCatalogEntry(ExecutableActionType.WAIT, "Wait", "passive", True, True, False, ("self",), True, ("wait", "idle", "hold"), ("MONITOR",), (), "agent.translate -> type=idle", "modules/agent.py::_translate_brain_decision_to_legacy_action", "implemented"),
 )
 
-ACTION_CATALOG: Dict[str, ActionCatalogEntry] = {entry.action_id: entry for entry in _ACTIONS}
-ACTION_ALIASES: Dict[str, str] = {alias: entry.action_id for entry in _ACTIONS for alias in entry.aliases}
+ACTION_CATALOG: Dict[str, ActionCatalogEntry] = {entry.action.value: entry for entry in _ACTIONS}
+ACTION_ALIASES: Dict[str, str] = {alias.strip().lower(): entry.action.value for entry in _ACTIONS for alias in entry.aliases}
 
 
 def normalize_action_alias(value: str) -> str | None:
@@ -73,9 +80,30 @@ def validate_action_catalog_coverage() -> list[str]:
         errors.append(f"missing_catalog_entries:{'|'.join(missing)}")
     if extra:
         errors.append(f"catalog_entries_without_enum:{'|'.join(extra)}")
-    for entry in ACTION_CATALOG.values():
+    seen_aliases: dict[str, str] = {}
+    for key, entry in ACTION_CATALOG.items():
+        if key != entry.action.value:
+            errors.append(f"catalog_key_mismatch:{key}:{entry.action.value}")
         if entry.action_id != entry.action_id.lower():
             errors.append(f"non_canonical_action_id_case:{entry.action_id}")
+        if entry.enum_name != entry.action.name:
+            errors.append(f"catalog_enum_name_mismatch:{entry.action.value}:{entry.enum_name}:{entry.action.name}")
+        if entry.action_id != entry.action.value:
+            errors.append(f"catalog_action_id_mismatch:{entry.action.value}:{entry.action_id}")
+        if entry.planner_visible and not entry.status.strip():
+            errors.append(f"planner_visible_missing_status:{entry.action_id}")
+        if entry.target_required and not entry.allowed_target_kinds:
+            errors.append(f"target_required_missing_allowed_target_kinds:{entry.action_id}")
+        for alias in entry.aliases:
+            normalized_alias = alias.strip().lower()
+            if alias != normalized_alias:
+                errors.append(f"alias_not_normalized:{entry.action_id}:{alias}")
+                continue
+            previous = seen_aliases.get(alias)
+            if previous is not None and previous != entry.action_id:
+                errors.append(f"duplicate_alias:{alias}:{previous}:{entry.action_id}")
+            else:
+                seen_aliases[alias] = entry.action_id
     return errors
 
 

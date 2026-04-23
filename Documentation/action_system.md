@@ -4,9 +4,9 @@ This document is the developer-facing action-system map for the current simulato
 
 ## Source of truth
 
-The canonical action catalog is `modules/action_catalog.py`.
+`ExecutableActionType` in `modules/action_schema.py` is the canonical action identity source.
 
-It defines every `ExecutableActionType` entry with:
+`modules/action_catalog.py` is the enriched metadata layer for those identities. It defines every executable action with:
 - planner visibility
 - runtime executability
 - expected `allowed_actions` surfacing
@@ -15,11 +15,13 @@ It defines every `ExecutableActionType` entry with:
 - translation and execution ownership
 - implementation status (`implemented`, `partial`, `experimental`, `deprecated`)
 
+Catalog identity fields are derived from enum members (`entry.action.value` / `entry.action.name`) rather than manually duplicated.
+
 ## Pipeline map: “what actions exist, and where do they go?”
 
 1. **Canonical vocabulary**
    - `ExecutableActionType` in `modules/action_schema.py`
-   - mirrored + enriched in `modules/action_catalog.py`
+   - enriched metadata in `modules/action_catalog.py` keyed by enum-derived IDs
 
 2. **Affordance generation / planner visibility**
    - `BrainContextBuilder._affordances(...)` in `modules/brain_context.py`
