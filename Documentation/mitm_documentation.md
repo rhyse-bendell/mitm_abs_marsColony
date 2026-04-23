@@ -411,7 +411,12 @@ Simulator is authoritative; brains propose actions, engine adjudicates legality/
 
 ### 15. Repository / Module Organization
 
-#### 15.0 Ownership and interaction framing
+##### Action catalog and diagnostics update (2026-04)
+
+The canonical action vocabulary and action-loss diagnostics are now documented in `Documentation/action_system.md`. The authoritative machine-readable source is `modules/action_catalog.py`, which maps each `ExecutableActionType` to planner visibility, alias normalization, translation destination, execution owner, and implementation status.
+
+
+## 15.0 Ownership and interaction framing
 For each module below, read descriptions as ownership boundaries:
 - *Owns state* means authoritative data should be maintained there.
 - *Should not own* means avoid hidden cross-layer side effects.
