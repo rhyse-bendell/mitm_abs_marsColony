@@ -28,6 +28,7 @@ from modules.brain_contract import (
     AgentDIKIntegrationRequest,
     validate_agent_brain_response,
 )
+from modules.action_catalog import planner_expected_action_ids
 from modules.brain_provider import select_productive_fallback_action
 from modules.goal_manager import GoalManager
 from modules.goal_state import GOAL_SOURCES, GOAL_STATUSES
@@ -6088,6 +6089,29 @@ class Agent:
             "policy_snapshot": dict(control_snapshot.get("policy_snapshot") or {}),
             "method_state": dict(control_snapshot.get("method_state") or {}),
         }
+        afforded_actions = list(context.action_affordances)
+        afforded_ids = [str(a.get("action_type")) for a in afforded_actions if isinstance(a, dict) and a.get("action_type")]
+        expected_ids = planner_expected_action_ids()
+        missing_expected = sorted(expected_ids - set(afforded_ids))
+        family_counts = {}
+        for action_id in afforded_ids:
+            family_counts[action_id] = int(family_counts.get(action_id, 0) or 0) + 1
+        self._emit_event(
+            sim_state,
+            "action_affordances_generated",
+            {
+                "affordance_count": len(afforded_actions),
+                "unique_action_types": sorted(set(afforded_ids)),
+                "action_type_counts": family_counts,
+                "missing_expected_actions": missing_expected,
+            },
+        )
+        for action_id in missing_expected[:6]:
+            self._emit_event(
+                sim_state,
+                "action_affordance_absent_reason",
+                {"action_type": action_id, "reason": "not_in_context_action_affordances"},
+            )
         return AgentBrainRequest(
             request_id=f"{self.agent_id}-{uuid.uuid4().hex[:8]}",
             tick=self.sim_step_count,
@@ -8608,6 +8632,7 @@ class Agent:
                         "target_id": decision.target_id,
                     },
                 )
+                self._emit_event(sim_state, "action_legality_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "illegal_action", "target_id": decision.target_id})
                 return [{"type": "idle", "duration": 1.0, "priority": 1, "decision_action": ExecutableActionType.WAIT.value}]
 
         mapping = {
@@ -8859,6 +8884,7 @@ class Agent:
                     "project_action_blocked_missing_binding_guard",
                     {"decision_action": decision.selected_action.value, "target_id": decision.target_id},
                 )
+                self._emit_event(sim_state, "planner_action_rejected_missing_requirements", {"planner_action_type": decision.selected_action.value, "failure_category": "missing_project_binding"})
                 return [{
                     "type": "idle",
                     "duration": 1.0,
@@ -8941,6 +8967,7 @@ class Agent:
                             "validate_construction_downgraded_to_communication",
                             {"project_id": project_id, "blockers": epistemic_blockers, "decision_action": decision.selected_action.value},
                         )
+                        self._emit_event(sim_state, "planner_action_downgraded", {"from_action": ExecutableActionType.VALIDATE_CONSTRUCTION.value, "to_action": ExecutableActionType.COMMUNICATE.value, "project_id": project_id, "reason": "epistemic_validation_blockers"})
                         return [{
                             "type": "communicate",
                             "duration": 1.0,
@@ -8996,6 +9023,7 @@ class Agent:
             if blockers and partitioned["hard_blockers"]:
                 self._record_known_gaps_from_blockers(blockers, sim_state=sim_state, project_id=project_id)
                 self._emit_event(sim_state, "execution_readiness_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "readiness_not_unlocked", "blockers": blockers, "project_id": project_id})
+                self._emit_event(sim_state, "action_legality_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "readiness_not_unlocked", "project_id": project_id, "blockers": blockers})
                 if decision.selected_action == ExecutableActionType.VALIDATE_CONSTRUCTION:
                     self.project_closure_state["blocked_count"] = int(self.project_closure_state.get("blocked_count", 0) or 0) + 1
                     if self.project_closure_state["blocked_count"] >= 3:
@@ -9104,6 +9132,7 @@ class Agent:
         self._sync_active_intent(sim_state, action_type=decision.selected_action.value, target=decision.target_id or action.get("project_id") or action.get("source_target_id"))
 
         self._emit_event(sim_state, "action_translation_succeeded", {"planner_action_type": decision.selected_action.value, "translated_action_type": action.get("type"), "target_id": decision.target_id, "target_zone": decision.target_zone})
+        self._emit_event(sim_state, "planner_action_translated", {"from_action": decision.selected_action.value, "to_action_type": action.get("type"), "project_id": action.get("project_id")})
         if decision.selected_action != ExecutableActionType.INSPECT_INFORMATION_SOURCE and isinstance(getattr(self, "post_inspect_handoff", None), dict):
             self.post_inspect_handoff["pending"] = False
         if (
@@ -9721,6 +9750,10 @@ class Agent:
             if extra:
                 payload.update(extra)
             self._emit_event(sim_state, "action_execution_stage", payload)
+            if stage == "mutation_execution_succeeded":
+                self._emit_event(sim_state, "action_execution_succeeded", payload)
+            elif stage in {"mutation_execution_blocked", "terminally_blocked"}:
+                self._emit_event(sim_state, "action_execution_failed", payload)
 
         def _location_ready(action, target_id):
             if not target_id:

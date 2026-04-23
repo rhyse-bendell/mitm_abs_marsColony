@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Dict
 from urllib import error, request
 
+from modules.action_catalog import ACTION_CATALOG, normalize_action_alias, validate_rulebrain_action_references
 from modules.action_schema import BrainDecision, CommunicationIntent, ExecutableActionType
 from modules.brain_contract import (
     AgentBrainRequest,
@@ -26,10 +27,12 @@ LOGGER = logging.getLogger(__name__)
 
 
 RUNTIME_ACTION_ALIASES: dict[str, str] = {
-    "inspect": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
-    "inspect_info": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
-    "observe": ExecutableActionType.OBSERVE_ENVIRONMENT.value,
-    "communicate_with_team": ExecutableActionType.COMMUNICATE.value,
+    alias: canonical
+    for alias, canonical in (
+        (alias, entry.action_id)
+        for entry in ACTION_CATALOG.values()
+        for alias in entry.aliases
+    )
 }
 
 
@@ -83,20 +86,7 @@ def select_productive_fallback_action(allowed_actions: list[dict[str, Any]]) -> 
         }
         for item in indexed_allowed
     )
-    preference_order = [
-        ExecutableActionType.START_CONSTRUCTION.value,
-        ExecutableActionType.CONTINUE_CONSTRUCTION.value,
-        ExecutableActionType.VALIDATE_CONSTRUCTION.value,
-        ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value,
-        ExecutableActionType.TRANSPORT_RESOURCES.value,
-        ExecutableActionType.EXTERNALIZE_PLAN.value,
-        ExecutableActionType.COMMUNICATE.value,
-        ExecutableActionType.CONSULT_TEAM_ARTIFACT.value,
-        ExecutableActionType.REQUEST_ASSISTANCE.value,
-        ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
-        ExecutableActionType.OBSERVE_ENVIRONMENT.value,
-        ExecutableActionType.WAIT.value,
-    ]
+    preference_order = list(RuleBrain.FALLBACK_ACTION_ORDER)
     if not build_actions_present:
         preference_order.remove(ExecutableActionType.INSPECT_INFORMATION_SOURCE.value)
         preference_order.insert(5, ExecutableActionType.INSPECT_INFORMATION_SOURCE.value)
@@ -383,6 +373,20 @@ class RuleBrain(BrainProvider):
         "RECOVERY",
         "MONITOR",
     )
+    FALLBACK_ACTION_ORDER = (
+        ExecutableActionType.START_CONSTRUCTION.value,
+        ExecutableActionType.CONTINUE_CONSTRUCTION.value,
+        ExecutableActionType.VALIDATE_CONSTRUCTION.value,
+        ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value,
+        ExecutableActionType.TRANSPORT_RESOURCES.value,
+        ExecutableActionType.EXTERNALIZE_PLAN.value,
+        ExecutableActionType.COMMUNICATE.value,
+        ExecutableActionType.CONSULT_TEAM_ARTIFACT.value,
+        ExecutableActionType.REQUEST_ASSISTANCE.value,
+        ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
+        ExecutableActionType.OBSERVE_ENVIRONMENT.value,
+        ExecutableActionType.WAIT.value,
+    )
     MODE_ACTION_PREFERENCES = {
         "BOOTSTRAP": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value: 1.3, ExecutableActionType.OBSERVE_ENVIRONMENT.value: 0.5},
         "ACQUIRE_DIK": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value: 1.6, ExecutableActionType.CONSULT_TEAM_ARTIFACT.value: 0.4, ExecutableActionType.REQUEST_ASSISTANCE.value: 0.4},
@@ -442,6 +446,13 @@ class RuleBrain(BrainProvider):
 
     def __init__(self, policy_config: RuleBrainPolicyConfig | None = None):
         self.policy_config = policy_config or RuleBrainPolicyConfig()
+        drift = validate_rulebrain_action_references(
+            self.MODE_ACTION_PREFERENCES,
+            self.STEP_ACTION_MAP,
+            self.FALLBACK_ACTION_ORDER,
+        )
+        if drift:
+            raise ValueError(f"RuleBrain action vocabulary drift detected: {drift}")
 
     @staticmethod
     def _detect_team_plan_state(team_shared_knowledge: dict[str, Any], artifacts: list[dict[str, Any]]) -> dict[str, float]:
@@ -1331,6 +1342,18 @@ class RuleBrain(BrainProvider):
             features=features,
             mechanism_profile=mechanism_profile,
         )
+        preferred_for_mode = set(self.MODE_ACTION_PREFERENCES.get(selected_mode, {}).keys())
+        legal_non_preferred = sorted(
+            {
+                str(a.get("action_type"))
+                for a in sorted_affordances
+                if str(a.get("action_type")) and str(a.get("action_type")) not in preferred_for_mode
+            }
+        )
+        if preferred_for_mode and legal_non_preferred:
+            method_notes.append(
+                f"action_family_filtered_by_mode:{selected_mode}:preferred={sorted(preferred_for_mode)}:non_preferred_legal={legal_non_preferred[:5]}"
+            )
         step_action_scores = self._score_actions_for_method_step(
             sorted_affordances=sorted_affordances,
             step_id=step_id,
@@ -1338,6 +1361,10 @@ class RuleBrain(BrainProvider):
         )
         if step_action_scores:
             action_scores.update({k: action_scores.get(k, 0.0) + (v * 1.6) for k, v in step_action_scores.items()})
+            step_allowed = sorted(set(self.STEP_ACTION_MAP.get(step_id, set())) if step_id else set())
+            blocked_by_step = sorted({str(a.get("action_type")) for a in sorted_affordances if str(a.get("action_type")) and str(a.get("action_type")) not in set(step_allowed)})
+            if step_allowed and blocked_by_step:
+                step_notes.append(f"action_family_filtered_by_method_step:{step_id}:allowed={step_allowed}:other_legal={blocked_by_step[:5]}")
         selected_action, chosen, action_probs = self._select_action(
             sorted_affordances=sorted_affordances,
             action_scores=action_scores,
@@ -1779,8 +1806,8 @@ class OllamaLocalBrainProvider(BrainProvider):
         if raw in ExecutableActionType._value2member_map_:
             return raw
         lowered = raw.lower()
-        if lowered in RUNTIME_ACTION_ALIASES:
-            mapped = RUNTIME_ACTION_ALIASES[lowered]
+        mapped = normalize_action_alias(lowered)
+        if mapped:
             note_sink.append(
                 {
                     "step": "normalized_action_alias",
