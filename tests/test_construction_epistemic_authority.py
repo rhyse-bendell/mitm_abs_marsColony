@@ -278,6 +278,45 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         self.assertFalse(any(e.get("event_type") == "construction_resource_delivered" for e in sim.logger.recent_events))
         sim.stop()
 
+    def test_policy_pivot_targets_provider_connector_work_for_support_deficit(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        self._prime_build_readiness(sim, agent)
+        cm = sim.environment.construction
+        house_id, house = self._ensure_project(sim, "Build_Site_B")
+        cm.deliver_resource(house_id, "bricks", quantity=int(house["required_resources"]["bricks"]))
+        for _ in range(len(house["build_steps"])):
+            cm.execute_build_step(house_id, actor=agent.name, sim_time=sim.time)
+        cm.record_project_epistemic_externalization(house_id, entry_type="claim", note="claim", actor=agent.name, sim_time=sim.time)
+        cm.record_project_epistemic_externalization(house_id, entry_type="evidence", note="evidence", actor=agent.name, sim_time=sim.time)
+        cm.record_project_epistemic_externalization(house_id, entry_type="design_note", note="design", actor=agent.name, sim_time=sim.time)
+        self.assertFalse(house["functional_support_complete"])
+
+        seed = BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=house_id, confidence=0.8)
+        rewritten = agent._resolve_support_deficit_decision(seed, sim.environment, sim_state=sim, pivot_origin="unit_test")
+        self.assertIsNotNone(rewritten)
+        self.assertIn(
+            rewritten.selected_action,
+            {
+                ExecutableActionType.TRANSPORT_RESOURCES,
+                ExecutableActionType.START_CONSTRUCTION,
+                ExecutableActionType.CONTINUE_CONSTRUCTION,
+                ExecutableActionType.VALIDATE_CONSTRUCTION,
+            },
+        )
+        target_project = sim.environment.construction.projects.get(str(rewritten.target_id or ""))
+        if target_project is not None:
+            self.assertIn(
+                target_project.get("type"),
+                {"greenhouse", "water_generator", "food_connector", "water_connector", "house", "housing"},
+            )
+        connector_or_provider_exists = any(
+            p.get("type") in {"greenhouse", "water_generator", "food_connector", "water_connector"}
+            for p in sim.environment.construction.projects.values()
+        )
+        self.assertTrue(connector_or_provider_exists)
+        sim.stop()
+
     def test_construction_expected_rules_normalized_to_canonical_ids(self):
         model = load_task_model("mars_colony")
         for template in model.construction_templates.values():

@@ -516,6 +516,130 @@ class ConstructionManager:
             "functional_support_complete": bool(project.get("functional_support_complete", False)),
         }
 
+    def get_missing_support_requirements(self, project_id):
+        project = self.projects.get(str(project_id or ""))
+        if not isinstance(project, dict):
+            return {}
+        self.recompute_support_status(project_id)
+        requirements = dict(project.get("support_requirements") or {})
+        counts = dict(project.get("support_counts") or {})
+        missing = {}
+        for support_type, required in requirements.items():
+            required_count = max(0, int(required or 0))
+            current_count = max(0, int(counts.get(support_type, 0) or 0))
+            deficit = required_count - current_count
+            if deficit > 0:
+                missing[str(support_type)] = deficit
+        return missing
+
+    def find_support_provider_project(self, support_type):
+        provider_type = {
+            "water": "water_generator",
+            "food": "greenhouse",
+        }.get(str(support_type or "").strip().lower())
+        if not provider_type:
+            return None
+        candidates = [
+            p for p in self.projects.values()
+            if isinstance(p, dict) and str(p.get("type") or "").strip().lower() == provider_type
+        ]
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda p: (
+                0 if str(p.get("status") or "") == "complete" else 1,
+                0 if bool(p.get("structurally_complete")) else 1,
+                0 if bool(p.get("resource_complete")) else 1,
+                str(p.get("id") or ""),
+            )
+        )
+        return candidates[0].get("id")
+
+    def find_or_create_connector_project(self, site_id, support_type, author="system"):
+        support_type_norm = str(support_type or "").strip().lower()
+        connector_type = {
+            "water": "water_connector",
+            "food": "food_connector",
+        }.get(support_type_norm)
+        if not connector_type:
+            return None, "unsupported_support_type"
+        existing = [
+            p for p in self.projects.values()
+            if isinstance(p, dict)
+            and p.get("site_id") == site_id
+            and str(p.get("type") or "").strip().lower() == connector_type
+            and str(p.get("status") or "") != "complete"
+        ]
+        if existing:
+            existing.sort(key=lambda p: (0 if bool(p.get("started")) else 1, str(p.get("id") or "")))
+            return existing[0].get("id"), "exists"
+        return self.create_project(site_id, structure_type=connector_type, author=author)
+
+    def find_attachable_connector(self, project_id, support_type):
+        anchor = self.projects.get(str(project_id or ""))
+        if not isinstance(anchor, dict):
+            return None
+        site_id = anchor.get("site_id")
+        support_type_norm = str(support_type or "").strip().lower()
+        connector_type = "water_connector" if support_type_norm == "water" else "food_connector" if support_type_norm == "food" else None
+        if not connector_type:
+            return None
+        candidates = [
+            p for p in self.projects.values()
+            if isinstance(p, dict)
+            and p.get("site_id") == site_id
+            and str(p.get("type") or "").strip().lower() == connector_type
+            and str(p.get("status") or "") != "complete"
+        ]
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda p: (
+                0 if bool(p.get("structurally_complete")) else 1,
+                0 if bool(p.get("resource_complete")) else 1,
+                str(p.get("id") or ""),
+            )
+        )
+        return candidates[0].get("id")
+
+    def _apply_support_deficit_state(self, project_id, *, sim_time=None, trigger=None):
+        project = self.projects.get(str(project_id or ""))
+        if not isinstance(project, dict):
+            return False
+        missing = self.get_missing_support_requirements(project_id)
+        support_deficit_active = bool(project.get("structurally_complete")) and not bool(project.get("functional_support_complete")) and bool(missing)
+        snapshot = {
+            "project_id": project.get("id"),
+            "missing_support": dict(missing),
+            "support_counts": dict(project.get("support_counts") or {}),
+            "support_requirements": dict(project.get("support_requirements") or {}),
+            "status": str(project.get("status") or ""),
+            "time": sim_time,
+            "trigger": trigger,
+        }
+        previous_snapshot = dict(project.get("last_support_deficit_snapshot") or {})
+        previous_missing = dict(previous_snapshot.get("missing_support") or {})
+        previous_status = str(previous_snapshot.get("status") or "")
+        project["support_deficit_active"] = bool(support_deficit_active)
+        if support_deficit_active:
+            project["support_deficit"] = dict(snapshot)
+            changed = (previous_missing != snapshot["missing_support"]) or (previous_status != snapshot["status"]) or not bool(previous_snapshot)
+            if changed:
+                project["last_support_deficit_snapshot"] = dict(snapshot)
+            return changed
+        if previous_snapshot:
+            project["support_deficit_resolved_snapshot"] = {
+                "project_id": project.get("id"),
+                "status": str(project.get("status") or ""),
+                "time": sim_time,
+                "trigger": trigger,
+            }
+            project["support_deficit"] = {}
+            project["last_support_deficit_snapshot"] = {}
+            return True
+        project["support_deficit"] = {}
+        return False
+
     def _required_epistemic_entries(self, project):
         required = {"claim", "evidence"}
         expected_rules = list((project or {}).get("expected_rules") or [])
@@ -703,6 +827,7 @@ class ConstructionManager:
                 else:
                     discussion["stagnation_count"] = 0
                 project["validation_discussion"] = discussion
+            self._apply_support_deficit_state(project.get("id"), trigger="update")
 
     def get_active_projects(self):
         return [p for p in self.projects.values() if p.get("started") and p["status"] != "complete"]
@@ -877,6 +1002,8 @@ class ConstructionManager:
             return
         if not project.get("started"):
             return
+        project["validation_attempted"] = True
+        project["last_validation_attempt_time"] = sim_time
         if not is_valid:
             project["correct"] = False
             project["validated_complete"] = False
@@ -908,6 +1035,7 @@ class ConstructionManager:
             project["validated_complete"] = False
             project["status"] = "in_progress"
             project["in_progress"] = True
+        self._apply_support_deficit_state(project_id, sim_time=sim_time, trigger="mark_validated")
         self.update_project_provenance(
             project_id,
             event=str(event or ("validation_passed" if is_valid else "validation_failed")),

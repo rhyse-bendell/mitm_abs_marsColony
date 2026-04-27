@@ -4856,6 +4856,155 @@ class Agent:
             return bool(project.get("structurally_complete", False))
         return any(bool(step.get("completed")) for step in steps)
 
+    def _choose_support_site(self, environment, preferred_site_id):
+        construction = getattr(environment, "construction", None)
+        if construction is None:
+            return None
+        preferred = str(preferred_site_id or "")
+        if preferred and construction._is_site_buildable(preferred) and construction._site_has_capacity(preferred):
+            return preferred
+        for site_id, site in sorted(construction.sites.items()):
+            if not getattr(site, "buildable", False):
+                continue
+            if construction._is_site_buildable(site_id) and construction._site_has_capacity(site_id):
+                return site_id
+        return None
+
+    def _resolve_support_deficit_decision(self, decision, environment, sim_state=None, pivot_origin="runtime"):
+        construction = getattr(environment, "construction", None)
+        if construction is None:
+            return None
+        target_project_id = str(decision.target_id or "")
+        if not target_project_id:
+            live_closure = self._live_project_closure_commitment(environment, sim_state=sim_state)
+            target_project_id = str(live_closure or "")
+        project = construction.projects.get(target_project_id)
+        if not isinstance(project, dict):
+            return None
+        if str(project.get("type") or "") not in {"house", "housing"}:
+            return None
+        structurally_relevant = bool(project.get("structurally_complete")) or bool(project.get("validation_attempted"))
+        if not structurally_relevant:
+            return None
+        missing = construction.get_missing_support_requirements(target_project_id)
+        if not missing or bool(project.get("functional_support_complete", False)):
+            return None
+        self._emit_event(
+            sim_state,
+            "support_deficit_detected",
+            {
+                "origin": pivot_origin,
+                "project_id": target_project_id,
+                "missing_support": dict(missing),
+                "support_counts": dict(project.get("support_counts") or {}),
+                "support_requirements": dict(project.get("support_requirements") or {}),
+                "status": project.get("status"),
+            },
+        )
+        support_type = sorted(missing.keys())[0]
+        self._emit_event(
+            sim_state,
+            "support_connector_needed",
+            {"origin": pivot_origin, "project_id": target_project_id, "support_type": support_type, "missing_count": int(missing.get(support_type, 0) or 0)},
+        )
+        provider_project_id = construction.find_support_provider_project(support_type)
+        if provider_project_id:
+            self._emit_event(
+                sim_state,
+                "support_provider_project_selected",
+                {"origin": pivot_origin, "project_id": target_project_id, "support_type": support_type, "provider_project_id": provider_project_id},
+            )
+        if not provider_project_id:
+            provider_type = "water_generator" if support_type == "water" else "greenhouse"
+            provider_site = self._choose_support_site(environment, project.get("site_id"))
+            if provider_site:
+                provider_project_id, provider_reason = construction.create_project(provider_site, structure_type=provider_type, author=self.name)
+                if provider_project_id:
+                    self._emit_event(
+                        sim_state,
+                        "support_provider_project_created",
+                        {
+                            "origin": pivot_origin,
+                            "project_id": target_project_id,
+                            "support_type": support_type,
+                            "provider_project_id": provider_project_id,
+                            "provider_type": provider_type,
+                            "site_id": provider_site,
+                            "reason": provider_reason,
+                        },
+                    )
+        provider = construction.projects.get(str(provider_project_id or ""))
+        if isinstance(provider, dict):
+            if self._project_needs_transport(provider):
+                return BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES, target_id=provider_project_id, confidence=max(0.82, float(decision.confidence or 0.0)))
+            if self._project_materially_ready_for_build(provider) and self._project_has_incomplete_build_steps(provider):
+                return BrainDecision(selected_action=ExecutableActionType.START_CONSTRUCTION, target_id=provider_project_id, confidence=max(0.82, float(decision.confidence or 0.0)))
+
+        connector_project_id = construction.find_attachable_connector(target_project_id, support_type)
+        if connector_project_id:
+            self._emit_event(
+                sim_state,
+                "connector_project_selected_for_support",
+                {"origin": pivot_origin, "project_id": target_project_id, "connector_project_id": connector_project_id, "support_type": support_type},
+            )
+        if not connector_project_id:
+            connector_site = self._choose_support_site(environment, project.get("site_id"))
+            if connector_site:
+                connector_project_id, connector_reason = construction.find_or_create_connector_project(connector_site, support_type, author=self.name)
+                if connector_project_id and connector_reason == "created":
+                    self._emit_event(
+                        sim_state,
+                        "connector_project_created_for_support",
+                        {"origin": pivot_origin, "project_id": target_project_id, "connector_project_id": connector_project_id, "support_type": support_type, "site_id": connector_site},
+                    )
+                elif connector_project_id:
+                    self._emit_event(
+                        sim_state,
+                        "connector_project_selected_for_support",
+                        {"origin": pivot_origin, "project_id": target_project_id, "connector_project_id": connector_project_id, "support_type": support_type, "reason": connector_reason},
+                    )
+
+        connector = construction.projects.get(str(connector_project_id or ""))
+        if isinstance(connector, dict):
+            if self._project_needs_transport(connector):
+                return BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES, target_id=connector_project_id, confidence=max(0.84, float(decision.confidence or 0.0)))
+            if self._project_materially_ready_for_build(connector) and self._project_has_incomplete_build_steps(connector):
+                return BrainDecision(selected_action=ExecutableActionType.START_CONSTRUCTION, target_id=connector_project_id, confidence=max(0.84, float(decision.confidence or 0.0)))
+            if bool(connector.get("structurally_complete")) and isinstance(provider, dict) and bool(provider.get("structurally_complete")):
+                self._emit_event(
+                    sim_state,
+                    "connector_attachment_attempted",
+                    {"origin": pivot_origin, "project_id": target_project_id, "connector_project_id": connector_project_id, "provider_project_id": provider_project_id, "support_type": support_type},
+                )
+                attached, attach_reason = construction.attach_connector(
+                    connector_project_id,
+                    from_project_id=target_project_id,
+                    to_project_id=provider_project_id,
+                    actor=self.name,
+                    sim_time=float(getattr(sim_state, "time", getattr(self, "current_time", 0.0))),
+                )
+                if attached:
+                    self._emit_event(
+                        sim_state,
+                        "connector_attachment_succeeded",
+                        {"origin": pivot_origin, "project_id": target_project_id, "connector_project_id": connector_project_id, "provider_project_id": provider_project_id, "support_type": support_type},
+                    )
+                else:
+                    self._emit_event(
+                        sim_state,
+                        "connector_attachment_failed",
+                        {"origin": pivot_origin, "project_id": target_project_id, "connector_project_id": connector_project_id, "provider_project_id": provider_project_id, "support_type": support_type, "reason": attach_reason},
+                    )
+                if construction.get_missing_support_requirements(target_project_id):
+                    return BrainDecision(selected_action=ExecutableActionType.START_CONSTRUCTION, target_id=connector_project_id, confidence=max(0.76, float(decision.confidence or 0.0)))
+                self._emit_event(
+                    sim_state,
+                    "support_deficit_resolved",
+                    {"origin": pivot_origin, "project_id": target_project_id, "support_type": support_type},
+                )
+                return BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=target_project_id, confidence=max(0.86, float(decision.confidence or 0.0)))
+        return None
+
     def _execution_lock_active_for_project(self, project_id=None):
         state = self.execution_lock_state
         if not bool(state.get("execution_lock_active")):
@@ -7641,6 +7790,14 @@ class Agent:
                     confidence=max(0.7, float(decision.confidence or 0.0)),
                 )
                 self._emit_event(sim_state, "recovery_pivot_applied", {"origin": pivot_origin, "forced_action": forced_pivot, "from_action": decision.selected_action.value})
+        support_deficit_rewrite = self._resolve_support_deficit_decision(
+            rewritten,
+            environment,
+            sim_state=sim_state,
+            pivot_origin=pivot_origin,
+        )
+        if support_deficit_rewrite is not None:
+            return support_deficit_rewrite
         closure_project_id = self._live_project_closure_commitment(environment, sim_state=sim_state)
         if closure_project_id:
             closure_owner_active = self._is_active_closure_owner(closure_project_id, environment)
@@ -10109,29 +10266,63 @@ class Agent:
                         team_rule_snapshot_ids=snapshot["team_rule_snapshot_ids"],
                         event="validation_passed" if (is_valid and has_required_rules) else "validation_failed",
                     )
+                    project = environment.construction.projects.get(project_id, project)
+                    support_missing = (
+                        environment.construction.get_missing_support_requirements(project_id)
+                        if hasattr(environment.construction, "get_missing_support_requirements")
+                        else {}
+                    )
+                    actually_completed = bool(project.get("validated_complete", False))
                     sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
                     self._emit_event(sim_state, "construction_artifact_provenance_updated", {"project_id": project_id, "event": "validation"})
                     _set_action_stage(action, "mutation_execution_succeeded", {"project_id": project_id, "is_valid": is_valid})
-                    self._emit_event(
-                        sim_state,
-                        "construction_validated_correct" if is_valid else "construction_validated_incorrect",
-                        {
-                            "agent": self.name,
-                            "project_id": project_id,
-                            "structure_type": project.get("type", "unknown"),
-                            "decision_action": action.get("decision_action"),
-                            "missing_expected_rules": missing_rules,
-                        },
-                    )
+                    if bool(is_valid) and not actually_completed and support_missing:
+                        self._emit_event(
+                            sim_state,
+                            "support_deficit_detected",
+                            {
+                                "project_id": project_id,
+                                "missing_support": dict(support_missing),
+                                "support_counts": dict(project.get("support_counts") or {}),
+                                "support_requirements": dict(project.get("support_requirements") or {}),
+                                "status": project.get("status"),
+                            },
+                        )
+                        self._emit_event(
+                            sim_state,
+                            "construction_validation_blocked",
+                            {
+                                "project_id": project_id,
+                                "failure_category": "missing_functional_support",
+                                "missing_support": dict(support_missing),
+                                "project_status": project.get("status"),
+                            },
+                        )
+                    else:
+                        self._emit_event(
+                            sim_state,
+                            "construction_validated_correct" if is_valid else "construction_validated_incorrect",
+                            {
+                                "agent": self.name,
+                                "project_id": project_id,
+                                "structure_type": project.get("type", "unknown"),
+                                "decision_action": action.get("decision_action"),
+                                "missing_expected_rules": missing_rules,
+                            },
+                        )
                     self._queue_project_state_communication_obligation(
                         project_id=project_id,
-                        state_event="validated" if is_valid else "validation_failed_needs_repair",
+                        state_event="validated" if (is_valid and actually_completed) else ("support_deficit_detected" if (is_valid and support_missing) else "validation_failed_needs_repair"),
                         sim_state=sim_state,
                         include_rules=missing_rules,
-                        detail={"status": project.get("status"), "decision_action": action.get("decision_action")},
+                        detail={
+                            "status": project.get("status"),
+                            "decision_action": action.get("decision_action"),
+                            "missing_support": dict(support_missing),
+                        },
                         priority="high",
                     )
-                    if is_valid:
+                    if actually_completed:
                         self._clear_project_closure_commitment(
                             sim_state=sim_state,
                             environment=environment,
