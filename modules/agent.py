@@ -4735,8 +4735,6 @@ class Agent:
         action_type = decision.selected_action
         if action_type in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION}:
             blockers.extend(self._build_readiness_blockers(environment, sim_state=sim_state))
-            if not epistemic.get("sufficient_for_construction", False):
-                blockers.append("epistemic_sufficiency_low_for_construction")
             if self.current_plan is not None and self.current_plan.plan_method_status == "low_trust":
                 notes = set(self.current_plan.validation_notes or [])
                 if any(n.startswith("missing_") for n in notes):

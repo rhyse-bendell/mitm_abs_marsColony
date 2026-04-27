@@ -159,6 +159,20 @@ class ConstructionManager:
                 "expected_rules": [normalize_rule_token("rule:water_generator_2x2")],
                 "required": int(self.parameters["water_generator_cost"]),
             },
+            "template_food_connector": {
+                "name": "Food Connector",
+                "type": "food_connector",
+                "artifact_type": "food_connector_construction",
+                "expected_rules": [normalize_rule_token("rule:food_connector_attached")],
+                "required": 4,
+            },
+            "template_water_connector": {
+                "name": "Water Connector",
+                "type": "water_connector",
+                "artifact_type": "water_connector_construction",
+                "expected_rules": [normalize_rule_token("rule:water_connector_attached")],
+                "required": 4,
+            },
         }
         templates = {}
         if self.task_model and getattr(self.task_model, "construction_templates", None):
@@ -173,6 +187,11 @@ class ConstructionManager:
                 }
                 templates[template_key] = templates.pop(template.project_id)
         if templates:
+            existing_types = {str(v.get("type") or "").strip().lower() for v in templates.values()}
+            for key, row in defaults.items():
+                row_type = str(row.get("type") or "").strip().lower()
+                if row_type not in existing_types:
+                    templates[key] = dict(row)
             return templates
         for key, row in defaults.items():
             templates[key] = dict(row)
@@ -226,6 +245,8 @@ class ConstructionManager:
         expected_rules = [normalize_rule_token(r) for r in template.get("expected_rules", []) if normalize_rule_token(r)]
         required = max(1, int(template.get("required", 1)))
         canonical_target_id = str(target_id or self.SITE_TO_BUILD_TARGET.get(site_id, ""))
+        support_requirements = self._default_support_requirements(resolved_structure_type)
+        support_counts = {support_type: 0 for support_type in support_requirements}
         project = {
             "id": project_id,
             "name": str(template.get("name") or f"{resolved_structure_type.replace('_', ' ').title()} at {self.sites[site_id].label}"),
@@ -250,6 +271,10 @@ class ConstructionManager:
                 for idx, component in enumerate(self._project_component_templates({"type": resolved_structure_type}))
             ],
             "connections": [],
+            "support_requirements": support_requirements,
+            "support_counts": support_counts,
+            "support_status": {support_type: False for support_type in support_requirements},
+            "functional_support_complete": len(support_requirements) == 0,
             "epistemic_workspace": {
                 "candidate_claim": f"{template.get('name') or resolved_structure_type} meets mission constraints",
                 "entries": [],
@@ -285,6 +310,12 @@ class ConstructionManager:
         project["validation_discussion"] = self._default_validation_discussion(project)
         self.projects[project_id] = project
         return project_id, "created"
+
+    def _default_support_requirements(self, structure_type):
+        stype = str(structure_type or "").strip().lower()
+        if stype in {"house", "housing"}:
+            return {"water": 1, "food": 1}
+        return {}
 
     def _default_validation_discussion(self, project):
         project_id = str((project or {}).get("id") or "")
@@ -454,8 +485,36 @@ class ConstructionManager:
             "housing": ["place_housing_floor", "place_housing_wall_or_ceiling", "place_airlock"],
             "greenhouse": ["place_greenhouse_soil", "place_greenhouse_cover", "place_food_connector"],
             "water_generator": ["place_water_generator_foundation", "place_water_generator_body", "cap_water_generator", "place_water_connector"],
+            "food_connector": ["place_food_connector_base", "seal_food_connector"],
+            "water_connector": ["place_water_connector_base", "seal_water_connector"],
         }
         return list(templates.get(structure_type, [f"place_{structure_type or 'structure'}_core"]))
+
+    def recompute_support_status(self, project_id):
+        project = self.projects.get(str(project_id or ""))
+        if not isinstance(project, dict):
+            return False
+        requirements = dict(project.get("support_requirements") or {})
+        counts = dict(project.get("support_counts") or {})
+        status = {}
+        for support_type, needed in requirements.items():
+            status[support_type] = int(counts.get(support_type, 0) or 0) >= max(0, int(needed or 0))
+        project["support_status"] = status
+        project["functional_support_complete"] = all(status.values()) if status else True
+        return bool(project["functional_support_complete"])
+
+    def get_structure_support_summary(self, project_id):
+        project = self.projects.get(str(project_id or ""))
+        if not isinstance(project, dict):
+            return {}
+        self.recompute_support_status(project_id)
+        return {
+            "project_id": project.get("id"),
+            "required": dict(project.get("support_requirements") or {}),
+            "counts": dict(project.get("support_counts") or {}),
+            "status": dict(project.get("support_status") or {}),
+            "functional_support_complete": bool(project.get("functional_support_complete", False)),
+        }
 
     def _required_epistemic_entries(self, project):
         required = {"claim", "evidence"}
@@ -596,6 +655,7 @@ class ConstructionManager:
             project["build_ready"] = required > 0 and staged >= required
             project["structurally_complete"] = self._project_physical_completeness(project)
             project["epistemically_supported"] = self._project_epistemic_completeness(project)
+            self.recompute_support_status(project.get("id"))
             self._recompute_project_progress(project)
             if not project.get("started"):
                 project["status"] = "not_started"
@@ -720,8 +780,42 @@ class ConstructionManager:
                 }
             )
         self.update()
+        self._record_build_step_externalization(
+            resolved_id,
+            step_component=str(step.get("component") or ""),
+            actor=actor,
+            sim_time=sim_time,
+        )
         self.update_project_provenance(resolved_id, event="project_build_step_completed", actor=actor, sim_time=sim_time)
         return True, "build_step_completed", dict(step)
+
+    def _record_build_step_externalization(self, project_id, *, step_component, actor=None, sim_time=None):
+        project = self.projects.get(str(project_id or ""))
+        if not isinstance(project, dict):
+            return
+        provenance = dict(project.get("provenance") or {})
+        held_rules = list(provenance.get("held_rule_ids_at_build") or [])
+        expected_rules = list(project.get("expected_rules") or [])
+        relevant_rules = sorted(
+            {
+                normalize_rule_token(rule_id)
+                for rule_id in held_rules + expected_rules
+                if normalize_rule_token(rule_id)
+            }
+        )[:4]
+        rule_note = f" with rules {', '.join(relevant_rules)}" if relevant_rules else ""
+        note = (
+            f"{project.get('type')} build step '{step_component}' completed by {actor or 'unknown'}"
+            f"{rule_note}."
+        )
+        self.record_project_epistemic_externalization(
+            project_id,
+            entry_type="design_note",
+            note=note,
+            references=relevant_rules,
+            actor=actor,
+            sim_time=sim_time,
+        )
 
     def record_project_epistemic_externalization(self, project_id, *, entry_type, note=None, references=None, actor=None, sim_time=None):
         resolved_id = self.resolve_project_id(project_id, create_if_missing=True)
@@ -802,7 +896,8 @@ class ConstructionManager:
             )
             return
         project["correct"] = True
-        if project.get("structurally_complete") and project.get("epistemically_supported"):
+        support_ready = self.recompute_support_status(project_id)
+        if project.get("structurally_complete") and project.get("epistemically_supported") and support_ready:
             project["validated_complete"] = True
             project["status"] = "complete"
             project["in_progress"] = False
@@ -926,6 +1021,53 @@ class ConstructionManager:
             }
         )
         return True, connector_id
+
+    def attach_connector(self, connector_project_id, *, from_project_id, to_project_id, actor=None, sim_time=None):
+        connector_id = str(connector_project_id or "")
+        connector = self.projects.get(connector_id)
+        if not isinstance(connector, dict):
+            return False, "connector_project_not_found"
+        connector_type = str(connector.get("type") or "").strip().lower()
+        if connector_type not in {"food_connector", "water_connector"}:
+            return False, "unsupported_connector_type"
+        start_id = self.resolve_project_id(from_project_id, create_if_missing=False)
+        end_id = self.resolve_project_id(to_project_id, create_if_missing=False)
+        if not start_id or not end_id:
+            return False, "unknown_structure_reference"
+        start_project = self.projects.get(start_id)
+        end_project = self.projects.get(end_id)
+        if not isinstance(start_project, dict) or not isinstance(end_project, dict):
+            return False, "project_not_found"
+        support_type = "water" if connector_type == "water_connector" else "food"
+        expected_pair = {"house", "housing", "water_generator"} if support_type == "water" else {"house", "housing", "greenhouse"}
+        endpoint_types = {str(start_project.get("type") or ""), str(end_project.get("type") or "")}
+        if not endpoint_types.issubset(expected_pair) or not {"house", "housing"}.intersection(endpoint_types):
+            return False, "invalid_connector_endpoint_types"
+        links = connector.setdefault("connections", [])
+        link_payload = {
+            "connection_id": f"{connector_id}:link:{len(links)+1}",
+            "connection_type": support_type,
+            "from_project_id": start_id,
+            "to_project_id": end_id,
+            "added_by": actor,
+            "added_at": sim_time,
+        }
+        links.append(link_payload)
+        self.connectors.append({"connector_project_id": connector_id, **link_payload})
+        start_project.setdefault("connections", []).append({"via_connector_project_id": connector_id, **link_payload})
+        end_project.setdefault("connections", []).append({"via_connector_project_id": connector_id, **link_payload})
+        for house_id in {start_id, end_id}:
+            candidate = self.projects.get(house_id)
+            if not isinstance(candidate, dict):
+                continue
+            if str(candidate.get("type") or "") not in {"house", "housing"}:
+                continue
+            counts = dict(candidate.get("support_counts") or {})
+            counts[support_type] = int(counts.get(support_type, 0) or 0) + 1
+            candidate["support_counts"] = counts
+            self.recompute_support_status(house_id)
+        self.update_project_provenance(connector_id, event="connector_attached", actor=actor, sim_time=sim_time)
+        return True, "attached"
 
     def build_bridge_bc(self, quantity=1):
         bridge = self.bridges["bridge_bc"]
