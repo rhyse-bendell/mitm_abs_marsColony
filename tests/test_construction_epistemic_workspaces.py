@@ -172,6 +172,91 @@ class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
         self.assertTrue(summary["functional_support_complete"])
         sim.stop()
 
+    def test_missing_support_requirements_reports_food_and_water_deficits(self):
+        sim = SimulationState(phases=[])
+        cm = sim.environment.construction
+        house_id, _ = cm.create_project("site_b", structure_type="house")
+        missing = cm.get_missing_support_requirements(house_id)
+        self.assertEqual(missing.get("food"), 1)
+        self.assertEqual(missing.get("water"), 1)
+        sim.stop()
+
+    def test_support_deficit_produces_connector_project_need(self):
+        sim = SimulationState(phases=[])
+        cm = sim.environment.construction
+        house_id, _ = cm.create_project("site_b", structure_type="house")
+        missing = cm.get_missing_support_requirements(house_id)
+        self.assertIn("water", missing)
+        connector_id = cm.find_attachable_connector(house_id, "water")
+        self.assertIsNone(connector_id)
+        created_id, reason = cm.find_or_create_connector_project("site_b", "water", author="test")
+        self.assertTrue(created_id)
+        self.assertIn(reason, {"created", "exists"})
+        sim.stop()
+
+    def test_food_connector_chain_can_resolve_house_support(self):
+        sim = SimulationState(phases=[])
+        cm = sim.environment.construction
+        house_id, _ = cm.create_project("site_b", structure_type="house")
+        provider_id, _ = cm.create_project("site_b", structure_type="greenhouse")
+        connector_id, _ = cm.create_project("site_b", structure_type="food_connector")
+        for project_id in [provider_id, connector_id]:
+            project = cm.projects[project_id]
+            cm.deliver_resource(project_id, "bricks", quantity=int(project["required_resources"]["bricks"]))
+            for _ in range(len(project["build_steps"])):
+                cm.execute_build_step(project_id, actor="Architect", sim_time=2.0)
+        ok, reason = cm.attach_connector(connector_id, from_project_id=house_id, to_project_id=provider_id, actor="Architect", sim_time=3.0)
+        self.assertTrue(ok, reason)
+        summary = cm.get_structure_support_summary(house_id)
+        self.assertGreaterEqual(summary["counts"].get("food", 0), 1)
+        sim.stop()
+
+    def test_water_connector_chain_can_resolve_house_support(self):
+        sim = SimulationState(phases=[])
+        cm = sim.environment.construction
+        house_id, _ = cm.create_project("site_b", structure_type="house")
+        provider_id, _ = cm.create_project("site_b", structure_type="water_generator")
+        connector_id, _ = cm.create_project("site_b", structure_type="water_connector")
+        for project_id in [provider_id, connector_id]:
+            project = cm.projects[project_id]
+            cm.deliver_resource(project_id, "bricks", quantity=int(project["required_resources"]["bricks"]))
+            for _ in range(len(project["build_steps"])):
+                cm.execute_build_step(project_id, actor="Architect", sim_time=2.0)
+        ok, reason = cm.attach_connector(connector_id, from_project_id=house_id, to_project_id=provider_id, actor="Architect", sim_time=3.0)
+        self.assertTrue(ok, reason)
+        summary = cm.get_structure_support_summary(house_id)
+        self.assertGreaterEqual(summary["counts"].get("water", 0), 1)
+        sim.stop()
+
+    def test_house_can_validate_after_support_connectors_attached(self):
+        sim = SimulationState(phases=[])
+        cm = sim.environment.construction
+        house_id, _ = cm.create_project("site_b", structure_type="house")
+        house = cm.projects[house_id]
+        cm.deliver_resource(house_id, "bricks", quantity=int(house["required_resources"]["bricks"]))
+        for _ in range(len(house["build_steps"])):
+            cm.execute_build_step(house_id, actor="Architect", sim_time=1.0)
+        cm.record_project_epistemic_externalization(house_id, entry_type="claim", note="claim", actor="Architect", sim_time=1.1)
+        cm.record_project_epistemic_externalization(house_id, entry_type="evidence", note="evidence", actor="Architect", sim_time=1.2)
+        cm.record_project_epistemic_externalization(house_id, entry_type="design_note", note="design", actor="Architect", sim_time=1.3)
+
+        greenhouse_id, _ = cm.create_project("site_b", structure_type="greenhouse")
+        food_connector_id, _ = cm.create_project("site_b", structure_type="food_connector")
+        water_id, _ = cm.create_project("site_b", structure_type="water_generator")
+        water_connector_id, _ = cm.create_project("site_b", structure_type="water_connector")
+        for project_id in [greenhouse_id, food_connector_id, water_id, water_connector_id]:
+            project = cm.projects[project_id]
+            cm.deliver_resource(project_id, "bricks", quantity=int(project["required_resources"]["bricks"]))
+            for _ in range(len(project["build_steps"])):
+                cm.execute_build_step(project_id, actor="Architect", sim_time=2.0)
+        self.assertTrue(cm.attach_connector(food_connector_id, from_project_id=house_id, to_project_id=greenhouse_id, actor="Architect", sim_time=3.0)[0])
+        self.assertTrue(cm.attach_connector(water_connector_id, from_project_id=house_id, to_project_id=water_id, actor="Architect", sim_time=3.1)[0])
+        self.assertTrue(cm.get_structure_support_summary(house_id)["functional_support_complete"])
+        cm.mark_validated(house_id, is_valid=True, actor="Architect", sim_time=4.0)
+        self.assertTrue(house["validated_complete"])
+        self.assertEqual(house["status"], "complete")
+        sim.stop()
+
 
 if __name__ == "__main__":
     unittest.main()
