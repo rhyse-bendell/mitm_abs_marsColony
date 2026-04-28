@@ -10064,6 +10064,89 @@ class Agent:
             elif stage in {"mutation_execution_blocked", "terminally_blocked"}:
                 self._emit_event(sim_state, "action_execution_failed", payload)
 
+        def _validate_and_repair_transport_target_binding(action, *, project_id, pickup_lookup):
+            state = self.transport_state
+            stage = str(state.get("stage") or "pickup")
+            pickup_source_id = state.get("pickup_source_id")
+            current_target_position = action.get("target")
+            current_target_id = action.get("target_id")
+            current_target_kind = action.get("target_kind")
+
+            expected_target_id = None
+            expected_target_kind = None
+            expected_target_position = None
+            reason = None
+            if stage == "pickup":
+                expected_target_id = pickup_source_id
+                expected_target_kind = "pickup"
+                expected_target_position = pickup_lookup.get(pickup_source_id) if pickup_source_id else None
+                if expected_target_position is None:
+                    reason = "missing_pickup_source_position"
+            else:
+                expected_target_id = project_id
+                expected_target_kind = "dropoff"
+                expected_target_position = _build_target(project_id) if project_id else None
+                if expected_target_position is None:
+                    reason = "missing_dropoff_target_position"
+
+            payload = {
+                "agent": self.name,
+                "agent_id": self.agent_id,
+                "project_id": project_id,
+                "stage": stage,
+                "pickup_source_id": pickup_source_id,
+                "current_target_id": current_target_id,
+                "current_target_kind": current_target_kind,
+                "current_target_position": current_target_position,
+                "expected_target_id": expected_target_id,
+                "expected_target_kind": expected_target_kind,
+                "expected_target_position": expected_target_position,
+                "repair_applied": False,
+                "reason": reason or "validated",
+            }
+
+            checked_signature = (project_id, stage, pickup_source_id)
+            if action.get("_transport_target_binding_checked_signature") != checked_signature:
+                action["_transport_target_binding_checked_signature"] = checked_signature
+                self._emit_event(sim_state, "transport_target_binding_checked", dict(payload))
+
+            if reason is not None:
+                self._emit_event(sim_state, "transport_target_binding_invariant_failed", dict(payload))
+                return False
+
+            mismatch = (
+                current_target_id != expected_target_id
+                or current_target_kind != expected_target_kind
+                or tuple(current_target_position or ()) != tuple(expected_target_position or ())
+            )
+            if not mismatch:
+                if self.target is None or tuple(self.target) != tuple(expected_target_position):
+                    self.target = expected_target_position
+                return True
+
+            action["target"] = expected_target_position
+            action["target_id"] = expected_target_id
+            action["target_kind"] = expected_target_kind
+            self.target = expected_target_position
+            nav = self.navigation if isinstance(self.navigation, dict) else {}
+            if tuple(nav.get("path_target") or ()) != tuple(expected_target_position or ()):
+                nav["active_path"] = []
+                nav["path_target"] = None
+                nav["path_index"] = 0
+
+            payload.update(
+                {
+                    "repair_applied": True,
+                    "reason": "target_binding_mismatch",
+                }
+            )
+            self._emit_event(sim_state, "transport_target_binding_repaired", dict(payload))
+            if stage == "pickup":
+                self._emit_event(sim_state, "transport_pickup_target_mismatch_repaired", dict(payload))
+            else:
+                self._emit_event(sim_state, "transport_dropoff_target_mismatch_repaired", dict(payload))
+            return True
+
         def _location_ready(action, target_id):
             if not target_id:
                 return True, {"accessible": True, "reason": "no_target_binding"}
@@ -10906,7 +10989,14 @@ class Agent:
                         )[0]
                         state["pickup_source_id"] = pickup_id
                         action["target"] = pickup_lookup[pickup_id]
-                        self.target = action["target"]
+                        action["target_id"] = pickup_id
+                        action["target_kind"] = "pickup"
+                    if not _validate_and_repair_transport_target_binding(
+                        action,
+                        project_id=project_id,
+                        pickup_lookup=pickup_lookup,
+                    ):
+                        continue
                     pickup_pos = pickup_lookup.get(pickup_id)
                     if pickup_pos is None:
                         continue
@@ -10928,6 +11018,12 @@ class Agent:
                     )
                     continue
 
+                if not _validate_and_repair_transport_target_binding(
+                    action,
+                    project_id=project_id,
+                    pickup_lookup=pickup_lookup,
+                ):
+                    continue
                 ready, access = _location_ready(action, project_id)
                 expected_location = _build_target(project_id)
                 if not ready:
