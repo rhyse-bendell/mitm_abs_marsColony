@@ -82,6 +82,32 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         self.assertIn("rule:R_RULE_X", set(request.get("content", [])))
         sim.stop()
 
+    def test_validation_blocker_path_accepts_project_embedded_rule_evidence(self):
+        sim = SimulationState(phases=[])
+        owner = sim.agents[0]
+        project_id = sim.environment.construction.resolve_project_id("Build_Table_B", create_if_missing=True)
+        project = sim.environment.construction.projects[project_id]
+        project["status"] = "ready_for_validation"
+        project["expected_rules"] = ["R_HOUSE_VALIDITY"]
+        self._prime_readiness_without_rules(sim, owner)
+        sim.environment.construction.record_project_epistemic_externalization(
+            project_id,
+            entry_type="evidence",
+            note="project embeds house validity support",
+            references=["rule:house_enclosed"],
+            actor="Architect",
+            sim_time=sim.time,
+        )
+        blockers, _ = owner._construction_action_blockers(
+            BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=project_id, confidence=0.9),
+            {"project_id": project_id},
+            sim.environment,
+            sim_state=sim,
+        )
+        self.assertNotIn("missing_validation_rule_knowledge", blockers)
+        self.assertNotIn("missing_expected_rule:R_HOUSE_VALIDITY", blockers)
+        sim.stop()
+
     def test_repeated_unchanged_closure_repair_emits_stalled_and_stops_refresh(self):
         sim = SimulationState(phases=[])
         owner = sim.agents[0]
