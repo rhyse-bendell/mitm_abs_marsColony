@@ -4525,6 +4525,7 @@ class Agent:
         support_rule_ids.update({normalize_rule_token(r) for r in (team_rules or set()) if normalize_rule_token(r)})
         provenance = (project or {}).get("provenance") or {}
         support_rule_ids.update({normalize_rule_token(r) for r in provenance.get("held_rule_ids_at_build", []) if normalize_rule_token(r)})
+        support_rule_ids.update({normalize_rule_token(r) for r in provenance.get("team_rule_snapshot_ids", []) if normalize_rule_token(r)})
         workspace = dict((project or {}).get("epistemic_workspace") or {})
         for entry in list(workspace.get("entries") or []):
             refs = list((entry or {}).get("references") or [])
@@ -4555,6 +4556,18 @@ class Agent:
             team_rules = {normalize_rule_token(r) for r in team_rule_ids if normalize_rule_token(r)}
         held_rules = local_rules | team_rules
         semantic_support = self._project_semantic_support_rule_ids(project, local_rules=local_rules, team_rules=team_rules)
+        construction = getattr(environment, "construction", None) if environment is not None else None
+        if construction is None and sim_state is not None:
+            construction = getattr(getattr(sim_state, "environment", None), "construction", None)
+        if construction is not None and hasattr(construction, "get_project_rule_evidence"):
+            evidence = construction.get_project_rule_evidence(project_id)
+            semantic_support.update(
+                {
+                    normalize_rule_token(r)
+                    for r in (evidence or {}).get("supported_rules", [])
+                    if normalize_rule_token(r)
+                }
+            )
         semantic_classes = {self._rule_dependency_support_class(r) for r in semantic_support if self._rule_dependency_support_class(r)}
         missing = []
         semantically_satisfied = []

@@ -2,3 +2,5 @@ project_id,name,structure_type,target_id,location_x,location_y,required_resource
 template_house,House Structure Archetype,house,,0,0,"{""bricks"": 10}",R_HOUSE_VALIDITY,house_construction,True
 template_greenhouse,Greenhouse Structure Archetype,greenhouse,,0,0,"{""bricks"": 10}",R_GREENHOUSE_SUPPORT_DEPENDENCY,greenhouse_construction,True
 template_water_generator,Water Generator Structure Archetype,water_generator,,0,0,"{""bricks"": 10}",R_WATERGEN_VALIDITY,water_generator_construction,True
+template_food_connector,Food Connector Structure Archetype,food_connector,,0,0,"{""bricks"": 4}",R_CONNECTOR_REQUIRED_FOR_FLOW,food_connector_construction,True
+template_water_connector,Water Connector Structure Archetype,water_connector,,0,0,"{""bricks"": 4}",R_CONNECTOR_REQUIRED_FOR_FLOW,water_connector_construction,True

@@ -135,6 +135,62 @@ class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
         self.assertEqual(int(water_template["required"]), 4)
         self.assertTrue(food_template["artifact_type"].startswith("food_connector"))
         self.assertTrue(water_template["artifact_type"].startswith("water_connector"))
+        self.assertEqual(["R_CONNECTOR_REQUIRED_FOR_FLOW"], food_template["expected_rules"])
+        self.assertEqual(["R_CONNECTOR_REQUIRED_FOR_FLOW"], water_template["expected_rules"])
+        sim.stop()
+
+    def test_workspace_and_provenance_rule_references_are_normalized(self):
+        sim = SimulationState(phases=[])
+        cm = sim.environment.construction
+        project_id, _ = self._ensure_project(sim, "Build_Site_B")
+        cm.record_project_epistemic_externalization(
+            project_id,
+            entry_type="design_note",
+            note="connector attached",
+            references=["rule:rule:food_connector_attached"],
+            actor="Architect",
+            sim_time=1.0,
+        )
+        cm.update_project_provenance(
+            project_id,
+            event="unit",
+            held_rule_ids=["rule:rule:water_connector_attached"],
+            team_rule_snapshot_ids=[" rule:food_connector_attached "],
+            sim_time=1.1,
+        )
+        project = cm.projects[project_id]
+        refs = project["epistemic_workspace"]["entries"][-1]["references"]
+        self.assertEqual(["R_CONNECTOR_REQUIRED_FOR_FLOW"], refs)
+        self.assertEqual(["R_CONNECTOR_REQUIRED_FOR_FLOW"], project["provenance"]["held_rule_ids_at_build"])
+        self.assertEqual(["R_CONNECTOR_REQUIRED_FOR_FLOW"], project["provenance"]["team_rule_snapshot_ids"])
+        sim.stop()
+
+    def test_project_rule_evidence_aggregates_workspace_provenance_and_discussion(self):
+        sim = SimulationState(phases=[])
+        cm = sim.environment.construction
+        project_id, project = self._ensure_project(sim, "Build_Site_B")
+        project["expected_rules"] = ["R_HOUSE_VALIDITY"]
+        cm.record_project_epistemic_externalization(
+            project_id,
+            entry_type="evidence",
+            note="house rule support",
+            references=["rule:rule:house_enclosed"],
+            actor="Architect",
+            sim_time=1.0,
+        )
+        cm.update_project_provenance(project_id, event="unit", held_rule_ids=["R_HOUSE_VALIDITY"], sim_time=1.1)
+        cm.record_validation_dialogue_event(
+            project_id,
+            event_type="validation_support_externalized",
+            actor="Architect",
+            payload={"references": ["rule:house_enclosed"]},
+            sim_time=1.2,
+        )
+        evidence = cm.get_project_rule_evidence(project_id)
+        self.assertEqual(["R_HOUSE_VALIDITY"], evidence["expected_rules"])
+        self.assertIn("R_HOUSE_VALIDITY", evidence["supported_rules"])
+        self.assertEqual([], evidence["missing_expected_rules"])
+        self.assertIn("R_HOUSE_VALIDITY", evidence["evidence_by_rule"])
         sim.stop()
 
     def test_house_support_gates_validation_completion(self):
