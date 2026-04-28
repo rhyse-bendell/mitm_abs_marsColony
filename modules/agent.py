@@ -4743,6 +4743,8 @@ class Agent:
                 blockers.append("project_already_complete")
         elif action_type == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION:
             blockers.extend(self._build_readiness_blockers(environment, sim_state=sim_state))
+            if bool(project.get("support_deficit_active")) and str(project.get("type") or "") in {"house", "housing"}:
+                blockers.append("support_dependency_chain_active")
             if not epistemic.get("sufficient_for_validation", False):
                 blockers.append("epistemic_sufficiency_low_for_repair")
             mismatch_detected = (project.get("correct", True) is False) or any(
@@ -4875,20 +4877,63 @@ class Agent:
         if construction is None:
             return None
         target_project_id = str(decision.target_id or "")
-        if not target_project_id:
-            live_closure = self._live_project_closure_commitment(environment, sim_state=sim_state)
-            target_project_id = str(live_closure or "")
-        project = construction.projects.get(target_project_id)
+        candidate_ids = []
+        if target_project_id:
+            candidate_ids.append(target_project_id)
+        live_closure = self._live_project_closure_commitment(environment, sim_state=sim_state)
+        if live_closure:
+            candidate_ids.append(str(live_closure))
+
+        active_support_houses = []
+        for candidate in construction.projects.values():
+            if not isinstance(candidate, dict):
+                continue
+            if str(candidate.get("type") or "") not in {"house", "housing"}:
+                continue
+            if not bool(candidate.get("support_deficit_active")):
+                continue
+            active_support_houses.append(str(candidate.get("id") or ""))
+        candidate_ids.extend(active_support_houses)
+
+        deduped_ids = []
+        seen = set()
+        for pid in candidate_ids:
+            if pid and pid not in seen:
+                seen.add(pid)
+                deduped_ids.append(pid)
+
+        target_project_id = ""
+        project = None
+        missing = {}
+        for candidate_id in deduped_ids:
+            candidate = construction.projects.get(candidate_id)
+            if not isinstance(candidate, dict):
+                continue
+            if str(candidate.get("type") or "") not in {"house", "housing"}:
+                continue
+            structurally_relevant = bool(candidate.get("structurally_complete")) or bool(candidate.get("validation_attempted"))
+            if not structurally_relevant:
+                continue
+            candidate_missing = construction.get_missing_support_requirements(candidate_id)
+            if not candidate_missing or bool(candidate.get("functional_support_complete", False)):
+                continue
+            target_project_id = candidate_id
+            project = candidate
+            missing = candidate_missing
+            break
         if not isinstance(project, dict):
             return None
-        if str(project.get("type") or "") not in {"house", "housing"}:
-            return None
-        structurally_relevant = bool(project.get("structurally_complete")) or bool(project.get("validation_attempted"))
-        if not structurally_relevant:
-            return None
-        missing = construction.get_missing_support_requirements(target_project_id)
-        if not missing or bool(project.get("functional_support_complete", False)):
-            return None
+
+        self._emit_event(
+            sim_state,
+            "support_dependency_chain_evaluated",
+            {
+                "origin": pivot_origin,
+                "project_id": target_project_id,
+                "decision_target_id": decision.target_id,
+                "missing_support": dict(missing),
+            },
+        )
         self._emit_event(
             sim_state,
             "support_deficit_detected",
@@ -4936,11 +4981,41 @@ class Agent:
         provider = construction.projects.get(str(provider_project_id or ""))
         if isinstance(provider, dict):
             if self._project_needs_transport(provider):
+                self._emit_event(
+                    sim_state,
+                    "support_dependency_chain_advanced",
+                    {"origin": pivot_origin, "project_id": target_project_id, "support_type": support_type, "stage": "provider_transport", "provider_project_id": provider_project_id},
+                )
                 return BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES, target_id=provider_project_id, confidence=max(0.82, float(decision.confidence or 0.0)))
             if self._project_materially_ready_for_build(provider) and self._project_has_incomplete_build_steps(provider):
+                self._emit_event(
+                    sim_state,
+                    "support_dependency_chain_advanced",
+                    {"origin": pivot_origin, "project_id": target_project_id, "support_type": support_type, "stage": "provider_construction", "provider_project_id": provider_project_id},
+                )
                 return BrainDecision(selected_action=ExecutableActionType.START_CONSTRUCTION, target_id=provider_project_id, confidence=max(0.82, float(decision.confidence or 0.0)))
 
-        connector_project_id = construction.find_attachable_connector(target_project_id, support_type)
+        if not isinstance(provider, dict):
+            self._emit_event(
+                sim_state,
+                "support_dependency_chain_blocked",
+                {"origin": pivot_origin, "project_id": target_project_id, "support_type": support_type, "reason": "provider_unavailable"},
+            )
+            return None
+        if not bool(provider.get("structurally_complete")):
+            self._emit_event(
+                sim_state,
+                "support_dependency_chain_blocked",
+                {"origin": pivot_origin, "project_id": target_project_id, "support_type": support_type, "reason": "provider_not_structurally_complete", "provider_project_id": provider_project_id},
+            )
+            return None
+        self._emit_event(
+            sim_state,
+            "support_provider_ready_for_connector",
+            {"origin": pivot_origin, "project_id": target_project_id, "support_type": support_type, "provider_project_id": provider_project_id},
+        )
+
+        connector_project_id = construction.find_connector_project(project_id=target_project_id, support_type=support_type, include_complete=True)
         if connector_project_id:
             self._emit_event(
                 sim_state,
@@ -4967,10 +5042,25 @@ class Agent:
         connector = construction.projects.get(str(connector_project_id or ""))
         if isinstance(connector, dict):
             if self._project_needs_transport(connector):
+                self._emit_event(
+                    sim_state,
+                    "support_dependency_chain_advanced",
+                    {"origin": pivot_origin, "project_id": target_project_id, "support_type": support_type, "stage": "connector_transport", "connector_project_id": connector_project_id},
+                )
                 return BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES, target_id=connector_project_id, confidence=max(0.84, float(decision.confidence or 0.0)))
             if self._project_materially_ready_for_build(connector) and self._project_has_incomplete_build_steps(connector):
+                self._emit_event(
+                    sim_state,
+                    "support_dependency_chain_advanced",
+                    {"origin": pivot_origin, "project_id": target_project_id, "support_type": support_type, "stage": "connector_construction", "connector_project_id": connector_project_id},
+                )
                 return BrainDecision(selected_action=ExecutableActionType.START_CONSTRUCTION, target_id=connector_project_id, confidence=max(0.84, float(decision.confidence or 0.0)))
             if bool(connector.get("structurally_complete")) and isinstance(provider, dict) and bool(provider.get("structurally_complete")):
+                self._emit_event(
+                    sim_state,
+                    "connector_project_ready_for_attachment",
+                    {"origin": pivot_origin, "project_id": target_project_id, "connector_project_id": connector_project_id, "provider_project_id": provider_project_id, "support_type": support_type},
+                )
                 self._emit_event(
                     sim_state,
                     "connector_attachment_attempted",
@@ -4995,14 +5085,36 @@ class Agent:
                         "connector_attachment_failed",
                         {"origin": pivot_origin, "project_id": target_project_id, "connector_project_id": connector_project_id, "provider_project_id": provider_project_id, "support_type": support_type, "reason": attach_reason},
                     )
-                if construction.get_missing_support_requirements(target_project_id):
+                remaining_missing = construction.get_missing_support_requirements(target_project_id)
+                if remaining_missing:
+                    self._emit_event(
+                        sim_state,
+                        "support_dependency_chain_advanced",
+                        {"origin": pivot_origin, "project_id": target_project_id, "support_type": support_type, "stage": "support_still_missing", "remaining_support": dict(remaining_missing)},
+                    )
                     return BrainDecision(selected_action=ExecutableActionType.START_CONSTRUCTION, target_id=connector_project_id, confidence=max(0.76, float(decision.confidence or 0.0)))
                 self._emit_event(
                     sim_state,
                     "support_deficit_resolved",
                     {"origin": pivot_origin, "project_id": target_project_id, "support_type": support_type},
                 )
+                self._emit_event(
+                    sim_state,
+                    "support_dependency_chain_advanced",
+                    {"origin": pivot_origin, "project_id": target_project_id, "support_type": support_type, "stage": "house_revalidation"},
+                )
                 return BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=target_project_id, confidence=max(0.86, float(decision.confidence or 0.0)))
+            self._emit_event(
+                sim_state,
+                "support_dependency_chain_blocked",
+                {"origin": pivot_origin, "project_id": target_project_id, "support_type": support_type, "reason": "connector_not_actionable", "connector_project_id": connector_project_id},
+            )
+            return None
+        self._emit_event(
+            sim_state,
+            "support_dependency_chain_blocked",
+            {"origin": pivot_origin, "project_id": target_project_id, "support_type": support_type, "reason": "connector_unavailable"},
+        )
         return None
 
     def _execution_lock_active_for_project(self, project_id=None):

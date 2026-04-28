@@ -556,51 +556,58 @@ class ConstructionManager:
         return candidates[0].get("id")
 
     def find_or_create_connector_project(self, site_id, support_type, author="system"):
+        connector_type = self._connector_type_for_support(support_type)
+        if not connector_type:
+            return None, "unsupported_support_type"
+        existing = self.find_connector_project(site_id=site_id, support_type=support_type, include_complete=False)
+        existing_project = self.projects.get(str(existing or ""))
+        if isinstance(existing_project, dict):
+            return existing_project.get("id"), "exists"
+        return self.create_project(site_id, structure_type=connector_type, author=author)
+
+    def _connector_type_for_support(self, support_type):
         support_type_norm = str(support_type or "").strip().lower()
-        connector_type = {
+        return {
             "water": "water_connector",
             "food": "food_connector",
         }.get(support_type_norm)
-        if not connector_type:
-            return None, "unsupported_support_type"
-        existing = [
-            p for p in self.projects.values()
-            if isinstance(p, dict)
-            and p.get("site_id") == site_id
-            and str(p.get("type") or "").strip().lower() == connector_type
-            and str(p.get("status") or "") != "complete"
-        ]
-        if existing:
-            existing.sort(key=lambda p: (0 if bool(p.get("started")) else 1, str(p.get("id") or "")))
-            return existing[0].get("id"), "exists"
-        return self.create_project(site_id, structure_type=connector_type, author=author)
 
-    def find_attachable_connector(self, project_id, support_type):
-        anchor = self.projects.get(str(project_id or ""))
-        if not isinstance(anchor, dict):
-            return None
-        site_id = anchor.get("site_id")
-        support_type_norm = str(support_type or "").strip().lower()
-        connector_type = "water_connector" if support_type_norm == "water" else "food_connector" if support_type_norm == "food" else None
+    def find_connector_project(self, *, support_type, project_id=None, site_id=None, include_complete=True):
+        connector_type = self._connector_type_for_support(support_type)
         if not connector_type:
+            return None
+        resolved_site = str(site_id or "")
+        if not resolved_site and project_id:
+            anchor = self.projects.get(str(project_id or ""))
+            if isinstance(anchor, dict):
+                resolved_site = str(anchor.get("site_id") or "")
+        if not resolved_site:
             return None
         candidates = [
             p for p in self.projects.values()
             if isinstance(p, dict)
-            and p.get("site_id") == site_id
+            and p.get("site_id") == resolved_site
             and str(p.get("type") or "").strip().lower() == connector_type
-            and str(p.get("status") or "") != "complete"
+            and (include_complete or str(p.get("status") or "") != "complete")
         ]
-        if not candidates:
-            return None
-        candidates.sort(
-            key=lambda p: (
-                0 if bool(p.get("structurally_complete")) else 1,
-                0 if bool(p.get("resource_complete")) else 1,
-                str(p.get("id") or ""),
+        if candidates:
+            candidates.sort(
+                key=lambda p: (
+                    0 if bool(p.get("structurally_complete")) else 1,
+                    0 if bool(p.get("resource_complete")) else 1,
+                    0 if bool(p.get("started")) else 1,
+                    str(p.get("id") or ""),
+                )
             )
+            return candidates[0].get("id")
+        return None
+
+    def find_attachable_connector(self, project_id, support_type):
+        return self.find_connector_project(
+            project_id=project_id,
+            support_type=support_type,
+            include_complete=True,
         )
-        return candidates[0].get("id")
 
     def _apply_support_deficit_state(self, project_id, *, sim_time=None, trigger=None):
         project = self.projects.get(str(project_id or ""))
