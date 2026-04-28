@@ -1237,8 +1237,16 @@ class ConstructionManager:
         workspace = dict(project.get("epistemic_workspace") or {})
         for entry in list(workspace.get("entries") or []):
             refs = self._normalize_rule_references((entry or {}).get("references") or [])
+            refs += self._normalize_rule_references((entry or {}).get("rules") or [])
             for rid in refs:
-                add_evidence(rid, {"source": "workspace", "entry_type": str((entry or {}).get("entry_type") or "")})
+                add_evidence(
+                    rid,
+                    {
+                        "source": "workspace",
+                        "entry_type": str((entry or {}).get("entry_type") or ""),
+                        "actor": (entry or {}).get("actor"),
+                    },
+                )
 
         provenance = dict(project.get("provenance") or {})
         for rid in self._normalize_rule_references(provenance.get("held_rule_ids_at_build") or []):
@@ -1252,11 +1260,27 @@ class ConstructionManager:
             payload_refs = self._normalize_rule_references(((item or {}).get("payload") or {}).get("references") or [])
             for rid in sorted(set(refs + payload_refs)):
                 add_evidence(rid, {"source": "validation_discussion_support", "event": (item or {}).get("event")})
+        raw_candidate_claim = discussion.get("candidate_claim")
+        candidate_claim = dict(raw_candidate_claim) if isinstance(raw_candidate_claim, dict) else {}
+        for rid in self._normalize_rule_references(candidate_claim.get("references") or []):
+            add_evidence(rid, {"source": "validation_discussion_candidate_claim", "actor": candidate_claim.get("actor")})
 
         for conn in list(project.get("connections") or []):
             refs = self._normalize_rule_references((conn or {}).get("references") or [])
             for rid in refs:
                 add_evidence(rid, {"source": "connection_record", "connection_id": (conn or {}).get("connection_id")})
+        connector_project_ids = {
+            str((conn or {}).get("via_connector_project_id") or "")
+            for conn in list(project.get("connections") or [])
+            if str((conn or {}).get("via_connector_project_id") or "")
+        }
+        for connector in list(self.connectors or []):
+            connector_project_id = str((connector or {}).get("connector_project_id") or "")
+            if connector_project_id not in connector_project_ids:
+                continue
+            refs = self._normalize_rule_references((connector or {}).get("references") or [])
+            for rid in refs:
+                add_evidence(rid, {"source": "connector_registry", "connector_project_id": connector_project_id})
 
         supported_rules = sorted(evidence_by_rule.keys())
         missing_expected_rules = sorted(set(expected_rules) - set(supported_rules))

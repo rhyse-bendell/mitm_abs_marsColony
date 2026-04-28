@@ -4530,10 +4530,14 @@ class Agent:
         for entry in list(workspace.get("entries") or []):
             refs = list((entry or {}).get("references") or [])
             support_rule_ids.update({normalize_rule_token(r) for r in refs if normalize_rule_token(r)})
+            rules = list((entry or {}).get("rules") or [])
+            support_rule_ids.update({normalize_rule_token(r) for r in rules if normalize_rule_token(r)})
         discussion = dict((project or {}).get("validation_discussion") or {})
         for item in list(discussion.get("support_items") or []):
             refs = list((item or {}).get("references") or [])
             support_rule_ids.update({normalize_rule_token(r) for r in refs if normalize_rule_token(r)})
+            payload_refs = list(((item or {}).get("payload") or {}).get("references") or [])
+            support_rule_ids.update({normalize_rule_token(r) for r in payload_refs if normalize_rule_token(r)})
         return {r for r in support_rule_ids if r}
 
     def _construction_rule_match(self, project_id, environment=None, sim_state=None, include_team=True):
@@ -4573,6 +4577,8 @@ class Agent:
         semantically_satisfied = []
         for expected_rule in sorted(expected):
             if expected_rule in held_rules:
+                continue
+            if expected_rule in semantic_support:
                 continue
             support_class = self._rule_dependency_support_class(expected_rule)
             if support_class and support_class in semantic_classes:

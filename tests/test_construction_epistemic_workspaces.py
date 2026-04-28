@@ -193,6 +193,25 @@ class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
         self.assertIn("R_HOUSE_VALIDITY", evidence["evidence_by_rule"])
         sim.stop()
 
+    def test_project_rule_evidence_aggregates_workspace_rules_field(self):
+        sim = SimulationState(phases=[])
+        cm = sim.environment.construction
+        project_id, project = self._ensure_project(sim, "Build_Site_B")
+        project["expected_rules"] = ["R_HOUSE_VALIDITY"]
+        cm.record_project_epistemic_externalization(
+            project_id,
+            entry_type="design_note",
+            note="explicit rule list",
+            references=[],
+            actor="Architect",
+            sim_time=1.0,
+        )
+        project["epistemic_workspace"]["entries"][-1]["rules"] = ["rule:house_enclosed"]
+        evidence = cm.get_project_rule_evidence(project_id)
+        self.assertIn("R_HOUSE_VALIDITY", evidence["supported_rules"])
+        self.assertEqual([], evidence["missing_expected_rules"])
+        sim.stop()
+
     def test_house_support_gates_validation_completion(self):
         sim = SimulationState(phases=[])
         cm = sim.environment.construction
