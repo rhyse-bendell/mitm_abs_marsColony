@@ -43,6 +43,10 @@ LEGACY_RULE_ALIASES = {
     "rule:greenhouse_requires_water": "R_GREENHOUSE_SUPPORT_DEPENDENCY",
     "water_generator_2x2": "R_WATERGEN_VALIDITY",
     "rule:water_generator_2x2": "R_WATERGEN_VALIDITY",
+    "food_connector_attached": "R_CONNECTOR_REQUIRED_FOR_FLOW",
+    "rule:food_connector_attached": "R_CONNECTOR_REQUIRED_FOR_FLOW",
+    "water_connector_attached": "R_CONNECTOR_REQUIRED_FOR_FLOW",
+    "rule:water_connector_attached": "R_CONNECTOR_REQUIRED_FOR_FLOW",
 }
 
 
@@ -50,18 +54,16 @@ def normalize_rule_token(token: str) -> str:
     value = str(token or "").strip()
     if not value:
         return value
-    if value.startswith("R_"):
-        return value
-    mapped = LEGACY_RULE_ALIASES.get(value)
+    while value.lower().startswith("rule:"):
+        value = value.split(":", 1)[1].strip()
+    lowered = value.lower().replace(" ", "_")
+    if lowered.startswith("r_"):
+        return lowered.upper()
+    mapped = LEGACY_RULE_ALIASES.get(value) or LEGACY_RULE_ALIASES.get(lowered)
     if mapped:
         return mapped
-    if value.startswith("rule:"):
-        suffix = value.split(":", 1)[1].strip()
-        mapped = LEGACY_RULE_ALIASES.get(suffix)
-        if mapped:
-            return mapped
-        if suffix.startswith("R_"):
-            return suffix
+    if value.startswith("R_"):
+        return value
     return value
 
 

@@ -7,7 +7,7 @@ from pathlib import Path
 from modules.agent import Agent
 from modules.environment import Environment
 from modules.simulation import SimulationState
-from modules.task_model import REQUIRED_TASK_FILES, TaskModelError, load_task_model, validate_task_model
+from modules.task_model import REQUIRED_TASK_FILES, TaskModelError, load_task_model, normalize_rule_token, validate_task_model
 
 
 class TaskModelIntegrationTests(unittest.TestCase):
@@ -139,6 +139,28 @@ class TaskModelIntegrationTests(unittest.TestCase):
         report = validate_task_model(model)
         self.assertEqual(0, len(report.errors))
         self.assertTrue(any(w.code.startswith("PHASE_UNLOCK_") for w in report.warnings))
+
+    def test_connector_rule_token_variants_normalize_to_canonical_rule(self):
+        variants = [
+            "food_connector_attached",
+            "rule:food_connector_attached",
+            "rule:rule:food_connector_attached",
+            "water_connector_attached",
+            "rule:water_connector_attached",
+            "rule:rule:water_connector_attached",
+            " Rule: Food_Connector_Attached ",
+            "rule: WATER_CONNECTOR_ATTACHED ",
+        ]
+        for token in variants:
+            self.assertEqual("R_CONNECTOR_REQUIRED_FOR_FLOW", normalize_rule_token(token))
+
+    def test_task_model_includes_connector_templates_with_canonical_expected_rule(self):
+        model = load_task_model("mars_colony")
+        by_type = {t.structure_type: t for t in model.construction_templates.values()}
+        self.assertIn("food_connector", by_type)
+        self.assertIn("water_connector", by_type)
+        self.assertEqual(["R_CONNECTOR_REQUIRED_FOR_FLOW"], by_type["food_connector"].expected_rules)
+        self.assertEqual(["R_CONNECTOR_REQUIRED_FOR_FLOW"], by_type["water_connector"].expected_rules)
 
 
 if __name__ == "__main__":

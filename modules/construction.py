@@ -163,14 +163,14 @@ class ConstructionManager:
                 "name": "Food Connector",
                 "type": "food_connector",
                 "artifact_type": "food_connector_construction",
-                "expected_rules": [normalize_rule_token("rule:food_connector_attached")],
+                "expected_rules": [normalize_rule_token("R_CONNECTOR_REQUIRED_FOR_FLOW")],
                 "required": 4,
             },
             "template_water_connector": {
                 "name": "Water Connector",
                 "type": "water_connector",
                 "artifact_type": "water_connector_construction",
-                "expected_rules": [normalize_rule_token("rule:water_connector_attached")],
+                "expected_rules": [normalize_rule_token("R_CONNECTOR_REQUIRED_FOR_FLOW")],
                 "required": 4,
             },
         }
@@ -205,6 +205,15 @@ class ConstructionManager:
             if str(template.get("type") or "").strip().lower() == normalized:
                 return template
         return None
+
+    def _normalize_rule_references(self, references):
+        return sorted(
+            {
+                normalize_rule_token(r)
+                for r in list(references or [])
+                if normalize_rule_token(r)
+            }
+        )
 
     def _site_project_ids(self, site_id):
         return [p.get("id") for p in self.projects.values() if p.get("site_id") == site_id]
@@ -242,7 +251,7 @@ class ConstructionManager:
         project_id = str(project_id_override or self._next_project_id(site_id, resolved_structure_type))
         if project_id in self.projects:
             return project_id, "exists"
-        expected_rules = [normalize_rule_token(r) for r in template.get("expected_rules", []) if normalize_rule_token(r)]
+        expected_rules = self._normalize_rule_references(template.get("expected_rules", []))
         required = max(1, int(template.get("required", 1)))
         canonical_target_id = str(target_id or self.SITE_TO_BUILD_TARGET.get(site_id, ""))
         support_requirements = self._default_support_requirements(resolved_structure_type)
@@ -370,6 +379,8 @@ class ConstructionManager:
             return None
         payload = dict(payload or {})
         evt = str(event_type or "")
+        if "references" in payload:
+            payload["references"] = self._normalize_rule_references(payload.get("references") or [])
         if evt in {"validation_request_externalized", "request_validation_help", "ask_if_knows"}:
             discussion.setdefault("open_requests", []).append({"request_type": evt, "actor": actor, "time": sim_time, **payload})
         elif evt in {"validation_support_externalized", "state_support", "externalize_evidence"}:
@@ -420,15 +431,12 @@ class ConstructionManager:
         if not project:
             return
         prov = project.setdefault("provenance", {})
-        expected = [
-            normalize_rule_token(r)
-            for r in (project.get("expected_rules") or prov.get("expected_rules") or [])
-            if normalize_rule_token(r)
-        ]
-        held_rules = sorted({normalize_rule_token(r) for r in (held_rule_ids or prov.get("held_rule_ids_at_build") or []) if normalize_rule_token(r)})
+        expected = self._normalize_rule_references(project.get("expected_rules") or prov.get("expected_rules") or [])
+        held_rules = self._normalize_rule_references(held_rule_ids or prov.get("held_rule_ids_at_build") or [])
         held_info = sorted({str(i) for i in (held_information_ids or prov.get("held_information_ids_at_build") or []) if str(i)})
         held_data = sorted({str(d) for d in (held_data_ids or prov.get("held_data_ids_at_build") or []) if str(d)})
-        team_rules = sorted({normalize_rule_token(r) for r in (team_rule_snapshot_ids or prov.get("team_rule_snapshot_ids") or []) if normalize_rule_token(r)})
+        team_rules = self._normalize_rule_references(team_rule_snapshot_ids or prov.get("team_rule_snapshot_ids") or [])
+        project["expected_rules"] = list(expected)
         expected_set = set(expected)
         held_expected_locally = bool(expected_set.issubset(set(held_rules))) if expected_set else True
         missing_expected = sorted(expected_set - set(held_rules))
@@ -959,7 +967,7 @@ class ConstructionManager:
         payload = {
             "entry_type": str(entry_type or "claim"),
             "note": str(note or "").strip(),
-            "references": list(references or []),
+            "references": self._normalize_rule_references(references),
             "actor": actor,
             "time": sim_time,
         }
@@ -1203,6 +1211,62 @@ class ConstructionManager:
             self.recompute_support_status(house_id)
         self.update_project_provenance(connector_id, event="connector_attached", actor=actor, sim_time=sim_time)
         return True, "attached"
+
+    def get_project_rule_evidence(self, project_id):
+        project = self.projects.get(str(project_id or ""))
+        if not isinstance(project, dict):
+            return {
+                "project_id": str(project_id or ""),
+                "expected_rules": [],
+                "supported_rules": [],
+                "missing_expected_rules": [],
+                "evidence_by_rule": {},
+            }
+        expected_rules = self._normalize_rule_references(project.get("expected_rules") or [])
+        evidence_by_rule = {}
+
+        def add_evidence(rule_id, payload):
+            rid = normalize_rule_token(rule_id)
+            if not rid:
+                return
+            evidence_by_rule.setdefault(rid, []).append(payload)
+
+        for rid in expected_rules:
+            add_evidence(rid, {"source": "expected_rules", "project_expected": True})
+
+        workspace = dict(project.get("epistemic_workspace") or {})
+        for entry in list(workspace.get("entries") or []):
+            refs = self._normalize_rule_references((entry or {}).get("references") or [])
+            for rid in refs:
+                add_evidence(rid, {"source": "workspace", "entry_type": str((entry or {}).get("entry_type") or "")})
+
+        provenance = dict(project.get("provenance") or {})
+        for rid in self._normalize_rule_references(provenance.get("held_rule_ids_at_build") or []):
+            add_evidence(rid, {"source": "provenance", "field": "held_rule_ids_at_build"})
+        for rid in self._normalize_rule_references(provenance.get("team_rule_snapshot_ids") or []):
+            add_evidence(rid, {"source": "provenance", "field": "team_rule_snapshot_ids"})
+
+        discussion = dict(project.get("validation_discussion") or {})
+        for item in list(discussion.get("support_items") or []):
+            refs = self._normalize_rule_references((item or {}).get("references") or [])
+            payload_refs = self._normalize_rule_references(((item or {}).get("payload") or {}).get("references") or [])
+            for rid in sorted(set(refs + payload_refs)):
+                add_evidence(rid, {"source": "validation_discussion_support", "event": (item or {}).get("event")})
+
+        for conn in list(project.get("connections") or []):
+            refs = self._normalize_rule_references((conn or {}).get("references") or [])
+            for rid in refs:
+                add_evidence(rid, {"source": "connection_record", "connection_id": (conn or {}).get("connection_id")})
+
+        supported_rules = sorted(evidence_by_rule.keys())
+        missing_expected_rules = sorted(set(expected_rules) - set(supported_rules))
+        return {
+            "project_id": str(project.get("id") or project_id or ""),
+            "expected_rules": expected_rules,
+            "supported_rules": supported_rules,
+            "missing_expected_rules": missing_expected_rules,
+            "evidence_by_rule": evidence_by_rule,
+        }
 
     def build_bridge_bc(self, quantity=1):
         bridge = self.bridges["bridge_bc"]
