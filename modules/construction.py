@@ -676,6 +676,14 @@ class ConstructionManager:
         required = self._required_epistemic_entries(project)
         if not required:
             return True
+        expected_rules = self._normalize_rule_references((project or {}).get("expected_rules") or [])
+        if expected_rules and "design_note" in required and "design_note" not in covered:
+            project_id = str((project or {}).get("id") or "")
+            if project_id:
+                rule_evidence = self.get_project_rule_evidence(project_id)
+                if not list((rule_evidence or {}).get("missing_expected_rules") or []):
+                    required = set(required)
+                    required.discard("design_note")
         return required.issubset(covered)
 
     def _recompute_project_progress(self, project):
