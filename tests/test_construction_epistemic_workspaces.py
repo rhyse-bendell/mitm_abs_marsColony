@@ -332,6 +332,24 @@ class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
         self.assertEqual(house["status"], "complete")
         sim.stop()
 
+    def test_expected_rule_support_allows_epistemic_completeness_without_design_note(self):
+        sim = SimulationState(phases=[])
+        cm = sim.environment.construction
+        project_id, project = self._ensure_project(sim, "Build_Site_B")
+        project["expected_rules"] = ["R_HOUSE_VALIDITY"]
+        cm.record_project_epistemic_externalization(project_id, entry_type="claim", note="claim", actor="Architect", sim_time=1.0)
+        cm.record_project_epistemic_externalization(
+            project_id,
+            entry_type="evidence",
+            note="rule-backed evidence",
+            references=["rule:house_enclosed"],
+            actor="Architect",
+            sim_time=1.1,
+        )
+        cm.update()
+        self.assertTrue(project["epistemically_supported"])
+        sim.stop()
+
 
 if __name__ == "__main__":
     unittest.main()
