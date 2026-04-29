@@ -1,3 +1,10 @@
+"""Task package loader and canonical rule normalization.
+
+This module parses Mars Colony task content (roles, sources, rules, phases,
+construction templates) and normalizes legacy aliases into canonical tokens so
+subsystems reason about consistent rule identities.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

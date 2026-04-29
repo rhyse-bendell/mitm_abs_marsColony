@@ -1,3 +1,11 @@
+"""Planner-visible context construction.
+
+This module limits what a planner can see at decision time. Context is a curated
+view (not omniscient truth unless explicitly exposed). Affordances represent
+currently possible actions and shape both deterministic RuleBrain and LLM planner
+behavior.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -17,6 +25,7 @@ class BrainContextPacket:
 
 
 class BrainContextBuilder:
+    """Builds planner-visible snapshots and action affordances per decision step."""
     def __init__(self, scenario_name: str = "Minerva Mars Colony"):
         self.scenario_name = scenario_name
 

@@ -1,5 +1,12 @@
 # File: modules/environment.py
 
+"""Spatial world model, access legality, and target mapping.
+
+The environment defines movement constraints, source access zones, and interaction
+target resolution used by agent legality checks and action execution.
+"""
+
+
 import math
 import logging
 import heapq

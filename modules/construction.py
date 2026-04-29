@@ -1,5 +1,18 @@
 # File: modules/construction.py
 
+"""Authoritative construction lifecycle manager.
+
+Construction in this simulator is both physical and epistemic. Projects track
+material delivery, build progress, rule/evidence support, support connectors
+(food/water), and validation status. A structure is only complete when lifecycle
+checks pass, not merely when materials arrive.
+
+For readers: follow create_project -> deliver_resource -> execute_build_step ->
+support/validation helpers. Canonical task rules live in
+config/tasks/mars_colony/CANONICAL_TASK_TRUTH.md.
+"""
+
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -39,6 +52,11 @@ class BridgeState:
 
 
 class ConstructionManager:
+    """Authoritative project lifecycle state machine for construction work.
+
+    Tracks physical progress and epistemic support together, including connectors
+    required for house-level functional completion.
+    """
     LOGGER = logging.getLogger(__name__)
     DEFAULT_PARAMETERS = {
         "pile_a_quantity": 100,
@@ -240,6 +258,7 @@ class ConstructionManager:
         self._project_counters[key] = next_idx
         return f"{site_id}_{structure_type}_{next_idx:03d}"
 
+# Project creation initializes physical + epistemic workspace state for a structure.
     def create_project(self, site_id, structure_type=None, *, template=None, target_id=None, author="system", project_id_override=None):
         site = self.sites.get(site_id)
         if not site:
@@ -498,6 +517,7 @@ class ConstructionManager:
         }
         return list(templates.get(structure_type, [f"place_{structure_type or 'structure'}_core"]))
 
+# Functional support status captures connector/provider dependencies (e.g., house->water/food).
     def recompute_support_status(self, project_id):
         project = self.projects.get(str(project_id or ""))
         if not isinstance(project, dict):
@@ -669,6 +689,7 @@ class ConstructionManager:
         completed = [step for step in steps if bool(step.get("completed"))]
         return len(completed) >= len(steps)
 
+# Epistemic completeness checks whether project claims have sufficient rule/evidence support.
     def _project_epistemic_completeness(self, project):
         workspace = dict((project or {}).get("epistemic_workspace") or {})
         entries = workspace.get("entries") or []
@@ -873,6 +894,7 @@ class ConstructionManager:
         self.update_project_provenance(resolved_id, event="project_started", sim_time=None)
         return True, "started"
 
+# Resource delivery updates inventory readiness, but does not imply structural or epistemic completion.
     def deliver_resource(self, project_id, resource_type, quantity=1):
         resolved_id = self.resolve_project_id(project_id, create_if_missing=True)
         project = self.projects.get(resolved_id)
@@ -895,6 +917,7 @@ class ConstructionManager:
         return True
 
 
+# Build steps change physical structure state and can deposit DIK artifacts used later in validation.
     def execute_build_step(self, project_id, *, actor=None, sim_time=None, requested_component=None):
         resolved_id = self.resolve_project_id(project_id, create_if_missing=True)
         project = self.projects.get(resolved_id)
@@ -1007,6 +1030,7 @@ class ConstructionManager:
         self.update_project_provenance(resolved_id, event="project_epistemic_externalization_updated", actor=actor, sim_time=sim_time)
         return True
 
+# Validation marks lifecycle closure only after physical, epistemic, and support checks align.
     def mark_validated(
         self,
         project_id,
