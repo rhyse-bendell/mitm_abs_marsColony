@@ -10507,8 +10507,17 @@ class Agent:
                             },
                         )
                         continue
-                    has_required_rules, missing_rules = self._construction_rule_match(project_id, environment=environment, sim_state=sim_state, include_team=True)
-                    is_valid = bool(project.get("correct", True)) and has_required_rules and bool(project.get("resource_complete", False))
+                    readiness_report = environment.construction.evaluate_project_validation_readiness(
+                        project_id,
+                        actor=self.name,
+                        agent_supported_rules=list(self.mental_model["knowledge"].rules),
+                    )
+                    has_required_rules = bool(readiness_report.get("rule_ready", False))
+                    missing_rules = list(readiness_report.get("missing_rules") or [])
+                    physical_ready = bool(readiness_report.get("physical_ready", False))
+                    support_ready = bool(readiness_report.get("support_ready", False))
+                    epistemic_ready = bool(readiness_report.get("epistemic_ready", False))
+                    is_valid = bool(project.get("correct", True)) and physical_ready and support_ready and has_required_rules and epistemic_ready
                     environment.construction.mark_validated(
                         project_id,
                         is_valid=bool(is_valid and has_required_rules),
@@ -10521,11 +10530,7 @@ class Agent:
                         event="validation_passed" if (is_valid and has_required_rules) else "validation_failed",
                     )
                     project = environment.construction.projects.get(project_id, project)
-                    support_missing = (
-                        environment.construction.get_missing_support_requirements(project_id)
-                        if hasattr(environment.construction, "get_missing_support_requirements")
-                        else {}
-                    )
+                    support_missing = dict((readiness_report.get("evidence_summary") or {}).get("support_missing") or {})
                     actually_completed = bool(project.get("validated_complete", False))
                     sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
                     self._emit_event(sim_state, "construction_artifact_provenance_updated", {"project_id": project_id, "event": "validation"})
@@ -10550,6 +10555,7 @@ class Agent:
                                 "failure_category": "missing_functional_support",
                                 "missing_support": dict(support_missing),
                                 "project_status": project.get("status"),
+                                "readiness_report": readiness_report,
                             },
                         )
                     else:
