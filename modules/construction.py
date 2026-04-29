@@ -1324,6 +1324,95 @@ class ConstructionManager:
             "evidence_by_rule": evidence_by_rule,
         }
 
+    def evaluate_project_validation_readiness(self, project_id, actor=None, agent_supported_rules=None):
+        project = self.projects.get(str(project_id or ""))
+        if not isinstance(project, dict):
+            return {
+                "project_id": str(project_id or ""),
+                "physical_ready": False,
+                "support_ready": False,
+                "rule_ready": False,
+                "epistemic_ready": False,
+                "validation_ready": False,
+                "missing_rules": [],
+                "missing_epistemic_functions": ["project_not_found"],
+                "blockers": ["project_not_found"],
+                "repair_options": ["start_or_resolve_project_reference"],
+                "evidence_summary": {},
+            }
+
+        rule_evidence = self.get_project_rule_evidence(project.get("id"))
+        expected_rules = set(rule_evidence.get("expected_rules") or [])
+        supported_rules = set(rule_evidence.get("supported_rules") or [])
+        if agent_supported_rules is not None:
+            supported_rules.update(self._normalize_rule_references(agent_supported_rules))
+        missing_rules = sorted(expected_rules - supported_rules)
+
+        support_missing = self.get_missing_support_requirements(project.get("id"))
+        support_ready = not bool(support_missing)
+        physical_ready = bool(project.get("resource_complete", False)) and bool(project.get("structurally_complete", False))
+        rule_ready = not bool(missing_rules)
+        epistemic_ready = bool(project.get("epistemically_supported", False)) and rule_ready
+        validation_ready = bool(physical_ready and support_ready and epistemic_ready)
+
+        missing_epistemic_functions = []
+        if not project.get("validation_attempted", False):
+            missing_epistemic_functions.append("validation_not_attempted")
+        if not project.get("epistemically_supported", False):
+            missing_epistemic_functions.append("epistemic_support_not_grounded")
+        if not (project.get("provenance") or {}):
+            missing_epistemic_functions.append("provenance_missing")
+        if not (project.get("epistemic_workspace") or {}).get("entries"):
+            missing_epistemic_functions.append("epistemic_workspace_empty")
+        if not (project.get("validation_discussion") or {}).get("timeline"):
+            missing_epistemic_functions.append("validation_discussion_empty")
+
+        blockers = []
+        if not physical_ready:
+            blockers.append("physical_incomplete")
+        if not support_ready:
+            blockers.append("missing_functional_support")
+        if missing_rules:
+            blockers.extend([f"missing_expected_rule:{rid}" for rid in missing_rules])
+        if not epistemic_ready:
+            blockers.append("epistemic_readiness_incomplete")
+
+        repair_options = []
+        if not physical_ready:
+            repair_options.append("continue_or_repair_construction")
+        if not support_ready:
+            repair_options.append("construct_or_attach_required_support")
+        if missing_rules:
+            repair_options.append("acquire_or_externalize_missing_rules")
+        if missing_epistemic_functions:
+            repair_options.append("resolve_validation_discussion_and_provenance_gaps")
+
+        return {
+            "project_id": str(project.get("id") or project_id or ""),
+            "physical_ready": physical_ready,
+            "support_ready": support_ready,
+            "rule_ready": rule_ready,
+            "epistemic_ready": epistemic_ready,
+            "validation_ready": validation_ready,
+            "missing_rules": missing_rules,
+            "missing_epistemic_functions": missing_epistemic_functions,
+            "blockers": sorted(set(blockers)),
+            "repair_options": repair_options,
+            "evidence_summary": {
+                "actor": actor,
+                "project_status": str(project.get("status") or ""),
+                "expected_rules": sorted(expected_rules),
+                "supported_rules": sorted(supported_rules),
+                "support_missing": dict(support_missing),
+                "resource_complete": bool(project.get("resource_complete", False)),
+                "structurally_complete": bool(project.get("structurally_complete", False)),
+                "epistemic_workspace_entries": len(list((project.get("epistemic_workspace") or {}).get("entries") or [])),
+                "validation_discussion_events": len(list((project.get("validation_discussion") or {}).get("timeline") or [])),
+                "provenance_events": len(list((project.get("provenance") or {}).get("events") or [])),
+                "rule_evidence": rule_evidence,
+            },
+        }
+
     def build_bridge_bc(self, quantity=1):
         bridge = self.bridges["bridge_bc"]
         if bridge.status == "complete":
