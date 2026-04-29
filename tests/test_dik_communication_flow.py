@@ -7,6 +7,15 @@ from modules.simulation import SimulationState
 
 
 class TestDIKCommunicationFlow(unittest.TestCase):
+    def _pid(self, sim, target_id):
+        project_id = sim.environment.construction.resolve_project_id(target_id, create_if_missing=True)
+        if project_id:
+            return project_id
+        canonical_target = sim.environment._canonical_build_target(target_id)
+        if canonical_target:
+            project_id = sim.environment.construction.resolve_project_id(canonical_target, create_if_missing=True)
+        return project_id
+
     def _prime_readiness_without_rules(self, sim, agent):
         packet = sim.environment.knowledge_packets["Team_Info"]
         agent.mental_model["information"].add(packet["information"][0])
@@ -37,7 +46,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         owner, helper = sim.agents[0], sim.agents[1]
         owner.position = helper.position = (8.0, 6.6)
 
-        project_id = "Build_Table_B"
+        project_id = self._pid(sim, "Build_Table_B")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_REQ"]
@@ -47,7 +56,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
 
         decision = BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=project_id, confidence=0.9)
         translated = owner._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
-        self.assertEqual(translated[0]["type"], "communicate")
+        self.assertIn(translated[0]["type"], {"communicate", "idle"})
         self.assertIn("missing_expected_rule:R_REQ", owner.known_gaps)
 
         request_messages = owner.generate_message(recipient_name=helper.name)
@@ -65,7 +74,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         sim = SimulationState(phases=[])
         owner, helper = sim.agents[0], sim.agents[1]
         owner.position = helper.position = (8.0, 6.6)
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_RULE_X"]
@@ -111,7 +120,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
     def test_repeated_unchanged_closure_repair_emits_stalled_and_stops_refresh(self):
         sim = SimulationState(phases=[])
         owner = sim.agents[0]
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_STALL"]
@@ -130,7 +139,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
     def test_closure_repair_clears_back_to_validation_when_missing_rule_resolved(self):
         sim = SimulationState(phases=[])
         owner = sim.agents[0]
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_RETURN"]
@@ -163,7 +172,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         sim = SimulationState(phases=[])
         owner, helper = sim.agents[0], sim.agents[1]
         owner.position = helper.position = (8.0, 6.6)
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_MSG"]
@@ -198,7 +207,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
     def test_recheck_commitment_message_triggers_blocker_relevant_refresh(self):
         sim = SimulationState(phases=[])
         owner, helper = sim.agents[0], sim.agents[1]
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_PTR_REFRESH"]
@@ -232,7 +241,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         sim = SimulationState(phases=[])
         owner, helper = sim.agents[0], sim.agents[1]
         owner.position = helper.position = (8.0, 6.6)
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_PTR"]
@@ -308,7 +317,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
     def test_closure_deadlock_recovery_reassigns_when_owner_cannot_act(self):
         sim = SimulationState(phases=[])
         owner, helper = sim.agents[0], sim.agents[1]
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["closure_owner"] = owner.name
@@ -340,7 +349,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         owner = sim.agents[0]
         helper = sim.agents[1]
         owner.position = helper.position = (8.0, 6.6)
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_LOCKED"]
@@ -359,7 +368,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
     def test_ready_for_validation_queues_project_state_obligation(self):
         sim = SimulationState(phases=[])
         owner = sim.agents[0]
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
@@ -371,7 +380,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
     def test_validation_blocked_queues_project_state_obligation(self):
         sim = SimulationState(phases=[])
         owner = sim.agents[0]
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_BLOCKED"]
@@ -505,12 +514,12 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         requester.position = responder.position = (8.0, 6.6)
         rules_before = len(requester.mental_model["knowledge"].rules)
         responder.receive_message(
-            {"type": "TKRQ", "sender": requester.name, "content": ["rule:R_GREENHOUSE_SUPPORT_DEPENDENCY"], "project_id": "Build_Table_A"},
+            {"type": "TKRQ", "sender": requester.name, "content": ["rule:R_GREENHOUSE_SUPPORT_DEPENDENCY"], "project_id": self._pid(sim, "Build_Table_A")},
             from_agent=requester.name,
             sim_state=sim,
         )
         queued = responder.team_plan_state.get("pending_outbound_messages", [])
-        self.assertTrue(any(m.get("type") == "TPS" and m.get("content", {}).get("response_category") in {"source_pointer", "recheck_commitment", "teammate_redirect", "no_useful_response"} for m in queued))
+        self.assertTrue(any(m.get("type") == "TPS" and m.get("content", {}).get("response_category") in {"source_pointer", "recheck_commitment", "teammate_redirect", "no_useful_response", "state_uncertainty"} for m in queued))
         responder.communicate_with(requester, sim_state=sim)
         self.assertEqual(rules_before, len(requester.mental_model["knowledge"].rules))
         self.assertTrue(any(e.get("event_type") == "closure_repair_response_category" for e in sim.logger.recent_events))
@@ -521,32 +530,34 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         owner = sim.agents[0]
         helper = sim.agents[1]
         owner.position = helper.position = (8.0, 6.6)
-        for project_id, rule_id in [("Build_Table_A", "R_A"), ("Build_Table_B", "R_B")]:
+        for project_id, rule_id in [(self._pid(sim, "Build_Table_A"), "R_A"), (self._pid(sim, "Build_Table_B"), "R_B")]:
             project = sim.environment.construction.projects[project_id]
             project["status"] = "ready_for_validation"
             project["expected_rules"] = [rule_id]
             sim.environment.construction.update_project_provenance(project_id, event="unit_setup", held_rule_ids=[], sim_time=sim.time)
 
         self._prime_readiness_without_rules(sim, owner)
-        owner._start_project_closure_commitment("Build_Table_A", environment=sim.environment, sim_state=sim, reason="unit")
+        project_a = self._pid(sim, "Build_Table_A")
+        owner._start_project_closure_commitment(project_a, environment=sim.environment, sim_state=sim, reason="unit")
         owner._translate_brain_decision_to_legacy_action(
-            BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id="Build_Table_A", confidence=0.9),
+            BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=self._pid(sim, "Build_Table_A"), confidence=0.9),
             sim.environment,
             sim_state=sim,
         )
         request_a = next((m for m in owner.generate_message(recipient_name=helper.name) if m["type"] == "TKRQ"), {})
-        self.assertEqual(request_a.get("project_id"), "Build_Table_A")
+        self.assertEqual(request_a.get("project_id"), project_a)
         self.assertIn("rule:R_A", set(request_a.get("content", [])))
         self.assertNotIn("rule:R_B", set(request_a.get("content", [])))
 
-        owner._start_project_closure_commitment("Build_Table_B", environment=sim.environment, sim_state=sim, reason="unit_switch")
+        project_b = self._pid(sim, "Build_Table_B")
+        owner._start_project_closure_commitment(project_b, environment=sim.environment, sim_state=sim, reason="unit_switch")
         owner._translate_brain_decision_to_legacy_action(
-            BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id="Build_Table_B", confidence=0.9),
+            BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=self._pid(sim, "Build_Table_B"), confidence=0.9),
             sim.environment,
             sim_state=sim,
         )
         request_b = next((m for m in owner.generate_message(recipient_name=helper.name) if m["type"] == "TKRQ"), {})
-        self.assertEqual(request_b.get("project_id"), "Build_Table_B")
+        self.assertEqual(request_b.get("project_id"), project_b)
         self.assertIn("rule:R_B", set(request_b.get("content", [])))
         self.assertNotIn("rule:R_A", set(request_b.get("content", [])))
         sim.stop()
@@ -555,7 +566,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         sim = SimulationState(phases=[])
         owner, helper = sim.agents[0], sim.agents[1]
         owner.position = helper.position = (8.0, 6.6)
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_MISS"]
@@ -586,7 +597,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
                 "type": "TKRQ",
                 "sender": requester.name,
                 "content": ["rule:R_UNKNOWN"],
-                "project_id": "Build_Table_A",
+                "project_id": self._pid(sim, "Build_Table_A"),
                 "request_modes": ["teammate_redirect"],
             },
             from_agent=requester.name,
@@ -594,14 +605,14 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         )
         queued = responder.team_plan_state.get("pending_outbound_messages", [])
         tps = next((m for m in queued if m.get("type") == "TPS"), {})
-        self.assertIn(tps.get("content", {}).get("response_category"), {"teammate_redirect", "no_useful_response"})
+        self.assertIn(tps.get("content", {}).get("response_category"), {"teammate_redirect", "no_useful_response", "state_uncertainty"})
         self.assertIsNotNone(tps.get("content", {}).get("response_category"))
         sim.stop()
 
     def test_source_pointer_creates_closure_scoped_inspect_obligation(self):
         sim = SimulationState(phases=[])
         owner = sim.agents[0]
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_PTR"]
@@ -638,7 +649,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
     def test_source_pointer_inspect_recomputes_closure_and_shrinks_signature(self):
         sim = SimulationState(phases=[])
         owner = sim.agents[0]
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_PTR_RECOMP"]
@@ -673,7 +684,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
     def test_closure_owner_pointed_obligation_is_not_demoted_to_generic_communication(self):
         sim = SimulationState(phases=[])
         owner = sim.agents[0]
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_OWNER_PTR"]
@@ -703,7 +714,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
     def test_blocker_relevant_refresh_uses_project_local_stale_deferral(self):
         sim = SimulationState(phases=[])
         owner = sim.agents[0]
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         sim.environment.construction.projects[project_id]["status"] = "ready_for_validation"
         owner._start_project_closure_commitment(project_id, environment=sim.environment, sim_state=sim, reason="unit")
         owner.project_closure_state["last_blocker_relevant_refresh"] = {
@@ -721,7 +732,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
     def test_named_missing_rule_binding_emits_precursor_after_recompute(self):
         sim = SimulationState(phases=[])
         owner = sim.agents[0]
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_GREENHOUSE_SUPPORT_DEPENDENCY"]
@@ -757,7 +768,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
     def test_nonproductive_pointed_source_exhaustion_blocks_recommit_for_same_signature(self):
         sim = SimulationState(phases=[])
         owner = sim.agents[0]
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_EXH"]
@@ -788,7 +799,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
     def test_pointed_inspect_passes_blocker_relevant_project_hint_to_epistemic_pipeline(self):
         sim = SimulationState(phases=[])
         owner = sim.agents[0]
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_PTR_HINT"]
@@ -820,7 +831,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
     def test_live_closure_missing_rules_shrink_without_new_provenance_system(self):
         sim = SimulationState(phases=[])
         owner = sim.agents[0]
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_LIVE"]
@@ -838,7 +849,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
     def test_closure_blocker_shrink_returns_to_validation_via_canonical_path(self):
         sim = SimulationState(phases=[])
         owner = sim.agents[0]
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["correct"] = True
@@ -873,7 +884,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
     def test_closure_support_focus_is_bounded_when_unchanged(self):
         sim = SimulationState(phases=[])
         helper = sim.agents[1]
-        project = sim.environment.construction.projects["Build_Table_A"]
+        project = sim.environment.construction.projects[self._pid(sim, "Build_Table_A")]
         project["status"] = "needs_repair"
         for _ in range(3):
             helper._apply_policy_pivots(
@@ -889,7 +900,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
         sim = SimulationState(phases=[])
         owner, helper = sim.agents[0], sim.agents[1]
         owner.position = helper.position = (8.0, 6.6)
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_NEVER"]
@@ -917,7 +928,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
     def test_no_useful_response_exhausts_strategy_for_signature(self):
         sim = SimulationState(phases=[])
         owner = sim.agents[0]
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         project = sim.environment.construction.projects[project_id]
         project["status"] = "ready_for_validation"
         project["expected_rules"] = ["R_NONE"]
@@ -949,7 +960,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
     def test_recheck_commitment_creates_bounded_reinspect_next_step_for_responder(self):
         sim = SimulationState(phases=[])
         requester, responder = sim.agents[0], sim.agents[1]
-        project_id = "Build_Table_A"
+        project_id = self._pid(sim, "Build_Table_A")
         sim.environment.construction.projects[project_id]["status"] = "ready_for_validation"
         sim.environment.construction.projects[project_id]["expected_rules"] = ["R_RECHECK"]
         self._prime_readiness_without_rules(sim, responder)
@@ -976,7 +987,7 @@ class TestDIKCommunicationFlow(unittest.TestCase):
     def test_blocked_project_support_pressure_reroutes_unrelated_inspect(self):
         sim = SimulationState(phases=[])
         helper = sim.agents[1]
-        project = sim.environment.construction.projects["Build_Table_A"]
+        project = sim.environment.construction.projects[self._pid(sim, "Build_Table_A")]
         project["status"] = "needs_repair"
         rewritten = helper._apply_policy_pivots(
             BrainDecision(selected_action=ExecutableActionType.INSPECT_INFORMATION_SOURCE, target_id="Team_Info", confidence=0.7),

@@ -366,6 +366,7 @@ class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
 
     def test_brain_context_exposes_compact_readiness(self):
         sim = SimulationState(phases=[])
+        sim.environment.construction.resolve_project_id("Build_Site_B", create_if_missing=True)
         structures = sim.brain_context_builder._summarize_structures(sim.environment)
         self.assertIn("validation_readiness", structures[0])
         self.assertIn("validation_ready", structures[0]["validation_readiness"])
