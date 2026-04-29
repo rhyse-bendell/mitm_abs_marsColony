@@ -140,6 +140,13 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         project["support_counts"] = {}
         project["support_status"] = {}
         sim.environment.construction.recompute_support_status(project_id)
+        project["correct"] = True
+        readiness = sim.environment.construction.evaluate_project_validation_readiness(
+            project_id,
+            actor=agent.name,
+            agent_supported_rules=list(agent.mental_model["knowledge"].rules),
+        )
+        self.assertTrue(readiness["validation_ready"])
 
         validate = BrainDecision(
             selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION,
@@ -162,6 +169,40 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
 
         self.assertTrue(project["validated_complete"])
         self.assertEqual(project["status"], "complete")
+        sim.stop()
+
+    def test_validation_ready_gold_path_validates_complete(self):
+        sim = SimulationState(phases=[])
+        agent = sim.agents[0]
+        self._prime_build_readiness(sim, agent)
+        project_id, project = self._ensure_project(sim, "Build_Site_B")
+        required = int(project["required_resources"]["bricks"])
+        sim.environment.construction.deliver_resource(project_id, "bricks", quantity=required)
+        for _ in range(sum(1 for step in project.get("build_steps", []) if not step.get("completed"))):
+            sim.environment.construction.execute_build_step(project_id, actor=agent.name, sim_time=sim.time)
+        for entry_type in ("claim", "evidence", "design_note"):
+            sim.environment.construction.record_project_epistemic_externalization(
+                project_id, entry_type=entry_type, note=f"{entry_type} for validation", references=["R_HOUSE_VALIDITY"], actor=agent.name, sim_time=sim.time
+            )
+        project["support_requirements"] = {}
+        project["support_counts"] = {}
+        project["support_status"] = {}
+        sim.environment.construction.recompute_support_status(project_id)
+        report = sim.environment.construction.evaluate_project_validation_readiness(
+            project_id, actor=agent.name, agent_supported_rules=list(agent.mental_model["knowledge"].rules)
+        )
+        self.assertTrue(report["validation_ready"])
+        blockers, _ = agent._construction_action_blockers(
+            BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=project_id, confidence=0.9),
+            {"project_id": project_id},
+            sim.environment,
+            sim_state=sim,
+        )
+        self.assertFalse(blockers)
+        agent.position = sim.environment.get_interaction_target_position(project_id, from_position=agent.position)
+        agent.active_actions = [{"type": "idle", "duration": 1.0, "progress": 0.0, "decision_action": ExecutableActionType.VALIDATE_CONSTRUCTION.value, "project_id": project_id}]
+        agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.1)
+        self.assertTrue(project["validated_complete"])
         sim.stop()
 
     def test_start_construction_auto_handoffs_to_logistics_when_resources_missing(self):

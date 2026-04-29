@@ -1084,7 +1084,8 @@ class ConstructionManager:
             return
         project["correct"] = True
         support_ready = self.recompute_support_status(project_id)
-        if project.get("structurally_complete") and project.get("epistemically_supported") and support_ready:
+        readiness = self.evaluate_project_validation_readiness(project_id, actor=actor)
+        if bool(readiness.get("validation_ready", False)) and support_ready:
             project["validated_complete"] = True
             project["status"] = "complete"
             project["in_progress"] = False
