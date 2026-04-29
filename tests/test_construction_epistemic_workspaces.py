@@ -351,5 +351,26 @@ class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
         sim.stop()
 
 
+    def test_readiness_physical_only_is_not_validation_ready(self):
+        sim = SimulationState(phases=[])
+        cm = sim.environment.construction
+        project_id, project = self._ensure_project(sim, "Build_Site_B")
+        required = int(project["required_resources"]["bricks"])
+        cm.deliver_resource(project_id, "bricks", quantity=required)
+        for _ in range(len(project["build_steps"])):
+            cm.execute_build_step(project_id, actor="Architect", sim_time=1.0)
+        report = cm.evaluate_project_validation_readiness(project_id)
+        self.assertFalse(report["validation_ready"])
+        self.assertIn("missing_epistemic_function:claim", report["blockers"])
+        sim.stop()
+
+    def test_brain_context_exposes_compact_readiness(self):
+        sim = SimulationState(phases=[])
+        structures = sim.environment.context_builder._summarize_structures(sim.environment)
+        self.assertIn("validation_readiness", structures[0])
+        self.assertIn("validation_ready", structures[0]["validation_readiness"])
+        sim.stop()
+
+
 if __name__ == "__main__":
     unittest.main()
