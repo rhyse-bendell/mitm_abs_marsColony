@@ -1,5 +1,20 @@
 # File: modules/agent.py
 
+"""Agent cognition/execution bridge for the MITM Mars Colony simulator.
+
+This module owns bounded teammate behavior. Each agent maintains private DIK
+(Data->Information->Knowledge), local goals/plans, movement and transport state,
+communication state, and construction/validation commitments. Planners (RuleBrain
+or LLM backends) are advisory: they propose actions, while simulator checks remain
+authoritative for legality and world truth.
+
+For nontechnical readers: focus on Agent.__init__ for state ownership, the planner
+request/translation methods for decision flow, and construction/validation helpers
+for closure and repair dynamics. See Documentation/mitm_documentation.md and
+Documentation/action_system.md for full model context.
+"""
+
+
 import math
 import random
 import json
@@ -57,6 +72,11 @@ MESSAGE_TYPES = {
 
 @dataclass
 class PlannerCadenceConfig:
+    """Planner cadence and degraded-mode controls for one agent.
+
+    These values govern when advisory planner calls are attempted, when fallbacks
+    are used, and how the agent behaves after repeated backend failures.
+    """
     planner_enabled: bool = True
     planner_interval_steps: int = 4
     planner_interval_time: float = 3.0
@@ -126,6 +146,12 @@ class PlannerCadenceConfig:
 
 
 class Agent:
+    """Bounded teammate that turns planner suggestions into simulator actions.
+
+    The agent owns local state (DIK, goals, plans, transport commitments, and
+    closure/repair loops) but does not own world truth. Execution legality is
+    always checked against environment and construction managers.
+    """
     def __init__(self, name, role, position=(0.0, 0.0), orientation=0.0, speed=1.0, planner_config=None, agent_id=None, display_name=None, agent_label=None, template_id=None, brain_config=None, communication_params=None, initial_goal_seeds=None):
         self.name = name
         self.role = role
@@ -4540,6 +4566,9 @@ class Agent:
             support_rule_ids.update({normalize_rule_token(r) for r in payload_refs if normalize_rule_token(r)})
         return {r for r in support_rule_ids if r}
 
+    # Compares agent-held rule support against project-embedded evidence.
+    # This distinction is central to MITM: team members can believe a rule is
+    # satisfied while the project workspace still lacks explicit support artifacts.
     def _construction_rule_match(self, project_id, environment=None, sim_state=None, include_team=True):
         project = None
         if environment is not None and getattr(environment, "construction", None) is not None:
@@ -4737,6 +4766,9 @@ class Agent:
             "adopted_team_plan": bool(adopted_plan_id),
         }
 
+    # Construction blockers expose *why* progress stopped (material, rule/evidence,
+    # support connector, or validation readiness). Repeated blocker events are
+    # analytically meaningful: they indicate repair loops rather than random delay.
     def _construction_action_blockers(self, decision, action, environment, sim_state=None):
         blockers = []
         epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
@@ -4891,6 +4923,8 @@ class Agent:
                 return site_id
         return None
 
+    # Support-deficit repair policy: translates "house lacks water/food" into
+    # successor work on provider projects and/or connector structures.
     def _resolve_support_deficit_decision(self, decision, environment, sim_state=None, pivot_origin="runtime"):
         construction = getattr(environment, "construction", None)
         if construction is None:
@@ -7885,6 +7919,8 @@ class Agent:
             self._emit_event(sim_state, "repeated_action_loop_detected", {"repetition_count": self.loop_counters["action_repeats"], "window_size": 3, "plan_id": self.current_plan.plan_id, "selected_action": self.current_plan.decision.selected_action.value})
         return True
 
+    # Policy pivots let an agent move from blocked primary goals into repair-oriented
+    # subgoals without claiming the blockage is resolved.
     def _apply_policy_pivots(self, decision, environment, sim_state=None, context=None, pivot_origin="runtime"):
         context = context or (sim_state.brain_context_builder.build(sim_state, self) if sim_state is not None else None)
         rewritten = decision
@@ -8934,6 +8970,10 @@ class Agent:
     def _attempt_local_rule_brain_refresh(self, sim_state, environment, planner_reason):
         """Backward-compatible alias for deterministic RuleBrain controller path."""
         return self._run_rule_brain_controller(sim_state, environment, planner_reason)
+    # Planner-to-execution boundary: advisory brain output is converted to
+    # executable legacy action dictionaries only after schema checks. Actions may
+    # be downgraded/rejected here if missing targets, illegal params, or context
+    # mismatches are detected.
     def _translate_brain_decision_to_legacy_action(self, decision, environment, sim_state=None):
         # NOTE: This is still a live legacy adapter in the execution path.
         # Planner outputs are normalized to action-dict records consumed by the

@@ -1,3 +1,10 @@
+"""Metadata catalog for canonical actions.
+
+The catalog maps canonical action identifiers to aliases, planner visibility,
+translation destinations, and validation metadata. It supports auditability and
+planner integration but does not execute simulator actions.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

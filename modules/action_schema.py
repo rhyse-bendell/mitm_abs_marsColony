@@ -1,3 +1,9 @@
+"""Canonical action, communication, and planner decision schemas.
+
+Strict enums and validation helpers protect simulator integrity by requiring
+planner outputs to conform before translation and execution.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

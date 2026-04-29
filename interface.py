@@ -1,5 +1,13 @@
 # File: interface.py
 
+"""GUI controller and visualization layer for simulation experiments.
+
+The interface displays runtime state and collects experiment settings. Core truth
+(e.g., legality, construction lifecycle, DIK state) remains in simulator modules,
+not in this UI layer.
+"""
+
+
 import tkinter as tk
 import tkinter.font as tkfont
 import queue
@@ -26,6 +34,7 @@ from modules.brain_provider import RuleBrain
 
 
 class MarsColonyInterface:
+    """Tkinter-based dashboard for configuring and observing simulation runs."""
     _PILE_DRAW_SIZE = 0.24
     _PILE_OUTSIDE_PADDING = 0.06
     _BRIDGE_SITE_INSET = 0.14

@@ -1,5 +1,16 @@
 # File: modules/simulation.py
 
+"""Top-level runtime coordinator and authoritative simulator clock.
+
+SimulationState orders subsystem updates each tick, wires planner backends,
+manages event logging, and finalizes metrics exports. It coordinates components
+but should not embed task truth that belongs in the task package configuration.
+
+For readers: inspect initialization, backend selection, and the per-tick update
+path to understand lifecycle sequencing and degraded planner handling.
+"""
+
+
 import math
 import json
 import time
@@ -82,6 +93,11 @@ def _load_task_construction_defaults(task_id):
 
 
 class SimulationState:
+    """Runtime coordinator that advances one global tick at a time.
+
+    Owns subsystem ordering, planner backend integration, event logging, and
+    metrics finalization. It orchestrates, rather than redefining, task truth.
+    """
 
     SPEED_MULTIPLIERS = {
         "Slow": 0.5,

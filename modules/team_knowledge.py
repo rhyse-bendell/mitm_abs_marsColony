@@ -1,3 +1,10 @@
+"""Shared artifact layer for team-level knowledge.
+
+Team knowledge captures externalized artifacts that are visible beyond any single
+agent. Broadcast and uptake are distinct: sharing an artifact does not guarantee
+that every teammate has integrated it yet.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -22,6 +29,7 @@ class TeamArtifact:
 
 @dataclass
 class TeamKnowledgeManager:
+    """Manages shared artifacts and teammate uptake bookkeeping."""
     validated_knowledge: Dict[str, str] = field(default_factory=dict)
     artifacts: Dict[str, TeamArtifact] = field(default_factory=dict)
     recent_updates: List[Dict[str, Any]] = field(default_factory=list)

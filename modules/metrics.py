@@ -1,3 +1,9 @@
+"""Event-trace rollups for run-level summary metrics.
+
+Metrics summarize behavior for analysis dashboards, but event logs and project
+state remain the authoritative causal record when diagnosing failures.
+"""
+
 import csv
 import json
 import math
@@ -8,6 +14,7 @@ from modules.agent import DIK_LOG
 
 
 class MetricsCollector:
+    """Consumes events and produces aggregate analysis summaries."""
     """Runtime metrics accumulator for comparison-ready run outputs."""
 
     ZONE_MAP = {

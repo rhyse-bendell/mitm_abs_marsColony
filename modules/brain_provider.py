@@ -1,3 +1,11 @@
+"""Brain backend adapters and deterministic fallback policy.
+
+RuleBrain provides a deterministic baseline planner. External/local LLM providers
+are swappable advisory planners whose outputs must be normalized and validated
+before execution. Fallback paths protect simulator continuity under invalid
+responses, timeouts, or degraded backend states.
+"""
+
 from __future__ import annotations
 
 import json
