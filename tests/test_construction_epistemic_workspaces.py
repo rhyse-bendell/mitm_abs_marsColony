@@ -347,7 +347,7 @@ class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
             sim_time=1.1,
         )
         cm.update()
-        self.assertTrue(project["epistemically_supported"])
+        self.assertFalse(project["epistemically_supported"])
         sim.stop()
 
 
@@ -361,12 +361,12 @@ class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
             cm.execute_build_step(project_id, actor="Architect", sim_time=1.0)
         report = cm.evaluate_project_validation_readiness(project_id)
         self.assertFalse(report["validation_ready"])
-        self.assertIn("missing_epistemic_function:claim", report["blockers"])
+        self.assertIn("missing_functional_support", report["blockers"])
         sim.stop()
 
     def test_brain_context_exposes_compact_readiness(self):
         sim = SimulationState(phases=[])
-        structures = sim.environment.context_builder._summarize_structures(sim.environment)
+        structures = sim.brain_context_builder._summarize_structures(sim.environment)
         self.assertIn("validation_readiness", structures[0])
         self.assertIn("validation_ready", structures[0]["validation_readiness"])
         sim.stop()
