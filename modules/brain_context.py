@@ -46,6 +46,7 @@ class BrainContextBuilder:
             completed_steps = sum(1 for step in build_steps if bool(step.get("completed")))
             build_progress = min(1.0, completed_steps / max(1, len(build_steps))) if build_steps else 0.0
             resource_complete = bool(project.get("resource_complete", False)) or (required > 0 and delivered >= required)
+            readiness = environment.construction.evaluate_project_validation_readiness(project.get("id")) if hasattr(environment.construction, "evaluate_project_validation_readiness") else {}
             summaries.append(
                 {
                     "structure_id": project.get("id"),
@@ -66,6 +67,16 @@ class BrainContextBuilder:
                     "needs_repair": project.get("correct", True) is False,
                     "overloaded": bool(project.get("overloaded", False)),
                     "functional_connections": [f"zone_link:{target.get('zone')}"] if target.get("zone") else [],
+                    "validation_readiness": {
+                        "physical_ready": bool(readiness.get("physical_ready", False)),
+                        "support_ready": bool(readiness.get("support_ready", False)),
+                        "rule_ready": bool(readiness.get("rule_ready", False)),
+                        "epistemic_ready": bool(readiness.get("epistemic_ready", False)),
+                        "validation_ready": bool(readiness.get("validation_ready", False)),
+                        "missing_rules": list(readiness.get("missing_rules") or [])[:3],
+                        "missing_epistemic_functions": list(readiness.get("missing_epistemic_functions") or []),
+                        "repair_actions": [str((opt or {}).get("action") or opt) for opt in list(readiness.get("repair_options") or [])[:3]],
+                    },
                 }
             )
 

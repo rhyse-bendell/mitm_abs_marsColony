@@ -4806,21 +4806,16 @@ class Agent:
         elif action_type == ExecutableActionType.VALIDATE_CONSTRUCTION:
             if not self._project_has_physical_build_progress(project) and not bool(project.get("structurally_complete", False)):
                 blockers.append("physical_build_not_started")
-            if not epistemic.get("sufficient_for_validation", False) and not closure_active_for_project:
-                blockers.append("epistemic_sufficiency_low_for_validation")
-            has_match, missing_rules = self._construction_rule_match(project_id, environment=environment, sim_state=sim_state, include_team=True)
-            if not has_match:
+            local_rules = getattr(self.mental_model.get("knowledge"), "rules", []) if isinstance(self.mental_model, dict) else []
+            _info_ids, rule_ids = self._effective_knowledge_for_readiness(sim_state=sim_state)
+            readiness = environment.construction.evaluate_project_validation_readiness(
+                project_id,
+                actor=self.name,
+                agent_supported_rules=set(local_rules or []).union(set(rule_ids or set())),
+            )
+            blockers.extend(list(readiness.get("blockers") or []))
+            if any(str(b).startswith("missing_expected_rule:") for b in blockers):
                 blockers.append("missing_validation_rule_knowledge")
-                blockers.extend([f"missing_expected_rule:{rid}" for rid in missing_rules[:3]])
-            discussion = dict(project.get("validation_discussion") or {})
-            support_items = list(discussion.get("support_items") or [])
-            conflict_items = list(discussion.get("conflict_items") or [])
-            if str(project.get("status")) == "ready_for_validation":
-                claim_externalized = bool(discussion.get("candidate_claim"))
-                grounded_support = len(support_items) >= 1
-                unresolved_conflict = len(conflict_items) > 0
-                if not claim_externalized or not grounded_support or unresolved_conflict:
-                    blockers.append("insufficient_externalized_validation_support")
 
         return sorted(set(blockers)), project_id
 
