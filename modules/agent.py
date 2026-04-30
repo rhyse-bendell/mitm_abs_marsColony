@@ -9007,6 +9007,8 @@ class Agent:
         if not mismatch:
             action.setdefault("validation_target_project_id", project_id)
             action.setdefault("target_bound", expected_target)
+            if expected_target is not None:
+                self.target = expected_target
             return action
         action["project_id"] = project_id
         action["target_id"] = expected_target_id
@@ -9014,6 +9016,8 @@ class Agent:
         action["target"] = expected_target
         action["target_bound"] = expected_target
         action["validation_target_project_id"] = project_id
+        if expected_target is not None:
+            self.target = expected_target
         nav = self.navigation if isinstance(self.navigation, dict) else {}
         if tuple(nav.get("path_target") or ()) != tuple(expected_target or ()):
             nav["active_path"] = []
@@ -11420,6 +11424,16 @@ class Agent:
                 and getattr(sim_state, "environment", None) is not None
             ):
                 access = sim_state.environment.get_interaction_access(self.position, "whiteboard", role=self.role)
+                if not access.get("accessible"):
+                    continue
+            if (
+                action.get("type") == "idle"
+                and action.get("decision_action") == ExecutableActionType.VALIDATE_CONSTRUCTION.value
+                and sim_state is not None
+                and getattr(sim_state, "environment", None) is not None
+            ):
+                project_id = action.get("project_id")
+                access = sim_state.environment.get_interaction_access(self.position, project_id, role=self.role)
                 if not access.get("accessible"):
                     continue
             action["progress"] += dt
