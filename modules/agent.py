@@ -8965,6 +8965,91 @@ class Agent:
     def _attempt_local_rule_brain_refresh(self, sim_state, environment, planner_reason):
         """Backward-compatible alias for deterministic RuleBrain controller path."""
         return self._run_rule_brain_controller(sim_state, environment, planner_reason)
+
+    def _validate_and_repair_validation_target_binding(self, action, environment, sim_state=None):
+        if not isinstance(action, dict):
+            return action
+        if str(action.get("decision_action") or "") != ExecutableActionType.VALIDATE_CONSTRUCTION.value:
+            return action
+        project_id = str(action.get("project_id") or "").strip()
+        if not project_id:
+            return action
+        construction = getattr(environment, "construction", None)
+        if construction is None:
+            return action
+        project_id = construction.resolve_project_id(project_id, create_if_missing=False) or project_id
+        project = (construction.projects or {}).get(project_id)
+        if not isinstance(project, dict):
+            return action
+        expected_target = environment.get_interaction_target_position(project_id, from_position=self.position)
+        expected_target_id = project_id
+        expected_target_kind = "construction_project"
+        old_target_id = action.get("target_id")
+        old_target_kind = action.get("target_kind")
+        old_target = action.get("target")
+        if action.get("_validation_target_binding_checked_project_id") != project_id:
+            action["_validation_target_binding_checked_project_id"] = project_id
+            self._emit_event(
+                sim_state,
+                "validation_target_binding_checked",
+                {
+                    "project_id": project_id,
+                    "target_id": old_target_id,
+                    "target_kind": old_target_kind,
+                    "target": old_target,
+                },
+            )
+        mismatch = (
+            old_target_id != expected_target_id
+            or old_target_kind != expected_target_kind
+            or tuple(old_target or ()) != tuple(expected_target or ())
+        )
+        if not mismatch:
+            action.setdefault("validation_target_project_id", project_id)
+            action.setdefault("target_bound", expected_target)
+            return action
+        action["project_id"] = project_id
+        action["target_id"] = expected_target_id
+        action["target_kind"] = expected_target_kind
+        action["target"] = expected_target
+        action["target_bound"] = expected_target
+        action["validation_target_project_id"] = project_id
+        nav = self.navigation if isinstance(self.navigation, dict) else {}
+        if tuple(nav.get("path_target") or ()) != tuple(expected_target or ()):
+            nav["active_path"] = []
+            nav["path_target"] = None
+            nav["path_index"] = 0
+        reason = "target_binding_mismatch"
+        if str(old_target_id or "").strip().lower() == "whiteboard":
+            reason = "nonproject_artifact_target_override"
+            self._emit_event(
+                sim_state,
+                "validation_nonproject_target_overridden",
+                {
+                    "project_id": project_id,
+                    "old_target_id": old_target_id,
+                    "old_target_kind": old_target_kind,
+                    "old_target": old_target,
+                    "new_target_id": expected_target_id,
+                    "new_target_kind": expected_target_kind,
+                    "new_target": expected_target,
+                },
+            )
+        self._emit_event(
+            sim_state,
+            "validation_target_binding_repaired",
+            {
+                "project_id": project_id,
+                "old_target_id": old_target_id,
+                "old_target_kind": old_target_kind,
+                "old_target": old_target,
+                "new_target_id": expected_target_id,
+                "new_target_kind": expected_target_kind,
+                "new_target": expected_target,
+                "reason": reason,
+            },
+        )
+        return action
     # Planner-to-execution boundary: advisory brain output is converted to
     # executable legacy action dictionaries only after schema checks. Actions may
     # be downgraded/rejected here if missing targets, illegal params, or context
@@ -9461,6 +9546,12 @@ class Agent:
                     resolved_target = environment.get_interaction_target_position(project_id, from_position=self.position)
                     if resolved_target is not None:
                         action["target"] = resolved_target
+                if decision.selected_action == ExecutableActionType.VALIDATE_CONSTRUCTION:
+                    action["target_id"] = action.get("project_id") or project_id
+                    action["target_kind"] = "construction_project"
+                    action = self._validate_and_repair_validation_target_binding(action, environment, sim_state=sim_state)
+                    if action.get("target") is not None:
+                        action["target_bound"] = action.get("target")
 
         if decision.selected_action in {ExecutableActionType.EXTERNALIZE_PLAN, ExecutableActionType.CONSULT_TEAM_ARTIFACT}:
             action["artifact_action"] = decision.selected_action.value
@@ -10453,6 +10544,7 @@ class Agent:
                 sim_state.logger.log_event(sim_state.time, "assistance_requested", {"agent": self.name})
 
             if action["type"] == "idle" and action.get("decision_action") == ExecutableActionType.VALIDATE_CONSTRUCTION.value:
+                action = self._validate_and_repair_validation_target_binding(action, environment, sim_state=sim_state)
                 project_id = action.get("project_id")
                 if not project_id:
                     _log_mutation_blocked(
@@ -10463,8 +10555,22 @@ class Agent:
                     continue
                 project = environment.construction.projects.get(project_id)
                 if project:
+                    if action.get("target") is not None and action.get("_validation_movement_target_selected_project") != project_id:
+                        action["_validation_movement_target_selected_project"] = project_id
+                        self._emit_event(
+                            sim_state,
+                            "validation_movement_target_selected",
+                            {"project_id": project_id, "target_id": action.get("target_id"), "target": action.get("target")},
+                        )
                     ready, access = _location_ready(action, project_id)
                     if not ready:
+                        if action.get("_validation_arrival_pending_project") != project_id:
+                            action["_validation_arrival_pending_project"] = project_id
+                            self._emit_event(
+                                sim_state,
+                                "validation_arrival_pending",
+                                {"project_id": project_id, "target_id": action.get("target_id"), "target": action.get("target"), "access_reason": access.get("reason")},
+                            )
                         self._emit_event(sim_state, "construction_validation_en_route", {"project_id": project_id, "access_reason": access.get("reason"), "expected_interaction_location": _build_target(project_id)})
                         self.project_closure_state["blocked_count"] = int(self.project_closure_state.get("blocked_count", 0) or 0) + 1
                         if int(self.project_closure_state.get("blocked_count", 0) or 0) >= 5:
@@ -10474,6 +10580,14 @@ class Agent:
                                 reason="validation_access_threshold_exceeded",
                             )
                         continue
+                    if action.get("_validation_arrival_pending_project") == project_id:
+                        self._emit_event(
+                            sim_state,
+                            "validation_arrival_confirmed",
+                            {"project_id": project_id, "target_id": action.get("target_id"), "target": action.get("target")},
+                        )
+                        action["_validation_arrival_pending_project"] = None
+                    action = self._validate_and_repair_validation_target_binding(action, environment, sim_state=sim_state)
                     _set_action_stage(action, "mutation_execution_started", {"project_id": project_id})
                     self._emit_event(sim_state, "construction_validation_attempted", {"project_id": project_id, "decision_action": action.get("decision_action")})
                     self.project_closure_state["attempt_count"] = int(self.project_closure_state.get("attempt_count", 0) or 0) + 1
