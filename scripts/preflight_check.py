@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import os
+import py_compile
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -17,6 +18,14 @@ REQUIRED_MODULES = ("tkinter", "numpy", "matplotlib", "pathfinding")
 OPTIONAL_QT_BINDINGS = ("PySide6", "PyQt6", "PyQt5", "PySide2")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REQUIREMENTS_PATH = REPO_ROOT / "requirements.txt"
+CRITICAL_PYTHON_FILES = (
+    REPO_ROOT / "interface.py",
+    REPO_ROOT / "modules" / "simulation.py",
+    REPO_ROOT / "modules" / "agent.py",
+    REPO_ROOT / "modules" / "brain_context.py",
+    REPO_ROOT / "modules" / "brain_provider.py",
+    REPO_ROOT / "modules" / "construction.py",
+)
 def _requirements_text() -> str:
     try:
         return REQUIREMENTS_PATH.read_text(encoding="utf-8")
@@ -139,6 +148,20 @@ def check_environment() -> PreflightReport:
         messages.append(CheckMessage("error", f"Missing dependency file: {REQUIREMENTS_PATH}", repairable=False))
     else:
         messages.append(CheckMessage("ok", f"Dependency file found: {REQUIREMENTS_PATH.name}."))
+
+    for file_path in CRITICAL_PYTHON_FILES:
+        try:
+            py_compile.compile(str(file_path), doraise=True)
+        except Exception as exc:
+            messages.append(
+                CheckMessage(
+                    "error",
+                    f"Syntax compile failed: {file_path.relative_to(REPO_ROOT)} ({exc})",
+                    repairable=False,
+                )
+            )
+        else:
+            messages.append(CheckMessage("ok", f"Syntax compile succeeded: {file_path.relative_to(REPO_ROOT)}."))
 
     return PreflightReport(messages)
 
