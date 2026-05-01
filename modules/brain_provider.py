@@ -580,6 +580,12 @@ class RuleBrain(BrainProvider):
             and float(p.get("physical_build_progress", p.get("progress", 0.0)) or 0.0) < 1.0
             for p in built_state
         )
+        materially_incomplete_unbuilt = any(
+            str(p.get("project_status") or "").lower() in {"absent", "in_progress"}
+            and int(p.get("required_resources", 0) or 0) > int(p.get("delivered_resources", 0) or 0)
+            and float(p.get("physical_build_progress", p.get("progress", 0.0)) or 0.0) <= 0.0
+            for p in built_state
+        )
         active_work_remains = bool(active_projects or ready_for_validation)
         no_active_reason = any(
             "no_active_plan" in str(reason or "")
@@ -634,6 +640,7 @@ class RuleBrain(BrainProvider):
             "coordination_deadlock_pressure": coordination_deadlock_pressure,
             "construction_decision_pressure": construction_decision_pressure,
             "materially_ready_incomplete_projects": 1.0 if materially_ready_incomplete else 0.0,
+            "materially_incomplete_unbuilt_projects": 1.0 if materially_incomplete_unbuilt else 0.0,
             **plan_state,
         }
 
@@ -1189,6 +1196,41 @@ class RuleBrain(BrainProvider):
             transport = next((a for a in sorted_affordances if a.get("action_type") == ExecutableActionType.TRANSPORT_RESOURCES.value), None)
             if transport is not None:
                 chosen = transport
+        if features.get("materially_incomplete_unbuilt_projects", 0.0) > 0.0:
+            transport = next(
+                (
+                    a
+                    for a in sorted_affordances
+                    if a.get("action_type") == ExecutableActionType.TRANSPORT_RESOURCES.value
+                    and bool(a.get("reachable", True))
+                ),
+                None,
+            )
+            if transport is not None:
+                chosen = transport
+        if features.get("materially_ready_incomplete_projects", 0.0) > 0.0:
+            build = next(
+                (
+                    a
+                    for a in sorted_affordances
+                    if a.get("action_type") in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value}
+                    and bool(a.get("reachable", True))
+                ),
+                None,
+            )
+            if build is not None:
+                chosen = build
+        if not bool(chosen.get("reachable", True)):
+            fallback_meta = next(
+                (
+                    a
+                    for a in sorted_affordances
+                    if a.get("action_type") in {ExecutableActionType.REASSESS_PLAN.value, ExecutableActionType.OBSERVE_ENVIRONMENT.value}
+                ),
+                None,
+            )
+            if fallback_meta is not None:
+                chosen = fallback_meta
         if features.get("coordination_deadlock_pressure", 0.0) >= 0.55:
             if features.get("team_plan_available", 0.0) > 0.0:
                 consult = next((a for a in sorted_affordances if a.get("action_type") == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value), None)
@@ -1400,6 +1442,32 @@ class RuleBrain(BrainProvider):
             step_notes.append("reassess_suppressed_due_to_available_concrete_action")
         if available_meta and selected_action != ExecutableActionType.OBSERVE_ENVIRONMENT:
             step_notes.append("observe_suppressed_due_to_available_concrete_action")
+        if selected_action == ExecutableActionType.REASSESS_PLAN:
+            active_proj = next(
+                (
+                    p
+                    for p in (context_packet.world_snapshot.get("built_state", []) if hasattr(context_packet, "world_snapshot") else [])
+                    if str(p.get("project_status") or "").lower() in {"absent", "in_progress"}
+                ),
+                {},
+            )
+            executable_actions = [
+                str(a.get("action_type"))
+                for a in sorted_affordances
+                if str(a.get("action_type")) in {
+                    ExecutableActionType.TRANSPORT_RESOURCES.value,
+                    ExecutableActionType.START_CONSTRUCTION.value,
+                    ExecutableActionType.CONTINUE_CONSTRUCTION.value,
+                }
+                and bool(a.get("reachable", True))
+            ]
+            step_notes.append(
+                "reassess_selected_with_execution_context:"
+                f"project={active_proj.get('structure_id') or active_proj.get('id')};"
+                f"delivered={active_proj.get('delivered_resources')}/{active_proj.get('required_resources')};"
+                f"physical_build_progress={active_proj.get('physical_build_progress', active_proj.get('progress'))};"
+                f"executable={executable_actions[:3]}"
+            )
         reason = f"mode={selected_mode};transition={transition_reason}"
         assumptions = [f"policy_mode={selected_mode}", f"mode_dwell={control_state.get('mode_dwell_steps', 0)}"]
         if method_id:
