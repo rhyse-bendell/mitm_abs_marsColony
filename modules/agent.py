@@ -12877,17 +12877,6 @@ class Agent:
                     )
                     if readiness_ratio < 0.8:
                         self._emit_event(sim_state, "repair_trigger_suppressed_not_ready", {"project_id": project_id, "reason": "build_not_ready_for_repair", "readiness_ratio": round(readiness_ratio, 3)})
-
-    def _emit_mismatch_skip_once(self, sim_state, project_id, reason, extra):
-        state = self.construction_validation_state.setdefault("mismatch_skip_emit_state", {})
-        key = str(project_id or "unknown")
-        current = {"reason": str(reason), "extra": dict(extra or {})}
-        if state.get(key) == current:
-            return
-        state[key] = current
-        payload = {"project_id": project_id, "reason": reason}
-        payload.update(dict(extra or {}))
-        self._emit_event(sim_state, "mismatch_detection_skipped_not_ready", payload)
                         continue
                     last_repair = float(self.construction_validation_state["repair_last_ts"].get(project_id, -999.0))
                     if now_ts - last_repair < 5.0:
@@ -12927,6 +12916,17 @@ class Agent:
                             )
                     else:
                         project["correct"] = False
+
+    def _emit_mismatch_skip_once(self, sim_state, project_id, reason, extra):
+        state = self.construction_validation_state.setdefault("mismatch_skip_emit_state", {})
+        key = str(project_id or "unknown")
+        current = {"reason": str(reason), "extra": dict(extra or {})}
+        if state.get(key) == current:
+            return
+        state[key] = current
+        payload = {"project_id": project_id, "reason": reason}
+        payload.update(dict(extra or {}))
+        self._emit_event(sim_state, "mismatch_detection_skipped_not_ready", payload)
 
 
     def draw(self, ax):
