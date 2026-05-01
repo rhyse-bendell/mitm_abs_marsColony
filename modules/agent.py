@@ -4537,6 +4537,63 @@ class Agent:
             confidence=max(0.78, float(decision.confidence or 0.0)),
         )
 
+    def _suppress_reassess_when_project_work_available(self, decision, environment, *, sim_state=None):
+        if decision.selected_action != ExecutableActionType.REASSESS_PLAN:
+            return decision
+        requested = str(decision.target_id or "")
+        project_id = requested if self._project_still_viable_for_binding(environment, requested) else self._acquire_project_focus_for_action(
+            environment,
+            action_type=ExecutableActionType.TRANSPORT_RESOURCES.value,
+            requested_project_id=None,
+            sim_state=sim_state,
+            reason="reassess_suppression_probe",
+        )
+        if not project_id:
+            return decision
+        construction = getattr(environment, "construction", None)
+        project = (construction.projects or {}).get(project_id) if construction else None
+        if not isinstance(project, dict):
+            return decision
+        preferred = None
+        reason = None
+        if self._project_needs_transport(project):
+            preferred = ExecutableActionType.TRANSPORT_RESOURCES
+            reason = "material_incomplete"
+        elif self._project_materially_ready_for_build(project) and self._project_has_incomplete_build_steps(project):
+            preferred = ExecutableActionType.CONTINUE_CONSTRUCTION
+            reason = "resource_complete_build_incomplete"
+        elif bool(project.get("structurally_complete")):
+            readiness = construction.evaluate_project_validation_readiness(project_id) if construction else {}
+            if bool(readiness.get("validation_ready", False)):
+                preferred = ExecutableActionType.VALIDATE_CONSTRUCTION
+                reason = "validation_ready"
+        if preferred is None:
+            return decision
+        self._emit_event(
+            sim_state,
+            "reassess_plan_suppressed_for_project_work",
+            {
+                "agent": self.name,
+                "project_id": project_id,
+                "project_type": project.get("type"),
+                "delivered_resources": dict(project.get("delivered_resources") or {}),
+                "required_resources": dict(project.get("required_resources") or {}),
+                "resource_complete": bool(project.get("resource_complete")),
+                "physical_build_progress": float(project.get("progress", 0.0) or 0.0),
+                "structurally_complete": bool(project.get("structurally_complete")),
+                "preferred_action": preferred.value,
+                "reason": reason,
+            },
+        )
+        return BrainDecision(
+            selected_action=preferred,
+            target_id=project_id,
+            target_zone=decision.target_zone,
+            goal_update="execute_project_work",
+            reason_summary="Concrete project work exists; suppressed reassess_plan.",
+            confidence=max(0.8, float(decision.confidence or 0.0)),
+        )
+
     def _rule_dependency_support_class(self, rule_id):
         rid = normalize_rule_token(rule_id)
         if not rid:
@@ -8969,6 +9026,11 @@ class Agent:
         decision = self._apply_policy_pivots(decision, environment, sim_state=sim_state, context=context, pivot_origin="local_refresh")
         if planner_reason == "no_active_plan":
             decision = self._no_active_plan_successor_for_materially_satisfied_project(
+                decision,
+                environment,
+                sim_state=sim_state,
+            )
+            decision = self._suppress_reassess_when_project_work_available(
                 decision,
                 environment,
                 sim_state=sim_state,
