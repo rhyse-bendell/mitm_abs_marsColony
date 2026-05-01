@@ -611,6 +611,15 @@ class RuleBrain(BrainProvider):
         no_active_plan_pressure = 1.0 if (active_work_remains and (no_active_reason or not plan_summary_usable) and not concrete_action_available) else 0.0
         coordination_deadlock_pressure = min(1.0, no_active_plan_pressure + (0.45 if no_progress_streak >= 1 else 0.0) + (0.35 if active_work_remains else 0.0))
         construction_decision_pressure = min(1.0, (0.55 if active_work_remains else 0.0) + (0.55 if ready_for_validation else 0.0) + (0.4 * no_active_plan_pressure))
+        capacity_unlock = dict(world.get("capacity_unlock") or {}) if isinstance(world, dict) else {}
+        bridge_unlock_needed = 1.0 if bool(capacity_unlock.get("bridge_id")) else 0.0
+        no_buildable_capacity = 1.0 if bridge_unlock_needed and bool(capacity_unlock.get("buildable_capacity_exhausted", True)) else 0.0
+        locked_capacity_available = 1.0 if bridge_unlock_needed and int(capacity_unlock.get("locked_remaining_capacity", 0) or 0) > 0 else 0.0
+        bridge_required = int(capacity_unlock.get("required_resources", 0) or 0)
+        bridge_delivered = int(capacity_unlock.get("delivered_resources", 0) or 0)
+        bridge_status = str(capacity_unlock.get("bridge_status") or "")
+        bridge_material_incomplete = 1.0 if bridge_unlock_needed and bridge_delivered < bridge_required else 0.0
+        bridge_build_incomplete = 1.0 if bridge_unlock_needed and bridge_required > 0 and bridge_delivered >= bridge_required and bridge_status != "complete" else 0.0
         return {
             "epistemic_deficit": min(1.0, len(known_gaps) / 4.0),
             "build_opportunity": 1.0 if readiness.get("ready_for_build") else 0.0,
@@ -641,6 +650,11 @@ class RuleBrain(BrainProvider):
             "construction_decision_pressure": construction_decision_pressure,
             "materially_ready_incomplete_projects": 1.0 if materially_ready_incomplete else 0.0,
             "materially_incomplete_unbuilt_projects": 1.0 if materially_incomplete_unbuilt else 0.0,
+            "no_buildable_capacity": no_buildable_capacity,
+            "locked_capacity_available": locked_capacity_available,
+            "bridge_unlock_needed": bridge_unlock_needed,
+            "bridge_material_incomplete": bridge_material_incomplete,
+            "bridge_build_incomplete": bridge_build_incomplete,
             **plan_state,
         }
 

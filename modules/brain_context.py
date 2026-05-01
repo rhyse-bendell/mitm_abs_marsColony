@@ -197,6 +197,9 @@ class BrainContextBuilder:
             and int(item.get("required_resources", 0) or 0) > int(item.get("delivered_resources", 0) or 0)
             and float(item.get("physical_build_progress", item.get("progress", 0.0)) or 0.0) <= 0.0
         ]
+        capacity_summary = environment.construction.get_site_capacity_summary() if hasattr(environment.construction, "get_site_capacity_summary") else []
+        capacity_unlock = environment.construction.get_next_capacity_unlock() if hasattr(environment.construction, "get_next_capacity_unlock") else None
+        bridge_unlock_needed = bool(isinstance(capacity_unlock, dict) and capacity_unlock.get("bridge_id"))
         has_artifacts = bool((team_state or {}).get("externalized_artifacts"))
         nearby_teammates = sum(
             1
@@ -322,6 +325,16 @@ class BrainContextBuilder:
                 "utility": utility_for(ExecutableActionType.TRANSPORT_RESOURCES),
             }
         )
+
+        if bridge_unlock_needed:
+            bridge_id = str(capacity_unlock.get("bridge_id"))
+            required = int(capacity_unlock.get("required_resources", 0) or 0)
+            delivered = int(capacity_unlock.get("delivered_resources", 0) or 0)
+            bridge_status = str(capacity_unlock.get("bridge_status") or "not_started")
+            if delivered < required:
+                legal.append({"action_type": ExecutableActionType.TRANSPORT_RESOURCES.value, "target_id": bridge_id, "target_class": "bridge", "target_kind": "bridge", "work_stage": "bridge_material_delivery", "reachable": True, "utility": 0.96})
+            elif bridge_status != "complete":
+                legal.append({"action_type": ExecutableActionType.CONTINUE_CONSTRUCTION.value, "target_id": bridge_id, "target_class": "bridge", "target_kind": "bridge", "work_stage": "bridge_build", "reachable": True, "utility": 0.94})
 
         task_model = getattr(agent, "task_model", None)
         if not task_model:
@@ -568,6 +581,8 @@ class BrainContextBuilder:
             "affordance_map": affordance_summary,
             "resource_status": {"visible_resources": environment.get_visible_resources(agent.position)},
             "legal_actions": action_affordances,
+            "site_capacity_summary": environment.construction.get_site_capacity_summary() if hasattr(environment.construction, "get_site_capacity_summary") else [],
+            "capacity_unlock": environment.construction.get_next_capacity_unlock() if hasattr(environment.construction, "get_next_capacity_unlock") else None,
         }
 
         mechanism_profile = {
