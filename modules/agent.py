@@ -822,7 +822,8 @@ class Agent:
             probe = BrainDecision(selected_action=action_type, target_id=target_id, confidence=0.8)
             blockers, project_id = self._construction_action_blockers(probe, {"type": "idle", "decision_action": action_type.value, "project_id": target_id}, environment, sim_state=sim_state)
             if not blockers:
-                return BrainDecision(selected_action=action_type, target_id=project_id or target_id, confidence=0.85)
+                self._emit_event(sim_state, "project_focus_bound_to_action", {"project_id": project_id, "selected_action": decision.selected_action.value, "reason": reason});
+            return BrainDecision(selected_action=action_type, target_id=project_id or target_id, confidence=0.85)
         return None
 
     def _force_recovery_pivot(self, sim_state=None, *, to_action, reason, ttl_s=12.0):
@@ -4336,6 +4337,9 @@ class Agent:
         return None
 
     def _project_still_viable_for_binding(self, environment, project_id, *, include_complete=False):
+        if str(project_id or "") == "bridge_bc":
+            bridge = getattr(environment.construction, "bridges", {}).get("bridge_bc")
+            return bridge is not None and (include_complete or str(getattr(bridge, "status", "")) != "complete")
         project = environment.construction.projects.get(project_id) if project_id else None
         if not isinstance(project, dict):
             return False
@@ -4382,6 +4386,10 @@ class Agent:
                 {"project_id": selected_project_id, "source": "target_selection", "reason": reason_tag},
             )
             return selected_project_id
+        unlock = environment.construction.get_next_capacity_unlock() if hasattr(environment.construction, "get_next_capacity_unlock") else None
+        if isinstance(unlock, dict) and str(unlock.get("bridge_id") or "") == "bridge_bc":
+            self._emit_event(sim_state, "locked_capacity_unlock_identified", {"bridge_id": "bridge_bc", "reason": reason_tag})
+            return "bridge_bc"
         return None
 
     def _bind_project_to_decision_if_needed(self, decision, environment, *, sim_state=None, reason=None):
@@ -4551,6 +4559,13 @@ class Agent:
         if not project_id:
             return decision
         construction = getattr(environment, "construction", None)
+        if project_id == "bridge_bc":
+            unlock = construction.get_next_capacity_unlock() if construction and hasattr(construction, "get_next_capacity_unlock") else None
+            if isinstance(unlock, dict) and str(unlock.get("bridge_id") or "") == "bridge_bc":
+                preferred = ExecutableActionType.TRANSPORT_RESOURCES if int(unlock.get("delivered_resources",0) or 0) < int(unlock.get("required_resources",0) or 0) else ExecutableActionType.CONTINUE_CONSTRUCTION
+                self._emit_event(sim_state, "reassess_plan_suppressed_for_project_work", {"agent": self.name, "project_id": "bridge_bc", "preferred_action": preferred.value, "reason": "bridge_unlock_needed"})
+                return BrainDecision(selected_action=preferred,target_id="bridge_bc",target_zone=decision.target_zone,goal_update="unlock_capacity_bridge",reason_summary="Bridge unlock work exists; suppressed reassess_plan.",confidence=max(0.8,float(decision.confidence or 0.0)))
+            return decision
         project = (construction.projects or {}).get(project_id) if construction else None
         if not isinstance(project, dict):
             return decision
@@ -5260,6 +5275,9 @@ class Agent:
         )
 
     def _start_execution_lock(self, environment, project_id, *, sim_state=None, reason="project_actionable"):
+        if str(project_id or "") == "bridge_bc":
+            bridge = getattr(environment.construction, "bridges", {}).get("bridge_bc")
+            return bridge is not None and (include_complete or str(getattr(bridge, "status", "")) != "complete")
         project = environment.construction.projects.get(project_id) if project_id else None
         if not isinstance(project, dict):
             return False
@@ -5309,6 +5327,9 @@ class Agent:
         return True
 
     def _execution_lock_viable_project(self, environment, project_id, *, sim_state=None):
+        if str(project_id or "") == "bridge_bc":
+            bridge = getattr(environment.construction, "bridges", {}).get("bridge_bc")
+            return bridge is not None and (include_complete or str(getattr(bridge, "status", "")) != "complete")
         project = environment.construction.projects.get(project_id) if project_id else None
         if not isinstance(project, dict):
             return False
@@ -9383,7 +9404,7 @@ class Agent:
             ExecutableActionType.CONTINUE_CONSTRUCTION,
             ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
             ExecutableActionType.VALIDATE_CONSTRUCTION,
-        } and action.get("project_id") not in environment.construction.projects:
+        } and action.get("project_id") not in environment.construction.projects and action.get("project_id") != "bridge_bc":
             selected = self._select_build_target(
                 environment,
                 require_readiness=False,
@@ -11149,6 +11170,17 @@ class Agent:
                     )
                     continue
                 project = environment.construction.projects.get(project_id)
+                if project_id == "bridge_bc":
+                    bridge = environment.construction.bridges.get("bridge_bc")
+                    if not bridge:
+                        continue
+                    delivered_ok = environment.construction.build_bridge_bc(quantity=1)
+                    self._emit_event(sim_state, "bridge_resource_delivered", {"bridge_id":"bridge_bc","delivered_resources": int(bridge.delivered_resources), "required_resources": int(bridge.required_resources)})
+                    if bool(delivered_ok):
+                        self._emit_event(sim_state, "bridge_completed_site_unlocked", {"bridge_id":"bridge_bc", "site_id":"site_c"})
+                        self._emit_event(sim_state, "site_unlocked_by_bridge", {"site_id":"site_c", "bridge_id":"bridge_bc"})
+                    _set_action_stage(action, "mutation_execution_succeeded", {"project_id": "bridge_bc", "target_kind": "dropoff"})
+                    continue
                 if not project:
                     self._emit_event(
                         sim_state,
