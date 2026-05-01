@@ -6150,7 +6150,28 @@ class Agent:
 
         if getattr(self, "derivation_events", []):
             last = self.derivation_events[-1]
-            self._activate_support_goal("integrate_new_derivation", f"derivation:{last.get('derivation_id')}", sim_state=sim_state, priority=0.65, source="derived_from_rule")
+            has_concrete_project_work = any(
+                isinstance(project, dict)
+                and (
+                    (
+                        int(project.get("required_resources", {}).get("bricks", 0) or 0)
+                        > int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
+                    )
+                    or (
+                        bool(project.get("resource_complete"))
+                        and float(project.get("physical_build_progress", 0.0) or 0.0) <= 0.0
+                    )
+                )
+                for project in getattr(environment.construction, "projects", {}).values()
+            )
+            if has_concrete_project_work:
+                self._emit_event(
+                    sim_state,
+                    "support_goal_activation_deferred",
+                    {"goal_id": "SUPPORT_INTEGRATE_NEW_DERIVATION", "reason": "concrete_project_work_available"},
+                )
+            else:
+                self._activate_support_goal("integrate_new_derivation", f"derivation:{last.get('derivation_id')}", sim_state=sim_state, priority=0.65, source="derived_from_rule")
 
         if (
             sim_state is not None
@@ -12772,6 +12793,8 @@ class Agent:
                     self.activity_log.append(f"Reinferred rule from tag [{tag}]")
 
     def compare_and_repair_construction(self, construction, sim_state=None):
+        if not isinstance(self.construction_validation_state.get("mismatch_skip_emit_state"), dict):
+            self.construction_validation_state["mismatch_skip_emit_state"] = {}
         closure_project_id = self.project_closure_state.get("project_id") if bool(self.project_closure_state.get("active")) else None
         for project in construction.projects.values():
             if not isinstance(project, dict):
@@ -12782,14 +12805,10 @@ class Agent:
             required = int(project.get("required_resources", {}).get("bricks", 0) or 0)
             delivered = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
             if required <= 0 or delivered <= 0:
-                self._emit_event(sim_state, "mismatch_detection_skipped_not_ready", {"project_id": project_id, "reason": "insufficient_build_state", "required": required, "delivered": delivered})
+                self._emit_mismatch_skip_once(sim_state, project_id, "insufficient_build_state", {"required": required, "delivered": delivered})
                 continue
             if not self._project_has_physical_build_progress(project):
-                self._emit_event(
-                    sim_state,
-                    "mismatch_detection_skipped_not_ready",
-                    {"project_id": project_id, "reason": "physical_build_not_started"},
-                )
+                self._emit_mismatch_skip_once(sim_state, project_id, "physical_build_not_started", {})
                 continue
             if closure_project_id and project_id == closure_project_id and str(project.get("status")) == "ready_for_validation":
                 self._emit_event(sim_state, "mismatch_detection_deferred_for_closure", {"project_id": project_id, "reason": "closure_commitment_active"})
@@ -12817,16 +12836,16 @@ class Agent:
                     continue
             readiness_ratio = delivered / max(1, required)
             if readiness_ratio < 0.5:
-                self._emit_event(sim_state, "mismatch_detection_skipped_not_ready", {"project_id": project_id, "reason": "build_state_below_validation_threshold", "readiness_ratio": round(readiness_ratio, 3)})
+                self._emit_mismatch_skip_once(sim_state, project_id, "build_state_below_validation_threshold", {"readiness_ratio": round(readiness_ratio, 3)})
                 continue
             known_rules = {normalize_rule_token(r) for r in self.mental_model["knowledge"].rules}
             if not known_rules:
-                self._emit_event(sim_state, "mismatch_detection_skipped_not_ready", {"project_id": project_id, "reason": "no_rules_to_validate_against"})
+                self._emit_mismatch_skip_once(sim_state, project_id, "no_rules_to_validate_against", {})
                 continue
             now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
             last_mismatch = float(self.construction_validation_state["mismatch_last_ts"].get(project_id, -999.0))
             if now_ts - last_mismatch < 5.0:
-                self._emit_event(sim_state, "mismatch_detection_skipped_not_ready", {"project_id": project_id, "reason": "cooldown_active", "cooldown_remaining": round(5.0 - (now_ts - last_mismatch), 3)})
+                self._emit_mismatch_skip_once(sim_state, project_id, "cooldown_active", {"cooldown_remaining": round(5.0 - (now_ts - last_mismatch), 3)})
                 continue
             expected_rules = {normalize_rule_token(r) for r in project.get("expected_rules", [])}
             rule_matches = bool(known_rules.intersection(expected_rules))
@@ -12858,6 +12877,17 @@ class Agent:
                     )
                     if readiness_ratio < 0.8:
                         self._emit_event(sim_state, "repair_trigger_suppressed_not_ready", {"project_id": project_id, "reason": "build_not_ready_for_repair", "readiness_ratio": round(readiness_ratio, 3)})
+
+    def _emit_mismatch_skip_once(self, sim_state, project_id, reason, extra):
+        state = self.construction_validation_state.setdefault("mismatch_skip_emit_state", {})
+        key = str(project_id or "unknown")
+        current = {"reason": str(reason), "extra": dict(extra or {})}
+        if state.get(key) == current:
+            return
+        state[key] = current
+        payload = {"project_id": project_id, "reason": reason}
+        payload.update(dict(extra or {}))
+        self._emit_event(sim_state, "mismatch_detection_skipped_not_ready", payload)
                         continue
                     last_repair = float(self.construction_validation_state["repair_last_ts"].get(project_id, -999.0))
                     if now_ts - last_repair < 5.0:

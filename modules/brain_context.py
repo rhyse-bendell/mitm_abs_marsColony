@@ -190,6 +190,13 @@ class BrainContextBuilder:
             and float(item.get("physical_build_progress", item.get("progress", 0.0)) or 0.0) <= 0.0
             for item in built_state
         )
+        materially_incomplete_projects = [
+            item
+            for item in built_state
+            if str(item.get("project_status") or "") in {"absent", "in_progress"}
+            and int(item.get("required_resources", 0) or 0) > int(item.get("delivered_resources", 0) or 0)
+            and float(item.get("physical_build_progress", item.get("progress", 0.0)) or 0.0) <= 0.0
+        ]
         has_artifacts = bool((team_state or {}).get("externalized_artifacts"))
         nearby_teammates = sum(
             1
@@ -217,6 +224,8 @@ class BrainContextBuilder:
             if action == ExecutableActionType.CONSULT_TEAM_ARTIFACT:
                 return 0.6 if has_artifacts else 0.2
             if action == ExecutableActionType.TRANSPORT_RESOURCES:
+                if materially_incomplete_projects:
+                    return 0.93 if readiness_ok else 0.82
                 penalty = 0.35 if epistemic_suff < 0.45 else (0.15 if epistemic_suff < 0.6 else 0.0)
                 return max(0.08, (0.75 if readiness_ok and stage != "early" else 0.25) - penalty)
             if action in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION}:
