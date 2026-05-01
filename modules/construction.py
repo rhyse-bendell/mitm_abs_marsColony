@@ -263,6 +263,12 @@ class ConstructionManager:
         site = self.sites.get(site_id)
         if not site:
             return None, "unknown_site"
+        if not self._is_site_buildable(site_id):
+            site_conf = self.site_definitions.get(site_id, {})
+            required_bridge = site_conf.get("buildable_when_bridge_complete")
+            if required_bridge:
+                return None, "site_locked_by_bridge"
+            return None, "site_not_buildable"
         if len(self._site_project_ids(site_id)) >= site.capacity:
             return None, "site_capacity_reached"
         template = dict(template or self._template_for_structure_type(structure_type) or {})
@@ -338,6 +344,72 @@ class ConstructionManager:
         project["validation_discussion"] = self._default_validation_discussion(project)
         self.projects[project_id] = project
         return project_id, "created"
+
+    def get_project_work_stage(self, project_id):
+        project = self.projects.get(str(project_id or ""))
+        if not isinstance(project, dict):
+            return "blocked"
+        if bool(project.get("validated_complete")) or str(project.get("status") or "") == "complete":
+            return "complete"
+        required = int((project.get("required_resources") or {}).get("bricks", 0) or 0)
+        delivered = int((project.get("delivered_resources") or {}).get("bricks", 0) or 0)
+        resource_complete = bool(project.get("resource_complete")) or (required > 0 and delivered >= required)
+        structurally_complete = bool(project.get("structurally_complete"))
+        if not resource_complete:
+            return "material_delivery"
+        if not structurally_complete:
+            return "physical_build"
+        readiness = self.evaluate_project_validation_readiness(project.get("id"))
+        if bool(readiness.get("validation_ready", False)):
+            return "validation"
+        return "support_chain"
+
+    def get_site_capacity_summary(self):
+        summary = []
+        for site_id, site in self.sites.items():
+            used = len(self._site_project_ids(site_id))
+            remaining = max(0, int(site.capacity) - int(used))
+            site_conf = self.site_definitions.get(site_id, {})
+            unlock_bridge_id = site_conf.get("buildable_when_bridge_complete")
+            unlock_bridge_status = None
+            locked_by_bridge = False
+            if unlock_bridge_id:
+                bridge = self.bridges.get(str(unlock_bridge_id))
+                unlock_bridge_status = str(getattr(bridge, "status", "unknown"))
+                locked_by_bridge = unlock_bridge_status != "complete"
+            summary.append({
+                "site_id": site_id,
+                "capacity": int(site.capacity),
+                "used": int(used),
+                "remaining": int(remaining),
+                "buildable": bool(self._is_site_buildable(site_id)),
+                "locked_by_bridge": bool(locked_by_bridge),
+                "unlock_bridge_id": unlock_bridge_id,
+                "unlock_bridge_status": unlock_bridge_status,
+            })
+        return summary
+
+    def find_buildable_site_for_structure(self, structure_type):
+        del structure_type
+        for row in self.get_site_capacity_summary():
+            if row.get("buildable") and int(row.get("remaining", 0)) > 0:
+                return row.get("site_id")
+        return None
+
+    def get_next_capacity_unlock(self):
+        buildable_capacity = [r for r in self.get_site_capacity_summary() if r.get("buildable") and int(r.get("remaining", 0)) > 0]
+        if buildable_capacity:
+            return None
+        locked = [r for r in self.get_site_capacity_summary() if (not r.get("buildable")) and int(r.get("remaining", 0)) > 0 and r.get("unlock_bridge_id")]
+        if not locked:
+            return None
+        locked.sort(key=lambda x: int(x.get("remaining", 0)), reverse=True)
+        return {
+            "bridge_id": locked[0].get("unlock_bridge_id"),
+            "site_id": locked[0].get("site_id"),
+            "remaining_capacity": int(locked[0].get("remaining", 0)),
+            "bridge_status": locked[0].get("unlock_bridge_status"),
+        }
 
     def _default_support_requirements(self, structure_type):
         stype = str(structure_type or "").strip().lower()
