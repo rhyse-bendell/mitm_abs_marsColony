@@ -1222,6 +1222,32 @@ class RuleBrain(BrainProvider):
             )
             if transport is not None:
                 chosen = transport
+        if features.get("bridge_unlock_needed", 0.0) > 0.0 and features.get("bridge_material_incomplete", 0.0) > 0.0:
+            bridge_transport = next(
+                (
+                    a
+                    for a in sorted_affordances
+                    if a.get("action_type") == ExecutableActionType.TRANSPORT_RESOURCES.value
+                    and str(a.get("target_id") or "") == "bridge_bc"
+                    and bool(a.get("reachable", True))
+                ),
+                None,
+            )
+            if bridge_transport is not None:
+                chosen = bridge_transport
+        if features.get("bridge_unlock_needed", 0.0) > 0.0 and features.get("bridge_build_incomplete", 0.0) > 0.0:
+            bridge_build = next(
+                (
+                    a
+                    for a in sorted_affordances
+                    if a.get("action_type") in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value}
+                    and str(a.get("target_id") or "") == "bridge_bc"
+                    and bool(a.get("reachable", True))
+                ),
+                None,
+            )
+            if bridge_build is not None:
+                chosen = bridge_build
         if features.get("materially_ready_incomplete_projects", 0.0) > 0.0:
             build = next(
                 (
