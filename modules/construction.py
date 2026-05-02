@@ -397,18 +397,29 @@ class ConstructionManager:
         return None
 
     def get_next_capacity_unlock(self):
-        buildable_capacity = [r for r in self.get_site_capacity_summary() if r.get("buildable") and int(r.get("remaining", 0)) > 0]
+        summary = self.get_site_capacity_summary()
+        buildable_capacity = [r for r in summary if r.get("buildable") and int(r.get("remaining", 0)) > 0]
         if buildable_capacity:
             return None
-        locked = [r for r in self.get_site_capacity_summary() if (not r.get("buildable")) and int(r.get("remaining", 0)) > 0 and r.get("unlock_bridge_id")]
+        locked = [r for r in summary if (not r.get("buildable")) and int(r.get("remaining", 0)) > 0 and r.get("unlock_bridge_id")]
         if not locked:
             return None
         locked.sort(key=lambda x: int(x.get("remaining", 0)), reverse=True)
+        bridge_id = str(locked[0].get("unlock_bridge_id") or "")
+        bridge = self.bridges.get(bridge_id)
+        required_resources = int(getattr(bridge, "required_resources", 0) or 0)
+        delivered_resources = int(getattr(bridge, "delivered_resources", 0) or 0)
+        bridge_status = str(getattr(bridge, "status", locked[0].get("unlock_bridge_status") or "not_started"))
         return {
-            "bridge_id": locked[0].get("unlock_bridge_id"),
+            "bridge_id": bridge_id,
             "site_id": locked[0].get("site_id"),
+            "locked_site_id": locked[0].get("site_id"),
             "remaining_capacity": int(locked[0].get("remaining", 0)),
-            "bridge_status": locked[0].get("unlock_bridge_status"),
+            "locked_remaining_capacity": int(locked[0].get("remaining", 0)),
+            "bridge_status": bridge_status,
+            "required_resources": required_resources,
+            "delivered_resources": delivered_resources,
+            "buildable_capacity_exhausted": True,
         }
 
     def _default_support_requirements(self, structure_type):

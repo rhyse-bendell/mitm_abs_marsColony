@@ -55,6 +55,31 @@ class TestRuleBrainCapacityUnlockRuntime(unittest.TestCase):
         self.assertIsNotNone(pid)
         self.assertEqual(reason, "created")
 
+    def test_bridge_not_selected_prematurely_when_regular_project_work_exists(self):
+        brain = RuleBrain(RuleBrainPolicyConfig(min_mode_dwell_steps=0, mode_selection_temperature=0.01, action_selection_temperature=0.01))
+        world_snapshot = {
+            "sim_time": 25.0,
+            "phase_profile": {"stage": "execution"},
+            "built_state": [
+                {"structure_id": "site_b_house_002", "project_status": "in_progress", "required_resources": 10, "delivered_resources": 6, "resource_complete": False, "physical_build_progress": 0.0, "state": "in_progress", "progress": 0.0},
+            ],
+            "capacity_unlock": None,
+        }
+        ctx = BrainContextPacket(
+            static_task_context={"role": "Engineer"},
+            world_snapshot=world_snapshot,
+            individual_cognitive_state={"build_readiness": {"ready_for_build": True}, "known_gaps": [], "loop_counters": {}, "progress_state": {}, "goal_stack": [{"goal_id": "phase1"}], "inspect_state": {"source_exhaustion": {}}, "epistemic_sufficiency": {}},
+            team_state={"externalized_artifacts": [], "teammate_help_signals": {}, "team_shared_knowledge": {}},
+            history_bands={"semantic_plan_evolution": {"unresolved_contradictions": []}},
+            action_affordances=[
+                {"action_type": "transport_resources", "target_id": "site_b_house_002", "reachable": True, "utility": 0.9},
+                {"action_type": "reassess_plan", "utility": 0.2},
+            ],
+        )
+        decision = brain.decide(ctx)
+        self.assertEqual(decision.selected_action, ExecutableActionType.TRANSPORT_RESOURCES)
+        self.assertEqual(decision.target_id, "site_b_house_002")
+
 
 if __name__ == "__main__":
     unittest.main()
