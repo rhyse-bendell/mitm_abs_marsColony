@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from modules.agent import Agent
 from modules.brain_context import BrainContextBuilder
-from modules.brain_provider import BrainBackendConfig, create_brain_provider
+from modules.brain_provider import BrainBackendConfig, create_brain_provider, resolve_pilot_display_name, resolve_pilot_id
 from modules.environment import Environment
 from modules.logging_tools import SimulationLogger
 from modules.interaction_graph import InteractionTelemetryBridge
@@ -245,6 +245,8 @@ class SimulationState:
             self.planner_defaults["warmup_timeout_seconds"] = effective_warmup_timeout
             self.planner_defaults["planner_completion_max_tokens"] = effective_planner_tokens
         self.configured_brain_backend = self.brain_backend_config.backend
+        self.pilot_id = resolve_pilot_id(self.configured_brain_backend)
+        self.pilot_display_name = resolve_pilot_display_name(self.configured_brain_backend)
         self.brain_provider = create_brain_provider(self.brain_backend_config)
         self.provider_warmup_status = None
         if hasattr(self.brain_provider, "warmup_probe") and callable(getattr(self.brain_provider, "warmup_probe")):
@@ -294,6 +296,10 @@ class SimulationState:
                 "effective_brain_backend": self.effective_brain_backend,
                 "provider_class": self.brain_provider.__class__.__name__,
                 "fallback_backend": self.brain_backend_config.fallback_backend,
+                "brain_backend": self.configured_brain_backend,
+                "pilot_id": self.pilot_id,
+                "pilot_display_name": self.pilot_display_name,
+                "legacy_backend_alias": "rule_brain" if self.pilot_id == "procedural_baseline" else None,
                 "local_backend_alias": "ollama_openai_compatible" if self.configured_brain_backend in {"local_http", "openai_compatible_local", "ollama_local", "ollama"} else None,
                 "local_model_name": self.brain_backend_config.local_model if self.configured_brain_backend != "rule_brain" else None,
                 "local_base_url": self.brain_backend_config.local_base_url if self.configured_brain_backend != "rule_brain" else None,
@@ -941,6 +947,10 @@ class SimulationState:
         return {
             "configured_brain_backend": self.configured_brain_backend,
             "effective_brain_backend": self.effective_brain_backend,
+            "brain_backend": self.configured_brain_backend,
+            "pilot_id": self.pilot_id,
+            "pilot_display_name": self.pilot_display_name,
+            "legacy_backend_alias": "rule_brain" if self.pilot_id == "procedural_baseline" else None,
             "fallback_backend": cfg.fallback_backend,
             "local_model_name": cfg.local_model if self.configured_brain_backend != "rule_brain" else None,
             "local_base_url": cfg.local_base_url if self.configured_brain_backend != "rule_brain" else None,

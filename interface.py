@@ -306,7 +306,7 @@ class MarsColonyInterface:
         log_scroll.pack(side="right", fill="y")
         self.system_log_text.configure(yscrollcommand=log_scroll.set)
 
-        self.backend_status_var = StringVar(value="Backend (configured/effective): rule_brain / rule_brain")
+        self.backend_status_var = StringVar(value="Backend (configured/effective): procedural_baseline / procedural_baseline")
         ttk.Label(right_frame, textvariable=self.backend_status_var).grid(row=2, column=0, sticky="w", pady=(6, 0))
 
         right_frame.rowconfigure(0, weight=3)
@@ -3859,7 +3859,7 @@ class MarsColonyInterface:
         ttk.Label(settings_frame, text="Brain Backend").grid(row=12, column=0, sticky="w", padx=(0, 8), pady=(6, 3))
         self.brain_backend_var = StringVar(value=self.BACKEND_DEFAULTS["brain_backend"])
         self.brain_backend_var.trace_add("write", lambda *_: self._refresh_all_agent_inheritance_display())
-        backend_combo = ttk.Combobox(settings_frame, textvariable=self.brain_backend_var, values=["rule_brain", "local_http", "ollama"], state="readonly", width=22)
+        backend_combo = ttk.Combobox(settings_frame, textvariable=self.brain_backend_var, values=["procedural_baseline", "rule_brain", "local_http", "ollama"], state="readonly", width=22)
         backend_combo.grid(row=12, column=1, sticky="w", pady=(6, 3))
         backend_combo.bind("<<ComboboxSelected>>", lambda _e: self._update_backend_field_states())
         self._add_help_text(settings_frame, 13, "Select which decision system agents use by default.")
@@ -3887,7 +3887,7 @@ class MarsColonyInterface:
         self._add_help_text(settings_frame, 19, "Maximum request time for the selected default backend.")
 
         ttk.Label(settings_frame, text="Fallback Backend").grid(row=20, column=0, sticky="w", padx=(0, 8), pady=3)
-        fallback_combo = ttk.Combobox(settings_frame, textvariable=self.fallback_backend_var, values=["rule_brain"], state="readonly", width=22)
+        fallback_combo = ttk.Combobox(settings_frame, textvariable=self.fallback_backend_var, values=["procedural_baseline", "rule_brain"], state="readonly", width=22)
         fallback_combo.grid(row=20, column=1, sticky="w", pady=3)
         self._add_help_text(settings_frame, 21, "Used if the selected backend fails or times out.")
 
@@ -4181,9 +4181,9 @@ class MarsColonyInterface:
         }
 
         fields = [
-            ("Backend Override", ttk.Combobox(advanced_body, textvariable=self.agent_brain_settings[role]["backend"], values=["", "rule_brain", "local_http", "ollama"], state="readonly", width=18), "Optional per-agent backend override. Leave blank to inherit global default.", "backend"),
+            ("Backend Override", ttk.Combobox(advanced_body, textvariable=self.agent_brain_settings[role]["backend"], values=["", "procedural_baseline", "rule_brain", "local_http", "ollama"], state="readonly", width=18), "Optional per-agent backend override. Leave blank to inherit global default.", "backend"),
             ("Model Override", ttk.Entry(advanced_body, textvariable=self.agent_brain_settings[role]["local_model"], width=20), "Optional model override for this agent. Leave blank to inherit global model.", "local_model"),
-            ("Fallback Override", ttk.Combobox(advanced_body, textvariable=self.agent_brain_settings[role]["fallback_backend"], values=["", "rule_brain"], state="readonly", width=18), "Fallback used by this agent if its selected backend fails. Leave blank to inherit global fallback.", "fallback_backend"),
+            ("Fallback Override", ttk.Combobox(advanced_body, textvariable=self.agent_brain_settings[role]["fallback_backend"], values=["", "procedural_baseline", "rule_brain"], state="readonly", width=18), "Fallback used by this agent if its selected backend fails. Leave blank to inherit global fallback.", "fallback_backend"),
             ("Planner Cadence (steps)", ttk.Entry(advanced_body, textvariable=self.agent_planner_settings[role]["planner_interval_steps"], width=8), "Higher values reduce how often this agent's brain is queried.", None),
             ("Planner Timeout (s)", ttk.Entry(advanced_body, textvariable=self.agent_planner_settings[role]["planner_timeout_seconds"], width=8), "Maximum time allowed for this agent's planning step before it is treated as failed.", None),
             ("Backend Timeout (s)", ttk.Entry(advanced_body, textvariable=self.agent_brain_settings[role]["timeout_s"], width=8), "Maximum backend request time for this agent.", None),

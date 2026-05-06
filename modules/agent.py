@@ -286,6 +286,9 @@ class Agent:
         # Theory of Mind (ToM) about teammates
         self.theory_of_mind = {}  # {agent_name: {"goals": [], "knowledge": set(), "last_seen": time}}
 
+        # ---------------------------------------------------------------------------
+        # MECHA CORE STATE: embodied/cognitive-action state owned by the agent suit
+        # ---------------------------------------------------------------------------
         # Brain-backed decision routing state
         self.current_plan = None
         self.plan_counter = 0
@@ -318,6 +321,11 @@ class Agent:
         self.planner_call_count = 0
         self.loop_counters = {"action_signature": None, "action_repeats": 0, "plan_signature": None, "plan_repeats": 0, "target_failures": {}}
         self.selection_loop_guard = {"last_action": None, "consecutive_count": 0}
+        # ---------------------------------------------------------------------------
+        # PILOT-SPECIFIC STATE TO EXTRACT: Procedural Baseline / legacy RuleBrain
+        # ---------------------------------------------------------------------------
+        # TODO(architecture): This is Procedural Baseline Pilot controller state, retained temporarily on Agent for compatibility.
+        # Move into ProceduralBaselineControllerState and access through PilotAdapter.
         self.control_state = {
             "mode": "BOOTSTRAP",
             "previous_mode": None,
@@ -330,6 +338,8 @@ class Agent:
             "recovery_active": False,
             "last_policy_snapshot": {},
         }
+        # TODO(architecture): This is Procedural Baseline Pilot controller state, retained temporarily on Agent for compatibility.
+        # Move into ProceduralBaselineControllerState and access through PilotAdapter.
         # Durable fallback method/step state (simulator authoritative; bounded history).
         self.active_method_id = None
         self.active_method_instance = None
@@ -425,6 +435,10 @@ class Agent:
             "first_movement_time": None,
             "left_spawn_time": None,
         }
+        # ---------------------------------------------------------------------------
+        # PROCEDURAL BASELINE SCAFFOLD TO EXTRACT: legacy RuleBrain support
+        # ---------------------------------------------------------------------------
+        # TODO(architecture): This is Procedural Baseline scaffold behavior, not general Agent Mecha execution.
         self.fallback_bootstrap = {
             "active": False,
             "required_sources": [],
