@@ -1,6 +1,9 @@
 """Brain backend adapters and deterministic fallback policy.
 
-RuleBrain provides a deterministic baseline planner. External/local LLM providers
+Legacy code name: RuleBrain. Preferred documentation-facing name: Procedural
+Baseline Pilot. RuleBrain/Procedural Baseline provides a deterministic coded
+pilot with explicit modes, methods, fallbacks, and recovery policies.
+External/local LLM providers
 are swappable advisory planners whose outputs must be normalized and validated
 before execution. Fallback paths protect simulator continuity under invalid
 responses, timeouts, or degraded backend states.
@@ -262,17 +265,32 @@ def _rule_method_library() -> dict[str, RuleMethodDefinition]:
         ),
     }
 
+def resolve_pilot_id(backend: str) -> str:
+    selected = str(backend or "").lower()
+    if selected in {"rule_brain", "procedural_baseline", "procedural_baseline_pilot"}:
+        return "procedural_baseline"
+    return selected or "unknown"
+
+
+def resolve_pilot_display_name(backend: str) -> str:
+    if resolve_pilot_id(backend) == "procedural_baseline":
+        return "Procedural Baseline Pilot"
+    return str(backend or "unknown")
+
+
 def create_brain_provider(config: BrainBackendConfig | None = None) -> BrainProvider:
     config = config or BrainBackendConfig()
     selected = config.backend.lower()
     if selected == "local_stub":
         return LocalLLMBrainStub()
     if selected in {"local_http", "openai_compatible_local", "ollama_local", "ollama"}:
-        fallback = RuleBrain()
+        fallback = ProceduralBaselinePilot()
         return OllamaLocalBrainProvider(config=config, fallback=fallback)
     if selected == "cloud_stub":
         return CloudBrainStub()
-    return RuleBrain()
+    if selected in {"rule_brain", "procedural_baseline", "procedural_baseline_pilot"}:
+        return ProceduralBaselinePilot()
+    return ProceduralBaselinePilot()
 
 
 class BrainProvider(ABC):
@@ -364,6 +382,12 @@ def _request_from_context_packet(context_packet) -> AgentBrainRequest:
             "inspect_state": dict(cognitive.get("inspect_state", {}) or {}),
         },
     )
+
+
+
+
+class ProceduralBaselinePilotAliasMixin:
+    """Compatibility marker for preferred Procedural Baseline naming."""
 
 
 class RuleBrain(BrainProvider):
@@ -2701,3 +2725,7 @@ class CloudBrainStub(BrainProvider):
 
 # Backward compatible alias
 LocalHTTPBrain = OllamaLocalBrainProvider
+
+
+# Preferred documentation-facing alias for the deterministic coded baseline pilot.
+ProceduralBaselinePilot = RuleBrain
