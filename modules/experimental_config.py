@@ -4,6 +4,13 @@ from __future__ import annotations
 
 This module intentionally wraps the existing ConstructMapper so the simulator keeps
 one mechanism profile path while allowing a canonical experimental config location.
+
+Layering note:
+- `teamwork_potential` and `taskwork_potential` are manipulation constructs.
+- Their downstream mechanism hooks can target pilot-capability, mecha-capability,
+  or environment/task parameters depending on mapping definitions.
+- Legacy `traits` input is preserved as a compatibility alias for mechanism
+  overrides while the architecture migrates toward explicit layer labels.
 """
 
 from pathlib import Path
