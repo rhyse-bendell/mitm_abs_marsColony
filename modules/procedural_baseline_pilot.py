@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional, Any
 
-from modules.action_schema import BrainDecision
+from modules.action_schema import BrainDecision, ExecutableActionType
 from modules.brain_contract import AgentBrainRequest, AgentBrainResponse
 from modules.brain_provider import ProceduralBaselinePilot, select_productive_fallback_action
 
@@ -33,5 +33,16 @@ class ProceduralBaselinePilotAdapter:
         gate_result: Any,
         sim_state: Any = None,
     ) -> Optional[BrainDecision]:
-        # Future work: optionally reroute with richer blocker-aware policy handling.
+        blockers = set(getattr(gate_result, "blockers", []) or [])
+        if blockers & {"physical_build_not_started", "physical_incomplete"}:
+            priority = [
+                ExecutableActionType.START_CONSTRUCTION,
+                ExecutableActionType.CONTINUE_CONSTRUCTION,
+                ExecutableActionType.TRANSPORT_RESOURCES,
+            ]
+            reroutes = list(getattr(gate_result, "available_reroutes", []) or [])
+            for action_type in priority:
+                for candidate in reroutes:
+                    if getattr(candidate, "selected_action", None) == action_type:
+                        return candidate
         return None

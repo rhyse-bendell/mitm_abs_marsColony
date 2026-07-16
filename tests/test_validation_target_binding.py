@@ -16,6 +16,17 @@ class TestValidationTargetBinding(unittest.TestCase):
         try:
             agent = sim.agents[0]
             project_id = self._project_id(sim)
+            project = sim.environment.construction.projects[project_id]
+            project["delivered_resources"]["bricks"] = project["required_resources"]["bricks"]
+            project["resource_complete"] = True
+            project["structurally_complete"] = True
+            project["functional_support_complete"] = True
+            project["support_requirements"] = {}
+            project["epistemic_workspace"]["entries"] = [
+                {"entry_type": "claim"},
+                {"entry_type": "evidence"},
+                {"entry_type": "design_note"},
+            ]
             decision = BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=project_id, confidence=0.9)
             with patch.object(agent, "_construction_action_blockers", return_value=([], project_id)):
                 actions = agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)

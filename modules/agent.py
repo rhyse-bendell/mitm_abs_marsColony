@@ -44,7 +44,6 @@ from modules.brain_contract import (
     validate_agent_brain_response,
 )
 from modules.action_catalog import planner_expected_action_ids
-from modules.brain_provider import select_productive_fallback_action
 from modules.goal_manager import GoalManager
 from modules.goal_state import GOAL_SOURCES, GOAL_STATUSES
 from modules.plan_state import PlanRecord
@@ -6691,7 +6690,13 @@ class Agent:
         if errors:
             repaired = True
             validation_repaired = True
-            fallback_step = select_productive_fallback_action(request_packet.allowed_actions)
+            fallback_decision = None
+            adapter = getattr(sim_state, "pilot_adapter", None)
+            if adapter is not None and hasattr(adapter, "choose_fallback_action"):
+                fallback_decision = adapter.choose_fallback_action(agent=self, context_packet=request_packet, reason="response_plan_invalid", sim_state=sim_state)
+            if fallback_decision is None:
+                fallback_decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="Fallback due to decision validation failure.", confidence=1.0)
+            fallback_step_dict = {"step_index": 0, "action_type": fallback_decision.selected_action.value, "target_id": fallback_decision.target_id, "target_zone": fallback_decision.target_zone, "expected_purpose": fallback_decision.reason_summary}
             response = AgentBrainResponse.from_dict(
                 {
                     "response_id": f"fallback-{request_packet.request_id}",
@@ -6700,8 +6705,8 @@ class Agent:
                         "plan_id": f"fallback-plan-{request_packet.request_id}",
                         "plan_horizon": 1,
                         "ordered_goals": [{"goal_id": "safety", "description": "maintain legal progress", "priority": 1.0, "status": "active"}],
-                        "ordered_actions": [fallback_step.__dict__],
-                        "next_action": fallback_step.__dict__,
+                        "ordered_actions": [fallback_step_dict],
+                        "next_action": fallback_step_dict,
                         "confidence": 1.0,
                     },
                     "explanation": None,
@@ -9176,7 +9181,58 @@ class Agent:
     # executable legacy action dictionaries only after schema checks. Actions may
     # be downgraded/rejected here if missing targets, illegal params, or context
     # mismatches are detected.
+    def _action_gate_decision_label(self, decision):
+        action = getattr(decision, "selected_action", None)
+        return getattr(action, "value", str(action))
+
+    def _action_gate_reroute_labels(self, gate_result):
+        return [self._action_gate_decision_label(candidate) for candidate in list(getattr(gate_result, "available_reroutes", []) or [])]
+
+    def _log_action_gate_blocked(self, sim_state, event_type, decision, gate_result, extra=None):
+        if sim_state is None or not hasattr(sim_state, "logger"):
+            return
+        payload = {
+            "agent": self.name,
+            "selected_action": self._action_gate_decision_label(decision),
+            "target_id": getattr(decision, "target_id", None),
+            "project_id": getattr(gate_result, "project_id", None),
+            "blockers": list(getattr(gate_result, "blockers", []) or []),
+            "available_reroutes": self._action_gate_reroute_labels(gate_result),
+            "source": getattr(gate_result, "source", "mecha_action_gate"),
+        }
+        if extra:
+            payload.update(extra)
+        sim_state.logger.log_event(sim_state.time, event_type, payload)
+
     def _translate_brain_decision_to_legacy_action(self, decision, environment, sim_state=None):
+        if sim_state is not None and hasattr(sim_state, "action_gate") and not getattr(decision, "_action_gate_checked", False):
+            gate_result = sim_state.action_gate.evaluate(agent=self, decision=decision, sim_state=sim_state)
+            if getattr(gate_result, "legal", False):
+                decision = gate_result.normalized_decision
+                setattr(decision, "_action_gate_checked", True)
+            else:
+                self._log_action_gate_blocked(sim_state, "mecha_action_blocked", decision, gate_result)
+                adapter = getattr(sim_state, "pilot_adapter", None)
+                reroute = None
+                if adapter is not None and hasattr(adapter, "handle_blocked_action"):
+                    reroute = adapter.handle_blocked_action(agent=self, original_decision=decision, gate_result=gate_result, sim_state=sim_state)
+                if reroute is not None:
+                    sim_state.logger.log_event(sim_state.time, "pilot_blocked_action_reroute_selected", {
+                        "agent": self.name,
+                        "pilot_id": getattr(adapter, "pilot_id", getattr(sim_state, "pilot_id", None)),
+                        "original_action": self._action_gate_decision_label(decision),
+                        "reroute_action": self._action_gate_decision_label(reroute),
+                        "project_id": getattr(gate_result, "project_id", None),
+                        "reason": getattr(reroute, "reason_summary", ""),
+                    })
+                    reroute_gate = sim_state.action_gate.evaluate(agent=self, decision=reroute, sim_state=sim_state)
+                    if getattr(reroute_gate, "legal", False):
+                        setattr(reroute_gate.normalized_decision, "_action_gate_checked", True)
+                        return self._translate_brain_decision_to_legacy_action(reroute_gate.normalized_decision, environment, sim_state=sim_state)
+                    self._log_action_gate_blocked(sim_state, "pilot_reroute_blocked", reroute, reroute_gate, {"original_action": self._action_gate_decision_label(decision)})
+                else:
+                    self._log_action_gate_blocked(sim_state, "blocked_action_observed", decision, gate_result)
+                return [{"type": "idle", "duration": 1.0, "priority": 1, "decision_action": ExecutableActionType.WAIT.value, "blocked_action": self._action_gate_decision_label(decision), "blockers": list(getattr(gate_result, "blockers", []) or [])}]
         # NOTE: This is still a live legacy adapter in the execution path.
         # Planner outputs are normalized to action-dict records consumed by the
         # existing simulator executor. Retain this bridge until executor cleanup.
