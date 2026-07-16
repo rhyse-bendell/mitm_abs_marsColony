@@ -6632,8 +6632,11 @@ class Agent:
         grounding_status = None
         grounding_notes = []
         runtime_disposition = None
+        adapter = getattr(sim_state, "pilot_adapter", None)
         provider_decide = getattr(provider, "decide", None)
-        if callable(provider_decide) and provider.__class__.__name__ == "RuleBrain":
+        if adapter is not None and hasattr(adapter, "choose_action"):
+            response = adapter.choose_action(request_packet)
+        elif callable(provider_decide) and provider.__class__.__name__ == "RuleBrain":
             legacy_decision = provider_decide(context)
             response = AgentBrainResponse.from_dict(
                 {
@@ -6652,6 +6655,9 @@ class Agent:
                 }
             )
         elif hasattr(provider, "generate_plan"):
+            # Compatibility fallback for tests or legacy runtime shims that have
+            # not installed sim_state.pilot_adapter. Normal runtime action
+            # selection goes through pilot_adapter.choose_action(request_packet).
             response = provider.generate_plan(request_packet)
         if response is None:
             legacy_decision = provider.decide(context)
@@ -6676,7 +6682,10 @@ class Agent:
             self.control_state.update(updated_control_state)
             self._sync_method_state_from_control()
 
-        provider_trace = getattr(provider, "last_trace", None)
+        provider_for_trace = getattr(adapter, "provider", provider) if adapter is not None else provider
+        provider_trace = getattr(adapter, "last_trace", None) if adapter is not None else None
+        if not isinstance(provider_trace, dict):
+            provider_trace = getattr(provider_for_trace, "last_trace", None)
         if isinstance(provider_trace, dict):
             runtime_disposition = provider_trace.get("runtime_disposition")
         response = self._validate_and_ground_response_plan(response, context, request_packet)
@@ -6736,7 +6745,11 @@ class Agent:
             decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="Fallback due to decision validation failure.", confidence=1.0)
 
         latency_s = max(0.0, time.perf_counter() - float(request_wallclock_time))
-        provider_outcome = getattr(provider, "last_outcome", {}) if isinstance(getattr(provider, "last_outcome", {}), dict) else {}
+        provider_outcome = getattr(adapter, "last_outcome", None) if adapter is not None else None
+        if not isinstance(provider_outcome, dict):
+            provider_outcome = getattr(provider_for_trace, "last_outcome", {})
+        if not isinstance(provider_outcome, dict):
+            provider_outcome = {}
         provider_trace = provider_trace if isinstance(provider_trace, dict) else {}
         llm_response_received = bool(provider_trace.get("llm_response_received", False))
         llm_response_parsed = bool(provider_trace.get("llm_response_parsed", False))
