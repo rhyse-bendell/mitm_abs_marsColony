@@ -830,13 +830,39 @@ class Agent:
         ]
         affordances = list(getattr(context, "action_affordances", []) or [])
         for action_type in order:
-            aff = next((a for a in affordances if str(a.get("action_type")) == action_type.value and (not preferred_project_id or str(a.get("target_id") or "") == str(preferred_project_id))), None)
-            target_id = aff.get("target_id") if isinstance(aff, dict) else preferred_project_id
+            aff = next(
+                (
+                    a
+                    for a in affordances
+                    if isinstance(a, dict)
+                    and str(a.get("action_type")) == action_type.value
+                    and (not preferred_project_id or str(a.get("target_id") or "") == str(preferred_project_id))
+                ),
+                None,
+            )
+            if aff is None:
+                continue
+            target_id = aff.get("target_id") or preferred_project_id
             probe = BrainDecision(selected_action=action_type, target_id=target_id, confidence=0.8)
-            blockers, project_id = self._construction_action_blockers(probe, {"type": "idle", "decision_action": action_type.value, "project_id": target_id}, environment, sim_state=sim_state)
-            if not blockers:
-                self._emit_event(sim_state, "project_focus_bound_to_action", {"project_id": project_id, "selected_action": decision.selected_action.value, "reason": reason});
-            return BrainDecision(selected_action=action_type, target_id=project_id or target_id, confidence=0.85)
+            blockers, project_id = self._construction_action_blockers(
+                probe,
+                {"type": "idle", "decision_action": action_type.value, "project_id": target_id},
+                environment,
+                sim_state=sim_state,
+            )
+            if blockers:
+                continue
+            resolved_project_id = project_id or target_id
+            self._emit_event(
+                sim_state,
+                "project_focus_bound_to_action",
+                {
+                    "project_id": resolved_project_id,
+                    "selected_action": action_type.value,
+                    "reason": "metacognitive_execution_candidate",
+                },
+            )
+            return BrainDecision(selected_action=action_type, target_id=resolved_project_id, confidence=0.85)
         return None
 
     def _force_recovery_pivot(self, sim_state=None, *, to_action, reason, ttl_s=12.0):
