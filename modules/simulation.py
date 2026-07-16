@@ -17,8 +17,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from modules.agent import Agent
+from modules.action_gate import AgentActionGate
 from modules.brain_context import BrainContextBuilder
 from modules.brain_provider import BrainBackendConfig, create_brain_provider, resolve_pilot_display_name, resolve_pilot_id
+from modules.pilot_adapter import GenericBrainProviderPilotAdapter
+from modules.procedural_baseline_pilot import ProceduralBaselinePilotAdapter
 from modules.environment import Environment
 from modules.logging_tools import SimulationLogger
 from modules.interaction_graph import InteractionTelemetryBridge
@@ -248,6 +251,11 @@ class SimulationState:
         self.pilot_id = resolve_pilot_id(self.configured_brain_backend)
         self.pilot_display_name = resolve_pilot_display_name(self.configured_brain_backend)
         self.brain_provider = create_brain_provider(self.brain_backend_config)
+        self.action_gate = AgentActionGate()
+        if self.pilot_id == "procedural_baseline":
+            self.pilot_adapter = ProceduralBaselinePilotAdapter(provider=self.brain_provider)
+        else:
+            self.pilot_adapter = GenericBrainProviderPilotAdapter(provider=self.brain_provider, pilot_id=self.pilot_id, display_name=self.pilot_display_name)
         self.provider_warmup_status = None
         if hasattr(self.brain_provider, "warmup_probe") and callable(getattr(self.brain_provider, "warmup_probe")):
             self.provider_warmup_status = self.brain_provider.warmup_probe()
