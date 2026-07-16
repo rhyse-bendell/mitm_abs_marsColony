@@ -71,20 +71,94 @@ class AgentActionGate:
     def _evaluate_meta(self, *, agent, decision, sim_state):
         return self._pass(decision)
 
-    def _resolve_project_id_from_decision(self, *, decision: BrainDecision, sim_state) -> Optional[str]:
+    _ACTIVE_CONSTRUCTION_PLACEHOLDERS = {"active_construction"}
+
+    def _resolve_existing_project_id(self, *, construction, requested: Any) -> Optional[str]:
+        requested_id = str(requested or "").strip()
+        if not requested_id or construction is None:
+            return None
+        projects = getattr(construction, "projects", {}) or {}
+        if requested_id in projects:
+            return requested_id
+        resolver = getattr(construction, "resolve_project_id", None)
+        if callable(resolver):
+            return resolver(requested_id, create_if_missing=False)
+        return None
+
+    def _resolve_active_construction_project_id(self, *, agent, construction) -> Optional[str]:
+        projects = getattr(construction, "projects", {}) or {}
+        if not projects:
+            return None
+
+        def existing(candidate: Any) -> Optional[str]:
+            return self._resolve_existing_project_id(construction=construction, requested=candidate)
+
+        for state_name in ("project_closure_state", "construction_validation_state", "transport_state"):
+            state = getattr(agent, state_name, None)
+            if isinstance(state, dict):
+                project_id = existing(state.get("project_id"))
+                if project_id:
+                    return project_id
+
+        project_id = existing(getattr(agent, "target", None))
+        if project_id:
+            return project_id
+
+        current_plan = getattr(agent, "current_plan", None)
+        plan_decision = getattr(current_plan, "decision", None)
+        project_id = existing(getattr(plan_decision, "target_id", None))
+        if project_id:
+            return project_id
+
+        active_intent = getattr(agent, "active_intent", None)
+        if isinstance(active_intent, dict):
+            project_id = existing(active_intent.get("target"))
+            if project_id:
+                return project_id
+
+        agent_name = str(getattr(agent, "name", "") or "")
+        ordered_projects = sorted(projects.values(), key=lambda p: str(p.get("id") or ""))
+        for project in ordered_projects:
+            if str(project.get("closure_owner") or "") == agent_name and str(project.get("status") or "") == "ready_for_validation":
+                return str(project.get("id"))
+        for status in ("ready_for_validation", "needs_repair"):
+            for project in ordered_projects:
+                if str(project.get("status") or "") == status:
+                    return str(project.get("id"))
+
+        get_active = getattr(construction, "get_active_projects", None)
+        active_projects = get_active() if callable(get_active) else [p for p in ordered_projects if p.get("started") and str(p.get("status") or "") != "complete"]
+        candidates = [p for p in active_projects if isinstance(p, dict) and str(p.get("status") or "") != "complete"]
+        if not candidates:
+            return None
+
+        def score(project: dict[str, Any]) -> tuple[int, int, int, str]:
+            actor_match = str(project.get("last_actor") or project.get("current_actor") or "") == agent_name
+            return (
+                0 if actor_match else 1,
+                0 if project.get("structurally_complete") else 1,
+                0 if project.get("resource_complete") else 1,
+                str(project.get("id") or ""),
+            )
+
+        selected = sorted(candidates, key=score)[0]
+        return str(selected.get("id")) if selected.get("id") else None
+
+    def _resolve_project_id_from_decision(self, *, agent, decision: BrainDecision, sim_state) -> Optional[str]:
         construction = getattr(getattr(sim_state, "environment", None), "construction", None)
         requested = str(decision.target_id or "").strip()
         if construction is None:
             return requested or None
-        resolver = getattr(construction, "resolve_project_id", None)
-        if callable(resolver):
-            return resolver(requested, create_if_missing=False) if requested else None
-        projects = getattr(construction, "projects", {}) or {}
-        return requested if requested in projects else None
+        project_id = self._resolve_existing_project_id(construction=construction, requested=requested)
+        if project_id:
+            return project_id
+        if requested.lower() in self._ACTIVE_CONSTRUCTION_PLACEHOLDERS:
+            return self._resolve_active_construction_project_id(agent=agent, construction=construction)
+        return None
 
     def _evaluate_validation(self, *, agent, decision, sim_state):
         construction = getattr(getattr(sim_state, "environment", None), "construction", None)
-        project_id = self._resolve_project_id_from_decision(decision=decision, sim_state=sim_state)
+        project_id = self._resolve_project_id_from_decision(agent=agent, decision=decision, sim_state=sim_state)
         project = (getattr(construction, "projects", {}) or {}).get(str(project_id or "")) if construction is not None else None
         if not isinstance(project, dict):
             return ActionGateResult(False, decision, blockers=["project_not_found"], target_id=decision.target_id, project_id=project_id)
