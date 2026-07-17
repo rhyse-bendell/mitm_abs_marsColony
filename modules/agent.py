@@ -830,39 +830,46 @@ class Agent:
         ]
         affordances = list(getattr(context, "action_affordances", []) or [])
         for action_type in order:
-            aff = next(
-                (
-                    a
-                    for a in affordances
-                    if isinstance(a, dict)
-                    and str(a.get("action_type")) == action_type.value
-                    and (not preferred_project_id or str(a.get("target_id") or "") == str(preferred_project_id))
-                ),
-                None,
-            )
-            if aff is None:
-                continue
-            target_id = aff.get("target_id") or preferred_project_id
-            probe = BrainDecision(selected_action=action_type, target_id=target_id, confidence=0.8)
-            blockers, project_id = self._construction_action_blockers(
-                probe,
-                {"type": "idle", "decision_action": action_type.value, "project_id": target_id},
-                environment,
-                sim_state=sim_state,
-            )
-            if blockers:
-                continue
-            resolved_project_id = project_id or target_id
-            self._emit_event(
-                sim_state,
-                "project_focus_bound_to_action",
-                {
-                    "project_id": resolved_project_id,
-                    "selected_action": action_type.value,
-                    "reason": "metacognitive_execution_candidate",
-                },
-            )
-            return BrainDecision(selected_action=action_type, target_id=resolved_project_id, confidence=0.85)
+            for aff in (
+                a
+                for a in affordances
+                if isinstance(a, dict)
+                and str(a.get("action_type")) == action_type.value
+            ):
+                target_id = aff.get("target_id") or preferred_project_id
+                if preferred_project_id:
+                    preferred_candidate_id = target_id
+                    construction = getattr(environment, "construction", None)
+                    if construction is not None and hasattr(construction, "resolve_project_id"):
+                        preferred_candidate_id = construction.resolve_project_id(
+                            target_id,
+                            create_if_missing=False,
+                        ) or target_id
+                    if str(preferred_candidate_id or "") != str(preferred_project_id):
+                        continue
+                probe = BrainDecision(selected_action=action_type, target_id=target_id, confidence=0.8)
+                blockers, project_id = self._construction_action_blockers(
+                    probe,
+                    {"type": "idle", "decision_action": action_type.value, "project_id": target_id},
+                    environment,
+                    sim_state=sim_state,
+                    probe_only=True,
+                )
+                if blockers:
+                    continue
+                resolved_project_id = project_id or target_id
+                if preferred_project_id and str(resolved_project_id or "") != str(preferred_project_id):
+                    continue
+                self._emit_event(
+                    sim_state,
+                    "project_focus_bound_to_action",
+                    {
+                        "project_id": resolved_project_id,
+                        "selected_action": action_type.value,
+                        "reason": "metacognitive_execution_candidate",
+                    },
+                )
+                return BrainDecision(selected_action=action_type, target_id=resolved_project_id, confidence=0.85)
         return None
 
     def _force_recovery_pivot(self, sim_state=None, *, to_action, reason, ttl_s=12.0):
@@ -903,7 +910,7 @@ class Agent:
             meta["last_readiness_unlock_tick"] = tick
             meta["execution_window_until"] = now_ts + 10.0
             meta["execution_window_origin"] = "readiness_unlocked"
-            unlocked_target = decision.target_id or (execution_candidate.target_id if (execution_candidate := self._metacognitive_execution_candidate(environment, sim_state=sim_state, context=context)) else None)
+            unlocked_target = decision.target_id or (execution_candidate.target_id if execution_candidate is not None else None)
             meta["execution_window_project_id"] = unlocked_target
             self._emit_event(sim_state, "metacognitive_execution_window_started", {"origin": "readiness_unlocked", "until": meta["execution_window_until"], "project_id": unlocked_target})
             self._emit_event(sim_state, "metacognitive_handoff_to_execution", {"reason": "readiness_unlocked", "project_id": unlocked_target})
@@ -4354,11 +4361,22 @@ class Agent:
                     rule_ids.add(rule.rule_id)
         return info_ids, rule_ids
 
-    def _construction_project_for_action(self, decision, action, environment):
+    def _construction_project_for_action(self, decision, action, environment, *, probe_only=False):
         requested_project_id = decision.target_id or action.get("project_id")
         if requested_project_id in environment.construction.projects:
             return requested_project_id
+        if requested_project_id:
+            resolved_project_id = environment.construction.resolve_project_id(
+                requested_project_id,
+                create_if_missing=not probe_only,
+            )
+            if resolved_project_id:
+                return resolved_project_id
+            if probe_only:
+                return None
         if decision.selected_action in {ExecutableActionType.VALIDATE_CONSTRUCTION, ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION}:
+            if probe_only:
+                return None
             closure_project_id = self._live_project_closure_commitment(environment)
             if closure_project_id:
                 return closure_project_id
@@ -4370,7 +4388,15 @@ class Agent:
                 ready_projects.sort(key=lambda p: str(p.get("id", "")))
                 return ready_projects[0].get("id")
             return None
-        build_selection = self._select_build_target(environment, require_readiness=False, include_project=True)
+        build_selection = self._select_build_target(
+            environment,
+            require_readiness=False,
+            include_project=True,
+            action_type=getattr(decision.selected_action, "value", decision.selected_action),
+            requested_project_id=requested_project_id,
+            allow_project_creation=not probe_only,
+            require_supplied_target=probe_only,
+        )
         if isinstance(build_selection, dict):
             return build_selection.get("project_id")
         return None
@@ -4880,12 +4906,9 @@ class Agent:
     # Construction blockers expose *why* progress stopped (material, rule/evidence,
     # support connector, or validation readiness). Repeated blocker events are
     # analytically meaningful: they indicate repair loops rather than random delay.
-    def _construction_action_blockers(self, decision, action, environment, sim_state=None):
+    def _construction_action_blockers(self, decision, action, environment, sim_state=None, *, probe_only=False):
         blockers = []
-        epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
-        project_id = self._construction_project_for_action(decision, action, environment)
-        closure_project_id = self._live_project_closure_commitment(environment, sim_state=sim_state)
-        closure_active_for_project = bool(project_id and closure_project_id and project_id == closure_project_id)
+        project_id = self._construction_project_for_action(decision, action, environment, probe_only=probe_only)
         if project_id is None:
             blockers.append("no_navigable_build_target")
             return blockers, None
@@ -4904,6 +4927,9 @@ class Agent:
             if project.get("status") == "complete":
                 blockers.append("project_already_complete")
         elif action_type == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION:
+            epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
+            closure_project_id = self._live_project_closure_commitment(environment, sim_state=sim_state)
+            closure_active_for_project = bool(project_id and closure_project_id and project_id == closure_project_id)
             blockers.extend(self._build_readiness_blockers(environment, sim_state=sim_state))
             if bool(project.get("support_deficit_active")) and str(project.get("type") or "") in {"house", "housing"}:
                 blockers.append("support_dependency_chain_active")
@@ -5455,7 +5481,7 @@ class Agent:
                 )
         return decision
 
-    def _select_build_target(self, environment, require_readiness=False, include_project=False, action_type=None, requested_project_id=None, sim_state=None):
+    def _select_build_target(self, environment, require_readiness=False, include_project=False, action_type=None, requested_project_id=None, sim_state=None, *, allow_project_creation=True, require_supplied_target=False):
         if not hasattr(environment, "interaction_targets") or not hasattr(environment, "construction"):
             return None
         candidates = []
@@ -5466,6 +5492,33 @@ class Agent:
             ExecutableActionType.VALIDATE_CONSTRUCTION.value,
             ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value,
         }
+        if requested_project_id:
+            resolved_requested_project_id = environment.construction.resolve_project_id(
+                requested_project_id,
+                create_if_missing=allow_project_creation,
+            )
+            if resolved_requested_project_id:
+                requested_project = environment.construction.projects.get(resolved_requested_project_id)
+                if isinstance(requested_project, dict) and (
+                    not transport_selection or self._project_needs_transport(requested_project)
+                ):
+                    point = environment.get_interaction_target_position(
+                        requested_project_id,
+                        from_position=self.position,
+                    ) or environment.get_interaction_target_position(
+                        resolved_requested_project_id,
+                        from_position=self.position,
+                    ) or environment.get_interaction_target_position(
+                        requested_project.get("target_id"),
+                        from_position=self.position,
+                    )
+                    if point is not None:
+                        if include_project:
+                            return {"project_id": resolved_requested_project_id, "target": point}
+                        return point
+            if require_supplied_target:
+                return None
+
         if transport_selection and requested_project_id:
             requested_project = environment.construction.projects.get(requested_project_id)
             if isinstance(requested_project, dict) and self._project_needs_transport(requested_project):
@@ -5486,7 +5539,7 @@ class Agent:
             point = environment.get_interaction_target_position(target_name, from_position=self.position)
             if point is None:
                 continue
-            project_id = environment.construction.resolve_project_id(target_name, create_if_missing=True)
+            project_id = environment.construction.resolve_project_id(target_name, create_if_missing=allow_project_creation)
             if not project_id:
                 continue
             project = environment.construction.projects.get(project_id, {})
