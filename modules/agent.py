@@ -6694,6 +6694,19 @@ class Agent:
             ExecutableActionType.VALIDATE_CONSTRUCTION.value,
         }
 
+    def _pilot_adapter_for_runtime(self, sim_state, runtime=None):
+        """Return this agent's PilotAdapter (from its brain runtime).
+
+        The simulation-wide ``sim_state.pilot_adapter`` is used only when the
+        runtime carries no adapter (legacy/test shims).
+        """
+        if runtime is None and hasattr(sim_state, "get_agent_brain_runtime"):
+            runtime = sim_state.get_agent_brain_runtime(self)
+        adapter = runtime.get("adapter") if isinstance(runtime, dict) else None
+        if adapter is None:
+            adapter = getattr(sim_state, "pilot_adapter", None)
+        return adapter
+
     def _execute_planner_request_sync(self, sim_state, trigger_reason, request_packet, request_explanation, request_started_at, request_sim_time, request_wallclock_time, trace_id, blocking_sim_barrier=False):
         context = sim_state.brain_context_builder.build(sim_state, self)
         runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"provider": sim_state.brain_provider, "config": sim_state.brain_backend_config, "configured_backend": getattr(sim_state, "configured_brain_backend", sim_state.brain_backend_config.backend), "effective_backend": getattr(sim_state, "effective_brain_backend", sim_state.brain_backend_config.backend)}
@@ -6711,7 +6724,7 @@ class Agent:
         grounding_status = None
         grounding_notes = []
         runtime_disposition = None
-        adapter = getattr(sim_state, "pilot_adapter", None)
+        adapter = self._pilot_adapter_for_runtime(sim_state, runtime)
         provider_decide = getattr(provider, "decide", None)
         if adapter is not None and hasattr(adapter, "choose_action"):
             response = adapter.choose_action(request_packet)
@@ -6779,7 +6792,7 @@ class Agent:
             repaired = True
             validation_repaired = True
             fallback_decision = None
-            adapter = getattr(sim_state, "pilot_adapter", None)
+            adapter = self._pilot_adapter_for_runtime(sim_state, runtime)
             if adapter is not None and hasattr(adapter, "choose_fallback_action"):
                 fallback_decision = adapter.choose_fallback_action(agent=self, context_packet=request_packet, reason="response_plan_invalid", sim_state=sim_state)
             if fallback_decision is None:
@@ -9304,7 +9317,7 @@ class Agent:
                 setattr(decision, "_action_gate_checked", True)
             else:
                 self._log_action_gate_blocked(sim_state, "mecha_action_blocked", decision, gate_result)
-                adapter = getattr(sim_state, "pilot_adapter", None)
+                adapter = self._pilot_adapter_for_runtime(sim_state)
                 reroute = None
                 if adapter is not None and hasattr(adapter, "handle_blocked_action"):
                     reroute = adapter.handle_blocked_action(agent=self, original_decision=decision, gate_result=gate_result, sim_state=sim_state)

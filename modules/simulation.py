@@ -809,6 +809,21 @@ class SimulationState:
             "mechanism_hook_keys": [f"{k[0]}::{k[1]}::{k[2]}" for k in sorted(getattr(agent, "hook_effects", {}).keys())],
         }
 
+    @staticmethod
+    def _build_pilot_adapter(provider, backend):
+        """Wrap ``provider`` in the PilotAdapter matching ``backend``.
+
+        Returns ``(pilot_id, pilot_display_name, adapter)``. Used for per-agent
+        runtimes so each agent owns a coherent provider/adapter pair.
+        """
+        pilot_id = resolve_pilot_id(backend)
+        pilot_display_name = resolve_pilot_display_name(backend)
+        if pilot_id == "procedural_baseline":
+            adapter = ProceduralBaselinePilotAdapter(provider=provider)
+        else:
+            adapter = GenericBrainProviderPilotAdapter(provider=provider, pilot_id=pilot_id, display_name=pilot_display_name)
+        return pilot_id, pilot_display_name, adapter
+
     def _register_agent_brain_runtime(self, agent):
         cfg = BrainBackendConfig(
             backend=str(agent.brain_config.get("backend", self.configured_brain_backend) or self.configured_brain_backend),
@@ -827,9 +842,14 @@ class SimulationState:
             debug=bool(agent.brain_config.get("debug", self.brain_backend_config.debug)),
         )
         provider = create_brain_provider(cfg)
+        pilot_id, pilot_display_name, adapter = self._build_pilot_adapter(provider, cfg.backend)
         self.agent_brain_runtime[agent.agent_id] = {
             "config": cfg,
             "provider": provider,
+            "adapter": adapter,
+            "pilot_id": pilot_id,
+            "configured_pilot_id": pilot_id,
+            "pilot_display_name": pilot_display_name,
             "configured_backend": cfg.backend,
             "effective_backend": cfg.backend,
             "hard_demoted": False,
@@ -850,6 +870,9 @@ class SimulationState:
         return self.agent_brain_runtime.get(agent.agent_id) or {
             "config": self.brain_backend_config,
             "provider": self.brain_provider,
+            "adapter": self.pilot_adapter,
+            "pilot_id": self.pilot_id,
+            "pilot_display_name": self.pilot_display_name,
             "configured_backend": self.configured_brain_backend,
             "effective_backend": self.effective_brain_backend,
             "fallback_count": self.backend_fallback_count,
@@ -922,6 +945,9 @@ class SimulationState:
             return False
         fallback_backend = runtime["config"].fallback_backend or "rule_brain"
         runtime["provider"] = create_brain_provider(BrainBackendConfig(backend=fallback_backend))
+        # Rebuild this agent's adapter around the replacement provider so the
+        # runtime never holds an adapter wrapping the demoted provider.
+        runtime["pilot_id"], runtime["pilot_display_name"], runtime["adapter"] = self._build_pilot_adapter(runtime["provider"], fallback_backend)
         runtime["effective_backend"] = fallback_backend
         runtime["hard_demoted"] = True
         runtime["hard_demoted_reason"] = str(reason)
