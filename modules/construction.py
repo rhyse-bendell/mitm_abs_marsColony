@@ -1421,6 +1421,39 @@ class ConstructionManager:
         self.update_project_provenance(connector_id, event="connector_attached", actor=actor, sim_time=sim_time)
         return True, "attached"
 
+    def get_support_deficit_report(self):
+        """Read-only observation of structures whose attached-link support requirements are unmet.
+
+        Reports the condition and the legal direct-connection options that would address it. It never
+        creates projects, builds connectors or attaches links: choosing to act is the Pilot's decision
+        (via connect_structures); only the already-built options are listed, nothing is arranged for it.
+        """
+        options = self.list_connection_options()
+        report = []
+        for project in sorted((p for p in self.projects.values() if isinstance(p, dict)), key=lambda p: str(p.get("id") or "")):
+            if str(project.get("type") or "").strip().lower() not in {"house", "housing"} or not project.get("structurally_complete"):
+                continue
+            counts = dict(project.get("support_counts") or {})
+            missing = {
+                str(k): int(v or 0) - int(counts.get(k, 0) or 0)
+                for k, v in dict(project.get("support_requirements") or {}).items()
+                if int(v or 0) - int(counts.get(k, 0) or 0) > 0
+            }
+            if not missing:
+                continue
+            pid = project.get("id")
+            report.append(
+                {
+                    "structure_id": pid,
+                    "structure_type": project.get("type"),
+                    "missing_support": missing,
+                    "legal_connect_options": [
+                        o for o in options if pid in (o["from_project_id"], o["to_project_id"]) and o["connection_type"] in missing
+                    ],
+                }
+            )
+        return report
+
     CONNECTION_TARGET_SEPARATOR = "|"
 
     @classmethod

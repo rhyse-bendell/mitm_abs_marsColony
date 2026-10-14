@@ -623,6 +623,7 @@ class BrainContextBuilder:
             "affordance_map": affordance_summary,
             "resource_status": {"visible_resources": environment.get_visible_resources(agent.position)},
             "legal_actions": action_affordances,
+            "support_deficits": environment.construction.get_support_deficit_report() if hasattr(environment.construction, "get_support_deficit_report") else [],
             "site_capacity_summary": environment.construction.get_site_capacity_summary() if hasattr(environment.construction, "get_site_capacity_summary") else [],
             "capacity_unlock": environment.construction.get_next_capacity_unlock() if hasattr(environment.construction, "get_next_capacity_unlock") else None,
         }

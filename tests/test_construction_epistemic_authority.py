@@ -319,7 +319,7 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         self.assertFalse(any(e.get("event_type") == "construction_resource_delivered" for e in sim.logger.recent_events))
         sim.stop()
 
-    def test_policy_pivot_targets_provider_connector_work_for_support_deficit(self):
+    def test_support_deficit_is_observed_not_resolved_by_middleware(self):
         sim = SimulationState(phases=[])
         agent = sim.agents[0]
         self._prime_build_readiness(sim, agent)
@@ -333,29 +333,16 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         cm.record_project_epistemic_externalization(house_id, entry_type="design_note", note="design", actor=agent.name, sim_time=sim.time)
         self.assertFalse(house["functional_support_complete"])
 
-        seed = BrainDecision(selected_action=ExecutableActionType.VALIDATE_CONSTRUCTION, target_id=house_id, confidence=0.8)
-        rewritten = agent._resolve_support_deficit_decision(seed, sim.environment, sim_state=sim, pivot_origin="unit_test")
-        self.assertIsNotNone(rewritten)
-        self.assertIn(
-            rewritten.selected_action,
-            {
-                ExecutableActionType.TRANSPORT_RESOURCES,
-                ExecutableActionType.START_CONSTRUCTION,
-                ExecutableActionType.CONTINUE_CONSTRUCTION,
-                ExecutableActionType.VALIDATE_CONSTRUCTION,
-            },
-        )
-        target_project = sim.environment.construction.projects.get(str(rewritten.target_id or ""))
-        if target_project is not None:
-            self.assertIn(
-                target_project.get("type"),
-                {"greenhouse", "water_generator", "food_connector", "water_connector", "house", "housing"},
-            )
-        connector_or_provider_exists = any(
-            p.get("type") in {"greenhouse", "water_generator", "food_connector", "water_connector"}
-            for p in sim.environment.construction.projects.values()
-        )
-        self.assertTrue(connector_or_provider_exists)
+        # The support deficit is an observable condition; middleware does not arrange providers/connectors for the Pilot.
+        before_projects = sorted(sim.environment.construction.projects)
+        before_links = list(sim.environment.construction.connectors)
+        deficits = sim.environment.construction.get_support_deficit_report()
+        self.assertEqual([d['structure_id'] for d in deficits], [house_id])
+        self.assertEqual(sorted(deficits[0]['missing_support']), ['food', 'water'])
+        self.assertEqual(sim.environment.construction.projects[house_id]['support_counts'], {'food': 0, 'water': 0})
+        self.assertFalse(hasattr(agent, '_resolve_support_deficit_decision'))
+        self.assertEqual(sorted(sim.environment.construction.projects), before_projects)
+        self.assertEqual(sim.environment.construction.connectors, before_links)
         sim.stop()
 
     def test_construction_expected_rules_normalized_to_canonical_ids(self):
