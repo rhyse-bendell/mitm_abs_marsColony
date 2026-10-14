@@ -1,6 +1,6 @@
-# Development state checkpoint (2026-10-14)
+# Development state checkpoint (2026-10-14, end of session; workspace hand-off)
 
-Updated after the support-accounting correction pass. `origin/main` = `19f4e64`. LOCAL, NOT PUSHED (held back deliberately until the user releases them): `3a857be` (support accounting), `f9b2aa0` (checkpoint), `6963171` (correction: greenhouse water legality, no first-N winners), and the commit that records this file. Untracked: `CLAUDE.md` only (do not add). `stash@{0}` ("local action_schema header comment") is untouched.
+Handoff snapshot: all work through the connector-authority cleanup (`5abe9b0`) is committed and pushed to `origin/main` (see git log for the final checkpoint commit). Untracked: `CLAUDE.md` only (do not add). `stash@{0}` ("local action_schema header comment") must stay untouched. SIMULATOR IS CURRENTLY IN A KNOWN-STALLED STATE BY DESIGN: no Pilot-reachable way to start provider/connector structures, so houses cannot validate (see the connector-authority section). Resume with item 4(a) below.
 
 ## Established (pushed unless noted)
 - Per-agent PilotAdapters; Procedural Baseline through the canonical contract; validation progression; capacity accounting; `bridge_bc` progression; rejected-action feedback; deterministic run seed in the manifest; simulator-owned construction correctness; real final measures + terminal state.
@@ -66,7 +66,7 @@ Action-schema technical debt: `connect_structures` still encodes its three argum
 1. (done, pushed) phantom-brick fix `2438940`.
 2. (done, pushed) productive-taskwork feature + policy RNG step `490a742`.
 3. (done, local) authoritative structural support accounting `3a857be`.
-4. NEXT: (a) [action machinery DONE] whether/how the Pilot policy should reason from greenhouse-water knowledge to choosing the connection (Pilot-policy/knowledge-propagation question, deliberately untouched); (b) derive or retire the legacy metrics proxy from the evaluator; (c) after the user releases the unpushed commits, push them.
+4. NEXT (resume here): (0) PREREQUISITE - give the Pilot a way to start non-house structures (water_generator, greenhouse, food/water connector), e.g. a structure type on start_construction affordances; decide together with a structured BrainDecision parameter field (replacing the `connector|a|b` target_id encoding of connect_structures). No middleware auto-creation. Then (a) [action machinery DONE] whether/how the Pilot policy should reason from greenhouse-water knowledge to choosing the connection (Pilot-policy/knowledge-propagation question, deliberately untouched); (b) derive or retire the legacy metrics proxy from the evaluator; (c) [done: everything pushed at session end].
 5. Architecture-integrity audit: query/probe mutation, project creation during lookup, ambient repair, hidden world-truth into shared knowledge, RuleBrain bypass of PilotAdapter, Mecha substitution of Pilot choices (metacognitive regrounding), bridge delivery not using the carry state, action families mutating via proper subsystems. Fix only demonstrated violations, each with a test.
 6. Phase 1 snapshot at t=1800 and a `mission` section (supported-population measures need the unresolved allocation policy), then re-run seeds 0-5 on the default task and a labelled certification run.
 
