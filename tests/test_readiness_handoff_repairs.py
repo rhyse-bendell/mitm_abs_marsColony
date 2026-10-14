@@ -27,6 +27,7 @@ class ReadinessHandoffRepairTests(unittest.TestCase):
     def test_inspect_dik_refreshes_project_local_grounding_marker(self):
         sim = SimulationState(phases=[])
         agent = sim.agents[0]
+        sim.environment.construction.create_project("site_b", structure_type="house")  # the old code instantiated this implicitly
         self._prime_min_readiness(sim, agent)
         role_source = f"{agent.role}_Info"
         role_mem = agent.source_memory_state.setdefault(role_source, {})

@@ -103,6 +103,13 @@ class BrainContextBuilder:
 
         return {"name": current_phase.get("name", "default"), "stage": "late", "progress": 1.0}
 
+    @staticmethod
+    def _new_structure_possible(environment) -> bool:
+        """Projects are instantiated dynamically: a buildable site with spare capacity is a build opportunity."""
+        construction = getattr(environment, "construction", None)
+        finder = getattr(construction, "find_buildable_site_for_structure", None)
+        return bool(callable(finder) and finder("house") is not None)
+
     def _build_readiness(self, agent, structure_summary: List[Dict[str, Any]], environment, team_state: Dict[str, Any] | None = None) -> Dict[str, Any]:
         info_count = len(agent.mental_model["information"])
         knowledge_count = len(agent.mental_model["knowledge"].rules)
@@ -145,7 +152,7 @@ class BrainContextBuilder:
             status = "premature"
         elif in_progress > 0:
             status = "plausible"
-        elif absent == 0:
+        elif absent == 0 and not self._new_structure_possible(environment):
             status = "blocked"
             blockers = blockers + ["no_remaining_absent_structure_targets"]
         else:
@@ -267,7 +274,15 @@ class BrainContextBuilder:
                 item["productive"] = productive_coordination
                 item["no_effect_streak"] = communication_no_effect_streak
 
+        site_rows = {r.get("site_id"): r for r in (capacity_summary or []) if isinstance(r, dict)}
+        build_target_site = {v: k for k, v in (getattr(environment.construction, "SITE_TO_BUILD_TARGET", {}) or {}).items()}
         for target_name, target in environment.interaction_targets.items():
+            # Only information sources (inspect) and build sites (start construction) are action targets here;
+            # artifacts such as the whiteboard are reached through externalize / consult.
+            if target.get("kind") not in {"information", "build"}:
+                continue
+            if target.get("kind") == "build" and int((site_rows.get(build_target_site.get(target_name), {}) or {}).get("capacity", 1) or 0) <= 0:
+                continue  # a site with no capacity can never host a project
             accessible_point = environment.get_interaction_target_position(target_name, from_position=agent.position)
             reachable = accessible_point is not None and environment._segment_is_navigable(agent.position, accessible_point)
             if accessible_point is None:
@@ -316,7 +331,7 @@ class BrainContextBuilder:
             legal.append({"action_type": ExecutableActionType.OBSERVE_ENVIRONMENT.value, "target_id": None, "target_class": "self", "utility": utility_for(ExecutableActionType.OBSERVE_ENVIRONMENT)})
             legal.append({"action_type": ExecutableActionType.REASSESS_PLAN.value, "target_id": None, "target_class": "self", "utility": utility_for(ExecutableActionType.REASSESS_PLAN)})
 
-        bricks_available = self._bricks_available(environment)
+        bricks_available = self._bricks_available(environment, agent)
         if bricks_available:
             legal.append(
                 {
@@ -363,8 +378,11 @@ class BrainContextBuilder:
         return filtered
 
     @staticmethod
-    def _bricks_available(environment) -> bool:
-        """Read-only legality predicate: is there any brick source left to pick up from?"""
+    def _bricks_available(environment, agent=None) -> bool:
+        """Read-only legality predicate: a brick source remains, or this agent is already carrying one."""
+        carrying = int((((getattr(agent, "transport_state", None) or {}).get("carrying")) or {}).get("quantity", 0) or 0)
+        if carrying > 0:
+            return True
         nodes = getattr(getattr(environment, "construction", None), "resource_nodes", None)
         if not isinstance(nodes, dict):
             return True  # unknown model: do not hide the action

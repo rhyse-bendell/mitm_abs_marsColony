@@ -753,6 +753,7 @@ class TestRuleBrainRepairPatch(unittest.TestCase):
         sim = SimulationState(phases=[], flash_mode=True)
         try:
             agent = sim.agents[0]
+            sim.environment.construction.create_project("site_b", structure_type="house")  # the old code instantiated this implicitly
             agent.active_actions = [{
                 "type": "transport_resources",
                 "duration": 30.0,

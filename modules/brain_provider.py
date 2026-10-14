@@ -545,7 +545,7 @@ class RuleBrain(BrainProvider):
     def _extract_features(self, context_packet, *, is_request: bool = False) -> dict[str, float]:
         request_ctx = dict(getattr(context_packet, "task_context", {}) or {}) if is_request else {}
         cognitive = context_packet.individual_cognitive_state if not is_request else request_ctx
-        world = context_packet.world_snapshot if not is_request else {"built_state": request_ctx.get("built_state", []), "capacity_unlock": request_ctx.get("capacity_unlock")}
+        world = context_packet.world_snapshot if not is_request else {"built_state": request_ctx.get("built_state", []), "capacity_unlock": request_ctx.get("capacity_unlock"), "site_capacity_summary": request_ctx.get("site_capacity", [])}
         known_gaps = cognitive.get("known_gaps", []) if not is_request else list(context_packet.working_memory_summary.get("known_gaps", []))
         readiness = cognitive.get("build_readiness", {}) if not is_request else dict(request_ctx.get("build_readiness", {}))
         built_state = world.get("built_state", []) if not is_request else list(request_ctx.get("built_state", []))
@@ -600,6 +600,8 @@ class RuleBrain(BrainProvider):
         plan_state = self._detect_team_plan_state(team_shared_knowledge, externalized)
         ready_for_validation = any(bool(p.get("ready_for_validation")) for p in built_state)
         validation_pending_projects = [p for p in built_state if self._project_validation_pending(p)]
+        site_capacity_rows = list(world.get("site_capacity_summary", []) or []) if isinstance(world, dict) else []
+        capacity_available = any(bool(r.get("buildable")) and int(r.get("remaining", 0) or 0) > 0 for r in site_capacity_rows)
         outcomes = (
             list(cognitive.get("recent_action_outcomes", []) or [])
             if not is_request
@@ -663,7 +665,15 @@ class RuleBrain(BrainProvider):
             str(a.get("action_type")) == ExecutableActionType.VALIDATE_CONSTRUCTION.value and bool(a.get("reachable", True))
             for a in (context_packet.allowed_actions if is_request else context_packet.action_affordances)
         )
-        if validation_actionable:
+        build_actionable = bool(materially_ready_incomplete) and any(
+            str(a.get("action_type")) in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value} and bool(a.get("reachable", True))
+            for a in (context_packet.allowed_actions if is_request else context_packet.action_affordances)
+        )
+        new_structure_actionable = bool(capacity_available and not active_projects and not validation_pending_projects) and any(
+            str(a.get("action_type")) == ExecutableActionType.START_CONSTRUCTION.value and bool(a.get("reachable", True))
+            for a in (context_packet.allowed_actions if is_request else context_packet.action_affordances)
+        )
+        if validation_actionable or build_actionable or new_structure_actionable:
             coordination_deadlock_pressure = 0.0
         construction_decision_pressure = min(1.0, (0.55 if active_work_remains else 0.0) + (0.55 if ready_for_validation else 0.0) + (0.4 * no_active_plan_pressure))
         capacity_unlock = dict(world.get("capacity_unlock") or {}) if isinstance(world, dict) else {}
@@ -696,6 +706,9 @@ class RuleBrain(BrainProvider):
             "contradiction_pressure": min(1.0, len(mismatch_signals) / 3.0),
             "active_incomplete_projects": min(1.0, len(active_projects) / 3.0),
             "validation_work_pending": 1.0 if validation_pending_projects else 0.0,
+            # Nothing unfinished to supply or validate, and a buildable site has room: the next move is to
+            # start a new structure (projects are instantiated by the START commit, not by transporting).
+            "new_structure_needed": 1.0 if (capacity_available and not active_projects and not validation_pending_projects) else 0.0,
             "validation_pending_projects": min(1.0, len(validation_pending_projects) / 3.0),
             "goal_pressure": min(1.0, len(goal_stack) / 4.0),
             "dik_change_recency": 1.0 if (seconds_since_dik_change is not None and float(seconds_since_dik_change) <= 4.0) else 0.0,
@@ -793,6 +806,11 @@ class RuleBrain(BrainProvider):
         mode_scores["RECOVERY"] = 0.2 + 1.8 * features["loop_pressure"] + self.policy_config.recovery_bonus * features["contradiction_pressure"]
         if not closure_only:
             mode_scores["LOGISTICS"] += 1.3 * features.get("no_progress_pressure", 0.0)
+        if features.get("new_structure_needed", 0.0) > 0.0:
+            # a concrete next step exists (start a structure): it outranks coordinating about what to do
+            mode_scores["CONSTRUCT"] += 2.8
+            mode_scores["LOGISTICS"] -= 1.8
+            mode_scores["COORDINATE"] -= 1.0
         mode_scores["LOGISTICS"] -= 0.95 * features.get("stale_grounding_pressure", 0.0)
         mode_scores["CONSTRUCT"] -= 1.15 * features.get("stale_grounding_pressure", 0.0)
         if features.get("validation_work_pending", 0.0) <= 0.0:
@@ -1211,6 +1229,13 @@ class RuleBrain(BrainProvider):
                 and action_type in {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, ExecutableActionType.REQUEST_ASSISTANCE.value}
             ):
                 score -= 1.25
+            if features.get("new_structure_needed", 0.0) > 0.0:
+                if action_type == ExecutableActionType.START_CONSTRUCTION.value:
+                    score += 3.5
+                if action_type in {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.EXTERNALIZE_PLAN.value}:
+                    score -= 1.2  # a concrete start is available; do not keep re-reading the plan
+                if action_type == ExecutableActionType.TRANSPORT_RESOURCES.value and str(affordance.get("target_id") or "") != "bridge_bc":
+                    score -= 3.0  # no unfinished project to carry bricks to
             # The same action keeps being rejected with the same blocker and nothing changed:
             # the outcome feedback says this attempt is not working, so prefer something else.
             score -= 6.0 * features.get(f"blocked_streak:{action_type}", 0.0)

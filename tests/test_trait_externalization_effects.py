@@ -69,6 +69,7 @@ class TestTraitDrivenBehavior(unittest.TestCase):
         with self._make_sim() as tmpdir:
             sim = SimulationState(phases=[], project_root=tmpdir)
             agent = sim.agents[0]
+            sim.environment.construction.create_project("site_b", structure_type="house")  # the old code instantiated this implicitly
 
             decision = BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES)
 

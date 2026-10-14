@@ -165,3 +165,19 @@ def test_reassess_suppression_does_not_invent_a_transport_that_cannot_happen(sim
         pile.quantity = 0
     without = agent._suppress_reassess_when_project_work_available(reassess, sim.environment, sim_state=sim)
     assert without.selected_action != ExecutableActionType.TRANSPORT_RESOURCES
+
+
+def test_an_agent_carrying_a_brick_can_still_deliver_when_the_piles_are_empty(sim):
+    agent = sim.agents[0]
+    cm = sim.environment.construction
+    project_id, _ = cm.create_project("site_b", structure_type="house")
+    for pile in cm.resource_nodes.values():
+        pile.quantity = 0
+    decision = BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES, target_id=project_id, confidence=0.9)
+    assert sim.action_gate.evaluate(agent=agent, decision=decision, sim_state=sim).legal is False
+    assert "transport_resources" not in {a["action_type"] for a in sim.brain_context_builder.build(sim, agent).action_affordances}
+
+    agent.transport_state["carrying"] = {"resource_type": "bricks", "quantity": 1}  # mid-delivery
+    assert sim.action_gate.evaluate(agent=agent, decision=decision, sim_state=sim).legal is True
+    assert "transport_resources" in {a["action_type"] for a in sim.brain_context_builder.build(sim, agent).action_affordances}
+    assert agent._brick_source_available(sim.environment) is True

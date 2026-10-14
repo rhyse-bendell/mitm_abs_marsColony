@@ -1088,7 +1088,7 @@ class Agent:
                 meta["execution_window_origin"] = str(meta.get("execution_window_origin") or "productive_action")
                 evt = "metacognitive_execution_window_extended" if prior_until > now_ts else "metacognitive_execution_window_started"
                 self._emit_event(sim_state, evt, {"origin": meta["execution_window_origin"], "project_id": focus_project, "until": meta["execution_window_until"]})
-            blockers, _ = self._construction_action_blockers(decision, {"type": "idle", "decision_action": action.value, "project_id": focus_project}, environment, sim_state=sim_state)
+            blockers, _ = self._construction_action_blockers(decision, {"type": "idle", "decision_action": action.value, "project_id": focus_project}, environment, sim_state=sim_state, probe_only=True)
             if blockers and execution_candidate is not None and str(execution_candidate.target_id or "") != str(focus_project):
                 same_project_candidate = self._metacognitive_execution_candidate(environment, sim_state=sim_state, context=context, preferred_project_id=focus_project)
                 in_execution_window = (
@@ -5080,8 +5080,10 @@ class Agent:
     def _is_build_eligible(self, environment, sim_state=None):
         return self._build_readiness_score() >= self._readiness_threshold() and not self._build_readiness_blockers(environment, sim_state=sim_state)
 
-    @staticmethod
-    def _brick_source_available(environment):
+    def _brick_source_available(self, environment):
+        """A brick source remains, or this agent is already carrying a brick to deliver."""
+        if int(((self.transport_state or {}).get("carrying") or {}).get("quantity", 0) or 0) > 0:
+            return True
         nodes = getattr(getattr(environment, "construction", None), "resource_nodes", None)
         if not isinstance(nodes, dict):
             return True
@@ -5576,7 +5578,7 @@ class Agent:
                 )
         return decision
 
-    def _select_build_target(self, environment, require_readiness=False, include_project=False, action_type=None, requested_project_id=None, sim_state=None, *, allow_project_creation=True, require_supplied_target=False):
+    def _select_build_target(self, environment, require_readiness=False, include_project=False, action_type=None, requested_project_id=None, sim_state=None, *, allow_project_creation=False, require_supplied_target=False):
         if not hasattr(environment, "interaction_targets") or not hasattr(environment, "construction"):
             return None
         candidates = []
@@ -6894,6 +6896,7 @@ class Agent:
             "build_readiness": dict(cognitive.get("build_readiness", {})),
             "built_state": list(context.world_snapshot.get("built_state", [])),
             "capacity_unlock": context.world_snapshot.get("capacity_unlock"),
+            "site_capacity": list(context.world_snapshot.get("site_capacity_summary", []) or []),
             "epistemic_sufficiency": dict(cognitive.get("epistemic_sufficiency", {})),
             "team_shared_knowledge": dict(team_state.get("team_shared_knowledge", {})),
             "externalized_artifacts": list(team_state.get("externalized_artifacts", [])),
@@ -9837,6 +9840,7 @@ class Agent:
                 action_type=decision.selected_action.value,
                 requested_project_id=decision.target_id,
                 sim_state=sim_state,
+                allow_project_creation=True,  # commit path: the Pilot chose to build here
             )
             if isinstance(selected, dict):
                 action["project_id"] = selected.get("project_id")

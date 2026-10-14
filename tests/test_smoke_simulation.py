@@ -266,7 +266,7 @@ class TestBuildTargetAndProgress(unittest.TestCase):
         env = Environment(phases=[])
         agent = Agent(name="Engineer", role="Engineer", position=env.get_spawn_point("Engineer"))
 
-        target = agent._select_build_target(env)
+        target = agent._select_build_target(env, allow_project_creation=True)  # geometry test: lookups no longer create projects by default
         self.assertIsNotNone(target)
         self.assertNotEqual(target, env.objects["Table_B"]["position"])
         self.assertTrue(env.is_point_navigable(target), msg=f"Build target should be navigable: {target}")
@@ -274,7 +274,7 @@ class TestBuildTargetAndProgress(unittest.TestCase):
     def test_agent_can_progress_toward_build_interaction_target(self):
         env = Environment(phases=[])
         agent = Agent(name="Engineer", role="Engineer", position=env.get_spawn_point("Engineer"))
-        target = agent._select_build_target(env)
+        target = agent._select_build_target(env, allow_project_creation=True)  # geometry test: lookups no longer create projects by default
         self.assertIsNotNone(target)
 
         start_dist = ((agent.position[0] - target[0]) ** 2 + (agent.position[1] - target[1]) ** 2) ** 0.5

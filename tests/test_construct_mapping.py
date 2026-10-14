@@ -220,6 +220,7 @@ class TestConstructMapping(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = SimulationState(phases=[], project_root=tmpdir)
             agent = sim.agents[0]
+            sim.environment.construction.create_project("site_b", structure_type="house")  # the old code instantiated this implicitly
 
             decision = BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES)
             agent.hook_effects[("action_duration", "transport_resources", "duration_scale")] = 0.6

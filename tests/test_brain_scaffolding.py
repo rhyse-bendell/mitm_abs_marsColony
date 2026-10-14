@@ -227,6 +227,7 @@ class TestTeamKnowledgeManagerAndIntegration(unittest.TestCase):
     def test_transport_resources_is_single_macro_action(self):
         env = Environment(phases=[])
         agent = Agent(name="Engineer", role="Engineer", position=env.get_spawn_point("Engineer"))
+        env.construction.create_project("site_b", structure_type="house")  # the old code instantiated this implicitly
         decision = BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES, assumptions=["duration_s=30"])
         actions = agent._translate_brain_decision_to_legacy_action(decision, env)
         self.assertEqual(len(actions), 1)
