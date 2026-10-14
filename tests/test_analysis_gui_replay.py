@@ -1,16 +1,25 @@
 import sys
 from types import ModuleType, SimpleNamespace
+from unittest import mock
 
 backend = ModuleType("matplotlib.backends.backend_tkagg")
 backend.FigureCanvasTkAgg = object
 pyplot = ModuleType("matplotlib.pyplot")
 pyplot.subplots = lambda *args, **kwargs: (None, None)
-sys.modules.setdefault("matplotlib", ModuleType("matplotlib"))
-sys.modules.setdefault("matplotlib.backends", ModuleType("matplotlib.backends"))
-sys.modules["matplotlib.backends.backend_tkagg"] = backend
-sys.modules["matplotlib.pyplot"] = pyplot
 
-from analysis_gui import AnalysisGUI
+# Scope the fake Matplotlib modules to the analysis_gui import only. Leaving them in sys.modules
+# leaks a stub FigureCanvasTkAgg (== object) into later imports such as interface.py, which then
+# fails to build its canvases and raises a modal "Plot initialization failed" dialog.
+with mock.patch.dict(
+    sys.modules,
+    {
+        "matplotlib": sys.modules.get("matplotlib") or ModuleType("matplotlib"),
+        "matplotlib.backends": sys.modules.get("matplotlib.backends") or ModuleType("matplotlib.backends"),
+        "matplotlib.backends.backend_tkagg": backend,
+        "matplotlib.pyplot": pyplot,
+    },
+):
+    from analysis_gui import AnalysisGUI
 
 
 class DummySlider:
