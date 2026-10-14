@@ -1348,6 +1348,34 @@ class ConstructionManager:
         )
         return True, connector_id
 
+    def _connector_endpoints_legal(self, support_type, type_a, type_b):
+        """Direct-connection legality: one provider endpoint and one consumer endpoint of the right kinds.
+
+        The kinds come from the task package support model (water: generator -> housing or greenhouse;
+        food: greenhouse -> housing). Legality is about what may be physically connected; it deliberately says
+        nothing about how many structures a provider can effectively serve (an overconnected provider is a
+        representable, detectable design state, evaluated by modules/support_accounting.py).
+        """
+        from modules.support_accounting import load_support_model
+
+        task_id = getattr(self.task_model, "task_id", None) or "mars_colony"
+        if not hasattr(self, "_support_model_cache"):
+            self._support_model_cache = {}
+        if task_id not in self._support_model_cache:
+            try:
+                self._support_model_cache[task_id] = load_support_model(task_id)
+            except FileNotFoundError:
+                self._support_model_cache[task_id] = None
+        model = self._support_model_cache[task_id]
+        a, b = str(type_a or "").strip().lower(), str(type_b or "").strip().lower()
+        if model is None:  # task package without a support model: previous endpoint rule
+            expected_pair = {"house", "housing", "water_generator"} if support_type == "water" else {"house", "housing", "greenhouse"}
+            return {a, b}.issubset(expected_pair) and bool({"house", "housing"} & {a, b})
+        kind_of_type = {t: kind for kind, types in model["structure_types"].items() for t in types}
+        rule = model["link_endpoints"][support_type]
+        kinds = (kind_of_type.get(a), kind_of_type.get(b))
+        return (kinds[0] == rule["provider"] and kinds[1] in rule["consumers"]) or (kinds[1] == rule["provider"] and kinds[0] in rule["consumers"])
+
     def attach_connector(self, connector_project_id, *, from_project_id, to_project_id, actor=None, sim_time=None):
         connector_id = str(connector_project_id or "")
         connector = self.projects.get(connector_id)
@@ -1365,9 +1393,7 @@ class ConstructionManager:
         if not isinstance(start_project, dict) or not isinstance(end_project, dict):
             return False, "project_not_found"
         support_type = "water" if connector_type == "water_connector" else "food"
-        expected_pair = {"house", "housing", "water_generator"} if support_type == "water" else {"house", "housing", "greenhouse"}
-        endpoint_types = {str(start_project.get("type") or ""), str(end_project.get("type") or "")}
-        if not endpoint_types.issubset(expected_pair) or not {"house", "housing"}.intersection(endpoint_types):
+        if not self._connector_endpoints_legal(support_type, start_project.get("type"), end_project.get("type")):
             return False, "invalid_connector_endpoint_types"
         links = connector.setdefault("connections", [])
         link_payload = {

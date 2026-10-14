@@ -70,7 +70,7 @@
     "max_supported_structures_per_generator": 2,
     "split": "even_across_served_structures",
     "direct_connection_only": true,
-    "overconnection_policy": "serve_first_n_in_connection_order",
+    "overconnection_policy": "no_winner_selection_report_slots_and_ranges",
     "demand_atoms": [
       {
         "unit": "civilians",
@@ -96,11 +96,12 @@
       "max_supported_structures_per_generator": "D_ENG_WATERGEN_MAX_2_STRUCTURES",
       "split": "D_ENG_WATER_SPLIT_EVENLY",
       "direct_connection_only": "D_ENG_DIRECT_CONNECTION_ONLY",
-      "overconnection_policy": "EVALUATOR CONVENTION (sources only say a generator supports at most two structures): connections beyond the limit are unserved; which ones is decided by connection order (connector project id, then link order) so the result is deterministic"
+      "overconnection_policy": "EVALUATOR RULE (sources only say a generator supports at most two structures and splits output evenly): physical connections beyond the limit are kept in world state and reported; WHICH endpoints are served is not specified, so none is chosen. The report gives service slots, total water units and serviceable ranges per endpoint category."
     }
   },
   "validity": {
     "validated_structure": "project status 'complete', validated_complete true, correct not false",
-    "valid_connector": "connector project status 'complete', validated_complete true, correct not false; only link entries with both endpoints are graph edges (endpoint-less entries are physical build-step records)"
+    "valid_connector": "connector project status 'complete', validated_complete true, correct not false; only link entries with both endpoints are graph edges (endpoint-less entries are physical build-step records)",
+    "support_vs_validity": "construction validity (built to its requirements) and mission support (receives food/water through the network) are separate; support accounting never invalidates a structure"
   }
 }

@@ -124,7 +124,7 @@ class TestMetricsOutputs(unittest.TestCase):
             self.assertIn("effective_colony_support_ratio_current_phase", support)
             self.assertTrue(any("LEGACY PROXY" in note for note in support["notes"]))
             structural = outcomes["structural_support"]
-            self.assertEqual(structural["schema"], "structural_support_accounting/1")
+            self.assertEqual(structural["schema"], "structural_support_accounting/2")
             for section in ("housing", "food", "water", "violations", "bottleneck"):
                 self.assertIn(section, structural)
 

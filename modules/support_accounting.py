@@ -5,11 +5,15 @@ Answers "what support infrastructure does this colony actually possess?" from th
 (config/tasks/<task_id>/support_model.json). It is a pure, read-only analysis layer:
 
 - it never mutates construction state and holds no Pilot beliefs;
-- it separates NOMINAL capacity (validated structures) from EFFECTIVELY SUPPORTED capacity
-  (structures actually served food and water through valid direct connections);
-- it does NOT decide which civilians or VIPs receive scarce capacity. Allocation and mission scoring are
-  unresolved task questions and are deliberately out of scope. Capacities are reported per colonist kind
-  so that a later explicit allocation policy can consume them.
+- it separates PHYSICAL CONNECTION STATE (what the team built, including invalid designs such as a generator
+  wired to many structures) from EFFECTIVE RESOURCE SERVICE (what the task rules allow those connections to
+  provide), and NOMINAL capacity (validated structures) from effectively supported capacity;
+- construction validity and mission support are separate: a validated house can lack food or water and a
+  validated greenhouse can lack water; this module reports that, it never invalidates anything;
+- it does NOT decide which civilians or VIPs receive scarce capacity, and it invents NO allocation winner:
+  when a generator is connected to more structures than it can serve, which endpoints are served is
+  UNDETERMINED by the task sources, so the report gives the slot count and serviceable ranges instead of
+  choosing by connection order. Allocation and mission scoring remain unresolved task questions.
 """
 
 from __future__ import annotations
@@ -19,7 +23,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-SCHEMA = "structural_support_accounting/1"
+SCHEMA = "structural_support_accounting/2"
+UNDETERMINED_WATER = "service_underdetermined_generator_overconnected"
 
 
 def load_support_model(task_id: str = "mars_colony") -> Dict[str, Any]:
@@ -34,6 +39,10 @@ def _is_validated(project: Dict[str, Any]) -> bool:
         and project.get("validated_complete") is True
         and project.get("correct", True) is not False
     )
+
+
+def _range(low: int, high: int) -> Dict[str, int]:
+    return {"min": low, "max": high}
 
 
 def evaluate_structural_support(construction, model: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -67,7 +76,7 @@ def evaluate_structural_support(construction, model: Optional[Dict[str, Any]] = 
 
     violations: List[Dict[str, Any]] = []
 
-    # --- the connector graph: only validated connector projects, only link entries with both endpoints ---
+    # --- the physical connector graph: validated connector projects, link entries with both endpoints ---
     links: List[Dict[str, Any]] = []
     seen = set()
     for pid in sorted(projects):
@@ -98,46 +107,72 @@ def evaluate_structural_support(construction, model: Optional[Dict[str, Any]] = 
             seen.add(key)
             links.append({"support": support, "provider": provider, "consumer": consumer, "connector": pid})
 
-    # --- water: each validated generator serves at most N structures, output split evenly among those served ---
-    water_delivered: Dict[str, float] = {}
-    water_linked: Dict[str, List[str]] = {}
+    # --- water: a generator can serve at most N structures, output split evenly among those served ---
+    # Physical connections are never capped. If a generator is connected to more than N structures, WHICH N
+    # are served is not specified by the sources, so no endpoint is chosen: endpoints are only "underdetermined".
+    certain_water: Dict[str, float] = {}
+    possible_water: Dict[str, float] = {}
+    water_linked = set()
     generators = []
-    effective_connections = 0
-    unsupported_connections = 0
-    overconnected = []
+    overconnected: List[str] = []
+    overconnected_ranges = []
     for generator in structures["water_generator"]:
-        connected = [l["consumer"] for l in links if l["support"] == "water" and l["provider"] == generator]
-        served, unserved = connected[:max_served], connected[max_served:]
-        share = output_per_generator / len(served) if served else 0.0
+        connected = sorted({l["consumer"] for l in links if l["support"] == "water" and l["provider"] == generator})
+        count = len(connected)
+        slots = min(count, max_served)
+        determined = count <= max_served
+        share = output_per_generator / slots if slots else 0.0
+        housing_ids = [c for c in connected if kind(c) == "housing"]
+        greenhouse_ids = [c for c in connected if kind(c) == "greenhouse"]
+        if determined:
+            h_min, h_max, g_min, g_max = len(housing_ids), len(housing_ids), len(greenhouse_ids), len(greenhouse_ids)
+        else:
+            h_max, g_max = min(len(housing_ids), slots), min(len(greenhouse_ids), slots)
+            h_min, g_min = max(0, slots - len(greenhouse_ids)), max(0, slots - len(housing_ids))
         for consumer in connected:
-            water_linked.setdefault(consumer, []).append(generator)
-        for consumer in served:
-            water_delivered[consumer] = water_delivered.get(consumer, 0.0) + share
-        effective_connections += len(served)
-        unsupported_connections += len(unserved)
+            water_linked.add(consumer)
+            target = certain_water if determined else possible_water
+            target[consumer] = target.get(consumer, 0.0) + share
         record = {
             "generator": generator,
             "nominal_output": output_per_generator,
-            "connected_structures": len(connected),
-            "served": list(served),
-            "unserved": list(unserved),
+            "connected_endpoints": connected,
+            "connection_count": count,
+            "max_serviceable_structures": max_served,
+            "overconnected": not determined,
+            "service_slots": slots,
+            "total_water_units": output_per_generator if slots else 0.0,
             "water_units_per_served_structure": share,
-            "overconnected": len(connected) > max_served,
+            "excess_connections": count - slots,
+            "allocation_determined": determined,
+            "housing_connected": len(housing_ids),
+            "greenhouses_connected": len(greenhouse_ids),
+            "housing_serviceable": _range(h_min, h_max),
+            "greenhouse_serviceable": _range(g_min, g_max),
         }
         generators.append(record)
-        if record["overconnected"]:
+        if not determined:
             overconnected.append(generator)
-            violations.append({"type": "generator_overconnected", "generator": generator, "connected": len(connected), "limit": max_served, "unserved": list(unserved)})
+            overconnected_ranges.append((h_min, h_max, g_min, g_max))
+            violations.append({"type": "generator_overconnected", "generator": generator, "connected": count, "limit": max_served, "connected_endpoints": connected, "allocation_determined": False})
 
-    # --- food: greenhouses feed housing; a greenhouse only counts as food if it is itself watered ---
+    def water_state(structure_id: str) -> str:
+        if structure_id in certain_water:
+            return "served"
+        if structure_id in possible_water:
+            return UNDETERMINED_WATER
+        return "no_water_link"
+
+    # --- food: greenhouses feed housing; a greenhouse only provides food if it is itself watered ---
     greenhouse_rows = []
-    watered = {gh for gh in structures["greenhouse"] if water_delivered.get(gh, 0.0) > 0.0}
+    gh_served = {gh for gh in structures["greenhouse"] if water_state(gh) == "served"}
+    gh_possible = {gh for gh in structures["greenhouse"] if water_state(gh) == UNDETERMINED_WATER}
     for gh in structures["greenhouse"]:
-        feeds = [l["consumer"] for l in links if l["support"] == "food" and l["provider"] == gh]
-        water_state = "served" if gh in watered else ("linked_but_unserved_generator_overconnected" if gh in water_linked else "no_water_link")
-        greenhouse_rows.append({"greenhouse": gh, "watered": gh in watered, "water": water_state, "water_units_delivered": water_delivered.get(gh, 0.0), "housing_connected": feeds})
-        if gh not in watered:
-            violations.append({"type": "greenhouse_unwatered", "greenhouse": gh, "water": water_state})
+        feeds = sorted({l["consumer"] for l in links if l["support"] == "food" and l["provider"] == gh})
+        state = water_state(gh)
+        greenhouse_rows.append({"greenhouse": gh, "water": state, "water_units": _range(certain_water.get(gh, 0.0), certain_water.get(gh, 0.0) + possible_water.get(gh, 0.0)), "housing_connected": feeds})
+        if state == "no_water_link":
+            violations.append({"type": "greenhouse_unwatered", "greenhouse": gh})
     food_providers: Dict[str, List[str]] = {}
     for l in links:
         if l["support"] == "food":
@@ -152,81 +187,99 @@ def evaluate_structural_support(construction, model: Optional[Dict[str, Any]] = 
         providers = food_providers.get(house, [])
         if not providers:
             food_state = "no_food_link"
-        elif any(p in watered for p in providers):
+        elif any(p in gh_served for p in providers):
             food_state = "effective"
+        elif any(p in gh_possible for p in providers):
+            food_state = "service_underdetermined"
         else:
             food_state = "food_source_unwatered"
-        if house in water_delivered:
-            water_state = "served"
-        elif house in water_linked:
-            water_state = "linked_but_unserved_generator_overconnected"
+        w_state = water_state(house)
+        if w_state == "served" and food_state == "effective":
+            support_state = "full"
+        elif w_state == "no_water_link" or food_state in ("no_food_link", "food_source_unwatered"):
+            support_state = "not_full"
         else:
-            water_state = "no_water_link"
+            support_state = "underdetermined"
         missing = []
         if food_state != "effective":
-            missing.append(food_state)
-        if water_state != "served":
-            missing.append(water_state)
+            missing.append(food_state if food_state != "service_underdetermined" else "food_service_underdetermined")
+        if w_state != "served":
+            missing.append("water_service_underdetermined_generator_overconnected" if w_state == UNDETERMINED_WATER else w_state)
         housing_rows.append(
             {
                 "housing": house,
                 "food": food_state,
-                "water": water_state,
-                "water_units_delivered": water_delivered.get(house, 0.0),
-                "fully_supported": not missing,
+                "water": w_state,
+                "water_units": _range(certain_water.get(house, 0.0), certain_water.get(house, 0.0) + possible_water.get(house, 0.0)),
+                "support": support_state,
                 "missing": missing,
             }
         )
-    fully = [r for r in housing_rows if r["fully_supported"]]
+
+    n_housing = len(housing_rows)
+    h_water_certain = sum(1 for r in housing_rows if r["water"] == "served")
+    h_water_possible = sum(1 for r in housing_rows if r["water"] == UNDETERMINED_WATER)
+    h_water_lo = h_water_certain + min(max([r[0] for r in overconnected_ranges] or [0]), h_water_possible)
+    h_water_hi = h_water_certain + min(sum(r[1] for r in overconnected_ranges), h_water_possible)
+    h_food_certain = sum(1 for r in housing_rows if r["food"] == "effective")
+    h_food_possible = sum(1 for r in housing_rows if r["food"] == "service_underdetermined")
+    full = sum(1 for r in housing_rows if r["support"] == "full")
+    undetermined = sum(1 for r in housing_rows if r["support"] == "underdetermined")
+    full_lo, full_hi = full, min(full + undetermined, h_water_hi)
 
     reasons = Counter(m for r in housing_rows for m in r["missing"])
     if reasons:
         limiting, count = sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))[0]
-        bottleneck = {"limiting_factor": limiting, "housing_affected": count, "of_validated_housing": len(housing_rows), "all_reasons": dict(sorted(reasons.items()))}
+        bottleneck = {"limiting_factor": limiting, "housing_affected": count, "of_validated_housing": n_housing, "all_reasons": dict(sorted(reasons.items()))}
     else:
-        bottleneck = {"limiting_factor": None, "housing_affected": 0, "of_validated_housing": len(housing_rows), "all_reasons": {}}
+        bottleneck = {"limiting_factor": None, "housing_affected": 0, "of_validated_housing": n_housing, "all_reasons": {}}
+    bottleneck["water_excess_connections"] = sum(g["excess_connections"] for g in generators)
 
-    soil_units = len(structures["greenhouse"]) * int(greenhouse_cfg["soil_units_per_structure"])
+    soil_per = int(greenhouse_cfg["soil_units_per_structure"])
     soil_civ = int(greenhouse_cfg["capacity_per_soil_unit"]["civilians"])
     soil_vip = int(greenhouse_cfg["capacity_per_soil_unit"]["vips"])
-    effective_soil = len(watered) * int(greenhouse_cfg["soil_units_per_structure"])
+    gh_possible_n = len(gh_possible)
+    gh_lo = len(gh_served) + min(max([r[2] for r in overconnected_ranges] or [0]), gh_possible_n)
+    gh_hi = len(gh_served) + min(sum(r[3] for r in overconnected_ranges), gh_possible_n)
 
     return {
         "schema": SCHEMA,
+        "allocation_determined": not overconnected,
         "housing": {
-            "validated_structures": len(housing_rows),
-            "civilian_capacity": len(housing_rows) * units * civ_per_unit,
-            "vip_capacity_if_vip_compatible": len(housing_rows) * units * vip_per_unit,
+            "validated_structures": n_housing,
+            "civilian_capacity": n_housing * units * civ_per_unit,
+            "vip_capacity_if_vip_compatible": n_housing * units * vip_per_unit,
             "vip_property_modeled": bool(housing_cfg.get("vip_property_modeled", False)),
             "with_food_link": sum(1 for r in housing_rows if r["food"] != "no_food_link"),
-            "with_effective_food": sum(1 for r in housing_rows if r["food"] == "effective"),
+            "with_effective_food": _range(h_food_certain, h_food_certain + h_food_possible),
             "with_water_connection": sum(1 for r in housing_rows if r["water"] != "no_water_link"),
-            "with_effective_water": sum(1 for r in housing_rows if r["water"] == "served"),
-            "fully_supported_structures": len(fully),
-            "fully_supported_civilian_capacity": len(fully) * units * civ_per_unit,
-            "fully_supported_vip_capacity_if_vip_compatible": len(fully) * units * vip_per_unit,
-            "unsupported_structures": [{"housing": r["housing"], "missing": r["missing"]} for r in housing_rows if not r["fully_supported"]],
+            "with_effective_water": _range(h_water_lo, h_water_hi),
+            "fully_supported_structures": _range(full_lo, full_hi),
+            "fully_supported_civilian_capacity": _range(full_lo * units * civ_per_unit, full_hi * units * civ_per_unit),
+            "fully_supported_vip_capacity_if_vip_compatible": _range(full_lo * units * vip_per_unit, full_hi * units * vip_per_unit),
+            "unsupported_structures": [{"housing": r["housing"], "support": r["support"], "missing": r["missing"]} for r in housing_rows if r["support"] != "full"],
             "structures": housing_rows,
         },
         "food": {
             "validated_greenhouses": len(greenhouse_rows),
-            "soil_units": soil_units,
-            "civilian_equivalent_capacity": soil_units * soil_civ,
-            "vip_equivalent_capacity": soil_units * soil_vip,
-            "watered_greenhouses": len(watered),
-            "unwatered_greenhouses": len(greenhouse_rows) - len(watered),
-            "effective_soil_units": effective_soil,
-            "effective_civilian_equivalent_capacity": effective_soil * soil_civ,
-            "effective_vip_equivalent_capacity": effective_soil * soil_vip,
+            "soil_units": len(greenhouse_rows) * soil_per,
+            "civilian_equivalent_capacity": len(greenhouse_rows) * soil_per * soil_civ,
+            "vip_equivalent_capacity": len(greenhouse_rows) * soil_per * soil_vip,
+            "watered_greenhouses": _range(gh_lo, gh_hi),
+            "unwatered_greenhouses": sum(1 for r in greenhouse_rows if r["water"] == "no_water_link"),
+            "effective_soil_units": _range(gh_lo * soil_per, gh_hi * soil_per),
+            "effective_civilian_equivalent_capacity": _range(gh_lo * soil_per * soil_civ, gh_hi * soil_per * soil_civ),
+            "effective_vip_equivalent_capacity": _range(gh_lo * soil_per * soil_vip, gh_hi * soil_per * soil_vip),
             "connected_housing": len(food_providers),
             "greenhouses": greenhouse_rows,
         },
         "water": {
             "validated_generators": len(generators),
             "total_nominal_output": output_per_generator * len(generators),
-            "total_delivered": sum(water_delivered.values()),
-            "effective_connections": effective_connections,
-            "unsupported_connections": unsupported_connections,
+            "total_water_units_deliverable": sum(g["total_water_units"] for g in generators),
+            "physical_connections": sum(g["connection_count"] for g in generators),
+            "effective_connections": sum(g["service_slots"] for g in generators),
+            "unsupported_connections": sum(g["excess_connections"] for g in generators),
             "overconnected_generators": overconnected,
             "connected_housing": sum(1 for h in structures["housing"] if h in water_linked),
             "connected_greenhouses": sum(1 for g in structures["greenhouse"] if g in water_linked),
@@ -238,7 +291,8 @@ def evaluate_structural_support(construction, model: Optional[Dict[str, Any]] = 
         "notes": [
             "Infrastructure only: no civilian/VIP allocation or scoring is implied (unresolved task question).",
             "Capacities are per colonist kind (civilians OR VIPs per unit); they are alternatives, not additive.",
-            "vip_capacity_if_vip_compatible assumes the VIP housing property, which construction state does not model.",
-            "Validated structures only; connector projects must themselves be validated and only endpoint-bearing link entries are edges.",
+            "Physical connections are never capped. For an overconnected generator the sources do not say which endpoints are served, so none is chosen: *_min/*_max ranges bound the effective values and structure states are 'underdetermined'.",
+            "Construction validity and mission support are separate: nothing here invalidates a structure.",
+            "vip_capacity_if_vip_compatible assumes the VIP housing property, which construction state does not model; one floorspace unit per house and one soil unit per greenhouse are simulator abstractions.",
         ],
     }
