@@ -11452,7 +11452,15 @@ class Agent:
                                 )
 
             if action["type"] == "transport_resources":
+                def _release_carried_bricks():
+                    held = self.transport_state.get("carrying") or {}
+                    held_qty = int(held.get("quantity", 0) or 0)
+                    source_id = self.transport_state.get("pickup_source_id")
+                    if held_qty > 0 and source_id:
+                        environment.construction.return_to_pile(source_id, held_qty)
+
                 def _reset_transport_episode():
+                    _release_carried_bricks()
                     self.transport_state.update(
                         {
                             "stage": "idle",
@@ -11693,6 +11701,7 @@ class Agent:
 
                 state = self.transport_state
                 if state.get("bound_project_id") != project_id:
+                    _release_carried_bricks()
                     state.update(
                         {
                             "stage": "pickup",
@@ -11739,6 +11748,10 @@ class Agent:
                         _set_action_stage(action, "en_route", {"target_id": pickup_id, "target_kind": "pickup"})
                         continue
                     _set_action_stage(action, "arrived", {"target_id": pickup_id, "target_kind": "pickup"})
+                    if not environment.construction.take_from_pile(pickup_id, 1):
+                        # Another agent took the last brick first; the pile is empty, so nothing is carried.
+                        state["pickup_source_id"] = None
+                        continue
                     state["carrying"] = {"resource_type": "bricks", "quantity": 1}
                     state["stage"] = "in_transit"
                     dropoff = _build_target(project_id)
@@ -11778,7 +11791,7 @@ class Agent:
                     continue
 
                 environment.construction.assign_builder(project_id, self.name)
-                delivered_ok = environment.construction.deliver_resource(project_id, "bricks", quantity=1)
+                delivered_ok = environment.construction.deliver_resource(project_id, "bricks", quantity=1, from_carried=True)
                 if not delivered_ok:
                     _log_mutation_blocked(
                         "construction_transport_blocked",

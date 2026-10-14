@@ -899,6 +899,30 @@ class ConstructionManager:
                 return True
         return False
 
+    def _sync_pile_quantity(self, pile):
+        pile.quantity = max(0, min(pile.max_quantity, self.site_resource_inventory.get(pile.site_id, 0)))
+
+    def take_from_pile(self, pile_id, quantity=1):
+        """Committed pickup: bricks leave the pile when taken, so two agents cannot hold the same brick."""
+        pile = self.resource_nodes.get(pile_id)
+        quantity = max(1, int(quantity))
+        if pile is None:
+            return False
+        if self.site_resource_inventory.get(pile.site_id, 0) < quantity:
+            self._sync_pile_quantity(pile)
+            return False
+        self.site_resource_inventory[pile.site_id] -= quantity
+        self._sync_pile_quantity(pile)
+        return True
+
+    def return_to_pile(self, pile_id, quantity=1):
+        pile = self.resource_nodes.get(pile_id)
+        if pile is None:
+            return False
+        self.site_resource_inventory[pile.site_id] = self.site_resource_inventory.get(pile.site_id, 0) + max(1, int(quantity))
+        self._sync_pile_quantity(pile)
+        return True
+
     def update(self):
         self._advance_transports()
         self.sites["site_c"].buildable = self._is_site_buildable("site_c")
@@ -997,7 +1021,7 @@ class ConstructionManager:
         return True, "started"
 
 # Resource delivery updates inventory readiness, but does not imply structural or epistemic completion.
-    def deliver_resource(self, project_id, resource_type, quantity=1):
+    def deliver_resource(self, project_id, resource_type, quantity=1, from_carried=False):
         resolved_id = self.resolve_project_id(project_id, create_if_missing=True)
         project = self.projects.get(resolved_id)
         if not project or resource_type != "bricks":
@@ -1005,7 +1029,7 @@ class ConstructionManager:
         started, _reason = self.start_project(resolved_id)
         if not started:
             return False
-        if not self._consume_resource_for_site(project["site_id"], quantity):
+        if not from_carried and not self._consume_resource_for_site(project["site_id"], quantity):
             return False
         required = int(project["required_resources"].get(resource_type, 0) or 0)
         current = int(project["delivered_resources"].get(resource_type, 0) or 0)
