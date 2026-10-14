@@ -353,6 +353,20 @@ class BrainContextBuilder:
             elif bridge_status != "complete":
                 legal.append({"action_type": ExecutableActionType.CONTINUE_CONSTRUCTION.value, "target_id": bridge_id, "target_class": "bridge", "target_kind": "bridge", "work_stage": "bridge_build", "reachable": True, "utility": 0.94})
 
+        list_connections = getattr(environment.construction, "list_connection_options", None)
+        for option in (list_connections() if callable(list_connections) else []):
+            legal.append(
+                {
+                    "action_type": ExecutableActionType.CONNECT_STRUCTURES.value,
+                    "target_id": environment.construction.encode_connection_target(option["connector_project_id"], option["from_project_id"], option["to_project_id"]),
+                    "target_class": "build",
+                    "target_kind": "connection",
+                    "connection_type": option["connection_type"],
+                    "reachable": True,
+                    "utility": 0.1,
+                }
+            )
+
         task_model = getattr(agent, "task_model", None)
         if not task_model:
             return legal

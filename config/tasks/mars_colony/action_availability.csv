@@ -11,6 +11,7 @@ start_construction,True,all,build
 continue_construction,True,all,build
 repair_or_correct_construction,True,all,build
 validate_construction,True,all,build
+connect_structures,True,all,build
 observe_environment,True,all,self
 reassess_plan,True,all,self
 wait,True,all,self

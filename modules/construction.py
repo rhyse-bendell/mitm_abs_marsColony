@@ -1421,6 +1421,75 @@ class ConstructionManager:
         self.update_project_provenance(connector_id, event="connector_attached", actor=actor, sim_time=sim_time)
         return True, "attached"
 
+    CONNECTION_TARGET_SEPARATOR = "|"
+
+    @classmethod
+    def encode_connection_target(cls, connector_project_id, from_project_id, to_project_id):
+        sep = cls.CONNECTION_TARGET_SEPARATOR
+        return f"{connector_project_id}{sep}{from_project_id}{sep}{to_project_id}"
+
+    @classmethod
+    def parse_connection_target(cls, target_id):
+        parts = str(target_id or "").split(cls.CONNECTION_TARGET_SEPARATOR)
+        if len(parts) != 3 or not all(p.strip() for p in parts):
+            return None
+        return tuple(p.strip() for p in parts)
+
+    def check_connection(self, connector_project_id, from_project_id, to_project_id):
+        """Read-only legality of one direct connection: (legal, blockers). Never mutates the connector graph.
+
+        Legality is about what may be physically connected now (structures exist and are built, connector kind
+        matches the endpoint kinds, the pair is not already linked). It says nothing about whether a provider can
+        effectively serve the link; over-connection stays a representable design state.
+        """
+        blockers = []
+        connector = self.projects.get(str(connector_project_id or ""))
+        if not isinstance(connector, dict):
+            return False, ["connector_project_not_found"]
+        connector_type = str(connector.get("type") or "").strip().lower()
+        if connector_type not in {"food_connector", "water_connector"}:
+            return False, ["unsupported_connector_type"]
+        start_id = self.resolve_project_id(from_project_id, create_if_missing=False)
+        end_id = self.resolve_project_id(to_project_id, create_if_missing=False)
+        start_project = self.projects.get(start_id) if start_id else None
+        end_project = self.projects.get(end_id) if end_id else None
+        if not isinstance(start_project, dict) or not isinstance(end_project, dict):
+            return False, ["unknown_structure_reference"]
+        if start_id == end_id:
+            blockers.append("self_connection")
+        support_type = "water" if connector_type == "water_connector" else "food"
+        if not self._connector_endpoints_legal(support_type, start_project.get("type"), end_project.get("type")):
+            blockers.append("invalid_connector_endpoint_types")
+        if not bool(connector.get("structurally_complete")):
+            blockers.append("connector_not_structurally_complete")
+        for endpoint in (start_project, end_project):
+            if not bool(endpoint.get("structurally_complete")):
+                blockers.append("endpoint_not_structurally_complete")
+                break
+        pair = {start_id, end_id}
+        for link in self.connectors:
+            if link.get("connection_type") == support_type and {link.get("from_project_id"), link.get("to_project_id")} == pair:
+                blockers.append("already_connected")
+                break
+        return not blockers, blockers
+
+    def list_connection_options(self):
+        """Read-only: every currently legal (connector, endpoint, endpoint) direct connection."""
+        options = []
+        projects = sorted((p for p in self.projects.values() if isinstance(p, dict)), key=lambda p: str(p.get("id") or ""))
+        connectors = [p for p in projects if str(p.get("type") or "").strip().lower() in {"food_connector", "water_connector"} and p.get("structurally_complete")]
+        structures = [p for p in projects if str(p.get("type") or "").strip().lower() in {"house", "housing", "greenhouse", "water_generator"} and p.get("structurally_complete")]
+        for connector in connectors:
+            support_type = "water" if str(connector.get("type")).strip().lower() == "water_connector" else "food"
+            for i, a in enumerate(structures):
+                for b in structures[i + 1:]:
+                    if not self._connector_endpoints_legal(support_type, a.get("type"), b.get("type")):
+                        continue
+                    legal, _ = self.check_connection(connector["id"], a["id"], b["id"])
+                    if legal:
+                        options.append({"connector_project_id": connector["id"], "from_project_id": a["id"], "to_project_id": b["id"], "connection_type": support_type})
+        return options
+
     def get_project_rule_evidence(self, project_id):
         project = self.projects.get(str(project_id or ""))
         if not isinstance(project, dict):

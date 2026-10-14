@@ -44,6 +44,8 @@ class AgentActionGate:
             return self._evaluate_repair(agent=agent, decision=decision, sim_state=sim_state)
         if action == ExecutableActionType.VALIDATE_CONSTRUCTION:
             return self._evaluate_validation(agent=agent, decision=decision, sim_state=sim_state)
+        if action == ExecutableActionType.CONNECT_STRUCTURES:
+            return self._evaluate_connection(agent=agent, decision=decision, sim_state=sim_state)
         return self._evaluate_meta(agent=agent, decision=decision, sim_state=sim_state)
 
     def _pass(self, decision: BrainDecision) -> ActionGateResult:
@@ -75,6 +77,24 @@ class AgentActionGate:
 
     def _evaluate_construction(self, *, agent, decision, sim_state):
         return self._pass(decision)
+
+    def _evaluate_connection(self, *, agent, decision, sim_state):
+        # Read-only legality of connect(connector, endpoint, endpoint). Any role may perform a legal connection;
+        # whether a Pilot chooses it is a decision-knowledge question the gate deliberately does not answer.
+        construction = getattr(getattr(sim_state, "environment", None), "construction", None)
+        parsed = construction.parse_connection_target(decision.target_id) if construction is not None else None
+        if parsed is None:
+            return ActionGateResult(False, decision, blockers=["malformed_connection_target"], target_id=decision.target_id)
+        connector_id, from_id, to_id = parsed
+        legal, blockers = construction.check_connection(connector_id, from_id, to_id)
+        return ActionGateResult(
+            legal,
+            decision,
+            blockers=list(blockers),
+            target_id=decision.target_id,
+            project_id=connector_id,
+            metadata={"connector_project_id": connector_id, "from_project_id": from_id, "to_project_id": to_id},
+        )
 
     def _evaluate_repair(self, *, agent, decision, sim_state):
         return self._pass(decision)

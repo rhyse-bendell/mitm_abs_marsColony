@@ -24,6 +24,7 @@ class ExecutableActionType(str, Enum):
     CONTINUE_CONSTRUCTION = "continue_construction"
     REPAIR_OR_CORRECT_CONSTRUCTION = "repair_or_correct_construction"
     VALIDATE_CONSTRUCTION = "validate_construction"
+    CONNECT_STRUCTURES = "connect_structures"
     OBSERVE_ENVIRONMENT = "observe_environment"
     REASSESS_PLAN = "reassess_plan"
     WAIT = "wait"

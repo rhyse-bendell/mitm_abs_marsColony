@@ -5399,6 +5399,29 @@ class Agent:
         )
         return None
 
+    def _execute_connect_structures(self, action, sim_state):
+        """Committed path for connect_structures: re-check legality, then add the connector graph edge."""
+        construction = getattr(getattr(sim_state, "environment", None), "construction", None)
+        parsed = construction.parse_connection_target(action.get("connection_target")) if construction is not None else None
+        if parsed is None:
+            self._emit_event(sim_state, "connection_attempt_failed", {"reason": "malformed_connection_target", "target_id": action.get("connection_target")})
+            return False
+        connector_id, from_id, to_id = parsed
+        legal, blockers = construction.check_connection(connector_id, from_id, to_id)
+        payload = {"connector_project_id": connector_id, "from_project_id": from_id, "to_project_id": to_id}
+        if not legal:
+            self._emit_event(sim_state, "connection_attempt_failed", {**payload, "reason": ",".join(blockers)})
+            return False
+        attached, reason = construction.attach_connector(
+            connector_id,
+            from_project_id=from_id,
+            to_project_id=to_id,
+            actor=self.name,
+            sim_time=float(getattr(sim_state, "time", getattr(self, "current_time", 0.0))),
+        )
+        self._emit_event(sim_state, "connection_attempt_succeeded" if attached else "connection_attempt_failed", {**payload, "reason": reason})
+        return bool(attached)
+
     def _execution_lock_active_for_project(self, project_id=None):
         state = self.execution_lock_state
         if not bool(state.get("execution_lock_active")):
@@ -8426,6 +8449,11 @@ class Agent:
                     confidence=max(0.7, float(decision.confidence or 0.0)),
                 )
                 self._emit_event(sim_state, "recovery_pivot_applied", {"origin": pivot_origin, "forced_action": forced_pivot, "from_action": decision.selected_action.value})
+        if rewritten.selected_action == ExecutableActionType.CONNECT_STRUCTURES and sim_state is not None and hasattr(sim_state, "action_gate"):
+            # Pilot authority: a legal explicit connection is not replaced by the house-centred support scaffold.
+            if getattr(sim_state.action_gate.evaluate(agent=self, decision=rewritten, sim_state=sim_state), "legal", False):
+                self._emit_event(sim_state, "policy_pivot_skipped_legal_connection", {"origin": pivot_origin, "target_id": rewritten.target_id})
+                return rewritten
         support_deficit_rewrite = self._resolve_support_deficit_decision(
             rewritten,
             environment,
@@ -9632,12 +9660,15 @@ class Agent:
             ExecutableActionType.CONTINUE_CONSTRUCTION: {"type": "construct", "duration": 2.0, "priority": 1},
             ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION: {"type": "construct", "duration": 2.0, "priority": 1},
             ExecutableActionType.VALIDATE_CONSTRUCTION: {"type": "idle", "duration": 1.0, "priority": 1},
+            ExecutableActionType.CONNECT_STRUCTURES: {"type": "idle", "duration": 2.0, "priority": 1},
             ExecutableActionType.OBSERVE_ENVIRONMENT: {"type": "idle", "duration": 0.8, "priority": 1},
             ExecutableActionType.REASSESS_PLAN: {"type": "idle", "duration": 0.8, "priority": 1},
             ExecutableActionType.WAIT: {"type": "idle", "duration": 1.0, "priority": 1},
         }
         action = dict(mapping[decision.selected_action])
         action["decision_action"] = decision.selected_action.value
+        if decision.selected_action == ExecutableActionType.CONNECT_STRUCTURES:
+            action["connection_target"] = str(decision.target_id or "")
         if self.task_model is not None:
             params = self.task_model.action_parameters.get(decision.selected_action.value)
             if params is not None:
@@ -12010,6 +12041,8 @@ class Agent:
                 completed.append(action)
 
         for action in completed:
+            if action.get("decision_action") == ExecutableActionType.CONNECT_STRUCTURES.value:
+                self._execute_connect_structures(action, sim_state)
             self.perform_action([action])
             if action.get("decision_action") == ExecutableActionType.OBSERVE_ENVIRONMENT.value:
                 self.progress_tracker["observe_no_effect"] = int(self.progress_tracker.get("observe_no_effect", 0) or 0) + 1
@@ -12070,6 +12103,7 @@ class Agent:
                     "assist_action": action.get("assist_action"),
                     "decision_action": action.get("decision_action"),
                     "source_target_id": action.get("source_target_id"),
+                    "connection_target": action.get("connection_target"),
                 })
                 if (
                     action.get("type") in {"move_to", "construct", "transport_resources"}
