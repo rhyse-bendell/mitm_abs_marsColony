@@ -217,6 +217,9 @@ class AgentBrainResponse:
     communication_act: Optional[Dict[str, Any]] = None
     explanation: Optional[str] = None
     escalation_flags: List[str] = field(default_factory=list)
+    # Pilot-owned controller state (e.g. Procedural Baseline mode/method state) returned
+    # for the middleware to persist between decisions. Empty for stateless pilots.
+    controller_state: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "AgentBrainResponse":
@@ -231,6 +234,7 @@ class AgentBrainResponse:
             communication_act=payload.get("communication_act"),
             explanation=payload.get("explanation"),
             escalation_flags=list(payload.get("escalation_flags", [])),
+            controller_state=dict(payload.get("controller_state") or {}),
         )
 
 

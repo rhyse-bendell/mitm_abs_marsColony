@@ -6598,7 +6598,7 @@ class Agent:
             return
         sim_state.logger.append_planner_trace(payload)
 
-    def _build_brain_request(self, sim_state, context, request_explanation, trigger_reason):
+    def _build_brain_request(self, sim_state, context, request_explanation, trigger_reason, request_id=None):
         phase = context.world_snapshot.get("phase_profile", {}).get("name", context.world_snapshot.get("phase_state", {}).get("name", "default"))
         observations = [str(e) for e in context.history_bands.get("near_preceding_events", [])[-4:]]
         runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {}
@@ -6642,13 +6642,13 @@ class Agent:
                 {"action_type": action_id, "reason": "not_in_context_action_affordances"},
             )
         return AgentBrainRequest(
-            request_id=f"{self.agent_id}-{uuid.uuid4().hex[:8]}",
+            request_id=request_id or f"{self.agent_id}-{uuid.uuid4().hex[:8]}",
             tick=self.sim_step_count,
             sim_time=float(sim_state.time),
             agent_id=self.agent_id,
             display_name=self.display_name,
             agent_label=self.agent_label,
-            task_id=getattr(sim_state.task_model, "task_id", "unknown"),
+            task_id=getattr(getattr(sim_state, "task_model", None), "task_id", "unknown"),
             phase=str(phase),
             local_context_summary=f"trigger={trigger_reason};build={context.individual_cognitive_state.get('build_readiness',{}).get('status')};accepted_dik={len(accepted_information)+len(accepted_knowledge)+len(accepted_rules)}",
             local_observations=observations,
@@ -6706,6 +6706,169 @@ class Agent:
         if adapter is None:
             adapter = getattr(sim_state, "pilot_adapter", None)
         return adapter
+
+    def _ground_validate_and_decide(self, response, context, request_packet, sim_state, runtime):
+        """Canonical Pilot-response contract: ground, validate, repair, convert to BrainDecision.
+
+        Shared by the asynchronous planner path and the synchronous Procedural Baseline path so
+        every Pilot response goes through the same validation before translation/ActionGate.
+        """
+        response = self._validate_and_ground_response_plan(response, context, request_packet)
+        plan_obj = getattr(response, "plan", None)
+        grounding_status = getattr(plan_obj, "_method_status", None) if plan_obj else None
+        grounding_notes = list(getattr(plan_obj, "_method_notes", [])) if plan_obj else []
+        legal_action_ids = [a["action_type"] for a in context.action_affordances]
+        errors = validate_agent_brain_response(response, legal_action_ids)
+        schema_validation_errors = list(errors)
+        repaired = False
+        if errors:
+            repaired = True
+            fallback_decision = None
+            adapter = self._pilot_adapter_for_runtime(sim_state, runtime)
+            if adapter is not None and hasattr(adapter, "choose_fallback_action"):
+                fallback_decision = adapter.choose_fallback_action(agent=self, context_packet=request_packet, reason="response_plan_invalid", sim_state=sim_state)
+            if fallback_decision is None:
+                fallback_decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="Fallback due to decision validation failure.", confidence=1.0)
+            fallback_step_dict = {"step_index": 0, "action_type": fallback_decision.selected_action.value, "target_id": fallback_decision.target_id, "target_zone": fallback_decision.target_zone, "expected_purpose": fallback_decision.reason_summary}
+            response = AgentBrainResponse.from_dict(
+                {
+                    "response_id": f"fallback-{request_packet.request_id}",
+                    "agent_id": self.agent_id,
+                    "plan": {
+                        "plan_id": f"fallback-plan-{request_packet.request_id}",
+                        "plan_horizon": 1,
+                        "ordered_goals": [{"goal_id": "safety", "description": "maintain legal progress", "priority": 1.0, "status": "active"}],
+                        "ordered_actions": [fallback_step_dict],
+                        "next_action": fallback_step_dict,
+                        "confidence": 1.0,
+                    },
+                    "explanation": None,
+                }
+            )
+
+        decision = response.plan.next_action.to_brain_decision(
+            confidence=max(0.0, min(1.0, float(response.plan.confidence))),
+            plan_method_id=response.plan.plan_method_id,
+            next_steps=[step.expected_purpose for step in response.plan.ordered_actions[:3] if step.expected_purpose],
+        )
+        if decision.selected_action in {ExecutableActionType.INSPECT_INFORMATION_SOURCE, ExecutableActionType.CONSULT_TEAM_ARTIFACT, ExecutableActionType.REQUEST_ASSISTANCE} and not decision.target_id:
+            match = next((a for a in context.action_affordances if a.get("action_type") == decision.selected_action.value), None)
+            if match:
+                decision.target_id = match.get("target_id")
+                decision.target_zone = match.get("target_zone")
+
+        if decision.selected_action == ExecutableActionType.TRANSPORT_RESOURCES and not any(str(a).startswith("duration_s=") for a in (decision.assumptions or [])):
+            # Bind the decision to the duration of the affordance it was offered under.
+            offered = [a for a in context.action_affordances if a.get("action_type") == decision.selected_action.value]
+            bound = next((a for a in offered if decision.target_id and a.get("target_id") == decision.target_id), offered[0] if offered else {})
+            decision.assumptions = list(decision.assumptions or []) + [f"duration_s={bound.get('duration_s', 30)}"]
+        return {
+            "response": response,
+            "decision": decision,
+            "schema_validation_errors": schema_validation_errors,
+            "repaired": repaired,
+            "grounding_status": grounding_status,
+            "grounding_notes": grounding_notes,
+            "legal_action_ids": legal_action_ids,
+        }
+
+    def _baseline_pilot_observation(self, context):
+        """Observation fields the Procedural Baseline Pilot consumed from BrainContextPacket.
+
+        Carried in AgentBrainRequest.task_context so the baseline is driven by the canonical
+        request. This is baseline-reference-pilot parity only; scoping what other pilots see
+        is a separate concern.
+        """
+        cognitive = context.individual_cognitive_state
+        team_state = context.team_state
+        return {
+            "role": self.role,
+            "control_state": dict(cognitive.get("control_state") or {}),
+            "build_readiness": dict(cognitive.get("build_readiness", {})),
+            "built_state": list(context.world_snapshot.get("built_state", [])),
+            "capacity_unlock": context.world_snapshot.get("capacity_unlock"),
+            "epistemic_sufficiency": dict(cognitive.get("epistemic_sufficiency", {})),
+            "team_shared_knowledge": dict(team_state.get("team_shared_knowledge", {})),
+            "externalized_artifacts": list(team_state.get("externalized_artifacts", [])),
+            "teammate_help_signals": dict(team_state.get("teammate_help_signals", {})),
+            "tom_summary_size": len(team_state.get("tom_summary", {}) or {}),
+            "loop_counters": dict(cognitive.get("loop_counters", {})),
+            "progress_state": dict(cognitive.get("progress_state", {})),
+            "seconds_since_dik_change": cognitive.get("seconds_since_dik_change"),
+            "mismatch_signals": list(context.history_bands.get("semantic_plan_evolution", {}).get("unresolved_contradictions", [])),
+            "inspect_state": dict(cognitive.get("inspect_state", {})),
+            "mechanism_profile": dict(cognitive.get("mechanism_profile", cognitive.get("traits", {})) or {}),
+            # Keeps the baseline policy's random stream identical to the legacy decide() path.
+            "policy_seed_key": "ctx",
+        }
+
+    def _build_sync_pilot_request(self, sim_state, context, trigger_reason):
+        """Canonical AgentBrainRequest for a synchronous (non-LLM) Pilot decision."""
+        request = self._build_brain_request(
+            sim_state, context, False, trigger_reason,
+            request_id=f"{self.agent_id}-sync-{self.sim_step_count}-{uuid.uuid5(uuid.NAMESPACE_OID, f'{self.agent_id}:{self.sim_step_count}:{trigger_reason}').hex[:6]}",
+        )
+        observation = self._baseline_pilot_observation(context)
+        request.task_context.update(observation)
+        control_state = observation["control_state"]
+        policy_snapshot = dict(control_state.get("last_policy_snapshot", {}) or {})
+        request.control_mode = str(control_state.get("mode") or "BOOTSTRAP")
+        request.previous_control_mode = control_state.get("previous_mode")
+        request.mode_dwell_steps = int(control_state.get("mode_dwell_steps", 0) or 0)
+        request.last_transition_reason = str(control_state.get("last_transition_reason") or "none")
+        request.control_state_snapshot = {
+            "mode": request.control_mode,
+            "previous_mode": request.previous_control_mode,
+            "mode_dwell_steps": request.mode_dwell_steps,
+            "last_transition_reason": request.last_transition_reason,
+            "recovery_active": bool(control_state.get("recovery_active")),
+            "top_features": dict(policy_snapshot.get("top_features", {}) or control_state.get("last_transition_features", {}) or {}),
+            "policy_snapshot": policy_snapshot,
+            "method_state": dict(control_state.get("method_state", {}) or {}),
+            "inspect_state": dict(observation["inspect_state"]),
+        }
+        return request
+
+    def _select_decision_through_pilot_adapter(self, sim_state, context, trigger_reason, runtime=None):
+        """Synchronous Pilot selection through this agent's PilotAdapter.
+
+        Used for the Procedural Baseline (synchronous, no async planner machinery). The request
+        and response go through the same grounding/validation as every other Pilot, and the
+        Pilot's returned controller state is persisted into the context control state.
+        """
+        if runtime is None:
+            runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"provider": sim_state.brain_provider}
+        adapter = self._pilot_adapter_for_runtime(sim_state, runtime)
+        if adapter is None:
+            from modules.procedural_baseline_pilot import ProceduralBaselinePilotAdapter
+
+            adapter = ProceduralBaselinePilotAdapter(provider=runtime.get("provider"))
+        request = self._build_sync_pilot_request(sim_state, context, trigger_reason)
+        response = adapter.choose_action(request)
+        grounded = self._ground_validate_and_decide(response, context, request, sim_state, runtime)
+        response = grounded["response"]
+        decision = grounded["decision"]
+        legacy_errors = validate_brain_decision(decision, [ExecutableActionType(a) for a in grounded["legal_action_ids"]])
+        if legacy_errors:
+            self._emit_event(sim_state, "pilot_decision_rejected_schema_invalid", {"pilot_id": getattr(adapter, "pilot_id", None), "errors": list(legacy_errors)[:3], "selected_action": decision.selected_action.value})
+            decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="Fallback due to decision validation failure.", confidence=1.0)
+        if response.controller_state:
+            context.individual_cognitive_state["control_state"] = dict(response.controller_state)
+        self._emit_event(
+            sim_state,
+            "pilot_selection_via_adapter",
+            {
+                "pilot_id": getattr(adapter, "pilot_id", None),
+                "request_id": request.request_id,
+                "response_id": response.response_id,
+                "selected_action": decision.selected_action.value,
+                "target_id": decision.target_id,
+                "schema_errors": list(grounded["schema_validation_errors"])[:3],
+                "repaired": bool(grounded["repaired"]),
+                "grounding_status": grounded["grounding_status"],
+            },
+        )
+        return decision
 
     def _execute_planner_request_sync(self, sim_state, trigger_reason, request_packet, request_explanation, request_started_at, request_sim_time, request_wallclock_time, trace_id, blocking_sim_barrier=False):
         context = sim_state.brain_context_builder.build(sim_state, self)
@@ -6780,51 +6943,16 @@ class Agent:
             provider_trace = getattr(provider_for_trace, "last_trace", None)
         if isinstance(provider_trace, dict):
             runtime_disposition = provider_trace.get("runtime_disposition")
-        response = self._validate_and_ground_response_plan(response, context, request_packet)
-        plan_obj = getattr(response, "plan", None)
-        grounding_status = getattr(plan_obj, "_method_status", None) if plan_obj else None
-        grounding_notes = list(getattr(plan_obj, "_method_notes", [])) if plan_obj else []
-        legal_action_ids = [a["action_type"] for a in context.action_affordances]
-        errors = validate_agent_brain_response(response, legal_action_ids)
-        schema_validation_errors = list(errors)
-        repaired = False
-        if errors:
-            repaired = True
-            validation_repaired = True
-            fallback_decision = None
-            adapter = self._pilot_adapter_for_runtime(sim_state, runtime)
-            if adapter is not None and hasattr(adapter, "choose_fallback_action"):
-                fallback_decision = adapter.choose_fallback_action(agent=self, context_packet=request_packet, reason="response_plan_invalid", sim_state=sim_state)
-            if fallback_decision is None:
-                fallback_decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="Fallback due to decision validation failure.", confidence=1.0)
-            fallback_step_dict = {"step_index": 0, "action_type": fallback_decision.selected_action.value, "target_id": fallback_decision.target_id, "target_zone": fallback_decision.target_zone, "expected_purpose": fallback_decision.reason_summary}
-            response = AgentBrainResponse.from_dict(
-                {
-                    "response_id": f"fallback-{request_packet.request_id}",
-                    "agent_id": self.agent_id,
-                    "plan": {
-                        "plan_id": f"fallback-plan-{request_packet.request_id}",
-                        "plan_horizon": 1,
-                        "ordered_goals": [{"goal_id": "safety", "description": "maintain legal progress", "priority": 1.0, "status": "active"}],
-                        "ordered_actions": [fallback_step_dict],
-                        "next_action": fallback_step_dict,
-                        "confidence": 1.0,
-                    },
-                    "explanation": None,
-                }
-            )
-
-        decision = response.plan.next_action.to_brain_decision(
-            confidence=max(0.0, min(1.0, float(response.plan.confidence))),
-            plan_method_id=response.plan.plan_method_id,
-            next_steps=[step.expected_purpose for step in response.plan.ordered_actions[:3] if step.expected_purpose],
-        )
-        if decision.selected_action in {ExecutableActionType.INSPECT_INFORMATION_SOURCE, ExecutableActionType.CONSULT_TEAM_ARTIFACT, ExecutableActionType.REQUEST_ASSISTANCE} and not decision.target_id:
-            match = next((a for a in context.action_affordances if a.get("action_type") == decision.selected_action.value), None)
-            if match:
-                decision.target_id = match.get("target_id")
-                decision.target_zone = match.get("target_zone")
-
+        grounded = self._ground_validate_and_decide(response, context, request_packet, sim_state, runtime)
+        response = grounded["response"]
+        decision = grounded["decision"]
+        grounding_status = grounded["grounding_status"]
+        grounding_notes = grounded["grounding_notes"]
+        legal_action_ids = grounded["legal_action_ids"]
+        schema_validation_errors = grounded["schema_validation_errors"]
+        errors = list(schema_validation_errors)
+        repaired = grounded["repaired"]
+        validation_repaired = repaired
         decision = self._apply_trait_bias_to_decision(decision, context, sim_state, trigger_reason)
         legacy_errors = validate_brain_decision(decision, [ExecutableActionType(a) for a in legal_action_ids])
         legacy_validation_errors = list(legacy_errors)
@@ -9074,7 +9202,7 @@ class Agent:
         method_state["last_method_switch_reason"] = f"pivot:{reason}"
         control_state["method_state"] = method_state
         context.individual_cognitive_state["control_state"] = control_state
-        controller_decision = provider.decide(context)
+        controller_decision = self._select_decision_through_pilot_adapter(sim_state, context, f"pivot:{reason}", runtime=runtime)
         updated_control_state = context.individual_cognitive_state.get("control_state", {})
         if isinstance(updated_control_state, dict) and updated_control_state:
             self.control_state.update(updated_control_state)
@@ -9145,7 +9273,7 @@ class Agent:
         context = sim_state.brain_context_builder.build(sim_state, self)
         context.individual_cognitive_state.setdefault("control_state", dict(self.control_state or {}))
         context.individual_cognitive_state["control_state"]["post_acquisition_until"] = int(self.post_acquisition_stabilization_until)
-        decision = provider.decide(context)
+        decision = self._select_decision_through_pilot_adapter(sim_state, context, planner_reason, runtime=runtime)
         if planner_reason in {"no_active_plan", "plan_invalidated", "plan_completed"}:
             decision = self._bind_project_to_decision_if_needed(
                 decision,

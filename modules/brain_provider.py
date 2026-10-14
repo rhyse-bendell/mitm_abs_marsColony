@@ -544,7 +544,7 @@ class RuleBrain(BrainProvider):
     def _extract_features(self, context_packet, *, is_request: bool = False) -> dict[str, float]:
         request_ctx = dict(getattr(context_packet, "task_context", {}) or {}) if is_request else {}
         cognitive = context_packet.individual_cognitive_state if not is_request else request_ctx
-        world = context_packet.world_snapshot if not is_request else {"built_state": request_ctx.get("built_state", [])}
+        world = context_packet.world_snapshot if not is_request else {"built_state": request_ctx.get("built_state", []), "capacity_unlock": request_ctx.get("capacity_unlock")}
         known_gaps = cognitive.get("known_gaps", []) if not is_request else list(context_packet.working_memory_summary.get("known_gaps", []))
         readiness = cognitive.get("build_readiness", {}) if not is_request else dict(request_ctx.get("build_readiness", {}))
         built_state = world.get("built_state", []) if not is_request else list(request_ctx.get("built_state", []))
@@ -558,7 +558,7 @@ class RuleBrain(BrainProvider):
         observe_no_effect = int(loop_counters.get("observe_no_effect", 0) or 0)
         communication_no_effect = int(loop_counters.get("communication_no_effect", 0) or 0)
         goal_stack = cognitive.get("goal_stack", []) if not is_request else list(context_packet.current_goal_stack)
-        externalized = context_packet.team_state.get("externalized_artifacts", []) if not is_request else list(context_packet.artifact_context)
+        externalized = context_packet.team_state.get("externalized_artifacts", []) if not is_request else list(request_ctx.get("externalized_artifacts", context_packet.artifact_context))
         team_shared_knowledge = context_packet.team_state.get("team_shared_knowledge", {}) if not is_request else dict(request_ctx.get("team_shared_knowledge", {}))
         validated = sum(1 for a in externalized if a.get("validation_state") == "validated")
         seconds_since_dik_change = cognitive.get("seconds_since_dik_change") if not is_request else request_ctx.get("seconds_since_dik_change")
@@ -647,7 +647,15 @@ class RuleBrain(BrainProvider):
         return {
             "epistemic_deficit": min(1.0, len(known_gaps) / 4.0),
             "build_opportunity": 1.0 if readiness.get("ready_for_build") else 0.0,
-            "coordination_need": min(1.0, (len(known_gaps) + len(context_packet.team_state.get("teammate_help_signals", {}))) / 6.0) if not is_request else min(1.0, len(known_gaps) / 4.0),
+            "coordination_need": (
+                min(1.0, (len(known_gaps) + len(context_packet.team_state.get("teammate_help_signals", {}))) / 6.0)
+                if not is_request
+                else (
+                    min(1.0, (len(known_gaps) + len(request_ctx.get("teammate_help_signals", {}))) / 6.0)
+                    if "teammate_help_signals" in request_ctx
+                    else min(1.0, len(known_gaps) / 4.0)
+                )
+            ),
             "repair_pressure": min(1.0, (len(mismatch_signals) / 3.0) + (0.5 if any(p.get("needs_repair") for p in built_state) else 0.0)),
             "loop_pressure": min(1.0, repeated / 4.0),
             "no_progress_pressure": min(1.0, no_progress_streak / 4.0),
@@ -659,7 +667,11 @@ class RuleBrain(BrainProvider):
             "goal_pressure": min(1.0, len(goal_stack) / 4.0),
             "dik_change_recency": 1.0 if (seconds_since_dik_change is not None and float(seconds_since_dik_change) <= 4.0) else 0.0,
             "artifact_validation_available": min(1.0, validated / 2.0),
-            "teammate_relevance": min(1.0, len(context_packet.team_state.get("tom_summary", {})) / 3.0) if not is_request else 0.0,
+            "teammate_relevance": (
+                min(1.0, len(context_packet.team_state.get("tom_summary", {})) / 3.0)
+                if not is_request
+                else min(1.0, int(request_ctx.get("tom_summary_size", 0) or 0) / 3.0)
+            ),
             "shared_source_exhausted": 1.0 if exhausted_shared else 0.0,
             "role_source_exhausted": 1.0 if exhausted_role else 0.0,
             "role_packet_inspected": role_inspected,
@@ -692,13 +704,16 @@ class RuleBrain(BrainProvider):
         previous = request_packet.previous_control_mode if request_packet.previous_control_mode is not None else merged.get("previous_mode")
         dwell = request_packet.mode_dwell_steps if request_packet.mode_dwell_steps is not None else merged.get("mode_dwell_steps", 0)
         reason = request_packet.last_transition_reason if request_packet.last_transition_reason is not None else merged.get("last_transition_reason", "none")
-        normalized = {
+        # Start from the full controller state when the middleware carries it (history,
+        # mode_entered_step, post_acquisition_until, ...) so it survives the round trip.
+        normalized = dict(task_control)
+        normalized.update({
             "mode": str(mode),
             "previous_mode": previous,
             "mode_dwell_steps": int(dwell or 0),
             "last_transition_reason": str(reason or "none"),
             "recovery_active": bool(merged.get("recovery_active")),
-        }
+        })
         if merged.get("last_transition_features"):
             normalized["last_transition_features"] = dict(merged.get("last_transition_features") or {})
         if merged.get("top_features"):
@@ -1334,11 +1349,15 @@ class RuleBrain(BrainProvider):
 
     def _bootstrap_exit_triggered(self, context_packet, features: dict[str, float], control_state: dict[str, Any], *, is_request: bool) -> tuple[bool, str]:
         if is_request:
-            return False, ""
-        inspect_state = context_packet.individual_cognitive_state.get("inspect_state", {})
+            request_ctx = dict(getattr(context_packet, "task_context", {}) or {})
+            inspect_state = request_ctx.get("inspect_state", {})
+            role_name = request_ctx.get("role", "")
+        else:
+            inspect_state = context_packet.individual_cognitive_state.get("inspect_state", {})
+            role_name = context_packet.static_task_context.get("role", "")
         source_exhaustion = inspect_state.get("source_exhaustion", {}) if isinstance(inspect_state, dict) else {}
         shared = source_exhaustion.get("Team_Info", {}) or {}
-        role_source = f"{context_packet.static_task_context.get('role', '')}_Info"
+        role_source = f"{role_name}_Info"
         role_state = source_exhaustion.get(role_source, {}) or {}
         shared_exhausted = bool(shared.get("exhausted"))
         shared_no_new_streak = int(shared.get("no_new_dik_streak", 0) or 0)
@@ -1356,9 +1375,11 @@ class RuleBrain(BrainProvider):
             return True, "bootstrap_exit_no_marginal_shared_value"
         return False, ""
 
-    def _apply_control_state_update(self, context_packet, selected_mode: str, features: dict[str, float], reason: str, policy_snapshot: dict[str, Any]) -> dict[str, Any]:
-        control_state = context_packet.individual_cognitive_state.get("control_state", {}) if hasattr(context_packet, "individual_cognitive_state") else {}
-        sim_step = int(context_packet.world_snapshot.get("sim_time", 0.0) if hasattr(context_packet, "world_snapshot") else 0)
+    def _apply_control_state_update(self, context_packet, selected_mode: str, features: dict[str, float], reason: str, policy_snapshot: dict[str, Any], *, control_state: dict[str, Any] | None = None, sim_step: int | None = None) -> dict[str, Any]:
+        if control_state is None:
+            control_state = context_packet.individual_cognitive_state.get("control_state", {}) if hasattr(context_packet, "individual_cognitive_state") else {}
+        if sim_step is None:
+            sim_step = int(context_packet.world_snapshot.get("sim_time", 0.0) if hasattr(context_packet, "world_snapshot") else 0)
         if not isinstance(control_state, dict):
             return {"mode": selected_mode, "mode_dwell_steps": 1}
         current_mode = str(control_state.get("mode") or "BOOTSTRAP")
@@ -1400,7 +1421,7 @@ class RuleBrain(BrainProvider):
                 context_packet.individual_cognitive_state.get("traits", {}),
             )
             if not is_request
-            else {}
+            else dict((getattr(context_packet, "task_context", {}) or {}).get("mechanism_profile") or {})
         ) or {}
         features = self._extract_features(context_packet, is_request=is_request)
         control_state = dict(control_state or (context_packet.individual_cognitive_state.get("control_state", {}) if not is_request else {}))
@@ -1409,7 +1430,10 @@ class RuleBrain(BrainProvider):
         control_state["sim_step"] = int((context_packet.world_snapshot.get("sim_time", 0.0) if not is_request else context_packet.sim_time) or 0)
         mode_scores, mode_guards = self._compute_mode_scores(features, legal_types, control_state, mechanism_profile)
         mode_scores, guard_notes = self._apply_transition_guards(mode_scores, mode_guards, features, legal_types)
-        rng_seed = f"{getattr(context_packet, 'request_id', 'ctx')}-{len(affordances)}-{control_state.get('mode')}-{int(features['goal_pressure']*100)}"
+        # A request may pin the rng namespace (policy_seed_key) so the policy's random
+        # stream does not depend on unique request ids.
+        seed_namespace = ((getattr(context_packet, "task_context", {}) or {}).get("policy_seed_key") if is_request else None) or getattr(context_packet, 'request_id', 'ctx')
+        rng_seed = f"{seed_namespace}-{len(affordances)}-{control_state.get('mode')}-{int(features['goal_pressure']*100)}"
         rng = random.Random(rng_seed)
         selected_mode, mode_probs, transition_reason = self._select_mode(
             mode_scores=mode_scores,
@@ -1557,7 +1581,9 @@ class RuleBrain(BrainProvider):
             updated_control = self._apply_control_state_update(context_packet, selected_mode, features, reason, policy_snapshot)
             context_packet.individual_cognitive_state["control_state"] = updated_control
         else:
-            updated_control = control_state
+            updated_control = self._apply_control_state_update(
+                None, selected_mode, features, reason, policy_snapshot, control_state=control_state, sim_step=sim_step
+            )
         method_state.pop("sim_step", None)
         method_state.pop("current_mode", None)
         control_state.pop("sim_step", None)
@@ -1636,7 +1662,8 @@ class RuleBrain(BrainProvider):
                 "ordered_actions": [step.__dict__],
                 "next_action": step.__dict__,
                 "confidence": max(prob for _, prob in result["action_probs"]) if result["action_probs"] else 0.65,
-                "plan_method_id": "rule_brain_hierarchical_policy_v1",
+                # The baseline's internal method is reported in notes; it is not a task-defined
+                # plan method, so it must not enter plan-method grounding.
                 "notes": [
                     f"mode={result['selected_mode']}",
                     f"method={result.get('selected_method')}",
@@ -1653,6 +1680,7 @@ class RuleBrain(BrainProvider):
                 else None
             ),
             "confidence": max(prob for _, prob in result["action_probs"]) if result["action_probs"] else 0.65,
+            "controller_state": dict(result.get("control_state") or {}),
         }
         return AgentBrainResponse.from_dict(payload)
 
