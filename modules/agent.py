@@ -6706,6 +6706,7 @@ class Agent:
             "built_state": list(context.world_snapshot.get("built_state", [])),
             "capacity_unlock": context.world_snapshot.get("capacity_unlock"),
             "site_capacity": list(context.world_snapshot.get("site_capacity_summary", []) or []),
+            "brick_source_available": context.world_snapshot.get("brick_source_available"),
             "epistemic_sufficiency": dict(cognitive.get("epistemic_sufficiency", {})),
             "team_shared_knowledge": dict(team_state.get("team_shared_knowledge", {})),
             "externalized_artifacts": list(team_state.get("externalized_artifacts", [])),
@@ -9593,6 +9594,7 @@ class Agent:
                 action["project_id"] = decision.target_id
         if decision.selected_action == ExecutableActionType.TRANSPORT_RESOURCES:
             action["duration"] = self._scaled_duration(action.get("duration", 30.0)) * self._duration_scale("transport_resources")
+            exact_project = str(decision.target_id or "") in environment.construction.projects
             build_selection = self._select_build_target(
                 environment,
                 require_readiness=False,
@@ -9600,7 +9602,11 @@ class Agent:
                 action_type=decision.selected_action.value,
                 requested_project_id=decision.target_id,
                 sim_state=sim_state,
+                require_supplied_target=exact_project,  # an exact project is delivered to or reported blocked, never swapped
             )
+            if exact_project and not isinstance(build_selection, dict):
+                self._emit_event(sim_state, "action_legality_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "project_does_not_need_material", "project_id": decision.target_id, "blockers": ["project_does_not_need_material"]})
+                return [{"type": "idle", "duration": 1.0, "priority": 1, "decision_action": ExecutableActionType.WAIT.value, "blocked_action": self._action_gate_decision_label(decision), "blockers": ["project_does_not_need_material"]}]
             if isinstance(build_selection, dict):
                 action["project_id"] = build_selection.get("project_id")
                 action["target"] = build_selection.get("target")

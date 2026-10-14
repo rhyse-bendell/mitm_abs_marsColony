@@ -85,6 +85,15 @@ class AgentActionGate:
                 target_id=decision.target_id,
                 metadata={"resource_nodes": {pid: int(getattr(p, "quantity", 0) or 0) for pid, p in nodes.items()}},
             )
+        # An exact project target is checked as asked; the gate never substitutes a different project.
+        construction = getattr(getattr(sim_state, "environment", None), "construction", None)
+        project = (getattr(construction, "projects", None) or {}).get(str(decision.target_id or ""))
+        if isinstance(project, dict):
+            status = str(project.get("status") or "")
+            required = int((project.get("required_resources") or {}).get("bricks", 0) or 0)
+            delivered = int((project.get("delivered_resources") or {}).get("bricks", 0) or 0)
+            if status in {"complete", "ready_for_validation"} or bool(project.get("resource_complete")) or (required > 0 and delivered >= required):
+                return ActionGateResult(False, decision, blockers=["project_does_not_need_material"], target_id=decision.target_id, project_id=project.get("id"))
         return self._pass(decision)
 
     def _evaluate_construction(self, *, agent, decision, sim_state):
@@ -105,6 +114,9 @@ class AgentActionGate:
             )
         # Untyped START only continues an existing unfinished project; it never creates one.
         target = str(decision.target_id or "").strip()
+        exact = (getattr(construction, "projects", None) or {}).get(target)
+        if isinstance(exact, dict) and str(exact.get("status") or "") == "complete":
+            return ActionGateResult(False, decision, blockers=["project_already_complete"], target_id=decision.target_id, project_id=exact.get("id"))
         is_site_target = target in getattr(construction, "PROJECT_TO_SITE", {}) or target in getattr(construction, "LEGACY_PROJECT_TO_SITE", {})
         if is_site_target and not construction.resolve_project_id(target, create_if_missing=False):
             return ActionGateResult(False, decision, blockers=["structure_type_required_for_new_project"], target_id=decision.target_id)

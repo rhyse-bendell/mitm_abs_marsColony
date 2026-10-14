@@ -166,6 +166,9 @@ def test_baseline_target_and_transport_duration_survive_grounding_and_validation
     assert "unknown_method_fallback" not in grounded["response"].plan.notes
     assert grounded["decision"].target_id == response.plan.next_action.target_id
 
+    project_id, _ = sim.environment.construction.create_project("site_b", structure_type="house")  # transport names an exact project
+    context = sim.brain_context_builder.build(sim, agent)  # affordances must reflect the new project
+    request = agent._build_sync_pilot_request(sim, context, "unit_test")
     transport = AgentBrainResponse.from_dict(
         {
             "response_id": "t",
@@ -174,8 +177,8 @@ def test_baseline_target_and_transport_duration_survive_grounding_and_validation
                 "plan_id": "p",
                 "plan_horizon": 1,
                 "ordered_goals": [],
-                "ordered_actions": [{"step_index": 0, "action_type": "transport_resources", "target_id": "resource_zone_to_work_zone", "expected_purpose": "t"}],
-                "next_action": {"step_index": 0, "action_type": "transport_resources", "target_id": "resource_zone_to_work_zone", "expected_purpose": "t"},
+                "ordered_actions": [{"step_index": 0, "action_type": "transport_resources", "target_id": project_id, "expected_purpose": "t"}],
+                "next_action": {"step_index": 0, "action_type": "transport_resources", "target_id": project_id, "expected_purpose": "t"},
                 "confidence": 0.9,
             },
         }

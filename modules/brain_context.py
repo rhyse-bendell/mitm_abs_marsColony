@@ -265,8 +265,6 @@ class BrainContextBuilder:
             {"action_type": ExecutableActionType.REQUEST_ASSISTANCE.value, "target_id": "nearby_agent", "target_class": "team", "utility": utility_for(ExecutableActionType.REQUEST_ASSISTANCE)},
             {"action_type": ExecutableActionType.EXTERNALIZE_PLAN.value, "target_id": "whiteboard", "target_class": "artifact", "utility": utility_for(ExecutableActionType.EXTERNALIZE_PLAN)},
             {"action_type": ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, "target_id": "whiteboard", "target_class": "artifact", "utility": utility_for(ExecutableActionType.CONSULT_TEAM_ARTIFACT)},
-            {"action_type": ExecutableActionType.VALIDATE_CONSTRUCTION.value, "target_id": "active_construction", "target_class": "build", "utility": utility_for(ExecutableActionType.VALIDATE_CONSTRUCTION, target_kind="build")},
-            {"action_type": ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value, "target_id": "active_construction", "target_class": "build", "utility": utility_for(ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, target_kind="build")},
         ]
         for item in legal:
             if item.get("action_type") in {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.REQUEST_ASSISTANCE.value}:
@@ -320,8 +318,6 @@ class BrainContextBuilder:
                 continue
             # Build site. Two distinct, read-only facts: an unfinished project here can be worked on, and each
             # legal (site, structure type) start may create a new project. Neither says which one to choose.
-            if environment.construction.resolve_project_id(target_name, create_if_missing=False):
-                legal.append({**base, "start_mode": "existing_project"})
             for option in start_options_by_target.get(target_name, []):
                 legal.append(
                     {
@@ -331,6 +327,42 @@ class BrainContextBuilder:
                         "required_resources": dict(option["required_resources"]),
                     }
                 )
+
+        bricks_available = self._bricks_available(environment, agent)
+        for project_id, project in sorted(environment.construction.projects.items()):
+            if not isinstance(project, dict) or str(project.get("status") or "") == "complete" or project.get("validated_complete"):
+                continue
+            point = environment.get_interaction_target_position(project_id, from_position=agent.position)
+            if point is None:
+                continue
+            site_target = environment.construction.SITE_TO_BUILD_TARGET.get(project.get("site_id"))
+            base = {
+                "target_id": project_id,
+                "target_zone": (environment.interaction_targets.get(site_target) or {}).get("zone"),
+                "target_point": point,
+                "target_class": "build",
+                "target_kind": "project",
+                "project_type": project.get("type"),
+                "reachable": environment._segment_is_navigable(agent.position, point),
+            }
+            required = int((project.get("required_resources") or {}).get("bricks", 0) or 0)
+            delivered = int((project.get("delivered_resources") or {}).get("bricks", 0) or 0)
+            steps = list(project.get("build_steps") or [])
+            progressed = any(bool(step.get("completed")) for step in steps)
+            physically_complete = bool(project.get("structurally_complete"))
+            needs_material = not bool(project.get("resource_complete")) and delivered < required and str(project.get("status") or "") != "ready_for_validation"
+            # Each fact below is stated per exact project; which one to work on is the Pilot's choice.
+            if needs_material and bricks_available:
+                legal.append({**base, "action_type": ExecutableActionType.TRANSPORT_RESOURCES.value, "work_stage": "material_delivery", "duration_s": 30.0, "utility": utility_for(ExecutableActionType.TRANSPORT_RESOURCES)})
+            if not physically_complete:
+                if progressed:
+                    legal.append({**base, "action_type": ExecutableActionType.CONTINUE_CONSTRUCTION.value, "utility": utility_for(ExecutableActionType.CONTINUE_CONSTRUCTION)})
+                else:
+                    legal.append({**base, "action_type": ExecutableActionType.START_CONSTRUCTION.value, "start_mode": "existing_project", "utility": utility_for(ExecutableActionType.START_CONSTRUCTION)})
+            else:
+                legal.append({**base, "action_type": ExecutableActionType.VALIDATE_CONSTRUCTION.value, "utility": utility_for(ExecutableActionType.VALIDATE_CONSTRUCTION, target_kind="build")})
+            if progressed:
+                legal.append({**base, "action_type": ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value, "utility": utility_for(ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, target_kind="build")})
 
         has_productive_target = any(
             item.get("action_type")
@@ -348,18 +380,6 @@ class BrainContextBuilder:
         if not has_productive_target or refresh_pressure >= 0.72:
             legal.append({"action_type": ExecutableActionType.OBSERVE_ENVIRONMENT.value, "target_id": None, "target_class": "self", "utility": utility_for(ExecutableActionType.OBSERVE_ENVIRONMENT)})
             legal.append({"action_type": ExecutableActionType.REASSESS_PLAN.value, "target_id": None, "target_class": "self", "utility": utility_for(ExecutableActionType.REASSESS_PLAN)})
-
-        bricks_available = self._bricks_available(environment, agent)
-        if bricks_available:
-            legal.append(
-                {
-                    "action_type": ExecutableActionType.TRANSPORT_RESOURCES.value,
-                    "target_id": "resource_zone_to_work_zone",
-                    "target_class": "logistics",
-                    "duration_s": 30.0,
-                    "utility": utility_for(ExecutableActionType.TRANSPORT_RESOURCES),
-                }
-            )
 
         if bridge_unlock_needed and bricks_available:
             bridge_id = str(capacity_unlock.get("bridge_id"))
@@ -649,6 +669,8 @@ class BrainContextBuilder:
             "support_deficits": environment.construction.get_support_deficit_report() if hasattr(environment.construction, "get_support_deficit_report") else [],
             "site_capacity_summary": environment.construction.get_site_capacity_summary() if hasattr(environment.construction, "get_site_capacity_summary") else [],
             "capacity_unlock": environment.construction.get_next_capacity_unlock() if hasattr(environment.construction, "get_next_capacity_unlock") else None,
+            # Observable resource fact (a pile still holds bricks, or this agent carries one); transport itself is offered per project.
+            "brick_source_available": self._bricks_available(environment, agent),
         }
 
         mechanism_profile = {

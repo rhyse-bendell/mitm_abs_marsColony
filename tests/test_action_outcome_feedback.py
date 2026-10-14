@@ -74,6 +74,7 @@ def test_outcomes_reach_the_pilot_context_and_request(sim):
 
 def test_transport_is_only_offered_while_a_brick_source_exists(sim):
     agent = sim.agents[0]
+    sim.environment.construction.create_project("site_b", structure_type="house")  # transport is offered per project that needs bricks
     offered = lambda: {a["action_type"] for a in sim.brain_context_builder.build(sim, agent).action_affordances}
     assert "transport_resources" in offered()
     for pile in sim.environment.construction.resource_nodes.values():

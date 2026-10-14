@@ -547,7 +547,7 @@ class RuleBrain(BrainProvider):
     def _extract_features(self, context_packet, *, is_request: bool = False) -> dict[str, float]:
         request_ctx = dict(getattr(context_packet, "task_context", {}) or {}) if is_request else {}
         cognitive = context_packet.individual_cognitive_state if not is_request else request_ctx
-        world = context_packet.world_snapshot if not is_request else {"built_state": request_ctx.get("built_state", []), "capacity_unlock": request_ctx.get("capacity_unlock"), "site_capacity_summary": request_ctx.get("site_capacity", [])}
+        world = context_packet.world_snapshot if not is_request else {"built_state": request_ctx.get("built_state", []), "capacity_unlock": request_ctx.get("capacity_unlock"), "site_capacity_summary": request_ctx.get("site_capacity", []), "brick_source_available": request_ctx.get("brick_source_available")}
         known_gaps = cognitive.get("known_gaps", []) if not is_request else list(context_packet.working_memory_summary.get("known_gaps", []))
         readiness = cognitive.get("build_readiness", {}) if not is_request else dict(request_ctx.get("build_readiness", {}))
         built_state = world.get("built_state", []) if not is_request else list(request_ctx.get("built_state", []))
@@ -693,6 +693,7 @@ class RuleBrain(BrainProvider):
             capacity_available=capacity_available,
             bridge_material_incomplete=bool(bridge_material_incomplete),
             bridge_build_incomplete=bool(bridge_build_incomplete),
+            brick_source_available=world.get("brick_source_available") if isinstance(world, dict) else None,
         )
         if not productive_taskwork_available:
             # An unfinished project nothing can currently supply or advance is not a coordination deadlock:
@@ -767,6 +768,7 @@ class RuleBrain(BrainProvider):
         capacity_available: bool,
         bridge_material_incomplete: bool,
         bridge_build_incomplete: bool,
+        brick_source_available: bool | None = None,
     ) -> bool:
         """Whether construction work could still advance, from observed state and legal affordances.
 
@@ -774,7 +776,8 @@ class RuleBrain(BrainProvider):
         repair-ready structure, an unfinished bridge, or a startable structure with a brick source all count.
         """
         legal = {str(a.get("action_type")) for a in (legal_actions or [])}  # presence = legal; "reachable" only says a straight path exists now
-        transport = ExecutableActionType.TRANSPORT_RESOURCES.value in legal  # a brick source exists, or one is carried
+        # a brick source exists, or one is carried: stated directly now that transport is offered per project
+        transport = ExecutableActionType.TRANSPORT_RESOURCES.value in legal or bool(brick_source_available)
         start_or_continue = bool(legal & {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value})
         unfinished = [p for p in built_state if str(p.get("project_status") or "").lower() != "complete"]
         needs_material = any(int(p.get("required_resources", 0) or 0) > int(p.get("delivered_resources", 0) or 0) for p in unfinished)
