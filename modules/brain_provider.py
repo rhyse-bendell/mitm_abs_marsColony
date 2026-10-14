@@ -405,6 +405,7 @@ class RuleBrain(BrainProvider):
         "RECOVERY",
         "MONITOR",
     )
+    BLOCKED_OUTCOME_WINDOW_S = 40.0
     FALLBACK_ACTION_ORDER = (
         ExecutableActionType.START_CONSTRUCTION.value,
         ExecutableActionType.CONTINUE_CONSTRUCTION.value,
@@ -599,6 +600,27 @@ class RuleBrain(BrainProvider):
         plan_state = self._detect_team_plan_state(team_shared_knowledge, externalized)
         ready_for_validation = any(bool(p.get("ready_for_validation")) for p in built_state)
         validation_pending_projects = [p for p in built_state if self._project_validation_pending(p)]
+        outcomes = (
+            list(cognitive.get("recent_action_outcomes", []) or [])
+            if not is_request
+            else list(getattr(context_packet, "recent_action_outcomes", []) or [])
+        )
+        latest_outcome_by_action: dict[str, dict[str, Any]] = {}
+        for outcome in outcomes:
+            if isinstance(outcome, dict) and outcome.get("action"):
+                latest_outcome_by_action[str(outcome["action"])] = outcome
+        now_for_outcomes = float((context_packet.sim_time if is_request else (world.get("sim_time") if isinstance(world, dict) else None)) or 0.0)
+        if not is_request:
+            now_for_outcomes = float(context_packet.world_snapshot.get("sim_time", 0.0) or 0.0)
+        blocked_streak_features = {}
+        for action, o in latest_outcome_by_action.items():
+            streak = int(o.get("consecutive_identical_failures", 0) or 0)
+            if o.get("status") != "blocked" or streak < 3:
+                continue
+            # the evidence ages out: the action is retried once the failure is no longer recent
+            recency = max(0.0, 1.0 - (now_for_outcomes - float(o.get("time", 0.0) or 0.0)) / self.BLOCKED_OUTCOME_WINDOW_S)
+            if recency > 0.0:
+                blocked_streak_features[f"blocked_streak:{action}"] = min(1.0, streak / 5.0) * recency
         materially_ready_incomplete = any(
             bool(p.get("resource_complete"))
             and str(p.get("project_status") or "").lower() not in {"complete", "ready_for_validation"}
@@ -703,6 +725,7 @@ class RuleBrain(BrainProvider):
             "bridge_material_incomplete": bridge_material_incomplete,
             "bridge_build_incomplete": bridge_build_incomplete,
             **plan_state,
+            **blocked_streak_features,
         }
 
     @staticmethod
@@ -1188,6 +1211,9 @@ class RuleBrain(BrainProvider):
                 and action_type in {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, ExecutableActionType.REQUEST_ASSISTANCE.value}
             ):
                 score -= 1.25
+            # The same action keeps being rejected with the same blocker and nothing changed:
+            # the outcome feedback says this attempt is not working, so prefer something else.
+            score -= 6.0 * features.get(f"blocked_streak:{action_type}", 0.0)
             if action_type == ExecutableActionType.WAIT.value:
                 score -= 0.35
             if action_type == ExecutableActionType.OBSERVE_ENVIRONMENT.value:
@@ -1257,6 +1283,9 @@ class RuleBrain(BrainProvider):
             rng,
         )
         selected_idx = int(selected_action_key.split(":")[0])
+        # Feedback says transport keeps being rejected with the same blocker: the hard "go transport"
+        # overrides below must not force the identical failing attempt again while that is recent.
+        transport_recently_blocked = features.get(f"blocked_streak:{ExecutableActionType.TRANSPORT_RESOURCES.value}", 0.0) > 0.0
         chosen = sorted_affordances[selected_idx] if sorted_affordances else {"action_type": ExecutableActionType.WAIT.value}
         concrete_actions = {
             ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
@@ -1285,7 +1314,7 @@ class RuleBrain(BrainProvider):
             )
         ):
             transport = next((a for a in sorted_affordances if a.get("action_type") == ExecutableActionType.TRANSPORT_RESOURCES.value), None)
-            if transport is not None:
+            if transport is not None and not transport_recently_blocked:
                 chosen = transport
         if features.get("materially_incomplete_unbuilt_projects", 0.0) > 0.0:
             transport = next(
@@ -1297,7 +1326,7 @@ class RuleBrain(BrainProvider):
                 ),
                 None,
             )
-            if transport is not None:
+            if transport is not None and not transport_recently_blocked:
                 chosen = transport
         if features.get("bridge_unlock_needed", 0.0) > 0.0 and features.get("bridge_material_incomplete", 0.0) > 0.0:
             bridge_transport = next(
@@ -1310,7 +1339,7 @@ class RuleBrain(BrainProvider):
                 ),
                 None,
             )
-            if bridge_transport is not None:
+            if bridge_transport is not None and not transport_recently_blocked:
                 chosen = bridge_transport
         if features.get("bridge_unlock_needed", 0.0) > 0.0 and features.get("bridge_build_incomplete", 0.0) > 0.0:
             bridge_build = next(
@@ -1934,6 +1963,7 @@ class OllamaLocalBrainProvider(BrainProvider):
             "derivation_context": [_truncate_text(item, max_chars=120) for item in request_packet.derivation_context[:max_derivations]],
             "artifact_context": [_bounded_json_value(item, max_chars=300) for item in request_packet.artifact_context[:max_artifacts]],
             "bootstrap_summary": _bounded_json_value(request_packet.bootstrap_summary, max_chars=500) if request_packet.bootstrap_summary else None,
+            "recent_action_outcomes": [_bounded_json_value(item, max_chars=240) for item in request_packet.recent_action_outcomes[-6:]],
         }
         return {
             "model": self.config.local_model,

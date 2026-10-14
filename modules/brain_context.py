@@ -316,17 +316,19 @@ class BrainContextBuilder:
             legal.append({"action_type": ExecutableActionType.OBSERVE_ENVIRONMENT.value, "target_id": None, "target_class": "self", "utility": utility_for(ExecutableActionType.OBSERVE_ENVIRONMENT)})
             legal.append({"action_type": ExecutableActionType.REASSESS_PLAN.value, "target_id": None, "target_class": "self", "utility": utility_for(ExecutableActionType.REASSESS_PLAN)})
 
-        legal.append(
-            {
-                "action_type": ExecutableActionType.TRANSPORT_RESOURCES.value,
-                "target_id": "resource_zone_to_work_zone",
-                "target_class": "logistics",
-                "duration_s": 30.0,
-                "utility": utility_for(ExecutableActionType.TRANSPORT_RESOURCES),
-            }
-        )
+        bricks_available = self._bricks_available(environment)
+        if bricks_available:
+            legal.append(
+                {
+                    "action_type": ExecutableActionType.TRANSPORT_RESOURCES.value,
+                    "target_id": "resource_zone_to_work_zone",
+                    "target_class": "logistics",
+                    "duration_s": 30.0,
+                    "utility": utility_for(ExecutableActionType.TRANSPORT_RESOURCES),
+                }
+            )
 
-        if bridge_unlock_needed:
+        if bridge_unlock_needed and bricks_available:
             bridge_id = str(capacity_unlock.get("bridge_id"))
             required = int(capacity_unlock.get("required_resources", 0) or 0)
             delivered = int(capacity_unlock.get("delivered_resources", 0) or 0)
@@ -359,6 +361,14 @@ class BrainContextBuilder:
                 affordance["task_parameters"] = dict(params.metadata)
             filtered.append(affordance)
         return filtered
+
+    @staticmethod
+    def _bricks_available(environment) -> bool:
+        """Read-only legality predicate: is there any brick source left to pick up from?"""
+        nodes = getattr(getattr(environment, "construction", None), "resource_nodes", None)
+        if not isinstance(nodes, dict):
+            return True  # unknown model: do not hide the action
+        return any(int(getattr(pile, "quantity", 0) or 0) > 0 for pile in nodes.values())
 
     def _world_affordance_summary(self, agent, environment) -> Dict[str, Any]:
         physical_obstacles = [
@@ -608,6 +618,7 @@ class BrainContextBuilder:
             },
             "build_readiness": build_readiness,
             "packets_inspected": list(agent.memory_seen_packets),
+            "recent_action_outcomes": [dict(o) for o in list(getattr(agent, "recent_action_outcomes", []) or [])[-6:]],
             "recent_failed_attempts": [
                 e for e in history_events if "blocked" in e.lower() or "could not" in e.lower() or "mismatch" in e.lower()
             ],

@@ -480,6 +480,8 @@ class Agent:
         self._construction_attempted_projects = set()
         self.support_goal_activation_state = {}
         self.support_goal_nonexec_counts = {}
+        self.recent_action_outcomes = []
+        self.action_failure_counts = {}
         self.support_goal_update_interval_s = 4.0
         self.last_support_goal_update_time = -999.0
         self.rulebrain_recalc_interval_s = 1.6
@@ -598,11 +600,66 @@ class Agent:
         self.task_model = None
 
 
+    ACTION_FAILURE_EVENTS = frozenset({
+        "construction_transport_blocked",
+        "construction_validation_blocked",
+        "construction_progress_blocked",
+        "construction_repair_blocked",
+        "action_translation_failed",
+        "mecha_action_blocked",
+        "pilot_reroute_blocked",
+    })
+    REPEATED_FAILURE_MILESTONES = (3, 10, 30, 100, 300)
+
     def _emit_event(self, sim_state, event_type, payload):
         if sim_state is None:
             return
         enriched = {"agent_id": self.agent_id, "agent": self.name, **dict(payload or {})}
         sim_state.logger.log_event(sim_state.time, event_type, enriched)
+        if event_type in self.ACTION_FAILURE_EVENTS or event_type == "action_execution_succeeded":
+            self._note_action_outcome(sim_state, event_type, enriched)
+
+    def _note_action_outcome(self, sim_state, event_type, payload):
+        """Structured outcome of an attempted action, visible to the Pilot on its next decision.
+
+        Repeated identical failures (same action/target/blocker) are counted and surfaced so a
+        no-effect loop is detectable instead of silently repeating.
+        """
+        succeeded = event_type == "action_execution_succeeded"
+        action = payload.get("decision_action") or payload.get("selected_action") or payload.get("planner_action_type") or payload.get("original_action")
+        target = payload.get("project_id") or payload.get("target_id")
+        blockers = payload.get("blockers") or []
+        blocker = None if succeeded else (payload.get("failure_category") or (blockers[0] if blockers else None) or event_type)
+        key = (str(action), str(target), str(blocker))
+        counts = self.__dict__.setdefault("action_failure_counts", {})
+        if succeeded:
+            # a success of an action clears every recorded failure streak for that action
+            for stale in [k for k in counts if k[0] == str(action)]:
+                counts.pop(stale, None)
+            count = 0
+        else:
+            counts[key] = counts.get(key, 0) + 1
+            count = counts[key]
+            if len(counts) > 64:
+                counts.pop(next(iter(counts)))
+        record = {
+            "time": round(float(getattr(sim_state, "time", 0.0)), 2),
+            "tick": int(getattr(self, "sim_step_count", 0)),
+            "status": "succeeded" if succeeded else "blocked",
+            "action": action,
+            "target": target,
+            "blocker": blocker,
+            "consecutive_identical_failures": int(count),
+        }
+        outcomes = self.__dict__.setdefault("recent_action_outcomes", [])
+        outcomes.append(record)
+        del outcomes[:-12]
+        if not succeeded and count in self.REPEATED_FAILURE_MILESTONES:
+            sim_state.logger.log_event(
+                sim_state.time,
+                "repeated_action_failure",
+                {"agent_id": self.agent_id, "agent": self.name, "action": action, "target": target, "blocker": blocker, "consecutive_identical_failures": int(count)},
+            )
 
     def _tracker_now(self, sim_state=None):
         return float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
@@ -4650,7 +4707,7 @@ class Agent:
             return decision
         preferred = None
         reason = None
-        if self._project_needs_transport(project):
+        if self._project_needs_transport(project) and self._brick_source_available(environment):
             preferred = ExecutableActionType.TRANSPORT_RESOURCES
             reason = "material_incomplete"
         elif self._project_materially_ready_for_build(project) and self._project_has_incomplete_build_steps(project):
@@ -5013,6 +5070,13 @@ class Agent:
 
     def _is_build_eligible(self, environment, sim_state=None):
         return self._build_readiness_score() >= self._readiness_threshold() and not self._build_readiness_blockers(environment, sim_state=sim_state)
+
+    @staticmethod
+    def _brick_source_available(environment):
+        nodes = getattr(getattr(environment, "construction", None), "resource_nodes", None)
+        if not isinstance(nodes, dict):
+            return True
+        return any(int(getattr(pile, "quantity", 0) or 0) > 0 for pile in nodes.values())
 
     @staticmethod
     def _bridge_needs_transport(environment, bridge_id):
@@ -6700,6 +6764,7 @@ class Agent:
             mode_dwell_steps=int(control_snapshot.get("mode_dwell_steps", 0) or 0),
             last_transition_reason=str(control_snapshot.get("last_transition_reason") or "none"),
             control_state_snapshot=compact_control_snapshot,
+            recent_action_outcomes=[dict(o) for o in list(context.individual_cognitive_state.get("recent_action_outcomes", []) or [])[-6:]],
         )
 
     def _is_productive_action(self, action_type):
@@ -9471,7 +9536,7 @@ class Agent:
         }
         if extra:
             payload.update(extra)
-        sim_state.logger.log_event(sim_state.time, event_type, payload)
+        self._emit_event(sim_state, event_type, payload)
 
     def _translate_brain_decision_to_legacy_action(self, decision, environment, sim_state=None):
         if sim_state is not None and hasattr(sim_state, "action_gate") and not getattr(decision, "_action_gate_checked", False):
@@ -11618,6 +11683,12 @@ class Agent:
                                 "construction_transport_blocked",
                                 {"project_id": project_id, "failure_category": "no_pickup_resource_source", "decision_action": action.get("decision_action")},
                             )
+                            # No brick source exists anywhere: the attempt ends here (the outcome is recorded
+                            # for the Pilot) rather than re-issuing the identical rejected action every tick.
+                            _set_action_stage(action, "terminally_blocked", {"project_id": project_id, "failure_category": "no_pickup_resource_source"})
+                            _reset_transport_episode()
+                            if action in self.active_actions:
+                                self.active_actions.remove(action)
                             continue
                         pickup_id = sorted(
                             pickup_lookup.keys(),

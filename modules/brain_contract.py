@@ -139,6 +139,8 @@ class AgentBrainRequest:
     mode_dwell_steps: Optional[int] = None
     last_transition_reason: Optional[str] = None
     control_state_snapshot: Optional[Dict[str, Any]] = None
+    # Structured outcomes of the agent's recent attempted actions (succeeded / blocked + blocker).
+    recent_action_outcomes: List[Dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "AgentBrainRequest":
@@ -171,6 +173,7 @@ class AgentBrainRequest:
             mode_dwell_steps=payload.get("mode_dwell_steps"),
             last_transition_reason=payload.get("last_transition_reason"),
             control_state_snapshot=payload.get("control_state_snapshot"),
+            recent_action_outcomes=[dict(o) for o in payload.get("recent_action_outcomes", []) if isinstance(o, dict)],
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -203,6 +206,7 @@ class AgentBrainRequest:
             "mode_dwell_steps": self.mode_dwell_steps,
             "last_transition_reason": self.last_transition_reason,
             "control_state_snapshot": self.control_state_snapshot,
+            "recent_action_outcomes": self.recent_action_outcomes,
         }
 
 

@@ -60,6 +60,16 @@ class AgentActionGate:
         return self._pass(decision)
 
     def _evaluate_transport(self, *, agent, decision, sim_state):
+        # Read-only legality: a transport needs a brick source to pick up from.
+        nodes = getattr(getattr(getattr(sim_state, "environment", None), "construction", None), "resource_nodes", None)
+        if isinstance(nodes, dict) and not any(int(getattr(pile, "quantity", 0) or 0) > 0 for pile in nodes.values()):
+            return ActionGateResult(
+                False,
+                decision,
+                blockers=["no_pickup_resource_source"],
+                target_id=decision.target_id,
+                metadata={"resource_nodes": {pid: int(getattr(p, "quantity", 0) or 0) for pid, p in nodes.items()}},
+            )
         return self._pass(decision)
 
     def _evaluate_construction(self, *, agent, decision, sim_state):
