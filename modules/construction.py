@@ -1133,6 +1133,30 @@ class ConstructionManager:
         return True
 
 # Validation marks lifecycle closure only after physical, epistemic, and support checks align.
+    def record_build_quality(self, project_id, *, correct, actor=None, sim_time=None, cause="build_fidelity"):
+        """A build action can introduce an error. Only the construction subsystem writes correctness."""
+        project = self.projects.get(project_id)
+        if not project or bool(correct):
+            return False
+        if project.get("correct", True) is False:
+            return False
+        project["correct"] = False
+        self.update_project_provenance(project_id, event="build_error_introduced", actor=actor, sim_time=sim_time)
+        project["last_build_error"] = {"actor": actor, "time": sim_time, "cause": cause}
+        return True
+
+    def repair_project(self, project_id, *, actor=None, sim_time=None):
+        """Apply a repair: clears a recorded build error. It does not validate the project."""
+        project = self.projects.get(project_id)
+        if not project or not project.get("started"):
+            return False
+        was_incorrect = project.get("correct", True) is False
+        project["correct"] = True
+        project["validated_complete"] = False
+        self.update_project_provenance(project_id, event="repair_applied" if was_incorrect else "repair_noop", actor=actor, sim_time=sim_time)
+        self.update()
+        return was_incorrect
+
     def mark_validated(
         self,
         project_id,

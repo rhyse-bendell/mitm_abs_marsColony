@@ -11285,7 +11285,10 @@ class Agent:
 
                     fidelity = (self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5) + self._trait_value("rule_accuracy")) / 2.0
                     if self._rng.random() > fidelity:
-                        project["correct"] = False
+                        if environment.construction.record_build_quality(
+                            project_id, correct=False, actor=self.name, sim_time=sim_state.time if sim_state is not None else None, cause="construction_fidelity"
+                        ):
+                            self._emit_event(sim_state, "construction_build_error_introduced", {"project_id": project_id, "cause": "construction_fidelity", "fidelity": round(float(fidelity), 3)})
 
                     build_ok, build_reason, completed_step = environment.construction.execute_build_step(
                         project_id,
@@ -11316,9 +11319,8 @@ class Agent:
                                 },
                             )
                             continue
-                        project["correct"] = True
-                        if project.get("structurally_complete", False) and project.get("epistemically_supported", False):
-                            environment.construction.mark_validated(project_id, is_valid=True)
+                        if environment.construction.repair_project(project_id, actor=self.name, sim_time=sim_state.time if sim_state is not None else None):
+                            self._emit_event(sim_state, "construction_repair_episode", {"project_id": project_id, "decision_action": decision_action})
                         self._refresh_construction_provenance(environment, project_id, sim_state=sim_state, event="repair")
                     sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
                     self._emit_event(sim_state, "construction_artifact_provenance_updated", {"project_id": project_id, "event": "build_or_repair"})
@@ -13392,40 +13394,24 @@ class Agent:
                     if now_ts - last_repair < 5.0:
                         self._emit_event(sim_state, "repair_trigger_suppressed_not_ready", {"project_id": project_id, "reason": "repair_cooldown_active", "cooldown_remaining": round(5.0 - (now_ts - last_repair), 3)})
                         continue
-                    repair_prob = min(
-                        1.0,
-                        (
-                            self._trait_value("help_tendency")
-                            + self._hook_value("action_utility", "repair_or_correct_construction", "utility_weight", default=0.5)
-                            + self._hook_value("decision_bias", "assist_stalled_teammate", "priority_weight", default=0.5)
-                        ) / 3.0,
+                    # The agent perceives a rule mismatch and tells the team. It does NOT change the
+                    # project: correcting construction is a REPAIR action executed through Construction.
+                    self.construction_validation_state["repair_last_ts"][project_id] = now_ts
+                    self._queue_project_state_communication_obligation(
+                        project_id=project_id,
+                        state_event="repair_needed",
+                        sim_state=sim_state,
+                        include_rules=sorted(expected_rules),
+                        detail={"trigger": "mismatch_noted"},
+                        priority="high",
                     )
-                    if self._rng.random() < repair_prob:
-                        self.construction_validation_state["repair_last_ts"][project_id] = now_ts
-                        project["correct"] = True
-                        self._queue_project_state_communication_obligation(
-                            project_id=project_id,
-                            state_event="repair_needed",
-                            sim_state=sim_state,
-                            include_rules=sorted(expected_rules),
-                            detail={"trigger": "mismatch_repair_episode"},
-                            priority="high",
-                        )
-                        self._refresh_construction_provenance(
-                            getattr(sim_state, "environment", None),
-                            project_id,
-                            sim_state=sim_state,
-                            event="construction_repair_episode",
-                        )
-                        self.activity_log.append("Triggered correction/repair on construction externalization")
-                        if sim_state is not None:
-                            sim_state.logger.log_event(
-                                sim_state.time,
-                                "construction_repair_episode",
-                                {"agent": self.name, "project_id": project.get("id", "unknown")},
-                            )
-                    else:
-                        project["correct"] = False
+                    self._refresh_construction_provenance(
+                        getattr(sim_state, "environment", None),
+                        project_id,
+                        sim_state=sim_state,
+                        event="construction_mismatch_noted",
+                    )
+                    self.activity_log.append("Noted a possible construction mismatch; raised it with the team")
 
     def _emit_mismatch_skip_once(self, sim_state, project_id, reason, extra):
         state = self.construction_validation_state.setdefault("mismatch_skip_emit_state", {})
