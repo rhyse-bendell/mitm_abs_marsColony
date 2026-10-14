@@ -100,7 +100,7 @@ REMAINING action-contract gaps:
 2. `active_construction` / site-alias targets are still accepted by the gate and translation for non-Pilot callers (middleware fallbacks, legacy tests).
 3. Physical location is still site-level (all projects at a site share one interaction point); only identity is project-level.
 
-Next cognitive-policy task (do NOT start without the user): Procedural Baseline policy for connecting supports - how/whether the Pilot reasons from greenhouse-water / house-support knowledge (D_BOT_GREENHOUSE_NEEDS_WATER, I_BOT_GREENHOUSE_DEPENDENCIES, PM_CONNECT_GREENHOUSE_RESOURCES) to choosing connect_structures; plus the audit item 1 above. 
+Next cognitive-policy task (do NOT start without the user): Procedural Baseline policy for connecting supports - how/whether the Pilot reasons from greenhouse-water / house-support knowledge (D_BOT_GREENHOUSE_NEEDS_WATER, I_BOT_GREENHOUSE_DEPENDENCIES, PM_CONNECT_GREENHOUSE_RESOURCES) to choosing connect_structures; plus the audit item 1 above.
 
 ## Remaining queue (user-approved order)
 1. (done, pushed) phantom-brick fix `2438940`.
