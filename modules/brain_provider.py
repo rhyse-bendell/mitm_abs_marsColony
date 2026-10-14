@@ -598,6 +598,7 @@ class RuleBrain(BrainProvider):
         stale_grounding_pressure = max(0.0, min(1.0, (1.0 - ((team_freshness + role_freshness) / 2.0)) + refresh_pressure))
         plan_state = self._detect_team_plan_state(team_shared_knowledge, externalized)
         ready_for_validation = any(bool(p.get("ready_for_validation")) for p in built_state)
+        validation_pending_projects = [p for p in built_state if self._project_validation_pending(p)]
         materially_ready_incomplete = any(
             bool(p.get("resource_complete"))
             and str(p.get("project_status") or "").lower() not in {"complete", "ready_for_validation"}
@@ -610,7 +611,7 @@ class RuleBrain(BrainProvider):
             and float(p.get("physical_build_progress", p.get("progress", 0.0)) or 0.0) <= 0.0
             for p in built_state
         )
-        active_work_remains = bool(active_projects or ready_for_validation)
+        active_work_remains = bool(active_projects or ready_for_validation or validation_pending_projects)
         no_active_reason = any(
             "no_active_plan" in str(reason or "")
             for reason in (
@@ -634,6 +635,14 @@ class RuleBrain(BrainProvider):
         plan_summary_usable = bool(plan_summary.get("summary") or plan_summary.get("goal_id") or plan_summary.get("target_project"))
         no_active_plan_pressure = 1.0 if (active_work_remains and (no_active_reason or not plan_summary_usable) and not concrete_action_available) else 0.0
         coordination_deadlock_pressure = min(1.0, no_active_plan_pressure + (0.45 if no_progress_streak >= 1 else 0.0) + (0.35 if active_work_remains else 0.0))
+        # A coordination deadlock presumes no concrete executable work. A legal, reachable validation of a
+        # validation-ready project is concrete work (the same rule no_active_plan_pressure applies above).
+        validation_actionable = bool(validation_pending_projects) and any(
+            str(a.get("action_type")) == ExecutableActionType.VALIDATE_CONSTRUCTION.value and bool(a.get("reachable", True))
+            for a in (context_packet.allowed_actions if is_request else context_packet.action_affordances)
+        )
+        if validation_actionable:
+            coordination_deadlock_pressure = 0.0
         construction_decision_pressure = min(1.0, (0.55 if active_work_remains else 0.0) + (0.55 if ready_for_validation else 0.0) + (0.4 * no_active_plan_pressure))
         capacity_unlock = dict(world.get("capacity_unlock") or {}) if isinstance(world, dict) else {}
         bridge_unlock_needed = 1.0 if bool(capacity_unlock.get("bridge_id")) else 0.0
@@ -664,6 +673,8 @@ class RuleBrain(BrainProvider):
             "readiness_blocked": 0.0 if readiness.get("ready_for_build") else 1.0,
             "contradiction_pressure": min(1.0, len(mismatch_signals) / 3.0),
             "active_incomplete_projects": min(1.0, len(active_projects) / 3.0),
+            "validation_work_pending": 1.0 if validation_pending_projects else 0.0,
+            "validation_pending_projects": min(1.0, len(validation_pending_projects) / 3.0),
             "goal_pressure": min(1.0, len(goal_stack) / 4.0),
             "dik_change_recency": 1.0 if (seconds_since_dik_change is not None and float(seconds_since_dik_change) <= 4.0) else 0.0,
             "artifact_validation_available": min(1.0, validated / 2.0),
@@ -693,6 +704,24 @@ class RuleBrain(BrainProvider):
             "bridge_build_incomplete": bridge_build_incomplete,
             **plan_state,
         }
+
+    @staticmethod
+    def _closure_only_work(features: dict[str, float]) -> bool:
+        return features.get("validation_work_pending", 0.0) > 0.0 and features.get("active_incomplete_projects", 0.0) <= 0.0
+
+    @staticmethod
+    def _project_validation_pending(project: dict[str, Any]) -> bool:
+        """A physically built project that Construction reports as validation-ready but not yet validated.
+
+        Uses the readiness already computed by Construction.evaluate_project_validation_readiness
+        (carried in built_state); this is unfinished work, not a completed project.
+        """
+        if str(project.get("project_status") or "").lower() == "complete":
+            return False
+        readiness = project.get("validation_readiness")
+        if isinstance(readiness, dict) and "validation_ready" in readiness:
+            return bool(readiness.get("validation_ready"))
+        return bool(project.get("ready_for_validation"))
 
     @staticmethod
     def _control_state_from_request(request_packet: AgentBrainRequest) -> dict[str, Any]:
@@ -730,15 +759,23 @@ class RuleBrain(BrainProvider):
         mode_scores["ACQUIRE_DIK"] = 0.4 + 1.5 * features["epistemic_deficit"] + 0.3 * features["coordination_need"] + 0.95 * features.get("need_to_refresh_assumptions", 0.0)
         mode_scores["INTEGRATE_DIK"] = 0.3 + 1.2 * features["dik_change_recency"] + 0.8 * features["artifact_validation_available"]
         mode_scores["COORDINATE"] = 0.3 + 1.0 * features["coordination_need"] + 0.4 * float(mechanism_profile.get("communication_propensity", 0.5))
-        mode_scores["LOGISTICS"] = 0.35 + 1.5 * features["build_opportunity"] + 0.9 * features["active_incomplete_projects"]
-        mode_scores["CONSTRUCT"] = 0.35 + 1.7 * features["build_opportunity"] + 0.9 * features["active_incomplete_projects"]
-        mode_scores["VALIDATE"] = 0.2 + 1.4 * features["artifact_validation_available"] + 0.5 * features["goal_pressure"]
+        # Closure-only state: every existing project is physically built and the remaining work is
+        # validation. Construction-side modes then have no work-driven (opportunity / no-progress) pull.
+        closure_only = self._closure_only_work(features)
+        build_pull = 0.0 if closure_only else features["build_opportunity"]
+        mode_scores["LOGISTICS"] = 0.35 + 1.5 * build_pull + 0.9 * features["active_incomplete_projects"]
+        mode_scores["CONSTRUCT"] = 0.35 + 1.7 * build_pull + 0.9 * features["active_incomplete_projects"]
+        mode_scores["VALIDATE"] = 0.2 + 1.4 * features["artifact_validation_available"] + 0.5 * features["goal_pressure"] + 1.5 * features.get("validation_work_pending", 0.0) + 0.9 * features.get("validation_pending_projects", 0.0)
         mode_scores["REPAIR"] = 0.2 + 1.8 * features["repair_pressure"]
         mode_scores["RECOVERY"] = 0.2 + 1.8 * features["loop_pressure"] + self.policy_config.recovery_bonus * features["contradiction_pressure"]
-        mode_scores["LOGISTICS"] += 1.3 * features.get("no_progress_pressure", 0.0)
+        if not closure_only:
+            mode_scores["LOGISTICS"] += 1.3 * features.get("no_progress_pressure", 0.0)
         mode_scores["LOGISTICS"] -= 0.95 * features.get("stale_grounding_pressure", 0.0)
         mode_scores["CONSTRUCT"] -= 1.15 * features.get("stale_grounding_pressure", 0.0)
-        mode_scores["VALIDATE"] -= 1.3 * max(0.0, 0.8 - features.get("epistemic_sufficiency", 0.0))
+        if features.get("validation_work_pending", 0.0) <= 0.0:
+            # Agent-level grounding staleness discourages speculative validation. It does not veto a
+            # project Construction already reports validation-ready (claim/evidence/rules satisfied).
+            mode_scores["VALIDATE"] -= 1.3 * max(0.0, 0.8 - features.get("epistemic_sufficiency", 0.0))
         mode_scores["MONITOR"] = 0.35 + 0.2 * (1.0 - features["goal_pressure"]) + 0.55 * features.get("construction_state_needs_recheck", 0.0)
         mode_scores["COORDINATE"] += 2.6 * features.get("coordination_deadlock_pressure", 0.0) + 1.1 * features.get("no_active_plan_pressure", 0.0)
         mode_scores["LOGISTICS"] -= 0.8 * features.get("no_active_plan_pressure", 0.0)
@@ -752,7 +789,7 @@ class RuleBrain(BrainProvider):
         mode_guards = {
             "CONSTRUCT": features["build_opportunity"] > 0 and any(t in legal_types for t in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value}),
             "LOGISTICS": ExecutableActionType.TRANSPORT_RESOURCES.value in legal_types,
-            "VALIDATE": ExecutableActionType.VALIDATE_CONSTRUCTION.value in legal_types and features["active_incomplete_projects"] > 0,
+            "VALIDATE": ExecutableActionType.VALIDATE_CONSTRUCTION.value in legal_types and (features["active_incomplete_projects"] > 0 or features.get("validation_work_pending", 0.0) > 0),
             "REPAIR": ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value in legal_types and features["repair_pressure"] > 0.0,
             "ACQUIRE_DIK": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value in legal_types,
             "COORDINATE": any(t in legal_types for t in {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.EXTERNALIZE_PLAN.value, ExecutableActionType.REQUEST_ASSISTANCE.value}),
@@ -799,7 +836,8 @@ class RuleBrain(BrainProvider):
                     guarded_scores[mode] -= 0.8
                     notes.append("loop_pressure_deprioritize_assistance_modes")
         if features.get("no_progress_pressure", 0.0) >= 0.5:
-            guarded_scores["LOGISTICS"] = guarded_scores.get("LOGISTICS", mode_scores.get("LOGISTICS", 0.0)) + 1.2
+            if not self._closure_only_work(features):
+                guarded_scores["LOGISTICS"] = guarded_scores.get("LOGISTICS", mode_scores.get("LOGISTICS", 0.0)) + 1.2
             guarded_scores["RECOVERY"] = guarded_scores.get("RECOVERY", mode_scores.get("RECOVERY", 0.0)) + 0.8
             guarded_scores["ACQUIRE_DIK"] = guarded_scores.get("ACQUIRE_DIK", mode_scores.get("ACQUIRE_DIK", 0.0)) + 0.6 * features.get("need_to_refresh_assumptions", 0.0)
             for mode in ("MONITOR", "COORDINATE"):

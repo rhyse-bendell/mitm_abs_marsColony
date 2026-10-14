@@ -8286,6 +8286,18 @@ class Agent:
             )
             return rewritten
         self._maintain_execution_lock(environment, sim_state=sim_state)
+        if decision.selected_action == ExecutableActionType.VALIDATE_CONSTRUCTION and sim_state is not None and hasattr(sim_state, "action_gate"):
+            # The ActionGate (read-only) is the authority on whether this validation is legal now.
+            # Generic recovery/regrounding heuristics must not replace a legal strategic Pilot choice;
+            # a not-ready validation still falls through to the existing pivots and gate blocking.
+            validation_gate = sim_state.action_gate.evaluate(agent=self, decision=decision, sim_state=sim_state)
+            if getattr(validation_gate, "legal", False):
+                self._emit_event(
+                    sim_state,
+                    "policy_pivot_skipped_legal_validation",
+                    {"origin": pivot_origin, "project_id": getattr(validation_gate, "project_id", None), "target_id": decision.target_id},
+                )
+                return decision
         live_commitment, live_source_id, live_reason = self._has_live_epistemic_commitment(
             environment,
             sim_state=sim_state,
@@ -11017,21 +11029,25 @@ class Agent:
                         held_rule_ids=snapshot["held_rule_ids_at_build"],
                         team_rule_snapshot_ids=snapshot["team_rule_snapshot_ids"],
                     )
-                    if project.get("status") not in {"ready_for_validation", "needs_repair"}:
+                    readiness_report = environment.construction.evaluate_project_validation_readiness(
+                        project_id,
+                        actor=self.name,
+                        agent_supported_rules=list(self.mental_model["knowledge"].rules),
+                    )
+                    # project["status"] is a cache refreshed once per tick; the ActionGate judges legality
+                    # from fresh readiness. Execution must agree with the gate, so a project that is
+                    # validation-ready now is validatable even if the cached status has not caught up.
+                    if project.get("status") not in {"ready_for_validation", "needs_repair"} and not bool(readiness_report.get("validation_ready", False)):
                         _log_mutation_blocked(
                             "construction_validation_blocked",
                             {
                                 "project_id": project_id,
                                 "failure_category": "illegal_project_status",
                                 "project_status": project.get("status"),
+                                "validation_blockers": list(readiness_report.get("blockers") or []),
                             },
                         )
                         continue
-                    readiness_report = environment.construction.evaluate_project_validation_readiness(
-                        project_id,
-                        actor=self.name,
-                        agent_supported_rules=list(self.mental_model["knowledge"].rules),
-                    )
                     has_required_rules = bool(readiness_report.get("rule_ready", False))
                     missing_rules = list(readiness_report.get("missing_rules") or [])
                     physical_ready = bool(readiness_report.get("physical_ready", False))
