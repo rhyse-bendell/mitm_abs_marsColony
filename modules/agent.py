@@ -972,7 +972,19 @@ class Agent:
             self._set_metacognitive_mode("EXECUTE", sim_state=sim_state, reason="execution_window", focus_target=execution_candidate.target_id, profile="execution_heavy")
             return execution_candidate
 
-        if stagnation["support"] >= 3 or stagnation["epistemic"] >= 4:
+        # Stagnation describes a non-executing epistemic/support loop. A productive Pilot action
+        # (transport / construct / validate / repair) is not that loop and is not replaced by the
+        # regrounding fallback; it is still subject to the blocker handling further below.
+        productive_pilot_action = action in {
+            ExecutableActionType.TRANSPORT_RESOURCES,
+            ExecutableActionType.START_CONSTRUCTION,
+            ExecutableActionType.CONTINUE_CONSTRUCTION,
+            ExecutableActionType.VALIDATE_CONSTRUCTION,
+            ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
+        }
+        if productive_pilot_action and recent_progress:
+            stagnation["epistemic"] = 0
+        if (stagnation["support"] >= 3 or stagnation["epistemic"] >= 4) and not productive_pilot_action:
             self._emit_event(sim_state, "metacognitive_support_loop_broken", {"support_stagnation": int(stagnation["support"]), "epistemic_stagnation": int(stagnation["epistemic"])})
             self._emit_event(sim_state, "metacognitive_switch_to_regrounding", {"reason": "stagnation"})
             self._set_metacognitive_mode("RECOVER_REGROUND", sim_state=sim_state, reason="stagnation", profile="recovery")
@@ -4509,6 +4521,8 @@ class Agent:
         )
         if not self._project_still_viable_for_binding(environment, project_id):
             return decision
+        if self._bridge_needs_transport(environment, project_id):
+            return decision  # unfinished capacity-unlock bridge: real transport work, not a satisfied project
         project = environment.construction.projects.get(project_id) if project_id else None
         if self._project_needs_transport(project):
             return decision
@@ -5000,6 +5014,14 @@ class Agent:
     def _is_build_eligible(self, environment, sim_state=None):
         return self._build_readiness_score() >= self._readiness_threshold() and not self._build_readiness_blockers(environment, sim_state=sim_state)
 
+    @staticmethod
+    def _bridge_needs_transport(environment, bridge_id):
+        """A capacity-unlock bridge (not a project dict) still needs bricks until it is complete."""
+        bridge = (getattr(getattr(environment, "construction", None), "bridges", {}) or {}).get(str(bridge_id or ""))
+        if bridge is None:
+            return False
+        return str(getattr(bridge, "status", "")) != "complete" and int(getattr(bridge, "delivered_resources", 0) or 0) < int(getattr(bridge, "required_resources", 0) or 0)
+
     def _project_needs_transport(self, project):
         if not isinstance(project, dict):
             return False
@@ -5341,8 +5363,8 @@ class Agent:
 
     def _start_execution_lock(self, environment, project_id, *, sim_state=None, reason="project_actionable"):
         if str(project_id or "") == "bridge_bc":
-            bridge = getattr(environment.construction, "bridges", {}).get("bridge_bc")
-            return bridge is not None and (include_complete or str(getattr(bridge, "status", "")) != "complete")
+            # The bridge is not a construction project dict, so there is no project lock to take.
+            return False
         project = environment.construction.projects.get(project_id) if project_id else None
         if not isinstance(project, dict):
             return False
@@ -5394,7 +5416,7 @@ class Agent:
     def _execution_lock_viable_project(self, environment, project_id, *, sim_state=None):
         if str(project_id or "") == "bridge_bc":
             bridge = getattr(environment.construction, "bridges", {}).get("bridge_bc")
-            return bridge is not None and (include_complete or str(getattr(bridge, "status", "")) != "complete")
+            return bridge is not None and str(getattr(bridge, "status", "")) != "complete"
         project = environment.construction.projects.get(project_id) if project_id else None
         if not isinstance(project, dict):
             return False
@@ -8975,7 +8997,9 @@ class Agent:
                     )
                     project_id = selected.get("project_id") if isinstance(selected, dict) else None
                 project = environment.construction.projects.get(project_id) if project_id else None
-                if not self._project_needs_transport(project):
+                # A legal transport to an unfinished capacity-unlock bridge is real work, not a "satisfied project".
+                bridge_needs_transport = self._bridge_needs_transport(environment, rewritten.target_id)
+                if not bridge_needs_transport and not self._project_needs_transport(project):
                     next_action = (
                         ExecutableActionType.VALIDATE_CONSTRUCTION
                         if (
