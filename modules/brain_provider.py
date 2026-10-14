@@ -685,6 +685,18 @@ class RuleBrain(BrainProvider):
         bridge_status = str(capacity_unlock.get("bridge_status") or "")
         bridge_material_incomplete = 1.0 if bridge_unlock_needed and bridge_delivered < bridge_required else 0.0
         bridge_build_incomplete = 1.0 if bridge_unlock_needed and bridge_required > 0 and bridge_delivered >= bridge_required and bridge_status != "complete" else 0.0
+        productive_taskwork_available = self._productive_taskwork_available(
+            built_state=built_state,
+            legal_actions=(context_packet.allowed_actions if is_request else context_packet.action_affordances),
+            capacity_available=capacity_available,
+            bridge_material_incomplete=bool(bridge_material_incomplete),
+            bridge_build_incomplete=bool(bridge_build_incomplete),
+        )
+        if not productive_taskwork_available:
+            # An unfinished project nothing can currently supply or advance is not a coordination deadlock:
+            # talking, consulting or replanning cannot create the missing bricks.
+            no_active_plan_pressure = 0.0
+            coordination_deadlock_pressure = 0.0
         return {
             "epistemic_deficit": min(1.0, len(known_gaps) / 4.0),
             "build_opportunity": 1.0 if readiness.get("ready_for_build") else 0.0,
@@ -710,6 +722,9 @@ class RuleBrain(BrainProvider):
             # start a new structure (projects are instantiated by the START commit, not by transporting).
             "new_structure_needed": 1.0 if (capacity_available and not active_projects and not validation_pending_projects) else 0.0,
             "validation_pending_projects": min(1.0, len(validation_pending_projects) / 3.0),
+            # 1.0 while any construction work could still advance (supply, build, validate, repair, start);
+            # 0.0 when none can. Read from observed project state and the legal affordances only.
+            "productive_taskwork_available": 1.0 if productive_taskwork_available else 0.0,
             "goal_pressure": min(1.0, len(goal_stack) / 4.0),
             "dik_change_recency": 1.0 if (seconds_since_dik_change is not None and float(seconds_since_dik_change) <= 4.0) else 0.0,
             "artifact_validation_available": min(1.0, validated / 2.0),
@@ -740,6 +755,48 @@ class RuleBrain(BrainProvider):
             **plan_state,
             **blocked_streak_features,
         }
+
+    @classmethod
+    def _productive_taskwork_available(
+        cls,
+        *,
+        built_state: list[dict[str, Any]],
+        legal_actions,
+        capacity_available: bool,
+        bridge_material_incomplete: bool,
+        bridge_build_incomplete: bool,
+    ) -> bool:
+        """Whether construction work could still advance, from observed state and legal affordances.
+
+        Scarce resources are not the same as no work: a carried brick, a staged build, a validation- or
+        repair-ready structure, an unfinished bridge, or a startable structure with a brick source all count.
+        """
+        legal = {str(a.get("action_type")) for a in (legal_actions or [])}  # presence = legal; "reachable" only says a straight path exists now
+        transport = ExecutableActionType.TRANSPORT_RESOURCES.value in legal  # a brick source exists, or one is carried
+        start_or_continue = bool(legal & {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value})
+        unfinished = [p for p in built_state if str(p.get("project_status") or "").lower() != "complete"]
+        needs_material = any(int(p.get("required_resources", 0) or 0) > int(p.get("delivered_resources", 0) or 0) for p in unfinished)
+        if transport and (needs_material or bridge_material_incomplete):
+            return True
+        if bridge_build_incomplete and ExecutableActionType.CONTINUE_CONSTRUCTION.value in legal:
+            return True
+        if start_or_continue and any(
+            bool(p.get("resource_complete"))
+            and str(p.get("project_status") or "").lower() not in {"ready_for_validation", "needs_repair"}
+            and float(p.get("physical_build_progress", p.get("progress", 0.0)) or 0.0) < 1.0
+            for p in unfinished
+        ):
+            return True
+        # a fully built structure that is not yet validated is open work even while its validation readiness
+        # still lacks knowledge (acquiring or sharing it is how that work advances)
+        if ExecutableActionType.VALIDATE_CONSTRUCTION.value in legal and any(
+            cls._project_validation_pending(p) or float(p.get("physical_build_progress", p.get("progress", 0.0)) or 0.0) >= 1.0
+            for p in unfinished
+        ):
+            return True
+        if ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value in legal and any(bool(p.get("needs_repair")) for p in built_state):
+            return True
+        return bool(transport and capacity_available and ExecutableActionType.START_CONSTRUCTION.value in legal)
 
     @staticmethod
     def _closure_only_work(features: dict[str, float]) -> bool:
@@ -818,6 +875,12 @@ class RuleBrain(BrainProvider):
             # project Construction already reports validation-ready (claim/evidence/rules satisfied).
             mode_scores["VALIDATE"] -= 1.3 * max(0.0, 0.8 - features.get("epistemic_sufficiency", 0.0))
         mode_scores["MONITOR"] = 0.35 + 0.2 * (1.0 - features["goal_pressure"]) + 0.55 * features.get("construction_state_needs_recheck", 0.0)
+        if features.get("productive_taskwork_available", 1.0) <= 0.0:
+            # Nothing can advance (no brick source, no staged/validation/repair work, nothing startable):
+            # the grounded response is to monitor for a change, not to keep coordinating or replanning.
+            mode_scores["MONITOR"] += 3.0
+            for churn_mode in ("COORDINATE", "INTEGRATE_DIK", "LOGISTICS", "CONSTRUCT", "REPAIR", "VALIDATE"):
+                mode_scores[churn_mode] -= 1.5
         mode_scores["COORDINATE"] += 2.6 * features.get("coordination_deadlock_pressure", 0.0) + 1.1 * features.get("no_active_plan_pressure", 0.0)
         mode_scores["LOGISTICS"] -= 0.8 * features.get("no_active_plan_pressure", 0.0)
         mode_scores["RECOVERY"] -= 0.5 * features.get("coordination_deadlock_pressure", 0.0)
@@ -962,7 +1025,9 @@ class RuleBrain(BrainProvider):
         if selected_mode == current_mode:
             return False
         return bool(
-            features.get("loop_pressure", 0.0) >= 0.85
+            # a method committed to taskwork that can no longer advance does not hold the Pilot to it
+            features.get("productive_taskwork_available", 1.0) <= 0.0
+            or features.get("loop_pressure", 0.0) >= 0.85
             or features.get("contradiction_pressure", 0.0) >= 0.8
             or features.get("repair_pressure", 0.0) >= 0.85
         )
@@ -1182,7 +1247,9 @@ class RuleBrain(BrainProvider):
             ExecutableActionType.EXTERNALIZE_PLAN.value,
             ExecutableActionType.REQUEST_ASSISTANCE.value,
         }
-        has_concrete_reachable = any(a.get("action_type") in concrete_actions and bool(a.get("reachable", True)) for a in sorted_affordances)
+        has_concrete_reachable = features.get("productive_taskwork_available", 1.0) > 0.0 and any(
+            a.get("action_type") in concrete_actions and bool(a.get("reachable", True)) for a in sorted_affordances
+        )
         for idx, affordance in enumerate(sorted_affordances):
             action_type = str(affordance.get("action_type") or ExecutableActionType.WAIT.value)
             utility = float(affordance.get("utility", 0.0))
@@ -1241,6 +1308,17 @@ class RuleBrain(BrainProvider):
             score -= 6.0 * features.get(f"blocked_streak:{action_type}", 0.0)
             if action_type == ExecutableActionType.WAIT.value:
                 score -= 0.35
+                if features.get("productive_taskwork_available", 1.0) <= 0.0:
+                    score += 2.4  # idling is the correct choice while nothing can advance
+            elif features.get("productive_taskwork_available", 1.0) <= 0.0 and action_type in {
+                ExecutableActionType.CONSULT_TEAM_ARTIFACT.value,
+                ExecutableActionType.EXTERNALIZE_PLAN.value,
+                ExecutableActionType.COMMUNICATE.value,
+                ExecutableActionType.REQUEST_ASSISTANCE.value,
+                ExecutableActionType.START_CONSTRUCTION.value,
+                ExecutableActionType.TRANSPORT_RESOURCES.value,
+            }:
+                score -= 1.5
             if action_type == ExecutableActionType.OBSERVE_ENVIRONMENT.value:
                 score -= 1.2 * features.get("observe_ineffective_pressure", 0.0)
             if action_type in {ExecutableActionType.REASSESS_PLAN.value, ExecutableActionType.OBSERVE_ENVIRONMENT.value}:
@@ -1324,7 +1402,7 @@ class RuleBrain(BrainProvider):
             ExecutableActionType.EXTERNALIZE_PLAN.value,
             ExecutableActionType.REQUEST_ASSISTANCE.value,
         }
-        if chosen.get("action_type") in {ExecutableActionType.REASSESS_PLAN.value, ExecutableActionType.OBSERVE_ENVIRONMENT.value}:
+        if features.get("productive_taskwork_available", 1.0) > 0.0 and chosen.get("action_type") in {ExecutableActionType.REASSESS_PLAN.value, ExecutableActionType.OBSERVE_ENVIRONMENT.value}:
             concrete = next((a for a in sorted_affordances if a.get("action_type") in concrete_actions and bool(a.get("reachable", True))), None)
             if concrete is not None:
                 chosen = concrete
@@ -1525,7 +1603,9 @@ class RuleBrain(BrainProvider):
         # A request may pin the rng namespace (policy_seed_key) so the policy's random
         # stream does not depend on unique request ids.
         seed_namespace = ((getattr(context_packet, "task_context", {}) or {}).get("policy_seed_key") if is_request else None) or getattr(context_packet, 'request_id', 'ctx')
-        rng_seed = f"{seed_namespace}-{len(affordances)}-{control_state.get('mode')}-{int(features['goal_pressure']*100)}"
+        # sim_step makes the draw advance with time: an unchanged state must not replay the identical draw every tick
+        # (a Pilot whose fixed draw fell in a tail would otherwise repeat that choice forever).
+        rng_seed = f"{seed_namespace}-{control_state.get('sim_step', 0)}-{len(affordances)}-{control_state.get('mode')}-{int(features['goal_pressure']*100)}"
         rng = random.Random(rng_seed)
         selected_mode, mode_probs, transition_reason = self._select_mode(
             mode_scores=mode_scores,
@@ -1607,7 +1687,10 @@ class RuleBrain(BrainProvider):
         else:
             method_state["meta_action_streak"] = 0
             method_state["last_step_progress_tick"] = sim_step
-        if int(method_state.get("meta_action_streak", 0) or 0) > self.policy_config.max_meta_action_streak:
+        if (
+            int(method_state.get("meta_action_streak", 0) or 0) > self.policy_config.max_meta_action_streak
+            and features.get("productive_taskwork_available", 1.0) > 0.0
+        ):
             concrete = next(
                 (a for a in sorted_affordances if a.get("action_type") not in {ExecutableActionType.REASSESS_PLAN.value, ExecutableActionType.OBSERVE_ENVIRONMENT.value, ExecutableActionType.WAIT.value}),
                 None,
