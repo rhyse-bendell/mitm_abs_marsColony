@@ -524,16 +524,44 @@ class RuleBrain(BrainProvider):
             return reachable[0]
         return next((item for item in sorted_affordances if item.get("action_type") in allowed_action_types), None)
 
+    @staticmethod
+    def _softmax_probs(weighted_scores: dict[str, float], temperature: float) -> dict[str, float]:
+        temp = max(0.05, float(temperature))
+        max_score = max(weighted_scores.values())
+        exp_scores = {key: math.exp((score - max_score) / temp) for key, score in weighted_scores.items()}
+        total = sum(exp_scores.values()) or 1.0
+        return {k: v / total for k, v in exp_scores.items()}
+
+    def _family_then_variant_pick(self, scored: dict[str, float], temperature: float, rng: random.Random) -> tuple[str, dict[str, float]]:
+        """Two-stage action selection over affordance keys of the form ``"<idx>:<action_type>"``.
+
+        Stage 1 chooses the ACTION FAMILY; a family is as desirable as its best-scored variant, so adding another
+        equally good legal target (a structure type, a project, a source, a connection) does not by itself raise the
+        family's probability. Stage 2 chooses among that family's variants with an ordinary softmax over their own
+        scores, so legitimate target preferences are kept. Returned probabilities are the joint P(family) * P(variant|family)
+        keyed like the input, so logging and confidence consumers are unchanged.
+        """
+        if not scored:
+            return "MONITOR", {"MONITOR": 1.0}
+        families: dict[str, dict[str, float]] = {}
+        for key, score in scored.items():
+            families.setdefault(key.split(":", 1)[1] if ":" in key else key, {})[key] = score
+        if len(families) == 1:  # nothing to choose between: consume no randomness, so single-family states keep their previous draw
+            family_pick, family_probs = next(iter(families)), {next(iter(families)): 1.0}
+        else:
+            family_pick, family_probs = self._softmax_pick({fam: max(variants.values()) for fam, variants in families.items()}, temperature, rng)
+        variant_pick, _ = self._softmax_pick(families[family_pick], temperature, rng)
+        joint: dict[str, float] = {}
+        for fam, variants in families.items():
+            within = self._softmax_probs(variants, temperature)
+            for key in variants:
+                joint[key] = family_probs[fam] * within[key]
+        return variant_pick, joint
+
     def _softmax_pick(self, weighted_scores: dict[str, float], temperature: float, rng: random.Random) -> tuple[str, dict[str, float]]:
         if not weighted_scores:
             return "MONITOR", {"MONITOR": 1.0}
-        temp = max(0.05, float(temperature))
-        max_score = max(weighted_scores.values())
-        exp_scores: dict[str, float] = {}
-        for key, score in weighted_scores.items():
-            exp_scores[key] = math.exp((score - max_score) / temp)
-        total = sum(exp_scores.values()) or 1.0
-        probs = {k: v / total for k, v in exp_scores.items()}
+        probs = self._softmax_probs(weighted_scores, temperature)
         pick = rng.random()
         csum = 0.0
         selected = next(iter(probs))
@@ -1385,7 +1413,7 @@ class RuleBrain(BrainProvider):
         step_allowed_actions: set[str] | None,
         rng: random.Random,
     ) -> tuple[ExecutableActionType, dict[str, Any], dict[str, float]]:
-        selected_action_key, action_probs = self._softmax_pick(
+        selected_action_key, action_probs = self._family_then_variant_pick(
             action_scores or {"0:wait": 0.0},
             self.policy_config.action_selection_temperature,
             rng,
