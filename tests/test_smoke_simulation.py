@@ -52,8 +52,9 @@ class TestSimulationSmoke(unittest.TestCase):
             self.assertEqual(manifest["sanitized_prefix"], "My_Test_Experiment")
             self.assertTrue(re.match(r"^\d{8}_\d{6}$", manifest["timestamp"]))
 
-            measures_placeholder = session_dir / "measures" / "final_measures_placeholder.json"
-            self.assertTrue(measures_placeholder.exists())
+            final_measures_path = session_dir / "measures" / "final_measures.json"
+            self.assertTrue(final_measures_path.exists())
+            self.assertFalse((session_dir / "measures" / "final_measures_placeholder.json").exists())
 
     def test_packet_access_respected(self):
         env = Environment(phases=[])

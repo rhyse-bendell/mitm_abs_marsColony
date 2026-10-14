@@ -150,6 +150,8 @@ class SimulationState:
         seed=None,
     ):
         # Deterministic run seed: seeds the global RNG and gives every agent its own RNG stream.
+        self.terminal_state = None  # set once by _check_terminal_state()
+        self.terminal_time = None
         self.seed = None if seed is None else int(seed)
         if self.seed is not None:
             random.seed(self.seed)
@@ -994,6 +996,8 @@ class SimulationState:
             "pilot_id": self.pilot_id,
             "pilot_display_name": self.pilot_display_name,
             "seed": self.seed,
+            "terminal_state": getattr(self, "terminal_state", None),
+            "terminal_time": getattr(self, "terminal_time", None),
             "legacy_backend_alias": "rule_brain" if self.pilot_id == "procedural_baseline" else None,
             "fallback_backend": cfg.fallback_backend,
             "local_model_name": cfg.local_model if self.configured_brain_backend != "rule_brain" else None,
@@ -1300,16 +1304,111 @@ class SimulationState:
         self.metrics.on_step(dt)
 
         self.time += dt
+        if self.terminal_state is None and int(self.time) % 5 == 0:
+            self._check_terminal_state()
 
         if self.flash_mode or (self.time - self._last_save_time >= self.save_interval):
             self.logger.save_csv()
             self._last_save_time = self.time
+
+    def _check_terminal_state(self):
+        """Terminal conditions derivable from authoritative simulator state (no success semantics).
+
+        - time_expired: the task package's phase schedule (sum of phase durations) has run out.
+        - resources_exhausted: no brick remains anywhere or in transit, and no unfinished project or bridge
+          can still advance without bricks, so no agent action can change the construction outcome.
+        """
+        reason = None
+        phases = list(self.environment.phases or [])
+        total_s = sum(float(p.get("duration_minutes", 0.0) or 0.0) * 60.0 for p in phases)
+        if total_s > 0.0 and self.time >= total_s:
+            reason = "time_expired"
+        else:
+            construction = self.environment.construction
+            bricks_left = sum(int(getattr(p, "quantity", 0) or 0) for p in construction.resource_nodes.values())
+            carried = sum(int(((getattr(a, "transport_state", {}) or {}).get("carrying") or {}).get("quantity", 0) or 0) for a in self.agents)
+            if bricks_left <= 0 and carried <= 0:
+                can_still_advance = any(
+                    p.get("status") != "complete" and (bool(p.get("resource_complete")) or bool(p.get("started")) and bool(p.get("structurally_complete")))
+                    for p in construction.projects.values()
+                )
+                bridge = construction.bridges.get("bridge_bc")
+                bridge_can_finish = bridge is not None and bridge.status != "complete" and int(bridge.delivered_resources) >= int(bridge.required_resources)
+                if not can_still_advance and not bridge_can_finish:
+                    reason = "resources_exhausted"
+        if reason is not None:
+            self.terminal_state = reason
+            self.terminal_time = float(self.time)
+            self.logger.log_event(self.time, "terminal_state_reached", {"terminal_state": reason, "sim_time": float(self.time), "mission_success_evaluated": False})
+        return reason
+
+    def _final_measures(self):
+        """Authoritative end-of-run state read from the simulator (construction / environment)."""
+        construction = self.environment.construction
+        projects = [
+            {
+                "project_id": pid,
+                "type": p.get("type"),
+                "site_id": p.get("site_id"),
+                "status": p.get("status"),
+                "started": bool(p.get("started")),
+                "validated_complete": bool(p.get("validated_complete")),
+                "correct": p.get("correct", True),
+                "delivered_bricks": int((p.get("delivered_resources") or {}).get("bricks", 0) or 0),
+                "required_bricks": int((p.get("required_resources") or {}).get("bricks", 0) or 0),
+            }
+            for pid, p in sorted(construction.projects.items())
+        ]
+        by_status = {}
+        for row in projects:
+            by_status[row["status"]] = by_status.get(row["status"], 0) + 1
+        piles = {pid: {"remaining": int(getattr(pile, "quantity", 0) or 0), "initial": int(getattr(pile, "max_quantity", 0) or 0)} for pid, pile in construction.resource_nodes.items()}
+        bridges = {bid: {"status": b.status, "delivered": int(b.delivered_resources), "required": int(b.required_resources)} for bid, b in construction.bridges.items()}
+        phase = self.environment.get_current_phase() or {}
+        events_by_type = getattr(self.metrics, "events_by_type", {})
+        return {
+            "run": {
+                "experiment_name": getattr(self.logger.output_session, "experiment_name", None),
+                "task_id": getattr(self.task_model, "task_id", None),
+                "seed": self.seed,
+                "sim_time_end": round(float(self.time), 2),
+                "terminal_state": self.terminal_state or "stopped_before_terminal",
+                "terminal_time": self.terminal_time,
+                "phase_at_end": phase.get("name"),
+                "pilots": {a.agent_id: self.get_agent_brain_runtime(a).get("pilot_id") for a in self.agents},
+            },
+            "mission": {
+                # The Mars task package defines phase targets (colonists to support) but not the capacity
+                # each structure provides, so mission success is not evaluated here (see README/engineering log).
+                "mission_success": None,
+                "success_evaluation": "not_defined_in_task_package",
+                "phase_targets": {p.get("name"): dict(p.get("colonist_manifest") or {}) for p in (self.environment.phases or [])},
+            },
+            "construction": {
+                "projects": projects,
+                "projects_by_status": by_status,
+                "structures_validated": sum(1 for r in projects if r["validated_complete"]),
+                "bricks_delivered_to_projects": sum(r["delivered_bricks"] for r in projects),
+                "bricks_delivered_to_bridges": sum(b["delivered"] for b in bridges.values()),
+                "resource_piles": piles,
+                "bridges": bridges,
+                "site_capacity": construction.get_site_capacity_summary(),
+            },
+            "action_feedback": {
+                "repeated_action_failure_events": int(events_by_type.get("repeated_action_failure", 0)),
+                "agents_final_action_outcomes": {a.agent_id: list(getattr(a, "recent_action_outcomes", [])[-3:]) for a in self.agents},
+            },
+        }
 
     def stop(self):
         if self.run_stopped_wallclock_at is None:
             self.run_stopped_wallclock_at = time.perf_counter()
         self.runtime_witness_audit_result = self.runtime_witness_audit.finalize()
         self.metrics.finalize()
+        try:
+            self.logger.output_session.write_final_measures(self._final_measures())
+        except Exception as exc:  # never let artifact writing break shutdown
+            self.logger.log_event(self.time, "final_measures_write_failed", {"error": repr(exc)})
         self.logger.update_session_manifest(
             extra_metadata={
                 **self._backend_settings_for_manifest(),

@@ -15,6 +15,7 @@ Documentation/action_system.md for full model context.
 """
 
 
+import hashlib
 import math
 import random
 import json
@@ -612,6 +613,12 @@ class Agent:
         "pilot_reroute_blocked",
     })
     REPEATED_FAILURE_MILESTONES = (3, 10, 30, 100, 300)
+
+    @staticmethod
+    def _compact_id(value, limit=60):
+        """Keep ids readable and bounded in event payloads (inferred-rule ids embed their full text)."""
+        text = str(value)
+        return text if len(text) <= limit else f"{text[:limit - 12]}…[len={len(text)}]"
 
     def _emit_event(self, sim_state, event_type, payload):
         if sim_state is None:
@@ -1767,7 +1774,7 @@ class Agent:
             {
                 "trigger_source": trigger_source,
                 "blocker_relevant": bool(blocker_relevant),
-                "changed_rule_ids": sorted(changed_rule_ids),
+                "changed_rule_ids": [self._compact_id(r) for r in sorted(changed_rule_ids)],
                 "changed_information_ids": sorted(changed_information_ids),
                 "changed_data_ids": sorted(changed_data_ids),
                 "readiness_changed": readiness_changed,
@@ -1779,7 +1786,7 @@ class Agent:
                 "closure_repair_stalled": closure_repair_stalled,
                 "closure_returned_to_validation": closure_unblocked,
                 "closure_named_rule_binding_status": named_rule_binding.get("status"),
-                "closure_missing_rule_ids_after_binding": list(named_rule_binding.get("missing_rule_ids") or []),
+                "closure_missing_rule_ids_after_binding": [self._compact_id(r) for r in (named_rule_binding.get("missing_rule_ids") or [])],
             },
         )
         if not readiness_after:
@@ -6713,22 +6720,33 @@ class Agent:
         family_counts = {}
         for action_id in afforded_ids:
             family_counts[action_id] = int(family_counts.get(action_id, 0) or 0) + 1
-        self._emit_event(
-            sim_state,
-            "action_affordances_generated",
-            {
-                "affordance_count": len(afforded_actions),
-                "unique_action_types": sorted(set(afforded_ids)),
-                "action_type_counts": family_counts,
-                "missing_expected_actions": missing_expected,
-            },
-        )
-        for action_id in missing_expected[:6]:
+        offered = [
+            [a.get("action_type"), a.get("target_id"), bool(a.get("reachable", True)), round(float(a.get("utility", 0.0) or 0.0), 2)]
+            for a in afforded_actions
+            if isinstance(a, dict)
+        ]
+        signature = hashlib.sha1(json.dumps(sorted(offered, key=str), default=str).encode("utf-8")).hexdigest()[:10]
+        self.last_affordance_signature = signature
+        if signature != getattr(self, "_emitted_affordance_signature", None):
+            self._emitted_affordance_signature = signature
             self._emit_event(
                 sim_state,
-                "action_affordance_absent_reason",
-                {"action_type": action_id, "reason": "not_in_context_action_affordances"},
+                "action_affordances_generated",
+                {
+                    "affordance_signature": signature,
+                    "affordance_count": len(afforded_actions),
+                    "unique_action_types": sorted(set(afforded_ids)),
+                    "action_type_counts": family_counts,
+                    "missing_expected_actions": missing_expected,
+                    "offered": offered,
+                },
             )
+            for action_id in missing_expected[:6]:
+                self._emit_event(
+                    sim_state,
+                    "action_affordance_absent_reason",
+                    {"action_type": action_id, "reason": "not_in_context_action_affordances", "affordance_signature": signature},
+                )
         return AgentBrainRequest(
             request_id=request_id or f"{self.agent_id}-{uuid.uuid4().hex[:8]}",
             tick=self.sim_step_count,
@@ -6950,6 +6968,7 @@ class Agent:
                 "pilot_id": getattr(adapter, "pilot_id", None),
                 "request_id": request.request_id,
                 "response_id": response.response_id,
+                "affordance_signature": getattr(self, "last_affordance_signature", None),
                 "selected_action": decision.selected_action.value,
                 "target_id": decision.target_id,
                 "schema_errors": list(grounded["schema_validation_errors"])[:3],

@@ -57,6 +57,16 @@ class OutputSessionManager:
         with manifest_path.open("w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
 
+    def write_final_measures(self, payload):
+        """Write the run's final measures; supersedes the placeholder written at session start."""
+        path = self.build_measure_path("final_measures.json")
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, default=str)
+        placeholder = self.build_measure_path("final_measures_placeholder.json")
+        if placeholder.exists():
+            placeholder.unlink()
+        return path
+
     def ensure_measures_placeholder(self):
         placeholder = self.build_measure_path("final_measures_placeholder.json")
         if placeholder.exists():

@@ -56,6 +56,8 @@ def run_batch_experiment(settings, progress_callback=None, run_name_builder=None
 
         for timestep in range(1, timesteps_per_run + 1):
             sim.update(base_dt)
+            if getattr(sim, "terminal_state", None):
+                break  # the simulator reached a terminal state; nothing further can happen
             if callable(progress_callback):
                 progress_callback(
                     {
