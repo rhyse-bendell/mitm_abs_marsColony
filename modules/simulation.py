@@ -152,6 +152,7 @@ class SimulationState:
         # Deterministic run seed: seeds the global RNG and gives every agent its own RNG stream.
         self.terminal_state = None  # set once by _check_terminal_state()
         self.terminal_time = None
+        self.resources_exhausted_time = None  # world condition, recorded once; not terminal unless the task policy says so
         self.seed = None if seed is None else int(seed)
         if self.seed is not None:
             random.seed(self.seed)
@@ -1311,6 +1312,11 @@ class SimulationState:
             self.logger.save_csv()
             self._last_save_time = self.time
 
+    def _end_on_resources_exhausted(self):
+        """Task-package policy (task_manifest.json terminal_policy); engine default keeps early termination."""
+        policy = (getattr(self.task_model, "manifest", None) or {}).get("terminal_policy") or {}
+        return bool(policy.get("end_on_resources_exhausted", True))
+
     def _check_terminal_state(self):
         """Terminal conditions derivable from authoritative simulator state (no success semantics).
 
@@ -1335,7 +1341,12 @@ class SimulationState:
                 bridge = construction.bridges.get("bridge_bc")
                 bridge_can_finish = bridge is not None and bridge.status != "complete" and int(bridge.delivered_resources) >= int(bridge.required_resources)
                 if not can_still_advance and not bridge_can_finish:
-                    reason = "resources_exhausted"
+                    # A world condition: recorded once. It ends the mission only if the task package says so.
+                    if self.resources_exhausted_time is None:
+                        self.resources_exhausted_time = float(self.time)
+                        self.logger.log_event(self.time, "resources_exhausted", {"sim_time": float(self.time), "ends_mission": self._end_on_resources_exhausted()})
+                    if self._end_on_resources_exhausted():
+                        reason = "resources_exhausted"
         if reason is not None:
             self.terminal_state = reason
             self.terminal_time = float(self.time)
@@ -1374,6 +1385,7 @@ class SimulationState:
                 "sim_time_end": round(float(self.time), 2),
                 "terminal_state": self.terminal_state or "stopped_before_terminal",
                 "terminal_time": self.terminal_time,
+                "resources_exhausted_time": self.resources_exhausted_time,
                 "phase_at_end": phase.get("name"),
                 "pilots": {a.agent_id: self.get_agent_brain_runtime(a).get("pilot_id") for a in self.agents},
             },

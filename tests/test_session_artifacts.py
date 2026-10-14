@@ -58,6 +58,7 @@ def test_inferred_rule_ids_are_bounded_in_event_payloads():
 def test_terminal_state_is_derived_from_authoritative_state_only():
     with tempfile.TemporaryDirectory() as tmp:
         sim = SimulationState(phases=None, project_root=tmp, flash_mode=True, experiment_name="terminal_test", seed=1)
+        sim.task_model.manifest["terminal_policy"] = {"end_on_resources_exhausted": True}  # Mars defaults to non-terminal
         try:
             cm = sim.environment.construction
             assert sim._check_terminal_state() is None  # bricks remain: not terminal
@@ -91,6 +92,7 @@ def test_headless_runner_stops_at_the_terminal_state_and_records_it(tmp_path, mo
     def _factory(*args, **kwargs):
         kwargs["project_root"] = str(tmp_path)
         sim = real(*args, **kwargs)
+        sim.task_model.manifest["terminal_policy"] = {"end_on_resources_exhausted": True}
         for pile in sim.environment.construction.resource_nodes.values():
             pile.quantity = 0  # a run that is terminal from the start
         holder["sim"] = sim
