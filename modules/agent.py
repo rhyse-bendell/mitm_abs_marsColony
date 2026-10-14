@@ -28,7 +28,7 @@ try:
 except ImportError:
     patches = None
 
-from modules.knowledge import Data, Information, Knowledge
+from modules.knowledge import Data, Information, Knowledge, OrderedSet
 from modules.action_schema import (
     BrainDecision,
     CommunicationIntent,
@@ -277,8 +277,8 @@ class Agent:
 
         # Mental Model
         self.mental_model = {
-            "data": set(),
-            "information": set(),
+            "data": OrderedSet(),
+            "information": OrderedSet(),
             "knowledge": Knowledge()
         }
 
@@ -482,6 +482,8 @@ class Agent:
         self.support_goal_nonexec_counts = {}
         self.recent_action_outcomes = []
         self.action_failure_counts = {}
+        self._rng = random  # replaced by a per-agent random.Random when the run is seeded
+        self.run_seed = None
         self.support_goal_update_interval_s = 4.0
         self.last_support_goal_update_time = -999.0
         self.rulebrain_recalc_interval_s = 1.6
@@ -1538,7 +1540,7 @@ class Agent:
                 self._trait_value("rule_accuracy"),
             )
             infer_prob = 0.35 + 0.6 * infer_base
-            if random.random() < infer_prob:
+            if self._rng.random() < infer_prob:
                 before_rules = len(self.mental_model["knowledge"].rules)
                 self.mental_model["knowledge"].try_infer_rules(group, agent_name=self.name)
                 after_rules = len(self.mental_model["knowledge"].rules)
@@ -2073,7 +2075,7 @@ class Agent:
         trait_base = self._trait_value(base_trait, default=0.5)
         mechanism_base = (0.6 * trait_base) + (0.4 * hook_base)
         deterministic_component = 0.2 + (0.75 * mechanism_base)
-        residual_noise = random.uniform(-0.04, 0.04)
+        residual_noise = self._rng.uniform(-0.04, 0.04)
         probability = deterministic_component + context_modifier + retry_bonus + residual_noise
         return max(0.05, min(0.98, probability))
 
@@ -2093,7 +2095,7 @@ class Agent:
             context_modifier=context_modifier,
             retry_bonus=retry_bonus,
         )
-        roll = random.random()
+        roll = self._rng.random()
         payload = dict(event_payload or {})
         payload.update(
             {
@@ -2175,7 +2177,7 @@ class Agent:
         return max(0.05, min(0.99, 0.15 + 0.8 * max(hook_base, trait_base)))
 
     def _should_apply_tom_update(self):
-        return random.random() <= self._tom_update_success_probability()
+        return self._rng.random() <= self._tom_update_success_probability()
 
     def _ensure_source_state(self, environment):
         for packet_name in environment.knowledge_packets.keys():
@@ -6119,7 +6121,7 @@ class Agent:
         if mode == "every_n_calls":
             return next_call % max(1, self.planner_cadence.explanation_every_n_calls) == 0
         if mode == "probability":
-            return random.random() < self.planner_cadence.explanation_probability
+            return self._rng.random() < self.planner_cadence.explanation_probability
         return False
 
     def _phase_matches(self, phase_scope, current_phase_name):
@@ -6886,7 +6888,7 @@ class Agent:
             "inspect_state": dict(cognitive.get("inspect_state", {})),
             "mechanism_profile": dict(cognitive.get("mechanism_profile", cognitive.get("traits", {})) or {}),
             # Keeps the baseline policy's random stream identical to the legacy decide() path.
-            "policy_seed_key": "ctx",
+            "policy_seed_key": "ctx" if self.run_seed is None else f"ctx:{self.run_seed}:{self.agent_id}",
         }
 
     def _build_sync_pilot_request(self, sim_state, context, trigger_reason):
@@ -7927,7 +7929,7 @@ class Agent:
         force_externalize = (
             trigger_reason == "new_dik_acquired"
             and ((comm + ext_t) / 2.0) >= 0.7
-            and random.random() < ((comm + ext_t + ext_utility) / 3.0)
+            and self._rng.random() < ((comm + ext_t + ext_utility) / 3.0)
         )
 
         if force_externalize:
@@ -7937,7 +7939,7 @@ class Agent:
         if (
             (align >= 0.75 or (consult_t >= 0.7 and align >= 0.4))
             and context.team_state.get("plan_readiness") == "validated_shared_plan"
-            and random.random() < ((align + consult_utility) / 2.0)
+            and self._rng.random() < ((align + consult_utility) / 2.0)
         ):
             selected = ExecutableActionType.CONSULT_TEAM_ARTIFACT
             reason_bits.append("goal_alignment favored validated team artifact consultation")
@@ -7949,7 +7951,7 @@ class Agent:
             and str(active_team_plan.get("status", "")).lower() == "committed"
             and self._team_plan_requires_uptake(sim_state)
             and (align + consult_t + consult_utility) / 3.0 >= 0.62
-            and random.random() < ((align + consult_t + consult_utility) / 3.0)
+            and self._rng.random() < ((align + consult_t + consult_utility) / 3.0)
         ):
             selected = ExecutableActionType.CONSULT_TEAM_ARTIFACT
             reason_bits.append("committed_team_plan_uptake_deference")
@@ -7958,7 +7960,7 @@ class Agent:
             help_t >= 0.7
             and self._help_context_available(sim_state)
             and not assistance_stalled
-            and random.random() < ((help_t + assist_utility + assist_bias) / 3.0)
+            and self._rng.random() < ((help_t + assist_utility + assist_bias) / 3.0)
         ):
             selected = ExecutableActionType.REQUEST_ASSISTANCE
             assist_commit_s = 6.0 + (10.0 * ((help_t + assist_bias) / 2.0))
@@ -7972,7 +7974,7 @@ class Agent:
             selected not in {ExecutableActionType.REQUEST_ASSISTANCE, ExecutableActionType.CONSULT_TEAM_ARTIFACT}
             and trigger_reason in {"contradiction_detected", "path_blocked_or_stalled", "build_readiness_changed"}
             and replanning_utility >= 0.72
-            and random.random() < replanning_utility
+            and self._rng.random() < replanning_utility
         ):
             selected = ExecutableActionType.REASSESS_PLAN
             reason_bits.append("replanning_tendency promoted reassess_plan under uncertainty")
@@ -7981,7 +7983,7 @@ class Agent:
             selected not in {ExecutableActionType.REQUEST_ASSISTANCE, ExecutableActionType.VALIDATE_CONSTRUCTION}
             and trigger_reason in {"construction_stalled", "validation_due", "closure_commitment"}
             and validate_utility >= 0.75
-            and random.random() < validate_utility
+            and self._rng.random() < validate_utility
         ):
             selected = ExecutableActionType.VALIDATE_CONSTRUCTION
             reason_bits.append("validation_thoroughness increased validation preference")
@@ -10979,7 +10981,7 @@ class Agent:
                     ) / 4.0
                     if preferred.artifact_type == "team_plan" and str((preferred.content or {}).get("status", "")).lower() == "committed":
                         adopt_prob = min(1.0, adopt_prob + (0.2 * self._trait_value("goal_alignment")))
-                    if random.random() <= adopt_prob:
+                    if self._rng.random() <= adopt_prob:
                         sim_state.team_knowledge_manager.adopt_artifact(preferred.artifact_id, self.name, sim_state.time)
                     if planless_consult and preferred.artifact_type != "team_plan":
                         self._set_cooldown(
@@ -11282,7 +11284,7 @@ class Agent:
                     delivered_before = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
 
                     fidelity = (self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5) + self._trait_value("rule_accuracy")) / 2.0
-                    if random.random() > fidelity:
+                    if self._rng.random() > fidelity:
                         project["correct"] = False
 
                     build_ok, build_reason, completed_step = environment.construction.execute_build_step(
@@ -13296,7 +13298,7 @@ class Agent:
 
         for tag, group in candidate_tags.items():
             if len(group) >= 2:
-                if random.random() < 0.95:  # Retry with high confidence
+                if self._rng.random() < 0.95:  # Retry with high confidence
                     self.mental_model["knowledge"].try_infer_rules(group)
                     self.activity_log.append(f"Reinferred rule from tag [{tag}]")
 
@@ -13360,7 +13362,7 @@ class Agent:
             if not rule_matches:
                 mismatch_sensitivity = (self._hook_value("validation_check", "detect_mismatch", "sensitivity", default=0.5) + self._trait_value("rule_accuracy")) / 2.0
                 mismatch_detect_prob = min(1.0, 0.25 + 0.7 * mismatch_sensitivity)
-                if random.random() <= mismatch_detect_prob:
+                if self._rng.random() <= mismatch_detect_prob:
                     self.construction_validation_state["mismatch_last_ts"][project_id] = now_ts
                     self.activity_log.append(f"Disagrees with approach for {project.get('name', 'Unknown')}")
                     if sim_state is not None:
@@ -13398,7 +13400,7 @@ class Agent:
                             + self._hook_value("decision_bias", "assist_stalled_teammate", "priority_weight", default=0.5)
                         ) / 3.0,
                     )
-                    if random.random() < repair_prob:
+                    if self._rng.random() < repair_prob:
                         self.construction_validation_state["repair_last_ts"][project_id] = now_ts
                         project["correct"] = True
                         self._queue_project_state_communication_obligation(

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Dict, Optional
 
 from modules.task_model import TaskModel
+from collections.abc import MutableSet
 
 class Data:
     def __init__(self, id, content, source=None, tags=None):
@@ -16,6 +17,42 @@ class Data:
 
     def __repr__(self):
         return f"<Data {self.id}: {self.content}>"
+
+
+class OrderedSet(MutableSet):
+    """Set with deterministic (insertion-order) iteration.
+
+    The agent's data/information holdings are sets of objects hashed by identity; plain sets
+    iterate in memory-address order, which makes runs non-reproducible.
+    """
+
+    def __init__(self, iterable=()):
+        self._items = {}
+        for item in iterable:
+            self._items[item] = None
+
+    def __contains__(self, item):
+        return item in self._items
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self):
+        return len(self._items)
+
+    def add(self, item):
+        self._items[item] = None
+
+    def discard(self, item):
+        self._items.pop(item, None)
+
+    def update(self, *iterables):
+        for iterable in iterables:
+            for item in iterable:
+                self._items[item] = None
+
+    def __repr__(self):
+        return f"OrderedSet({list(self._items)!r})"
 
 
 class Information:
@@ -53,6 +90,7 @@ class Knowledge:
 
         for tag, group in tag_groups.items():
             if len(group) >= 2:
+                group = sorted(group, key=lambda i: str(getattr(i, "id", "")))  # stable text regardless of set order
                 rule_text = f"Inferred rule for [{tag}]: " + " + ".join(i.content for i in group)
                 info_ids = [i.id for i in group]
                 if rule_text not in self.rules:

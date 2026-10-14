@@ -12,6 +12,7 @@ path to understand lifecycle sequencing and degraded planner handling.
 
 
 import math
+import random
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -146,7 +147,12 @@ class SimulationState:
         task_id="mars_colony",
         startup_progress_callback=None,
         execution_metadata=None,
+        seed=None,
     ):
+        # Deterministic run seed: seeds the global RNG and gives every agent its own RNG stream.
+        self.seed = None if seed is None else int(seed)
+        if self.seed is not None:
+            random.seed(self.seed)
         self.task_model = load_task_model(task_id=task_id)
         self.construction_parameters = _load_task_construction_defaults(task_id)
         if isinstance(construction_parameters, dict):
@@ -433,6 +439,9 @@ class SimulationState:
                 communication_params=config.get("communication_params"),
                 initial_goal_seeds=config.get("initial_goal_seeds"),
             )
+            if self.seed is not None:
+                agent.run_seed = self.seed
+                agent._rng = random.Random(f"{self.seed}:{agent.agent_id}")
             construct_values = dict(config.get("constructs", {}))
             mechanism_defaults = {
                 "communication_propensity": float(getattr(agent, "communication_propensity", 0.5)),
@@ -984,6 +993,7 @@ class SimulationState:
             "brain_backend": self.configured_brain_backend,
             "pilot_id": self.pilot_id,
             "pilot_display_name": self.pilot_display_name,
+            "seed": self.seed,
             "legacy_backend_alias": "rule_brain" if self.pilot_id == "procedural_baseline" else None,
             "fallback_backend": cfg.fallback_backend,
             "local_model_name": cfg.local_model if self.configured_brain_backend != "rule_brain" else None,

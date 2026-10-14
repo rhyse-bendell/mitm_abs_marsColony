@@ -11,6 +11,7 @@ def run_batch_experiment(settings, progress_callback=None, run_name_builder=None
     base_dt = float(resolved_settings.get("base_dt", 1.0) or 1.0)
     agent_configs = deepcopy(resolved_settings.get("agent_configs") or [])
     experiment_name = resolved_settings.get("experiment_name")
+    base_seed = resolved_settings.get("seed")
 
     for run_index in range(1, num_runs + 1):
         if callable(run_name_builder):
@@ -43,6 +44,7 @@ def run_batch_experiment(settings, progress_callback=None, run_name_builder=None
             planner_config=deepcopy(resolved_settings.get("planner_config") or {}),
             construction_parameters=deepcopy(resolved_settings.get("construction_parameters") or {}),
             task_id=resolved_settings.get("task_id", "mars_colony"),
+            seed=(None if base_seed is None else int(base_seed) + run_index - 1),
             execution_metadata={
                 "batch_mode": True,
                 "batch_run_index": run_index,
