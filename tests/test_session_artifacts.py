@@ -22,7 +22,6 @@ def _run(ticks, seed=5):
     return events, measures, manifest
 
 
-@pytest.mark.xfail(reason="Pilot cannot yet start provider/connector structures (middleware scaffold removed); houses cannot reach validation. See DEVELOPMENT_STATE.md", strict=False)
 def test_final_measures_replace_the_placeholder_and_report_authoritative_state():
     _, measures, manifest = _run(260)
     assert "final_measures_placeholder.json" not in measures

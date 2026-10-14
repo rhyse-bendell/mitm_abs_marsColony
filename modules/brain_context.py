@@ -276,6 +276,10 @@ class BrainContextBuilder:
 
         site_rows = {r.get("site_id"): r for r in (capacity_summary or []) if isinstance(r, dict)}
         build_target_site = {v: k for k, v in (getattr(environment.construction, "SITE_TO_BUILD_TARGET", {}) or {}).items()}
+        start_options_by_target: Dict[str, List[Dict[str, Any]]] = {}
+        list_starts = getattr(environment.construction, "list_start_options", None)
+        for option in (list_starts() if callable(list_starts) else []):
+            start_options_by_target.setdefault(option["target_id"], []).append(option)
         for target_name, target in environment.interaction_targets.items():
             # Only information sources (inspect) and build sites (start construction) are action targets here;
             # artifacts such as the whiteboard are reached through externalize / consult.
@@ -301,18 +305,32 @@ class BrainContextBuilder:
                     confidence = float(source_memory.get("memory_confidence", 1.0) or 1.0)
                     if refresh_pressure < 0.28 and confidence >= 0.62:
                         continue
-            legal.append(
-                {
-                    "action_type": action_type.value,
-                    "target_id": target_name,
-                    "target_zone": target.get("zone"),
-                    "target_point": accessible_point,
-                    "target_class": target.get("kind"),
-                    "reachable": reachable,
-                    "source_state": source_state,
-                    "utility": utility_for(action_type, target_kind=target.get("kind")),
-                }
-            )
+            base = {
+                "action_type": action_type.value,
+                "target_id": target_name,
+                "target_zone": target.get("zone"),
+                "target_point": accessible_point,
+                "target_class": target.get("kind"),
+                "reachable": reachable,
+                "source_state": source_state,
+                "utility": utility_for(action_type, target_kind=target.get("kind")),
+            }
+            if target.get("kind") != "build":
+                legal.append(base)
+                continue
+            # Build site. Two distinct, read-only facts: an unfinished project here can be worked on, and each
+            # legal (site, structure type) start may create a new project. Neither says which one to choose.
+            if environment.construction.resolve_project_id(target_name, create_if_missing=False):
+                legal.append({**base, "start_mode": "existing_project"})
+            for option in start_options_by_target.get(target_name, []):
+                legal.append(
+                    {
+                        **base,
+                        "start_mode": "new_project",
+                        "action_args": {"structure_type": option["structure_type"]},
+                        "required_resources": dict(option["required_resources"]),
+                    }
+                )
 
         has_productive_target = any(
             item.get("action_type")
@@ -358,7 +376,12 @@ class BrainContextBuilder:
             legal.append(
                 {
                     "action_type": ExecutableActionType.CONNECT_STRUCTURES.value,
-                    "target_id": environment.construction.encode_connection_target(option["connector_project_id"], option["from_project_id"], option["to_project_id"]),
+                    "target_id": None,
+                    "action_args": {
+                        "connector_project_id": option["connector_project_id"],
+                        "endpoint_a_id": option["from_project_id"],
+                        "endpoint_b_id": option["to_project_id"],
+                    },
                     "target_class": "build",
                     "target_kind": "connection",
                     "connection_type": option["connection_type"],

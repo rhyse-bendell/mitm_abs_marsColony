@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from modules.action_schema import BrainDecision, ExecutableActionType
+from modules.action_schema import BrainDecision, ExecutableActionType, decision_action_args, validate_action_args
 
 
 @dataclass
@@ -30,6 +30,18 @@ class ActionGateResult:
 class AgentActionGate:
     def evaluate(self, *, agent, decision: BrainDecision, sim_state) -> ActionGateResult:
         action = decision.selected_action
+        construction = getattr(getattr(sim_state, "environment", None), "construction", None)
+        startable = construction.startable_structure_types() if construction is not None and hasattr(construction, "startable_structure_types") else None
+        arg_errors = validate_action_args(action, decision_action_args(decision), allowed_structure_types=startable)
+        if arg_errors:
+            # Structural rejection only: the Pilot's request is reported back, never repaired or replaced.
+            return ActionGateResult(
+                False,
+                decision,
+                blockers=["malformed_action_args", *arg_errors],
+                target_id=decision.target_id,
+                metadata={"action_args": decision_action_args(decision)},
+            )
         if action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
             return self._evaluate_inspect(agent=agent, decision=decision, sim_state=sim_state)
         if action in {ExecutableActionType.COMMUNICATE, ExecutableActionType.REQUEST_ASSISTANCE}:
@@ -76,16 +88,36 @@ class AgentActionGate:
         return self._pass(decision)
 
     def _evaluate_construction(self, *, agent, decision, sim_state):
+        construction = getattr(getattr(sim_state, "environment", None), "construction", None)
+        if decision.selected_action != ExecutableActionType.START_CONSTRUCTION or construction is None:
+            return self._pass(decision)
+        structure_type = str(decision_action_args(decision).get("structure_type") or "").strip().lower()
+        if structure_type:
+            # Read-only legality of creating a new project of this type here; the project is created only when the
+            # committed START executes.
+            legal, blockers, site_id = construction.check_start(decision.target_id, structure_type)
+            return ActionGateResult(
+                legal,
+                decision,
+                blockers=list(blockers),
+                target_id=decision.target_id,
+                metadata={"structure_type": structure_type, "site_id": site_id},
+            )
+        # Untyped START only continues an existing unfinished project; it never creates one.
+        target = str(decision.target_id or "").strip()
+        is_site_target = target in getattr(construction, "PROJECT_TO_SITE", {}) or target in getattr(construction, "LEGACY_PROJECT_TO_SITE", {})
+        if is_site_target and not construction.resolve_project_id(target, create_if_missing=False):
+            return ActionGateResult(False, decision, blockers=["structure_type_required_for_new_project"], target_id=decision.target_id)
         return self._pass(decision)
 
     def _evaluate_connection(self, *, agent, decision, sim_state):
         # Read-only legality of connect(connector, endpoint, endpoint). Any role may perform a legal connection;
         # whether a Pilot chooses it is a decision-knowledge question the gate deliberately does not answer.
         construction = getattr(getattr(sim_state, "environment", None), "construction", None)
-        parsed = construction.parse_connection_target(decision.target_id) if construction is not None else None
-        if parsed is None:
-            return ActionGateResult(False, decision, blockers=["malformed_connection_target"], target_id=decision.target_id)
-        connector_id, from_id, to_id = parsed
+        args = decision_action_args(decision)
+        connector_id, from_id, to_id = (str(args.get(k) or "") for k in ("connector_project_id", "endpoint_a_id", "endpoint_b_id"))
+        if construction is None or not (connector_id and from_id and to_id):
+            return ActionGateResult(False, decision, blockers=["malformed_action_args"], target_id=decision.target_id)
         legal, blockers = construction.check_connection(connector_id, from_id, to_id)
         return ActionGateResult(
             legal,

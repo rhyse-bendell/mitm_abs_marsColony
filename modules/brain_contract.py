@@ -42,10 +42,19 @@ class PlannedActionStep:
     preconditions: List[str] = field(default_factory=list)
     expected_outcome: Optional[str] = None
     fallback_if_blocked: Optional[str] = None
+    # Structured, action-specific arguments (validated per action by modules.action_schema.validate_action_args).
+    action_args: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "PlannedActionStep":
         action = payload.get("action_type", ExecutableActionType.WAIT.value)
+        raw_args = payload.get("action_args")
+        if raw_args is None:
+            action_args: Dict[str, Any] = {}
+        elif isinstance(raw_args, dict):
+            action_args = dict(raw_args)
+        else:  # fail closed: a non-mapping is kept as a visible, invalid argument rather than dropped
+            action_args = {"_malformed_action_args": repr(raw_args)}
         return cls(
             step_index=int(payload.get("step_index", 0)),
             action_type=ExecutableActionType(action),
@@ -55,6 +64,7 @@ class PlannedActionStep:
             preconditions=list(payload.get("preconditions", [])),
             expected_outcome=payload.get("expected_outcome"),
             fallback_if_blocked=payload.get("fallback_if_blocked"),
+            action_args=action_args,
         )
 
     def to_brain_decision(self, confidence: float, plan_method_id: Optional[str] = None, next_steps: Optional[List[str]] = None) -> BrainDecision:
@@ -66,6 +76,7 @@ class PlannedActionStep:
             confidence=confidence,
             plan_method_id=plan_method_id,
             next_steps=list(next_steps or []),
+            action_args=dict(self.action_args or {}),
         )
 
 

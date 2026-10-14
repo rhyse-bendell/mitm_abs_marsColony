@@ -75,3 +75,14 @@ Even with a canonical catalog, an action may still disappear because:
 - execution started but failed due to runtime state constraints
 
 This is expected in current architecture; the catalog + instrumentation make it diagnosable.
+
+## Structured action arguments (`action_args`)
+
+`BrainDecision` and `PlannedActionStep` carry an optional `action_args: Dict[str, Any]` (default `{}`) for action-specific arguments. It is validated per action by `modules/action_schema.py::validate_action_args` (allowed keys, required keys, value types, id shape) and enforced by `AgentActionGate`, which rejects with `malformed_action_args` plus a specific token (`missing_action_arg:<k>`, `unsupported_action_arg:<k>`, `unknown_structure_type:<t>`, ...). Actions not listed in `ACTION_ARG_SPECS` accept no arguments. The ConstructionManager remains authoritative for legality.
+
+Only two actions use it so far (other legacy argument hacks, e.g. transport durations in `assumptions`, are deliberately not migrated):
+
+- `start_construction`: `{"structure_type": <task-package structure type>}`. A START with `structure_type` is the only way a project is created at runtime: affordances, probes and target lookups are read-only, and the committed START (`Agent._commit_typed_start` -> `ConstructionManager.start_new_project`) creates exactly the Pilot's type (never defaulting to `house`), after readiness is checked. A START without it only continues an existing unfinished project at the target (`start_mode: existing_project`); on a site with none it is rejected (`structure_type_required_for_new_project`). Startable types come from the task package's enabled construction templates (`ConstructionManager.startable_structure_types`); bridges are a separate capacity-unlock path. Each affordance is `start_mode: new_project` with its own `action_args`, one per currently legal (build target, type); the list states legality only.
+- `connect_structures`: `{"connector_project_id", "endpoint_a_id", "endpoint_b_id"}`. A connector project must first be started and built; connecting never creates one.
+
+Compatibility: the retired packed `target_id = "connector|a|b"` is still read, but only at `BrainDecision` construction (`__post_init__`), where it is converted into `action_args` and cleared, so everything downstream sees a single representation.

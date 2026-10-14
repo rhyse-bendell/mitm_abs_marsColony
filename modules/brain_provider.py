@@ -114,6 +114,7 @@ def select_productive_fallback_action(allowed_actions: list[dict[str, Any]]) -> 
             target_id=choice.get("target_id"),
             target_zone=choice.get("target_zone"),
             expected_purpose="safe productive fallback action",
+            action_args=dict(choice.get("action_args") or {}),
         )
 
     first = allowed_actions[0]
@@ -123,6 +124,7 @@ def select_productive_fallback_action(allowed_actions: list[dict[str, Any]]) -> 
         target_id=first.get("target_id"),
         target_zone=first.get("target_zone"),
         expected_purpose="deterministic first legal action fallback",
+        action_args=dict(first.get("action_args") or {}),
     )
 
 
@@ -1463,6 +1465,7 @@ class RuleBrain(BrainProvider):
                     a
                     for a in sorted_affordances
                     if a.get("action_type") in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value}
+                    and a.get("start_mode") != "new_project"  # this override continues existing material-ready work
                     and bool(a.get("reachable", True))
                 ),
                 None,
@@ -1791,6 +1794,7 @@ class RuleBrain(BrainProvider):
             selected_action=result["selected_action"],
             target_id=result["chosen_affordance"].get("target_id"),
             target_zone=result["chosen_affordance"].get("target_zone"),
+            action_args=dict(result["chosen_affordance"].get("action_args") or {}),
             goal_update=result["goal_update"],
             plan_steps=[
                 f"macro_state:{result['selected_mode']}",
@@ -1818,6 +1822,7 @@ class RuleBrain(BrainProvider):
             target_id=result["chosen_affordance"].get("target_id"),
             target_zone=result["chosen_affordance"].get("target_zone"),
             expected_purpose=result["reason"],
+            action_args=dict(result["chosen_affordance"].get("action_args") or {}),
         )
         payload = {
             "response_id": f"rule-{request_packet.request_id}",

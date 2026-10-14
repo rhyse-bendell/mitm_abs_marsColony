@@ -36,6 +36,7 @@ from modules.action_schema import (
     ExecutableActionType,
     InternalEventType,
     LEGACY_COMMUNICATION_TYPE_MAP,
+    decision_action_args,
     validate_brain_decision,
 )
 from modules.brain_contract import (
@@ -4439,14 +4440,21 @@ class Agent:
                     rule_ids.add(rule.rule_id)
         return info_ids, rule_ids
 
+    @staticmethod
+    def _is_typed_start(decision):
+        return decision.selected_action == ExecutableActionType.START_CONSTRUCTION and bool(str(decision_action_args(decision).get("structure_type") or "").strip())
+
     def _construction_project_for_action(self, decision, action, environment, *, probe_only=False):
+        if self._is_typed_start(decision) and action.get("project_id") in environment.construction.projects:
+            return action.get("project_id")  # the project this START committed to create
         requested_project_id = decision.target_id or action.get("project_id")
         if requested_project_id in environment.construction.projects:
             return requested_project_id
         if requested_project_id:
+            # Resolution never creates a project: creation belongs to the committed typed START only.
             resolved_project_id = environment.construction.resolve_project_id(
                 requested_project_id,
-                create_if_missing=not probe_only,
+                create_if_missing=False,
             )
             if resolved_project_id:
                 return resolved_project_id
@@ -4472,7 +4480,6 @@ class Agent:
             include_project=True,
             action_type=getattr(decision.selected_action, "value", decision.selected_action),
             requested_project_id=requested_project_id,
-            allow_project_creation=not probe_only,
             require_supplied_target=probe_only,
         )
         if isinstance(build_selection, dict):
@@ -4545,6 +4552,8 @@ class Agent:
         }
         if decision.selected_action not in project_actions:
             return decision
+        if self._is_typed_start(decision):
+            return decision  # an explicit new-project START is not a project the Mecha may rebind to another one
         project_id = decision.target_id
         if not self._project_still_viable_for_binding(environment, project_id):
             project_id = self._acquire_project_focus_for_action(
@@ -4983,6 +4992,36 @@ class Agent:
             "adopted_team_plan": bool(adopted_plan_id),
         }
 
+    def _commit_typed_start(self, decision, environment, sim_state=None):
+        """Committed creation of the project an explicit typed START asks for: (project_id, blockers).
+
+        The single runtime path that creates a Pilot-started structure. Readiness is checked first so a blocked START
+        creates nothing; the project type is the Pilot's ``structure_type``, never a default. Idempotent per decision:
+        re-translating the same decision reuses the project it already created.
+        """
+        construction = environment.construction
+        committed = getattr(decision, "_committed_project_id", None)
+        if committed and committed in construction.projects:
+            return committed, []
+        structure_type = str(decision_action_args(decision).get("structure_type") or "").strip().lower()
+        blockers = self._build_readiness_blockers(environment, sim_state=sim_state, typed_start_target=decision.target_id)
+        if self.current_plan is not None and self.current_plan.plan_method_status == "low_trust":
+            if any(str(n).startswith("missing_") for n in (self.current_plan.validation_notes or [])):
+                blockers.append("plan_method_not_grounded")
+        hard = self._partition_action_blockers(blockers)["hard_blockers"]
+        if hard:
+            return None, sorted(set(blockers))
+        project_id, status = construction.start_new_project(decision.target_id, structure_type, author=self.name)
+        if status != "created":
+            return None, [str(status)]
+        setattr(decision, "_committed_project_id", project_id)
+        self._emit_event(
+            sim_state,
+            "project_created_by_start",
+            {"agent": self.name, "role": self.role, "project_id": project_id, "structure_type": structure_type, "target_id": decision.target_id, "site_id": construction.projects[project_id].get("site_id")},
+        )
+        return project_id, []
+
     # Construction blockers expose *why* progress stopped (material, rule/evidence,
     # support connector, or validation readiness). Repeated blocker events are
     # analytically meaningful: they indicate repair loops rather than random delay.
@@ -5034,7 +5073,7 @@ class Agent:
 
         return sorted(set(blockers)), project_id
 
-    def _build_readiness_blockers(self, environment, sim_state=None):
+    def _build_readiness_blockers(self, environment, sim_state=None, *, typed_start_target=None):
         blockers = []
         info_ids, rule_ids = self._effective_knowledge_for_readiness(sim_state=sim_state)
         epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
@@ -5071,7 +5110,11 @@ class Agent:
                 blockers.append("missing_task_prerequisite_rules")
         if not any(state == "inspected" for state in self.source_inspection_state.values()):
             blockers.append("no_inspected_information_source")
-        if self._select_build_target(environment, require_readiness=False) is None:
+        if typed_start_target is not None:
+            # A new-project START needs a reachable build site, not an already-existing project.
+            if environment.get_interaction_target_position(typed_start_target, from_position=self.position) is None:
+                blockers.append("no_navigable_build_target")
+        elif self._select_build_target(environment, require_readiness=False) is None:
             blockers.append("no_navigable_build_target")
         return blockers
 
@@ -5139,11 +5182,11 @@ class Agent:
     def _execute_connect_structures(self, action, sim_state):
         """Committed path for connect_structures: re-check legality, then add the connector graph edge."""
         construction = getattr(getattr(sim_state, "environment", None), "construction", None)
-        parsed = construction.parse_connection_target(action.get("connection_target")) if construction is not None else None
-        if parsed is None:
-            self._emit_event(sim_state, "connection_attempt_failed", {"reason": "malformed_connection_target", "target_id": action.get("connection_target")})
+        args = dict(action.get("action_args") or {})
+        connector_id, from_id, to_id = (str(args.get(k) or "") for k in ("connector_project_id", "endpoint_a_id", "endpoint_b_id"))
+        if construction is None or not (connector_id and from_id and to_id):
+            self._emit_event(sim_state, "connection_attempt_failed", {"reason": "malformed_action_args", "action_args": args})
             return False
-        connector_id, from_id, to_id = parsed
         legal, blockers = construction.check_connection(connector_id, from_id, to_id)
         payload = {"connector_project_id": connector_id, "from_project_id": from_id, "to_project_id": to_id}
         if not legal:
@@ -6487,7 +6530,12 @@ class Agent:
             for a in afforded_actions
             if isinstance(a, dict)
         ]
-        signature = hashlib.sha1(json.dumps(sorted(offered, key=str), default=str).encode("utf-8")).hexdigest()[:10]
+        offered_args = [
+            [a.get("action_type"), a.get("target_id"), dict(a.get("action_args"))]
+            for a in afforded_actions
+            if isinstance(a, dict) and a.get("action_args")
+        ]
+        signature = hashlib.sha1(json.dumps([sorted(offered, key=str), sorted(offered_args, key=str)], default=str).encode("utf-8")).hexdigest()[:10]
         self.last_affordance_signature = signature
         if signature != getattr(self, "_emitted_affordance_signature", None):
             self._emitted_affordance_signature = signature
@@ -6501,6 +6549,7 @@ class Agent:
                     "action_type_counts": family_counts,
                     "missing_expected_actions": missing_expected,
                     "offered": offered,
+                    "offered_args": offered_args,
                 },
             )
             for action_id in missing_expected[:6]:
@@ -6598,7 +6647,7 @@ class Agent:
                 fallback_decision = adapter.choose_fallback_action(agent=self, context_packet=request_packet, reason="response_plan_invalid", sim_state=sim_state)
             if fallback_decision is None:
                 fallback_decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="Fallback due to decision validation failure.", confidence=1.0)
-            fallback_step_dict = {"step_index": 0, "action_type": fallback_decision.selected_action.value, "target_id": fallback_decision.target_id, "target_zone": fallback_decision.target_zone, "expected_purpose": fallback_decision.reason_summary}
+            fallback_step_dict = {"step_index": 0, "action_type": fallback_decision.selected_action.value, "target_id": fallback_decision.target_id, "target_zone": fallback_decision.target_zone, "expected_purpose": fallback_decision.reason_summary, "action_args": decision_action_args(fallback_decision)}
             response = AgentBrainResponse.from_dict(
                 {
                     "response_id": f"fallback-{request_packet.request_id}",
@@ -6734,6 +6783,7 @@ class Agent:
                 "affordance_signature": getattr(self, "last_affordance_signature", None),
                 "selected_action": decision.selected_action.value,
                 "target_id": decision.target_id,
+                "action_args": decision_action_args(decision),
                 "schema_errors": list(grounded["schema_validation_errors"])[:3],
                 "repaired": bool(grounded["repaired"]),
                 "grounding_status": grounded["grounding_status"],
@@ -6772,7 +6822,7 @@ class Agent:
                         "plan_id": f"legacy-plan-{request_packet.request_id}",
                         "plan_horizon": 1,
                         "ordered_goals": ([{"goal_id": legacy_decision.goal_update, "description": legacy_decision.goal_update, "priority": 0.8, "status": "active"}] if legacy_decision.goal_update else []),
-                        "ordered_actions": [{"step_index": 0, "action_type": legacy_decision.selected_action.value, "target_id": legacy_decision.target_id, "target_zone": legacy_decision.target_zone, "expected_purpose": legacy_decision.reason_summary}],
+                        "ordered_actions": [{"step_index": 0, "action_type": legacy_decision.selected_action.value, "target_id": legacy_decision.target_id, "target_zone": legacy_decision.target_zone, "expected_purpose": legacy_decision.reason_summary, "action_args": decision_action_args(legacy_decision)}],
                         "next_action": {"step_index": 0, "action_type": legacy_decision.selected_action.value, "target_id": legacy_decision.target_id, "target_zone": legacy_decision.target_zone, "expected_purpose": legacy_decision.reason_summary},
                         "plan_method_id": legacy_decision.plan_method_id,
                         "confidence": legacy_decision.confidence,
@@ -6795,7 +6845,7 @@ class Agent:
                         "plan_id": f"legacy-plan-{request_packet.request_id}",
                         "plan_horizon": 1,
                         "ordered_goals": [],
-                        "ordered_actions": [{"step_index": 0, "action_type": legacy_decision.selected_action.value, "target_id": legacy_decision.target_id, "target_zone": legacy_decision.target_zone, "expected_purpose": legacy_decision.reason_summary}],
+                        "ordered_actions": [{"step_index": 0, "action_type": legacy_decision.selected_action.value, "target_id": legacy_decision.target_id, "target_zone": legacy_decision.target_zone, "expected_purpose": legacy_decision.reason_summary, "action_args": decision_action_args(legacy_decision)}],
                         "next_action": {"step_index": 0, "action_type": legacy_decision.selected_action.value, "target_id": legacy_decision.target_id, "target_zone": legacy_decision.target_zone, "expected_purpose": legacy_decision.reason_summary},
                         "plan_method_id": legacy_decision.plan_method_id,
                         "confidence": legacy_decision.confidence,
@@ -8189,7 +8239,7 @@ class Agent:
         if rewritten.selected_action == ExecutableActionType.CONNECT_STRUCTURES and sim_state is not None and hasattr(sim_state, "action_gate"):
             # Pilot authority: a legal explicit connection is not replaced by the house-centred support scaffold.
             if getattr(sim_state.action_gate.evaluate(agent=self, decision=rewritten, sim_state=sim_state), "legal", False):
-                self._emit_event(sim_state, "policy_pivot_skipped_legal_connection", {"origin": pivot_origin, "target_id": rewritten.target_id})
+                self._emit_event(sim_state, "policy_pivot_skipped_legal_connection", {"origin": pivot_origin, "action_args": decision_action_args(rewritten)})
                 return rewritten
         closure_project_id = self._live_project_closure_commitment(environment, sim_state=sim_state)
         if closure_project_id:
@@ -8765,7 +8815,7 @@ class Agent:
             recent_meaningful_epistemic_change = seconds_since_dik_change is not None and float(seconds_since_dik_change) <= 2.0 and bool(mismatch_signals)
             if readiness.get("ready_for_build") and active_incomplete_projects and not recent_meaningful_epistemic_change and float(epistemic.get("refresh_pressure", 0.0) or 0.0) < 0.45:
                 sorted_affordances = sorted(context.action_affordances, key=lambda a: float(a.get("utility", 0.0)), reverse=True)
-                candidate = next((c for c in sorted_affordances if c.get("action_type") in {ExecutableActionType.TRANSPORT_RESOURCES.value, ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value}), None)
+                candidate = next((c for c in sorted_affordances if c.get("action_type") in {ExecutableActionType.TRANSPORT_RESOURCES.value, ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value} and c.get("start_mode") != "new_project"), None)
                 if candidate is not None:
                     if not rule_brain_runtime:
                         rewritten = BrainDecision(
@@ -9396,8 +9446,8 @@ class Agent:
         }
         action = dict(mapping[decision.selected_action])
         action["decision_action"] = decision.selected_action.value
-        if decision.selected_action == ExecutableActionType.CONNECT_STRUCTURES:
-            action["connection_target"] = str(decision.target_id or "")
+        if decision_action_args(decision):
+            action["action_args"] = decision_action_args(decision)
         if self.task_model is not None:
             params = self.task_model.action_parameters.get(decision.selected_action.value)
             if params is not None:
@@ -9587,6 +9637,18 @@ class Agent:
         }:
             action["duration"] = self._scaled_duration(action["duration"]) * self._duration_scale(decision.selected_action.value)
 
+        if self._is_typed_start(decision):
+            typed_project_id, typed_blockers = self._commit_typed_start(decision, environment, sim_state=sim_state)
+            if typed_project_id is None:
+                self._record_known_gaps_from_blockers(typed_blockers, sim_state=sim_state, project_id=None)
+                self._emit_event(sim_state, "execution_readiness_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "start_not_committed", "blockers": typed_blockers, "project_id": None})
+                self._emit_event(sim_state, "action_legality_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "start_not_committed", "project_id": None, "blockers": typed_blockers})
+                return [{"type": "idle", "duration": 1.0, "priority": 1, "decision_action": ExecutableActionType.WAIT.value, "blocked_action": self._action_gate_decision_label(decision), "blockers": list(typed_blockers)}]
+            action["project_id"] = typed_project_id
+            target_point = environment.get_interaction_target_position(typed_project_id, from_position=self.position) or environment.get_interaction_target_position(decision.target_id, from_position=self.position)
+            if target_point is not None:
+                action["target"] = target_point
+
         if decision.selected_action in {
             ExecutableActionType.START_CONSTRUCTION,
             ExecutableActionType.CONTINUE_CONSTRUCTION,
@@ -9600,7 +9662,6 @@ class Agent:
                 action_type=decision.selected_action.value,
                 requested_project_id=decision.target_id,
                 sim_state=sim_state,
-                allow_project_creation=True,  # commit path: the Pilot chose to build here
             )
             if isinstance(selected, dict):
                 action["project_id"] = selected.get("project_id")
@@ -11832,7 +11893,7 @@ class Agent:
                     "assist_action": action.get("assist_action"),
                     "decision_action": action.get("decision_action"),
                     "source_target_id": action.get("source_target_id"),
-                    "connection_target": action.get("connection_target"),
+                    "action_args": dict(action.get("action_args") or {}),
                 })
                 if (
                     action.get("type") in {"move_to", "construct", "transport_resources"}

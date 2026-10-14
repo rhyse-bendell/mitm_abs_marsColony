@@ -154,6 +154,7 @@ class TestRuntimeWitnessAudit(unittest.TestCase):
             decision = BrainDecision(
                 selected_action=ExecutableActionType.START_CONSTRUCTION,
                 target_id="Build_Table_B",
+                action_args={"structure_type": "house"},
                 reason_summary="test",
                 confidence=0.9,
             )

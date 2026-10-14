@@ -229,5 +229,5 @@ def test_a_committed_start_instantiates_its_project_through_construction(sim):
     assert cm.projects == {}
     with patch.object(cm, "create_project", wraps=cm.create_project) as spy:
         with patch.object(agent, "_build_readiness_blockers", return_value=[]), patch.object(agent, "_epistemic_sufficiency", return_value=READY):
-            agent._translate_brain_decision_to_legacy_action(_decision(A.START_CONSTRUCTION, "Build_Site_B"), sim.environment, sim_state=sim)
+            agent._translate_brain_decision_to_legacy_action(BrainDecision(selected_action=A.START_CONSTRUCTION, target_id="Build_Site_B", action_args={"structure_type": "house"}, confidence=0.9), sim.environment, sim_state=sim)
     assert spy.called and len(cm.projects) == 1 and next(iter(cm.projects.values()))["site_id"] == "site_b"

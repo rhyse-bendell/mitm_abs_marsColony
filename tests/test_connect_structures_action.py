@@ -32,12 +32,12 @@ def _built(cm, structure_type):
     return pid
 
 
-def _target(cm, connector, a, b):
-    return cm.encode_connection_target(connector, a, b)
+def _args(connector, a, b):
+    return {"connector_project_id": connector, "endpoint_a_id": a, "endpoint_b_id": b}
 
 
 def _decision(cm, connector, a, b):
-    return BrainDecision(selected_action=CONNECT, target_id=_target(cm, connector, a, b), confidence=0.8)
+    return BrainDecision(selected_action=CONNECT, action_args=_args(connector, a, b), confidence=0.8)
 
 
 def _colony(sim):
@@ -57,7 +57,7 @@ def test_the_action_contract_can_represent_a_generator_to_greenhouse_water_conne
     cm, ids = _colony(sim)
     decision = _decision(cm, ids["water_connector"], ids["water_generator"], ids["greenhouse"])
     assert decision.selected_action is CONNECT and CONNECT.value in ACTION_CATALOG
-    assert cm.parse_connection_target(decision.target_id) == (ids["water_connector"], ids["water_generator"], ids["greenhouse"])
+    assert decision.action_args == _args(ids["water_connector"], ids["water_generator"], ids["greenhouse"]) and decision.target_id is None
     assert sim.task_model is not None and CONNECT.value in sim.task_model.enabled_actions_for_role("Engineer")
 
 
@@ -86,7 +86,10 @@ def test_the_gate_rejects_illegal_or_unbuilt_connections(sim):
         assert not result.legal and blocker in result.blockers, (a, b, result.blockers)
     cm.projects[ids["greenhouse"]]["structurally_complete"] = False
     assert "endpoint_not_structurally_complete" in _gate(sim, agent, _decision(cm, ids["water_connector"], ids["water_generator"], ids["greenhouse"])).blockers
-    assert "malformed_connection_target" in _gate(sim, agent, BrainDecision(CONNECT, target_id="nonsense", confidence=0.5)).blockers
+    assert "malformed_action_args" in _gate(sim, agent, BrainDecision(CONNECT, target_id="nonsense", confidence=0.5)).blockers
+    assert "missing_action_arg:endpoint_b_id" in _gate(sim, agent, BrainDecision(CONNECT, action_args={"connector_project_id": "x", "endpoint_a_id": "y"}, confidence=0.5)).blockers
+    assert "unsupported_action_arg:bogus" in _gate(sim, agent, BrainDecision(CONNECT, action_args={**_args("x", "y", "z"), "bogus": 1}, confidence=0.5)).blockers
+    assert "malformed_action_arg:endpoint_a_id" in _gate(sim, agent, BrainDecision(CONNECT, action_args=_args("x", "y z", "z"), confidence=0.5)).blockers
     assert "connector_project_not_found" in _gate(sim, agent, BrainDecision(CONNECT, target_id="a|b|c", confidence=0.5)).blockers
     assert "unknown_structure_reference" in _gate(sim, agent, _decision(cm, ids["water_connector"], ids["water_generator"], "nope")).blockers
 
@@ -139,8 +142,9 @@ def test_affordance_generation_is_read_only_and_lists_the_legal_connections(sim)
     for agent in sim.agents:
         affordances = sim.brain_context_builder.build(sim, agent).action_affordances
         connects = [a for a in affordances if a["action_type"] == CONNECT.value]
-        targets = {a["target_id"] for a in connects}
-        assert _target(cm, ids["water_connector"], ids["greenhouse"], ids["water_generator"]) in targets or _target(cm, ids["water_connector"], ids["water_generator"], ids["greenhouse"]) in targets
+        assert all(a["target_id"] is None and set(a["action_args"]) == set(_args("c", "a", "b")) for a in connects)  # canonical structured form, no packed target
+        pairs = {frozenset((a["action_args"]["endpoint_a_id"], a["action_args"]["endpoint_b_id"])) for a in connects}
+        assert frozenset((ids["greenhouse"], ids["water_generator"])) in pairs
         assert len(connects) == 3
     assert (cm.connectors, cm.projects, len(cm.projects)) == before
     cm.list_connection_options(); cm.check_connection(ids["water_connector"], ids["water_generator"], ids["greenhouse"])
@@ -166,3 +170,33 @@ def test_a_connect_decision_survives_the_runtime_action_queue_and_executes_on_co
         agent._advance_active_actions(1.0, sim)
     edges = [c for c in cm.connectors if c["connector_project_id"] == ids["water_connector"]]
     assert len(edges) == 1
+
+
+def test_legacy_packed_target_is_normalized_once_into_structured_args(sim):
+    """Temporary read compatibility: the old ``connector|a|b`` target is consumed at BrainDecision construction."""
+    cm, ids = _colony(sim)
+    packed = f"{ids['water_connector']}|{ids['water_generator']}|{ids['greenhouse']}"
+    legacy = BrainDecision(selected_action=CONNECT, target_id=packed, confidence=0.8)
+    assert legacy.action_args == _args(ids["water_connector"], ids["water_generator"], ids["greenhouse"])
+    assert legacy.target_id is None  # one authoritative representation downstream
+    assert _gate(sim, sim.agents[0], legacy).legal
+    agent = sim.agents[0]
+    action = agent._translate_brain_decision_to_legacy_action(legacy, sim.environment, sim_state=sim)[0]
+    assert action["action_args"] == legacy.action_args and "connection_target" not in action
+    assert agent._execute_connect_structures(action, sim)
+
+
+def test_structured_args_win_over_a_leftover_packed_target(sim):
+    explicit = _args("c1", "a1", "b1")
+    decision = BrainDecision(selected_action=CONNECT, target_id="c2|a2|b2", action_args=explicit, confidence=0.5)
+    assert decision.action_args == explicit and decision.target_id is None
+
+
+def test_the_active_action_copy_preserves_all_three_connect_arguments(sim):
+    cm, ids = _colony(sim)
+    agent = sim.agents[0]
+    decision = _decision(cm, ids["water_connector"], ids["water_generator"], ids["greenhouse"])
+    agent.current_action = agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
+    agent.active_actions = []
+    agent._advance_active_actions(0.0, sim)
+    assert agent.active_actions and agent.active_actions[0]["action_args"] == decision.action_args

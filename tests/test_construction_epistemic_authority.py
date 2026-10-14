@@ -43,6 +43,7 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         decision = BrainDecision(
             selected_action=ExecutableActionType.START_CONSTRUCTION,
             target_id="Build_Table_B",
+            action_args={"structure_type": "house"},  # a START that creates a project names its structure type
             confidence=0.9,
         )
 
@@ -61,6 +62,7 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         decision = BrainDecision(
             selected_action=ExecutableActionType.START_CONSTRUCTION,
             target_id="Build_Table_B",
+            action_args={"structure_type": "house"},  # a START that creates a project names its structure type
             confidence=0.9,
         )
         translated = agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)

@@ -46,7 +46,7 @@ def _snapshot(cm):
 
 
 def _run(sim, agent, cm, connector, a, b):
-    decision = BrainDecision(selected_action=CONNECT, target_id=cm.encode_connection_target(connector, a, b), confidence=0.9)
+    decision = BrainDecision(selected_action=CONNECT, action_args={"connector_project_id": connector, "endpoint_a_id": a, "endpoint_b_id": b}, confidence=0.9)
     pivoted = agent._apply_policy_pivots(decision, sim.environment, sim_state=sim, pivot_origin="test")
     assert pivoted.selected_action is CONNECT  # a legal explicit connect is not rewritten
     action = agent._translate_brain_decision_to_legacy_action(pivoted, sim.environment, sim_state=sim)[0]

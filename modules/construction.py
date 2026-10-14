@@ -202,6 +202,8 @@ class ConstructionManager:
                     "artifact_type": template.artifact_type,
                     "expected_rules": [normalize_rule_token(r) for r in template.expected_rules if normalize_rule_token(r)],
                     "required": int((template.required_resources or {}).get("bricks", 1) or 1),
+                    "enabled": bool(template.enabled),
+                    "source": "task_package",
                 }
                 templates[template_key] = templates.pop(template.project_id)
         if templates:
@@ -209,7 +211,7 @@ class ConstructionManager:
             for key, row in defaults.items():
                 row_type = str(row.get("type") or "").strip().lower()
                 if row_type not in existing_types:
-                    templates[key] = dict(row)
+                    templates[key] = {**row, "source": "engine_default"}
             return templates
         for key, row in defaults.items():
             templates[key] = dict(row)
@@ -388,6 +390,76 @@ class ConstructionManager:
                 "unlock_bridge_status": unlock_bridge_status,
             })
         return summary
+
+    def startable_structure_types(self):
+        """Structure types a Pilot may start, derived from the task package's enabled construction templates.
+
+        When a task package defines construction templates only those count (engine-default rows merged in for
+        other types are not Pilot-startable). Without a task package the engine defaults apply. Bridges are not
+        projects and are built through the separate capacity-unlock path.
+        """
+        out = []
+        for template in self.project_templates.values():
+            if template.get("source") == "engine_default" and self.task_model and getattr(self.task_model, "construction_templates", None):
+                continue
+            if not bool(template.get("enabled", True)):
+                continue
+            stype = str(template.get("type") or "").strip().lower()
+            if stype and stype not in out:
+                out.append(stype)
+        return out
+
+    def _site_for_start_target(self, target):
+        requested = str(target or "").strip()
+        if requested in self.sites:
+            return requested
+        return self.PROJECT_TO_SITE.get(requested) or self.LEGACY_PROJECT_TO_SITE.get(requested)
+
+    def check_start(self, target, structure_type):
+        """Read-only legality of starting a NEW project of ``structure_type`` at a build site/target.
+
+        Returns (legal, blockers, site_id). Never creates a project or touches any counter.
+        """
+        blockers = []
+        stype = str(structure_type or "").strip().lower()
+        if stype not in self.startable_structure_types():
+            blockers.append("unknown_structure_type")
+        site_id = self._site_for_start_target(target)
+        if site_id is None or site_id not in self.sites:
+            return False, blockers + ["unknown_start_site"], None
+        if not self._is_site_buildable(site_id):
+            blockers.append("site_locked_by_bridge" if self.site_definitions.get(site_id, {}).get("buildable_when_bridge_complete") else "site_not_buildable")
+        elif len(self._site_project_ids(site_id)) >= self.sites[site_id].capacity:
+            blockers.append("site_capacity_reached")
+        return not blockers, blockers, site_id
+
+    def list_start_options(self):
+        """Read-only: every currently legal (build target, structure type) start. States legality only."""
+        options = []
+        for site_id, target_id in self.SITE_TO_BUILD_TARGET.items():
+            for stype in self.startable_structure_types():
+                legal, _blockers, _site = self.check_start(site_id, stype)
+                if legal:
+                    template = self._template_for_structure_type(stype) or {}
+                    options.append(
+                        {
+                            "site_id": site_id,
+                            "target_id": target_id,
+                            "structure_type": stype,
+                            "required_resources": {"bricks": int(template.get("required", 1) or 1)},
+                        }
+                    )
+        return options
+
+    def start_new_project(self, target, structure_type, *, author="system"):
+        """Committed creation of a project of an explicit structure type: (project_id, status).
+
+        The only runtime creation path for Pilot-started structures. Re-checks legality; never defaults the type.
+        """
+        legal, blockers, site_id = self.check_start(target, structure_type)
+        if not legal:
+            return None, blockers[0]
+        return self.create_project(site_id, str(structure_type).strip().lower(), author=author)
 
     def find_buildable_site_for_structure(self, structure_type):
         del structure_type
@@ -1453,20 +1525,6 @@ class ConstructionManager:
                 }
             )
         return report
-
-    CONNECTION_TARGET_SEPARATOR = "|"
-
-    @classmethod
-    def encode_connection_target(cls, connector_project_id, from_project_id, to_project_id):
-        sep = cls.CONNECTION_TARGET_SEPARATOR
-        return f"{connector_project_id}{sep}{from_project_id}{sep}{to_project_id}"
-
-    @classmethod
-    def parse_connection_target(cls, target_id):
-        parts = str(target_id or "").split(cls.CONNECTION_TARGET_SEPARATOR)
-        if len(parts) != 3 or not all(p.strip() for p in parts):
-            return None
-        return tuple(p.strip() for p in parts)
 
     def check_connection(self, connector_project_id, from_project_id, to_project_id):
         """Read-only legality of one direct connection: (legal, blockers). Never mutates the connector graph.
