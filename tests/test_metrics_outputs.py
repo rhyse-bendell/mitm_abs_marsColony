@@ -122,6 +122,11 @@ class TestMetricsOutputs(unittest.TestCase):
             self.assertIn("capacity_estimate", support)
             self.assertIn("phase_support_ratio_estimate", support)
             self.assertIn("effective_colony_support_ratio_current_phase", support)
+            self.assertTrue(any("LEGACY PROXY" in note for note in support["notes"]))
+            structural = outcomes["structural_support"]
+            self.assertEqual(structural["schema"], "structural_support_accounting/1")
+            for section in ("housing", "food", "water", "violations", "bottleneck"):
+                self.assertIn(section, structural)
 
     def test_agent_and_team_summaries_have_expected_fields(self):
         with tempfile.TemporaryDirectory() as tmpdir:

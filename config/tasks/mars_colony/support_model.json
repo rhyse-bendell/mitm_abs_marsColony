@@ -1,0 +1,106 @@
+{
+  "schema": "structural_support_model/1",
+  "description": "Machine-readable structural support atoms for the Mars Colony task, consumed by modules/support_accounting.py. Every number cites the DIK element (dik_elements.csv) it is taken from. The model describes infrastructure only; it does not allocate civilians or VIPs.",
+  "structure_types": {
+    "housing": [
+      "house",
+      "housing"
+    ],
+    "greenhouse": [
+      "greenhouse"
+    ],
+    "water_generator": [
+      "water_generator"
+    ]
+  },
+  "connector_project_types": {
+    "water": "water_connector",
+    "food": "food_connector"
+  },
+  "link_endpoints": {
+    "water": {
+      "provider": "water_generator",
+      "consumers": [
+        "housing",
+        "greenhouse"
+      ]
+    },
+    "food": {
+      "provider": "greenhouse",
+      "consumers": [
+        "housing"
+      ]
+    }
+  },
+  "housing": {
+    "floorspace_units_per_structure": 1,
+    "capacity_per_floorspace_unit": {
+      "civilians": 3,
+      "vips": 2
+    },
+    "requires_support": [
+      "food",
+      "water"
+    ],
+    "vip_property_modeled": false,
+    "provenance": {
+      "capacity_per_floorspace_unit": "D_ARCH_CAPACITY_PER_2X2",
+      "requires_support": "D_ARCH_HOUSE_NEEDS_FOOD_AND_WATER; R_HOUSE_SUPPORT_DEPENDENCY",
+      "vip_property": "D_ARCH_VIP_FLOOR_PINK (not represented in construction state)",
+      "floorspace_units_per_structure": "SIMULATOR ABSTRACTION: a valid house is credited one 2x2 floorspace unit (conservative lower bound, as in the legacy metrics proxy); actual floor area is not modeled"
+    }
+  },
+  "greenhouse": {
+    "soil_units_per_structure": 1,
+    "capacity_per_soil_unit": {
+      "civilians": 5,
+      "vips": 2
+    },
+    "requires_support": [
+      "water"
+    ],
+    "provenance": {
+      "capacity_per_soil_unit": "D_BOT_SOIL_SUPPORT_CAPACITY",
+      "requires_support": "D_BOT_GREENHOUSE_NEEDS_WATER",
+      "soil_units_per_structure": "SIMULATOR ABSTRACTION: a valid greenhouse is credited one soil unit (conservative lower bound); soil area is not modeled"
+    }
+  },
+  "water": {
+    "output_per_generator": 60,
+    "max_supported_structures_per_generator": 2,
+    "split": "even_across_served_structures",
+    "direct_connection_only": true,
+    "overconnection_policy": "serve_first_n_in_connection_order",
+    "demand_atoms": [
+      {
+        "unit": "civilians",
+        "count": 30,
+        "water": 60,
+        "dik": "D_ENG_30CIV_60_WATER"
+      },
+      {
+        "unit": "vips",
+        "count": 20,
+        "water": 60,
+        "dik": "D_ENG_20VIP_60_WATER"
+      },
+      {
+        "unit": "soil_blocks",
+        "count": 10,
+        "water": 60,
+        "dik": "D_ENG_10SOIL_60_WATER"
+      }
+    ],
+    "provenance": {
+      "output_per_generator": "D_ENG_WATERGEN_60_UNITS",
+      "max_supported_structures_per_generator": "D_ENG_WATERGEN_MAX_2_STRUCTURES",
+      "split": "D_ENG_WATER_SPLIT_EVENLY",
+      "direct_connection_only": "D_ENG_DIRECT_CONNECTION_ONLY",
+      "overconnection_policy": "EVALUATOR CONVENTION (sources only say a generator supports at most two structures): connections beyond the limit are unserved; which ones is decided by connection order (connector project id, then link order) so the result is deterministic"
+    }
+  },
+  "validity": {
+    "validated_structure": "project status 'complete', validated_complete true, correct not false",
+    "valid_connector": "connector project status 'complete', validated_complete true, correct not false; only link entries with both endpoints are graph edges (endpoint-less entries are physical build-step records)"
+  }
+}

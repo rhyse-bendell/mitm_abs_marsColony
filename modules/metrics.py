@@ -617,6 +617,20 @@ class MetricsCollector:
             }
         return demands
 
+    def _structural_support_report(self):
+        """Authoritative structural support (validated structures + connector graph); see modules/support_accounting.py.
+
+        Infrastructure only: it does not allocate civilians or VIPs. The legacy proxy below is NOT authoritative.
+        """
+        from modules.support_accounting import evaluate_structural_support, load_support_model
+
+        task_id = getattr(getattr(self.simulation, "task_model", None), "task_id", "mars_colony")
+        try:
+            model = load_support_model(task_id)
+        except FileNotFoundError:
+            return {"available": False, "reason": f"task package '{task_id}' has no support_model.json"}
+        return evaluate_structural_support(self.simulation.environment.construction, model)
+
     def _colony_support_capacity_proxy(self, structure_summary):
         by_type = structure_summary.get("by_type", {}) or {}
         house_count = int((by_type.get("house", {}) or {}).get("validated_correct", 0) or 0)
@@ -714,6 +728,7 @@ class MetricsCollector:
             "phase_support_ratio_estimate": phase_support,
             "effective_colony_support_ratio_current_phase": round(float(current_phase_ratio), 4),
             "notes": [
+                "LEGACY PROXY - not authoritative: hard-coded atoms that duplicate the task package and ignore the connector graph. See outcomes.structural_support for the authoritative structural report.",
                 "Conservative proxy from validated structures only.",
                 "Connection coverage uses water_generator max-2-direct-structures topology.",
                 "House/greenhouse capacities are lower-bound estimates from DIK atoms; detailed geometry, pink-floor, and exact connector graph are not encoded in runtime construction state.",
@@ -892,6 +907,7 @@ class MetricsCollector:
 
         structure_summary = self._structure_summary()
         support_capacity_proxy = self._colony_support_capacity_proxy(structure_summary)
+        structural_support = self._structural_support_report()
         team_knowledge_summary = self._team_knowledge_summary()
         planner_states = [getattr(agent, "planner_state", {}) for agent in self.simulation.agents]
         witness_result = getattr(self.simulation, "runtime_witness_audit_result", None) or {}
@@ -961,6 +977,7 @@ class MetricsCollector:
                     ) if structure_summary["attempted"] else 0.0,
                 },
                 "colony_support_capacity_proxy": support_capacity_proxy,
+                "structural_support": structural_support,
                 "phase_objective_completion": {
                     # Outcome-based objective completion: progress/externalization activity
                     # alone should not satisfy phase objectives.
