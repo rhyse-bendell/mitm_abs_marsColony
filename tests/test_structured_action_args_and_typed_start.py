@@ -431,3 +431,26 @@ def test_a_seeded_baseline_run_creates_projects_and_links_only_through_explicit_
     assert len(started) >= len(created)  # created projects never exceed explicit typed START selections
     succeeded = [p for name, p in events if name == "connection_attempt_succeeded"]
     assert len(links) == len(succeeded)  # every graph link is a committed connect_structures
+
+
+@pytest.mark.parametrize("missing", ["connector_project_id", "endpoint_a_id", "endpoint_b_id"])
+def test_connect_rejects_each_missing_canonical_arg_and_malformed_values(sim, missing):
+    agent = sim.agents[0]
+    full = {"connector_project_id": "site_b_water_connector_001", "endpoint_a_id": "site_b_house_001", "endpoint_b_id": "site_b_water_generator_001"}
+    partial = {k: v for k, v in full.items() if k != missing}
+    result = sim.action_gate.evaluate(agent=agent, decision=BrainDecision(selected_action=CONNECT, action_args=partial), sim_state=sim)
+    assert not result.legal and f"missing_action_arg:{missing}" in result.blockers
+    for bad in (7, "has space", "a|b", ""):
+        result = sim.action_gate.evaluate(agent=agent, decision=BrainDecision(selected_action=CONNECT, action_args={**full, missing: bad}), sim_state=sim)
+        assert not result.legal and "malformed_action_args" in result.blockers, bad
+
+
+def test_start_args_cannot_smuggle_extra_semantics_or_non_strings(sim):
+    agent = sim.agents[0]
+    for args, token in (
+        ({"structure_type": ["house"]}, "action_arg_not_a_string:structure_type"),
+        ({"structure_type": "house", "site_id": "site_a"}, "unsupported_action_arg:site_id"),
+        ({"structure_type": "house", "required_resources": {"bricks": 0}}, "unsupported_action_arg:required_resources"),
+    ):
+        result = sim.action_gate.evaluate(agent=agent, decision=BrainDecision(selected_action=START, target_id="Build_Site_B", action_args=args), sim_state=sim)
+        assert not result.legal and token in result.blockers
