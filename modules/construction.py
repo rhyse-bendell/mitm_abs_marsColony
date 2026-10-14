@@ -805,11 +805,17 @@ class ConstructionManager:
         (project or {})["progress"] = progress
         return progress
 
-    def _site_has_capacity(self, site_id):
+    def _site_has_capacity(self, site_id, exclude_project_id=None):
+        """True when the site can hold one more project.
+
+        ``exclude_project_id`` is for a project that already occupies a slot (it was created
+        within capacity): it must not be counted against itself when it is started.
+        """
         site = self.sites.get(site_id)
         if not site:
             return False
-        return len(self._site_project_ids(site_id)) < site.capacity
+        occupied = [pid for pid in self._site_project_ids(site_id) if pid != exclude_project_id]
+        return len(occupied) < site.capacity
 
     def _is_site_buildable(self, site_id):
         site_conf = self.site_definitions.get(site_id, {})
@@ -981,7 +987,7 @@ class ConstructionManager:
         if not self._is_site_buildable(site_id):
             return False, "site_not_buildable"
         if not project.get("started"):
-            if not self._site_has_capacity(site_id):
+            if not self._site_has_capacity(site_id, exclude_project_id=resolved_id):
                 return False, "site_capacity_reached"
             project["started"] = True
             if resolved_id not in self.sites[site_id].started_structures:
