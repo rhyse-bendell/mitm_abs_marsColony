@@ -7,6 +7,24 @@
     "3. explicit constituent override (config 'constituent_overrides'); it REPLACES the generated value, it is never added to it",
     "4. legacy low-level mechanism overrides (compatibility/debug); these replace the mechanism value the constituent produced and are logged"
   ],
+  "profile_modes": {
+    "default": "broad_legacy",
+    "note": "A profile MODE decides how the lower-level mechanisms that are NOT owned by one of the seven constituents are set. It does not change the seven constituents or their gestalt generation.",
+    "modes": {
+      "broad_legacy": {
+        "label": "Broad legacy profile",
+        "residual_policy": "legacy construct->mechanism rules drive the residual mechanisms (current behavior; default for bare launches)",
+        "residual_mechanisms": []
+      },
+      "compact_panel": {
+        "label": "Compact seven-variable panel",
+        "residual_policy": "residual mechanisms are frozen at the compact-panel reference value; only the seven constituents vary",
+        "residual_mechanisms": ["communication_propensity", "artifact_consultation_tendency", "teammate_model_accuracy", "rule_accuracy", "build_readiness_sensitivity", "mismatch_detection_sensitivity", "validation_thoroughness"],
+        "residual_reference_value": 0.5,
+        "residual_reference_label": "compact-panel reference (a fixed neutral simulator value, NOT a claim about normal human performance)"
+      }
+    }
+  },
   "constructs": ["teamwork_potential", "taskwork_potential"],
   "constituents": {
     "dik_push_propensity": {

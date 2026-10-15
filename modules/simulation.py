@@ -463,7 +463,7 @@ class SimulationState:
                 **dict(agent_settings.get("constituent_overrides") or {}),
                 **dict(config.get("constituent_overrides") or {}),
             }
-            experimental_profile = resolve_experimental_profile(construct_values, constituent_overrides)
+            experimental_profile = resolve_experimental_profile(construct_values, constituent_overrides, profile_mode=run_settings.get("profile_mode"))
             mechanism_defaults = {
                 "communication_propensity": float(getattr(agent, "communication_propensity", 0.5)),
                 "goal_alignment": float(getattr(agent, "goal_alignment", 0.5)),
@@ -492,7 +492,16 @@ class SimulationState:
                 for k, v in mechanism_overrides.items()
                 if k in experimental_profile["constituent_mechanisms"] and abs(float(v) - experimental_profile["constituent_mechanisms"][k]) > 1e-9
             }
-            combined_overrides = {**experimental_profile["constituent_mechanisms"], **mechanism_overrides}
+            # Profile mode: residual mechanisms (not owned by a constituent) are either left to the legacy construct rules
+            # (broad_legacy) or frozen at the compact-panel reference (compact_panel). Constituent values and, last, explicit
+            # legacy low-level overrides still win over the frozen residuals.
+            residual_references = dict(experimental_profile.get("residual_mechanism_references") or {})
+            legacy_overrides_of_residuals = {
+                k: {"frozen_value": residual_references[k], "legacy_override": float(v)}
+                for k, v in mechanism_overrides.items()
+                if k in residual_references and abs(float(v) - residual_references[k]) > 1e-9
+            }
+            combined_overrides = {**residual_references, **experimental_profile["constituent_mechanisms"], **mechanism_overrides}
             resolved_constructs, resolved_mechanisms, resolved_hooks = self.construct_mapper.resolve_agent_profile(
                 construct_values=construct_values,
                 mechanism_overrides=combined_overrides,
@@ -500,6 +509,8 @@ class SimulationState:
             )
             experimental_profile["legacy_mechanism_overrides_supplied"] = dict(mechanism_overrides)
             experimental_profile["legacy_overrides_of_constituent_mechanisms"] = legacy_collisions
+            experimental_profile["legacy_overrides_of_residual_mechanisms"] = legacy_overrides_of_residuals
+            experimental_profile["final_mechanism_profile"] = {k: float(v) for k, v in resolved_mechanisms.items()}
             agent.experimental_profile = experimental_profile
             self.logger.log_event(self.time, "agent_experimental_profile", {"agent": config.get("name", role_id), **experimental_profile})
             agent.construct_values = resolved_constructs
@@ -1043,6 +1054,7 @@ class SimulationState:
             "status": cfg.get("status"),
             "precedence": list(cfg.get("precedence", [])),
             "run_level_settings": dict(self.experimental_settings),
+            **self._profile_mode_manifest(cfg),
             "memory_config": dict(cfg.get("memory", {})),
             "per_agent": {
                 a.name: {
@@ -1051,12 +1063,27 @@ class SimulationState:
                     "explicit_constituent_overrides": dict((getattr(a, "experimental_profile", {}) or {}).get("explicit_constituent_overrides", {})),
                     "resolved_constituents": dict((getattr(a, "experimental_profile", {}) or {}).get("resolved_constituents", {})),
                     "legacy_overrides_of_constituent_mechanisms": dict((getattr(a, "experimental_profile", {}) or {}).get("legacy_overrides_of_constituent_mechanisms", {})),
+                    "legacy_overrides_of_residual_mechanisms": dict((getattr(a, "experimental_profile", {}) or {}).get("legacy_overrides_of_residual_mechanisms", {})),
+                    "constituent_mechanisms": dict((getattr(a, "experimental_profile", {}) or {}).get("constituent_mechanisms", {})),
+                    "residual_mechanism_values": {k: float(getattr(a, "mechanism_profile", {}).get(k)) for k in ((getattr(a, "experimental_profile", {}) or {}).get("residual_mechanism_references") or {}) if k in getattr(a, "mechanism_profile", {})},
                     "resolved_mechanisms": dict(getattr(a, "mechanism_profile", {})),
                     "hook_effects": {f"{k[0]}::{k[1]}::{k[2]}": float(v) for k, v in sorted(getattr(a, "hook_effects", {}).items())},
                 }
                 for a in self.agents
             },
             "provenance_hashes": self._condition_provenance(),
+        }
+
+    def _profile_mode_manifest(self, cfg):
+        from modules.experimental_profile import resolve_profile_mode
+
+        record = resolve_profile_mode(self.experimental_settings.get("profile_mode"), config=cfg)
+        return {
+            "profile_mode": record["profile_mode"],
+            "profile_mode_label": record["profile_mode_label"],
+            "residual_policy": record["residual_policy"],
+            "residual_mechanism_references": record["residual_mechanism_references"],
+            "residual_reference_label": record["residual_reference_label"],
         }
 
     def _backend_settings_for_manifest(self):

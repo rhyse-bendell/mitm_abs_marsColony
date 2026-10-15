@@ -3,6 +3,7 @@
 A condition is: seed, duration, optional backend, and `experimental_settings`:
     {"constructs": {"teamwork_potential": x, "taskwork_potential": y},
      "constituent_overrides": {<any of the seven constituents>: value},
+     "profile_mode": "broad_legacy" (default) | "compact_panel",   # how residual (non-constituent) mechanisms are set
      "per_agent": {"Architect": {"constructs": {...}, "constituent_overrides": {...}}}}
 Explicit constituent overrides replace gestalt-generated values (see modules/experimental_profile.py).
 """
@@ -96,6 +97,7 @@ def main(argv=None) -> int:
     parser.add_argument("--taskwork", type=float, default=None, help="Taskwork Potential (0..1)")
     parser.add_argument("--set", action="append", default=[], metavar="CONSTITUENT=VALUE", help="explicit constituent override (repeatable)")
     parser.add_argument("--condition-json", default=None, help="JSON file with experimental_settings (CLI flags are applied on top)")
+    parser.add_argument("--profile-mode", default=None, help="broad_legacy (default) or compact_panel: how residual mechanisms are set")
     parser.add_argument("--backend", default="rule_brain")
     parser.add_argument("--out", default=None, help="write the summary JSON here")
     parser.add_argument("--project-root", default=None, help="session output root (default: temporary)")
@@ -108,6 +110,8 @@ def main(argv=None) -> int:
     if args.taskwork is not None:
         settings["constructs"]["taskwork_potential"] = args.taskwork
     settings["constituent_overrides"].update(parse_overrides(args.set))
+    if args.profile_mode:
+        settings["profile_mode"] = args.profile_mode
     summary = run_condition(seed=args.seed, duration_s=args.duration, experimental_settings=settings, project_root=args.project_root, brain_backend=args.backend, experiment_name="headless_condition")
     text = json.dumps(summary, indent=2, default=str)
     if args.out:

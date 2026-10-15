@@ -40,11 +40,40 @@ def load_experimental_profile_config(config_dir: Optional[str | Path] = None) ->
     return _load(str(path))
 
 
+def resolve_profile_mode(profile_mode: Optional[str] = None, *, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Resolve a profile mode name into its residual-mechanism policy (unknown names are an error, never a silent fallback)."""
+    cfg = config or load_experimental_profile_config()
+    modes = dict((cfg.get("profile_modes") or {}).get("modes") or {})
+    name = str(profile_mode or (cfg.get("profile_modes") or {}).get("default") or "broad_legacy")
+    if name not in modes:
+        raise ValueError(f"Unknown profile mode '{name}'. Known: {sorted(modes)}")
+    spec = modes[name]
+    residuals = list(spec.get("residual_mechanisms") or [])
+    reference = spec.get("residual_reference_value")
+    owned = {m for c in cfg["constituents"].values() for m in c["mechanisms"]}
+    overlap = sorted(set(residuals) & owned)
+    if overlap:
+        raise ValueError(f"Profile mode '{name}' freezes mechanisms owned by a constituent: {overlap}")
+    return {
+        "profile_mode": name,
+        "profile_mode_label": spec.get("label"),
+        "residual_policy": spec.get("residual_policy"),
+        "residual_mechanism_references": {m: float(reference) for m in residuals} if residuals and reference is not None else {},
+        "residual_reference_label": spec.get("residual_reference_label"),
+    }
+
+
+def available_profile_modes(config: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    cfg = config or load_experimental_profile_config()
+    return {k: v.get("label", k) for k, v in dict((cfg.get("profile_modes") or {}).get("modes") or {}).items()}
+
+
 def resolve_experimental_profile(
     construct_values: Optional[Dict[str, float]] = None,
     constituent_overrides: Optional[Dict[str, float]] = None,
     *,
     config: Optional[Dict[str, Any]] = None,
+    profile_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Resolve one agent's seven-variable profile.
 
@@ -82,7 +111,9 @@ def resolve_experimental_profile(
     for name, spec in cfg["constituents"].items():
         for mechanism in spec["mechanisms"]:
             mechanisms[mechanism] = resolved[name]
+    mode_record = resolve_profile_mode(profile_mode, config=cfg)
     return {
+        **mode_record,
         "schema": cfg.get("schema"),
         "status": cfg.get("status"),
         "gestalt_constructs": constructs,

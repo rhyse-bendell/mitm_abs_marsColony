@@ -44,6 +44,7 @@ def run_batch_experiment(settings, progress_callback=None, run_name_builder=None
             planner_config=deepcopy(resolved_settings.get("planner_config") or {}),
             construction_parameters=deepcopy(resolved_settings.get("construction_parameters") or {}),
             task_id=resolved_settings.get("task_id", "mars_colony"),
+            experimental_settings={"profile_mode": resolved_settings.get("profile_mode", "broad_legacy")},
             seed=(None if base_seed is None else int(base_seed) + run_index - 1),
             execution_metadata={
                 "batch_mode": True,
