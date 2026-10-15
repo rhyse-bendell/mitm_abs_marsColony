@@ -170,7 +170,7 @@ class BrainContextBuilder:
             "epistemic_refresh_pressure": float(epistemic.get("refresh_pressure", 0.0) or 0.0),
         }
 
-    def _affordances(self, agent, environment, build_readiness: Dict[str, Any] | None = None, phase_profile: Dict[str, Any] | None = None, team_state: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
+    def _affordances(self, agent, environment, build_readiness: Dict[str, Any] | None = None, phase_profile: Dict[str, Any] | None = None, team_state: Dict[str, Any] | None = None, support_subgoals: List[Dict[str, Any]] | None = None) -> List[Dict[str, Any]]:
         if phase_profile is None:
             phase_profile = self._phase_profile(environment)
         if build_readiness is None:
@@ -217,6 +217,8 @@ class BrainContextBuilder:
         productive_coordination = bool(nearby_teammates > 0 and (agent.known_gaps or any(teammate_help_signals.values()) or has_artifacts))
         communication_no_effect_streak = int((getattr(agent, "communication_state", {}) or {}).get("no_effect_streak", 0) or 0)
 
+        consult_assessment = dict((team_state or {}).get("consult_assessment") or {})
+
         def utility_for(action: ExecutableActionType, target_kind: str | None = None):
             if action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
                 base = 0.95 if stage == "early" else (0.55 if not readiness_ok else 0.25)
@@ -232,6 +234,8 @@ class BrainContextBuilder:
             if action == ExecutableActionType.EXTERNALIZE_PLAN:
                 return 0.8 if stage in {"early", "execution"} else 0.45
             if action == ExecutableActionType.CONSULT_TEAM_ARTIFACT:
+                if consult_assessment.get("has_artifacts") and not consult_assessment.get("useful"):
+                    return 0.05  # nothing new to learn from it: the same artifact version, no new context
                 return 0.6 if has_artifacts else 0.2
             if action == ExecutableActionType.TRANSPORT_RESOURCES:
                 if materially_incomplete_projects:
@@ -264,7 +268,9 @@ class BrainContextBuilder:
             {"action_type": ExecutableActionType.COMMUNICATE.value, "target_id": "nearby_agent", "target_class": "team", "utility": utility_for(ExecutableActionType.COMMUNICATE)},
             {"action_type": ExecutableActionType.REQUEST_ASSISTANCE.value, "target_id": "nearby_agent", "target_class": "team", "utility": utility_for(ExecutableActionType.REQUEST_ASSISTANCE)},
             {"action_type": ExecutableActionType.EXTERNALIZE_PLAN.value, "target_id": "whiteboard", "target_class": "artifact", "utility": utility_for(ExecutableActionType.EXTERNALIZE_PLAN)},
-            {"action_type": ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, "target_id": "whiteboard", "target_class": "artifact", "utility": utility_for(ExecutableActionType.CONSULT_TEAM_ARTIFACT)},
+            {"action_type": ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, "target_id": "whiteboard", "target_class": "artifact", "utility": utility_for(ExecutableActionType.CONSULT_TEAM_ARTIFACT),
+             "consult_useful": bool(consult_assessment.get("useful")), "consult_redundant": bool(consult_assessment.get("has_artifacts")) and not bool(consult_assessment.get("useful")),
+             "consult_reasons": list(consult_assessment.get("reasons") or []), "consult_artifact_id": consult_assessment.get("artifact_id")},
         ]
         for item in legal:
             if item.get("action_type") in {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.REQUEST_ASSISTANCE.value}:
@@ -410,6 +416,11 @@ class BrainContextBuilder:
                 }
             )
 
+        if support_subgoals:
+            from modules.support_reasoning import annotate_affordances
+
+            annotate_affordances(legal, support_subgoals)
+
         task_model = getattr(agent, "task_model", None)
         if not task_model:
             return legal
@@ -433,6 +444,33 @@ class BrainContextBuilder:
                 affordance["task_parameters"] = dict(params.metadata)
             filtered.append(affordance)
         return filtered
+
+    @staticmethod
+    def _support_reasoning(agent, sim_state, environment) -> Dict[str, Any]:
+        """Support subgoals this agent can recognise from the DIK it holds (read-only; chooses nothing)."""
+        from modules.support_accounting import load_support_model
+        from modules.support_reasoning import derive_support_subgoals, load_support_reasoning
+
+        task_id = getattr(getattr(sim_state, "task_model", None), "task_id", None) or "mars_colony"
+        config = load_support_reasoning(task_id)
+        try:
+            model = load_support_model(task_id)
+        except FileNotFoundError:
+            model = None
+        construction = environment.construction
+        if not config or not model or not hasattr(construction, "list_connection_options"):
+            return {"subgoals": [], "held_basis_only": True}
+        data_ids, info_ids, _ = agent._held_dik_ids()
+        subgoals = derive_support_subgoals(
+            config=config,
+            support_model=model,
+            held_ids=set(data_ids) | set(info_ids),
+            projects=construction.projects,
+            links=[dict(l) for l in construction.connectors],
+            connection_options=construction.list_connection_options(),
+            start_structure_types=construction.startable_structure_types(),
+        )
+        return {"subgoals": subgoals, "held_basis_only": True}
 
     @staticmethod
     def _bricks_available(environment, agent=None) -> bool:
@@ -641,7 +679,9 @@ class BrainContextBuilder:
         }
 
         build_readiness = self._build_readiness(agent, structure_summary, environment, team_state=team_state)
-        action_affordances = self._affordances(agent, environment, build_readiness=build_readiness, phase_profile=phase_profile, team_state=team_state)
+        team_state["consult_assessment"] = agent._consult_assessment(environment, sim_state=sim_state)
+        support_reasoning = self._support_reasoning(agent, sim_state, environment)
+        action_affordances = self._affordances(agent, environment, build_readiness=build_readiness, phase_profile=phase_profile, team_state=team_state, support_subgoals=support_reasoning["subgoals"])
 
         static_task_context = {
             "mission": self.scenario_name,
@@ -672,6 +712,8 @@ class BrainContextBuilder:
             # Observable resource fact (a pile still holds bricks, or this agent carries one); transport itself is offered per project.
             "brick_source_available": self._bricks_available(environment, agent),
         }
+        # Recognised support deficits are derived from what THIS agent holds plus observable construction state.
+        # (`support_deficits` above is the unfiltered observation of attached-link requirements, kept as before.)
 
         mechanism_profile = {
             "communication_propensity": getattr(agent, "communication_propensity", 0.5),
@@ -679,6 +721,7 @@ class BrainContextBuilder:
             "help_tendency": getattr(agent, "help_tendency", 0.5),
             "build_speed": getattr(agent, "build_speed", 0.5),
             "rule_accuracy": getattr(agent, "rule_accuracy", 0.5),
+            "artifact_consultation_tendency": agent._trait_value("artifact_consultation_tendency"),
         }
         individual_cognitive_state = {
             "goal_stack": list(agent.goal_stack),
@@ -689,6 +732,7 @@ class BrainContextBuilder:
             "information_summary": information_summary,
             "knowledge_summary": knowledge_summary,
             "known_gaps": list(agent.known_gaps),
+            "support_reasoning": support_reasoning,
             "certainty_signals": {
                 "definitely_known": knowledge_summary[-5:],
                 "uncertain_or_missing": sorted(set(list(agent.known_gaps) + (["validated_plan_missing"] if active_plan is None else []))),

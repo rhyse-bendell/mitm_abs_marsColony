@@ -1,0 +1,20 @@
+{
+  "schema": "support_reasoning/1",
+  "description": "Task-package knowledge gates for support reasoning (consumed by modules/support_reasoning.py). A Pilot may recognise a support requirement, and see which actions would address it, only if it HOLDS at least one of the listed DIK elements (own role source, team source, communication, artifact, or derivation). The structural facts (which structure kinds provide/consume which support and which connector type carries it) come from support_model.json; nothing here names an action or an order.",
+  "requirement_knowledge": {
+    "housing": {
+      "water": ["D_ARCH_HOUSE_NEEDS_FOOD_AND_WATER", "I_ARCH_HOUSING_DEPENDENCIES"],
+      "food": ["D_ARCH_HOUSE_NEEDS_FOOD_AND_WATER", "I_ARCH_HOUSING_DEPENDENCIES", "D_BOT_GREENHOUSE_CONNECTED_TO_HOUSING"]
+    },
+    "greenhouse": {
+      "water": ["D_BOT_GREENHOUSE_NEEDS_WATER", "I_BOT_GREENHOUSE_DEPENDENCIES"]
+    }
+  },
+  "provision_knowledge": {
+    "water": ["D_ENG_WATER_CONNECTOR_GENERATOR_TO_HOUSING_OR_GREENHOUSE", "D_ENG_WATERGEN_REQUIRED", "I_ENG_CONNECTOR_RULES"],
+    "food": ["D_ENG_FOOD_CONNECTOR_GREENHOUSE_TO_HOUSING", "I_ENG_CONNECTOR_RULES"]
+  },
+  "provider_capacity_knowledge": {
+    "water": ["D_ENG_WATERGEN_MAX_2_STRUCTURES", "I_ENG_DISTRIBUTION_TOPOLOGY"]
+  }
+}

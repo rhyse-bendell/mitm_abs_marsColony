@@ -1238,8 +1238,8 @@ class RuleBrain(BrainProvider):
             suppressed_sources.add("Team_Info")
         for idx, affordance in enumerate(sorted_affordances):
             action_type = str(affordance.get("action_type") or ExecutableActionType.WAIT.value)
-            if allowed and action_type not in allowed:
-                continue
+            if allowed and action_type not in allowed and not affordance.get("addresses_support_subgoals"):
+                continue  # a knowledge-grounded support subgoal is not confined to the current method step's action family
             score = 1.0 + float(affordance.get("utility", 0.0))
             if action_type == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value:
                 target_id = str(affordance.get("target_id") or "")
@@ -1288,6 +1288,14 @@ class RuleBrain(BrainProvider):
             utility = float(affordance.get("utility", 0.0))
             score = utility + self.MODE_ACTION_PREFERENCES.get(selected_mode, {}).get(action_type, 0.0)
             score += 0.6 * features["goal_pressure"] + 0.4 * features["build_opportunity"]
+            if action_type == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value:
+                if affordance.get("consult_redundant"):
+                    score -= 3.0  # same artifact version, no new context or knowledge: tendency cannot make this repeatable
+                elif affordance.get("consult_useful"):
+                    score += 0.8 * float(mechanism_profile.get("artifact_consultation_tendency", 0.5))
+            if affordance.get("addresses_support_subgoals"):
+                # A recognised (knowledge-grounded) support deficit this action would address; goal alignment scales it.
+                score += 0.9 + 1.4 * float(mechanism_profile.get("goal_alignment", 0.5))
             if action_type == ExecutableActionType.REQUEST_ASSISTANCE.value:
                 score += 0.9 * features["epistemic_deficit"] + 0.5 * float(mechanism_profile.get("help_tendency", 0.5))
                 score -= 0.8 * features["loop_pressure"]
@@ -1363,7 +1371,7 @@ class RuleBrain(BrainProvider):
             if features.get("coordination_deadlock_pressure", 0.0) >= 0.55:
                 if action_type == ExecutableActionType.EXTERNALIZE_PLAN.value and features.get("team_plan_available", 0.0) <= 0.0:
                     score += 3.1
-                if action_type == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value and features.get("team_plan_available", 0.0) > 0.0:
+                if action_type == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value and features.get("team_plan_available", 0.0) > 0.0 and not affordance.get("consult_redundant"):
                     score += 3.2
             if (
                 action_type == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value
@@ -1516,7 +1524,7 @@ class RuleBrain(BrainProvider):
                 chosen = fallback_meta
         if features.get("coordination_deadlock_pressure", 0.0) >= 0.55:
             if features.get("team_plan_available", 0.0) > 0.0:
-                consult = next((a for a in sorted_affordances if a.get("action_type") == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value), None)
+                consult = next((a for a in sorted_affordances if a.get("action_type") == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value and not a.get("consult_redundant")), None)
                 if consult is not None:
                     chosen = consult
             else:

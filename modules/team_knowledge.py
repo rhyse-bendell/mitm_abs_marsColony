@@ -25,6 +25,7 @@ class TeamArtifact:
     knowledge_summary: List[str] = field(default_factory=list)
     validation_state: str = "unvalidated"
     consulted_by: List[str] = field(default_factory=list)
+    carried_information: List[Any] = field(default_factory=list)  # Information objects the author held and externalized
 
 
 @dataclass

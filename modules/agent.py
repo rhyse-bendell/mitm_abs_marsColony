@@ -530,6 +530,8 @@ class Agent:
             "pending_outbound_messages": [],
             "commitment_expired_emitted": False,
         }
+        self.artifact_consult_memory = {}  # artifact_id -> what was read (version signature, context, DIK gained)
+        self.artifact_consult_sig_memory = {}  # content signature -> context when it was last read (a re-posted identical plan is not new)
         self.artifact_coordination_state = {
             "last_consulted_artifact_id": None,
             "last_consulted_time": -1.0,
@@ -994,14 +996,22 @@ class Agent:
         last_progress_time = float(self.progress_tracker.get("last_progress_time", -1.0) or -1.0)
         recent_progress = last_progress_time >= 0.0 and (now_ts - last_progress_time) <= 8.0
         stagnation = meta.setdefault("stagnation_counters", {"epistemic": 0, "support": 0, "closure": 0, "wait": 0})
-        support_stale = max([int(v or 0) for v in self.support_goal_nonexec_counts.values()] + [0])
-        stagnation["support"] = max(int(stagnation.get("support", 0) or 0), support_stale)
+        # Current support stagnation = how long the worst support goal has been non-executable NOW. (It used to be
+        # max(previous, value) over every recurrence key, so it never fell once it reached 3 and the regrounding
+        # override then replaced every non-productive Pilot choice for the rest of the run.)
+        support_stale = max([int(v or 0) for k, v in self.support_goal_nonexec_counts.items() if ":" not in str(k)] + [0])
+        stagnation["support"] = support_stale
+        epistemic_signals = 0
         if int(self.communication_state.get("no_effect_streak", 0) or 0) >= 3:
-            stagnation["epistemic"] = int(stagnation.get("epistemic", 0) or 0) + 1
+            epistemic_signals += 1
         if int(self.progress_tracker.get("observe_no_effect", 0) or 0) >= 3:
-            stagnation["epistemic"] = int(stagnation.get("epistemic", 0) or 0) + 1
-        if int(self.artifact_coordination_state.get("consecutive_same_artifact_consults", 0) or 0) >= 2:
-            stagnation["epistemic"] = int(stagnation.get("epistemic", 0) or 0) + 1
+            epistemic_signals += 1
+        if int(self.artifact_coordination_state.get("consecutive_same_artifact_consults", 0) or 0) >= 2 and not bool(self.artifact_coordination_state.get("last_consult_useful", False)):
+            epistemic_signals += 1  # repeated consults only count as a loop when the last one taught nothing new
+        if epistemic_signals:
+            stagnation["epistemic"] = int(stagnation.get("epistemic", 0) or 0) + epistemic_signals
+        else:
+            stagnation["epistemic"] = max(0, int(stagnation.get("epistemic", 0) or 0) - 1)  # the loop signal decays when the evidence stops
         if action == ExecutableActionType.WAIT:
             stagnation["wait"] = int(stagnation.get("wait", 0) or 0) + 1
         else:
@@ -4089,6 +4099,100 @@ class Agent:
                 return True
         return False
 
+    @staticmethod
+    def _artifact_version_signature(artifact):
+        """Content/version identity of an artifact, excluding consultation bookkeeping (uptake, consulted_by)."""
+        import hashlib
+        import json
+
+        content = artifact.content if isinstance(artifact.content, dict) else {}
+        if artifact.artifact_type == "team_plan":
+            # What a plan SAYS (status, goals, targets, assignments), not response bookkeeping (supporters, event times).
+            content = {k: content.get(k) for k in ("status", "goal_ids", "goal_summary", "project_targets", "assignments_by_role", "blocked_reasons")}
+        elif artifact.artifact_id.startswith("construction:"):
+            content = {}  # the summary line carries the state; provenance timelines only grow
+        payload = json.dumps(
+            {
+                "summary": "" if artifact.artifact_type == "team_plan" else artifact.summary,  # a plan summary embeds its own id
+                "validation": artifact.validation_state,
+                "content": content,
+                "knowledge": list(artifact.knowledge_summary or []),
+                "carried": sorted(str(getattr(i, "id", i)) for i in (getattr(artifact, "carried_information", None) or [])),
+            },
+            sort_keys=True,
+            default=str,
+        )
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+    @staticmethod
+    def _artifact_preference_key(artifact):
+        return (
+            artifact.artifact_type == "team_plan" and str((artifact.content or {}).get("status", "")).lower() == "committed",
+            artifact.artifact_type == "team_plan",
+            artifact.validation_state == "validated",
+            artifact.uptake_count,
+        )
+
+    def _artifact_consult_reasons(self, aid, artifact, held_info, blocker_category, goal):
+        """Why reading this artifact now could teach the agent something (empty list = nothing new)."""
+        signature = self._artifact_version_signature(artifact)
+        seen = self.artifact_consult_sig_memory.get(signature)
+        reasons = []
+        carried_new = sorted(str(i.id) for i in (getattr(artifact, "carried_information", None) or []) if getattr(i, "id", None) not in held_info)
+        if seen is None:
+            reasons.append("artifact_changed_since_consult" if aid in self.artifact_consult_memory else "unseen")
+        if carried_new:
+            reasons.append("carries_unheld_dik")
+        if seen is not None and not reasons:
+            if blocker_category and str(blocker_category) not in {"none", ""} and seen.get("blocker_category") != blocker_category:
+                reasons.append("blocker_context_changed")
+            elif goal and seen.get("goal") != goal:
+                reasons.append("goal_context_changed")
+        return reasons, carried_new
+
+    def _planless_consult(self):
+        return (
+            str(getattr(self.current_plan, "trigger_reason", "") or "") == "no_active_plan"
+            or str((self.control_state or {}).get("last_transition_reason", "") or "") == "no_active_plan"
+        )
+
+    def _consult_assessment(self, environment, sim_state=None):
+        """Read-only: would consulting a team artifact now tell this agent anything new?
+
+        Useful when an artifact is unseen, changed since this agent last read it, carries information the agent does
+        not hold, or the agent's blocker/goal context changed since the last read. Otherwise the consultation is
+        redundant (same version, nothing to gain). Mutates nothing.
+        """
+        artifacts = dict(getattr(getattr(sim_state, "team_knowledge_manager", None), "artifacts", {}) or {})
+        if self._planless_consult():
+            # With no active plan only a team plan can be consulted (others are skipped at execution), so only those count.
+            artifacts = {aid: a for aid, a in artifacts.items() if a.artifact_type == "team_plan" and not self._in_cooldown("planless_consult_artifact", aid, sim_state=sim_state)}
+        if not artifacts:
+            return {"has_artifacts": False, "useful": False, "reasons": [], "artifact_id": None, "suppression_reason": "no_artifacts"}
+        _, held_info, _ = self._held_dik_ids()
+        context = self._artifact_coordination_context_signature(environment, sim_state=sim_state)
+        blocker_category = context.get("blocker_category")
+        goal = str(self.goal or "")
+        rows = []
+        for aid, artifact in artifacts.items():
+            reasons, carried_new = self._artifact_consult_reasons(aid, artifact, held_info, blocker_category, goal)
+            rows.append((aid, artifact, reasons, carried_new))
+        useful = [r for r in rows if r[2]]
+        pool = useful or rows
+        best = sorted(pool, key=lambda r: self._artifact_preference_key(r[1]), reverse=True)[0]
+        aid, artifact, reasons, carried_new = best
+        return {
+            "has_artifacts": True,
+            "useful": bool(reasons),
+            "artifact_id": aid,
+            "reasons": list(reasons),
+            "artifact_changed_since_consult": "artifact_changed_since_consult" in reasons,
+            "carries_unheld_dik": carried_new,
+            "blocker_relevant": "blocker_context_changed" in reasons,
+            "goal_relevant": "goal_context_changed" in reasons,
+            "suppression_reason": None if reasons else "same_version_no_new_context",
+        }
+
     def _artifact_action_is_redundant(self, action_type, environment, sim_state=None, artifact_id=None):
         state = self.artifact_coordination_state
         context = self._artifact_coordination_context_signature(environment, sim_state=sim_state)
@@ -4139,8 +4243,51 @@ class Agent:
             return bool(recent_externalization and same_signature and no_novelty)
         return False
 
-    def _record_artifact_consult(self, artifact_id, environment, sim_state=None):
+    def _adopt_artifact_information(self, artifact, sim_state):
+        """Artifact-mediated acquisition: take the information objects the author externalized that this agent lacks."""
+        gained = 0
+        _, held_info, _ = self._held_dik_ids()
+        for info in list(getattr(artifact, "carried_information", None) or []):
+            if getattr(info, "id", None) in held_info:
+                continue
+            self.mental_model["information"].add(info)
+            gained += 1
+            self.known_gaps.discard(f"information:{info.id}")
+            if self.name not in info.acquired_by:
+                info.acquired_by[self.name] = {"mode": "artifact", "from": artifact.author, "artifact_id": artifact.artifact_id}
+            DIK_LOG.append({"time": getattr(sim_state, "time", 0.0), "agent": self.name, "type": "Information", "id": info.id, "mode": "artifact", "from": artifact.author})
+            self._emit_event(sim_state, "dik_acquired_from_artifact", {"agent": self.name, "information_id": info.id, "artifact_id": artifact.artifact_id, "author": artifact.author})
+        if gained:
+            self.last_dik_change_time = float(getattr(sim_state, "time", 0.0))
+        return gained
+
+    def _attach_carried_information(self, artifact, sim_state):
+        """The author externalizes the plan-relevant information it holds (task-declared); fidelity may drop one item."""
+        from modules.support_reasoning import load_support_reasoning, plan_relevant_dik_ids
+
+        if artifact is None:
+            return
+        relevant = plan_relevant_dik_ids(load_support_reasoning(getattr(getattr(sim_state, "task_model", None), "task_id", None) or "mars_colony"))
+        held = sorted((i for i in self.mental_model["information"] if getattr(i, "id", None) in relevant), key=lambda i: str(i.id))
+        fidelity = (self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5) + self._trait_value("rule_accuracy")) / 2.0
+        if held and fidelity < 0.5:
+            held = held[:-1]
+        artifact.carried_information = held
+
+    def _record_artifact_consult(self, artifact_id, environment, sim_state=None, dik_gained=0, useful=False):
+        artifact = getattr(getattr(sim_state, "team_knowledge_manager", None), "artifacts", {}).get(artifact_id)
+        if artifact is not None:
+            ctx = self._artifact_coordination_context_signature(environment, sim_state=sim_state)
+            self.artifact_consult_sig_memory[self._artifact_version_signature(artifact)] = {"blocker_category": ctx.get("blocker_category"), "goal": str(self.goal or ""), "time": ctx["now_ts"]}
+            self.artifact_consult_memory[artifact_id] = {
+                "signature": self._artifact_version_signature(artifact),
+                "time": ctx["now_ts"],
+                "blocker_category": ctx.get("blocker_category"),
+                "goal": str(self.goal or ""),
+                "dik_gained": int(dik_gained),
+            }
         state = self.artifact_coordination_state
+        state["last_consult_useful"] = bool(useful)
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
         if str(state.get("last_consulted_artifact_id")) == str(artifact_id):
             state["consecutive_same_artifact_consults"] = int(state.get("consecutive_same_artifact_consults", 0) or 0) + 1
@@ -6722,6 +6869,42 @@ class Agent:
         }
         return request
 
+    def _emit_support_reasoning_events(self, sim_state, context, decision):
+        """Observability only: which support deficits this agent can recognise, and Pilot actions that address one."""
+        try:
+            subgoals = list(((context.individual_cognitive_state or {}).get("support_reasoning") or {}).get("subgoals") or [])
+        except AttributeError:
+            return
+        signature = tuple(sorted((s["subgoal_id"], bool(s["means_known"])) for s in subgoals))
+        if signature != getattr(self, "_support_subgoal_signature", ()):
+            self._support_subgoal_signature = signature
+            if subgoals:
+                self._emit_event(
+                    sim_state,
+                    "support_deficit_recognized",
+                    {
+                        "agent": self.name,
+                        "subgoals": [
+                            {"subgoal_id": s["subgoal_id"], "support": s["support"], "consumer_type": s["consumer_type"], "means_known": bool(s["means_known"]), "requirement_basis": list(s["requirement_basis"]), "means_basis": list(s["means_basis"])}
+                            for s in subgoals
+                        ],
+                    },
+                )
+        args = decision_action_args(decision)
+        for aff in list(getattr(context, "action_affordances", []) or []):
+            if (
+                aff.get("addresses_support_subgoals")
+                and aff.get("action_type") == decision.selected_action.value
+                and str(aff.get("target_id") or "") == str(decision.target_id or "")
+                and dict(aff.get("action_args") or {}) == dict(args or {})
+            ):
+                self._emit_event(
+                    sim_state,
+                    "support_subgoal_action_selected",
+                    {"agent": self.name, "action": decision.selected_action.value, "target_id": decision.target_id, "action_args": dict(args or {}), "subgoal_ids": list(aff["addresses_support_subgoals"])},
+                )
+                break
+
     def _select_decision_through_pilot_adapter(self, sim_state, context, trigger_reason, runtime=None):
         """Synchronous Pilot selection through this agent's PilotAdapter.
 
@@ -6748,6 +6931,7 @@ class Agent:
         if response.controller_state:
             context.individual_cognitive_state["control_state"] = dict(response.controller_state)
         self._pilot_decision_anchor = decision  # a fresh Pilot decision (e.g. a re-query) is Pilot-authored
+        self._emit_support_reasoning_events(sim_state, context, decision)
         self._emit_event(
             sim_state,
             "pilot_selection_via_adapter",
@@ -9599,7 +9783,8 @@ class Agent:
         if decision.selected_action == ExecutableActionType.TRANSPORT_RESOURCES:
             action["duration"] = self._scaled_duration(action.get("duration", 30.0)) * self._duration_scale("transport_resources")
             exact_project = str(decision.target_id or "") in environment.construction.projects
-            build_selection = self._select_build_target(
+            bridge_named = str(decision.target_id or "") == "bridge_bc"
+            build_selection = None if bridge_named else self._select_build_target(
                 environment,
                 require_readiness=False,
                 include_project=True,
@@ -9608,6 +9793,13 @@ class Agent:
                 sim_state=sim_state,
                 require_supplied_target=exact_project,  # an exact project is delivered to or reported blocked, never swapped
             )
+            if bridge_named:
+                # The Pilot named the capacity-unlock bridge: ground it as named. (A bridge is not a project dict, so the
+                # project selector used to swap in some unfinished project instead.)
+                action["project_id"] = "bridge_bc"
+                bridge_point = environment.get_interaction_target_position("bridge_bc", from_position=self.position)
+                if bridge_point is not None:
+                    action["target"] = bridge_point
             if exact_project and not isinstance(build_selection, dict):
                 self._emit_event(sim_state, "action_legality_failed", {"planner_action_type": decision.selected_action.value, "failure_category": "project_does_not_need_material", "project_id": decision.target_id, "blockers": ["project_does_not_need_material"]})
                 return [{"type": "idle", "duration": 1.0, "priority": 1, "decision_action": ExecutableActionType.WAIT.value, "blocked_action": self._action_gate_decision_label(decision), "blockers": ["project_does_not_need_material"]}]
@@ -10702,7 +10894,7 @@ class Agent:
                     rules = rules[:-1]
                 if hasattr(sim_state.team_knowledge_manager, "propose_team_plan"):
                     plan_id = f"{self.name}-{int(sim_state.time*10)}"
-                    sim_state.team_knowledge_manager.propose_team_plan(
+                    proposed_artifact = sim_state.team_knowledge_manager.propose_team_plan(
                         plan_id=plan_id,
                         proposed_by=self.name,
                         sim_time=sim_state.time,
@@ -10718,6 +10910,7 @@ class Agent:
                         expires_at=sim_state.time + max(45.0, 50.0 + (60.0 * ext_signal)),
                         supporters=[self.name],
                     )
+                    self._attach_carried_information(proposed_artifact, sim_state)
                 else:
                     sim_state.team_knowledge_manager.externalize_artifact(
                         artifact_id=artifact_id,
@@ -10763,10 +10956,7 @@ class Agent:
                 _set_action_stage(action, "mutation_execution_started", {"target_id": "whiteboard"})
                 artifacts = dict(sim_state.team_knowledge_manager.artifacts or {})
                 if artifacts:
-                    planless_consult = (
-                        str(getattr(self.current_plan, "trigger_reason", "") or "") == "no_active_plan"
-                        or str((self.control_state or {}).get("last_transition_reason", "") or "") == "no_active_plan"
-                    )
+                    planless_consult = self._planless_consult()
                     candidate_artifacts = list(artifacts.values())
                     if planless_consult:
                         candidate_artifacts = [
@@ -10774,16 +10964,13 @@ class Agent:
                             if a.artifact_type == "team_plan"
                             and not self._in_cooldown("planless_consult_artifact", a.artifact_id, sim_state=sim_state)
                         ]
-                    preferred = sorted(
-                        candidate_artifacts,
-                        key=lambda a: (
-                            a.artifact_type == "team_plan" and str((a.content or {}).get("status", "")).lower() == "committed",
-                            a.artifact_type == "team_plan",
-                            a.validation_state == "validated",
-                            a.uptake_count,
-                        ),
-                        reverse=True,
-                    )[0] if candidate_artifacts else None
+                    assessment = self._consult_assessment(environment, sim_state=sim_state)
+                    _, held_info_now, _ = self._held_dik_ids()
+                    exec_ctx = self._artifact_coordination_context_signature(environment, sim_state=sim_state)
+                    reasons_by_id = {a.artifact_id: self._artifact_consult_reasons(a.artifact_id, a, held_info_now, exec_ctx.get("blocker_category"), str(self.goal or ""))[0] for a in candidate_artifacts}
+                    useful_ids = {aid for aid, rs in reasons_by_id.items() if rs}
+                    consult_pool = [a for a in candidate_artifacts if a.artifact_id in useful_ids] or candidate_artifacts
+                    preferred = sorted(consult_pool, key=self._artifact_preference_key, reverse=True)[0] if consult_pool else None
                     if preferred is None:
                         _set_action_stage(
                             action,
@@ -10800,7 +10987,21 @@ class Agent:
                             },
                         )
                         continue
-                    if self._artifact_action_is_redundant(ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, environment, sim_state=sim_state, artifact_id=preferred.artifact_id):
+                    preferred_reasons = list(reasons_by_id.get(preferred.artifact_id, []))
+                    self._emit_event(
+                        sim_state,
+                        "artifact_consult_assessed",
+                        {
+                            "artifact_id": preferred.artifact_id,
+                            "useful": bool(preferred_reasons),
+                            "reasons": preferred_reasons,
+                            "artifact_changed_since_consult": "artifact_changed_since_consult" in preferred_reasons,
+                            "blocker_relevant": "blocker_context_changed" in preferred_reasons,
+                            "goal_relevant": "goal_context_changed" in preferred_reasons,
+                            "suppression_reason": None if preferred_reasons else "same_version_no_new_context",
+                        },
+                    )
+                    if not preferred_reasons or self._artifact_action_is_redundant(ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, environment, sim_state=sim_state, artifact_id=preferred.artifact_id):
                         _set_action_stage(
                             action,
                             "mutation_execution_blocked",
@@ -10835,8 +11036,10 @@ class Agent:
                     ) / 4.0
                     if preferred.artifact_type == "team_plan" and str((preferred.content or {}).get("status", "")).lower() == "committed":
                         adopt_prob = min(1.0, adopt_prob + (0.2 * self._trait_value("goal_alignment")))
+                    dik_gained = 0
                     if self._rng.random() <= adopt_prob:
                         sim_state.team_knowledge_manager.adopt_artifact(preferred.artifact_id, self.name, sim_state.time)
+                        dik_gained = self._adopt_artifact_information(preferred, sim_state)
                     if planless_consult and preferred.artifact_type != "team_plan":
                         self._set_cooldown(
                             "planless_consult_artifact",
@@ -10897,7 +11100,8 @@ class Agent:
                                 self.team_plan_state.setdefault("pending_outbound_plan_responses", []).append(response_msg)
                                 self._mark_team_plan_response_emitted(sim_state, plan_summary, response_type)
                     self.activity_log.append(f"Consulted shared artifact {preferred.artifact_id}")
-                    self._record_artifact_consult(preferred.artifact_id, environment, sim_state=sim_state)
+                    self._record_artifact_consult(preferred.artifact_id, environment, sim_state=sim_state, dik_gained=dik_gained, useful=bool(preferred_reasons))
+                    self._emit_event(sim_state, "artifact_consult_outcome", {"artifact_id": preferred.artifact_id, "reasons": preferred_reasons, "dik_gained": dik_gained, "useful": bool(preferred_reasons)})
                     self._recompute_project_state_after_dik_change(
                         sim_state=sim_state,
                         trigger_source=f"artifact_consult:{preferred.artifact_id}",
