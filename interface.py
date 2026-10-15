@@ -1897,6 +1897,11 @@ class MarsColonyInterface:
             "carry_capacity": max(1, int(self.construction_param_vars["carry_capacity"].get())),
         }
 
+    def _selected_profile_mode(self):
+        var = getattr(self, "profile_mode_var", None)
+        labels = getattr(self, "_profile_mode_labels", {}) or {}
+        return labels.get(var.get(), "broad_legacy") if var is not None else "broad_legacy"
+
     def _collect_experiment_settings(self):
         selected_backend, backend_options = self._collect_brain_backend_config()
         planner_config = self._collect_global_planner_config()
@@ -1913,7 +1918,7 @@ class MarsColonyInterface:
             "brain_backend_options": backend_options,
             "planner_config": planner_config,
             "construction_parameters": construction_parameters,
-            "profile_mode": self._profile_mode_labels.get(self.profile_mode_var.get(), "broad_legacy"),
+            "profile_mode": self._selected_profile_mode(),
             "base_dt": 1.0,
         }
 
