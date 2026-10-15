@@ -188,3 +188,27 @@ Findings:
   provisions are reconstructable per element.
 - Regression (related test files, 511 tests): 81 failed vs 80 at c25d9c6; the single extra failure was a GUI-stub test broken by the
   new profile control (fixed in the next commit); the remaining failures are a subset of the baseline failures.
+
+
+## CONSULT LOOP FIX (seed 2) and proof-matrix rerun (2026-10-15)
+Trace (seed 2, neutral .5/.5): Architect and Botanist selected CONSULT_TEAM_ARTIFACT every ~2 s (467 selections / 467 episodes in
+600 s) but only 6 consults EXECUTED. Cause chain: (1) the Pilot's consult was correct and "useful" by the existing consult
+assessment (artifact `unseen`, carries unheld DIK); (2) the Mecha's metacognitive regulation
+(`_apply_metacognitive_regulation`: `support_stagnation >= 3` from a support goal that stayed non-executable) replaced every
+non-productive Pilot choice, including that consult, with the `reassess_plan` regrounding fallback BEFORE it ran (agents never
+moved: `target None`, position constant); (3) since the consult never ran, no consult memory was written, the artifact stayed
+"unseen", and the stagnation counter never fell - a closed loop. The assessment was right; the substitution defeated it.
+Fix (one condition, no coefficient/utility change): the regrounding fallback no longer replaces a CONSULT that the existing
+`_consult_assessment` marks useful (unseen / revised artifact / unheld carried DIK / changed blocker or goal context). A consult
+that would teach nothing (same version, nothing new) is still replaced as before. New event
+`metacognitive_regrounding_deferred_useful_consult`. Tests: tests/test_consult_loop.py (1-7).
+Seed-2 diagnostic (600 s, before -> after): consult selections 467 -> 89; consult episodes 467 -> 87; consult executions 6 -> 67;
+distinct artifacts consulted 5 -> 8; DIK gained from artifacts 0 -> 6; externalizations 2 -> 2; taskwork actions 77 -> 175;
+validated structures 0 -> 2; executed consults assessed not-useful 0 -> 0 (so no repeated unchanged consults executed);
+agent-artifact pairs consulted >1 time 1 -> 17 (each was a revised/changed artifact). Seeds 0 and 1 are IDENTICAL before/after
+(78/99 selections, 57/70 executions): legitimate consultation is untouched.
+Backup metric: `backup_actions` counts taskwork on another role's structure (the constituent's own runtime definition), so it is
+not a pure volume count and was NOT changed. It is, however, ~0.3-0.6 of taskwork in every condition and does not respond to
+backup_propensity (matrix b: B[1.0] 62, C[0.0] 60, D 55, H 42), so it is not a usable readout of the propensity here.
+Regression (related test files, 536 tests incl. the new ones): 80 failed / 456 passed; the 80 failures are exactly the
+c25d9c6 baseline failure set (none new, none fixed).

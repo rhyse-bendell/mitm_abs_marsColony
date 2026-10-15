@@ -1397,7 +1397,14 @@ class Agent:
         }
         if productive_pilot_action and recent_progress:
             stagnation["epistemic"] = 0
-        if (stagnation["support"] >= 3 or stagnation["epistemic"] >= 4) and not productive_pilot_action:
+        # A consult the existing consult assessment says would teach something (unseen / revised artifact, unheld carried DIK,
+        # changed blocker or goal context) is not the non-executing loop this fallback exists to break; replacing it before it
+        # ever runs left the artifact permanently "unseen", so the Pilot re-chose it forever. A consult that would teach
+        # nothing (same version, nothing new) is still subject to the fallback.
+        useful_consult = action == ExecutableActionType.CONSULT_TEAM_ARTIFACT and bool(self._consult_assessment(environment, sim_state=sim_state).get("useful"))
+        if (stagnation["support"] >= 3 or stagnation["epistemic"] >= 4) and not productive_pilot_action and useful_consult:
+            self._emit_event(sim_state, "metacognitive_regrounding_deferred_useful_consult", {"support_stagnation": int(stagnation["support"]), "epistemic_stagnation": int(stagnation["epistemic"])})
+        if (stagnation["support"] >= 3 or stagnation["epistemic"] >= 4) and not productive_pilot_action and not useful_consult:
             self._emit_event(sim_state, "metacognitive_support_loop_broken", {"support_stagnation": int(stagnation["support"]), "epistemic_stagnation": int(stagnation["epistemic"])})
             self._emit_event(sim_state, "metacognitive_switch_to_regrounding", {"reason": "stagnation"})
             self._set_metacognitive_mode("RECOVER_REGROUND", sim_state=sim_state, reason="stagnation", profile="recovery")
