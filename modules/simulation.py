@@ -637,6 +637,34 @@ class SimulationState:
         candidates.sort(key=lambda row: row[0], reverse=True)
         return candidates
 
+    CLOSURE_UNCOMMITTED_GRACE_TICKS = 3
+
+    def _reconcile_uncommitted_closure_owners(self):
+        """A closure owner must be an agent actually committed to that project's closure.
+
+        Construction names a tentative owner ('assigned') when a project becomes ready for validation. If that agent has not
+        started a closure commitment within a few ticks, the hint is cleared instead of reserving the project indefinitely
+        (which otherwise suppressed teammates' work while the named owner never acted)."""
+        ticks = self.__dict__.setdefault("_closure_uncommitted_ticks", {})
+        by_name = {a.name: a for a in self.agents}
+        for project_id, project in self.environment.construction.projects.items():
+            if not isinstance(project, dict):
+                continue
+            owner_name = str(project.get("closure_owner") or "")
+            if str(project.get("status")) != "ready_for_validation" or str(project.get("closure_status")) != "assigned" or not owner_name:
+                ticks.pop(project_id, None)
+                continue
+            owner = by_name.get(owner_name)
+            state = getattr(owner, "project_closure_state", None) or {}
+            if state.get("active") and str(state.get("project_id") or "") == str(project_id):
+                ticks.pop(project_id, None)
+                continue
+            ticks[project_id] = ticks.get(project_id, 0) + 1
+            if ticks[project_id] >= self.CLOSURE_UNCOMMITTED_GRACE_TICKS:
+                if self.environment.construction.decline_uncommitted_closure(project_id, agent_name=owner_name):
+                    self.logger.log_event(self.time, "closure_uncommitted_reservation_cleared", {"project_id": str(project_id), "owner": owner_name, "ticks_uncommitted": ticks[project_id]})
+                ticks.pop(project_id, None)
+
     def _recover_closure_deadlock(self, *, trigger_event=None):
         recovered = 0
         reassigned = 0
@@ -1401,6 +1429,7 @@ class SimulationState:
             self.refresh_agent_backend_effective_state(agent, reason="planner_call")
             self.logger.log_agent_state(self.time, agent)
 
+        self._reconcile_uncommitted_closure_owners()
         self.metrics.on_step(dt)
 
         self.time += dt

@@ -311,9 +311,10 @@ class BrainContextBuilder:
             if target.get("kind") == "build" and int((site_rows.get(build_target_site.get(target_name), {}) or {}).get("capacity", 1) or 0) <= 0:
                 continue  # a site with no capacity can never host a project
             accessible_point = environment.get_interaction_target_position(target_name, from_position=agent.position)
-            reachable = accessible_point is not None and environment._segment_is_navigable(agent.position, accessible_point)
             if accessible_point is None:
                 continue
+            straight_line_clear = environment._segment_is_navigable(agent.position, accessible_point)
+            reachable = straight_line_clear or environment.path_reachable(agent.position, accessible_point)
             action_type = (
                 ExecutableActionType.INSPECT_INFORMATION_SOURCE
                 if target.get("kind") == "information"
@@ -335,6 +336,7 @@ class BrainContextBuilder:
                 "target_point": accessible_point,
                 "target_class": target.get("kind"),
                 "reachable": reachable,
+                "straight_line_clear": straight_line_clear,
                 "source_state": source_state,
                 "utility": utility_for(action_type, target_kind=target.get("kind")),
             }
@@ -361,6 +363,7 @@ class BrainContextBuilder:
             if point is None:
                 continue
             site_target = environment.construction.SITE_TO_BUILD_TARGET.get(project.get("site_id"))
+            straight_line_clear = environment._segment_is_navigable(agent.position, point)
             base = {
                 "target_id": project_id,
                 "target_zone": (environment.interaction_targets.get(site_target) or {}).get("zone"),
@@ -368,7 +371,9 @@ class BrainContextBuilder:
                 "target_class": "build",
                 "target_kind": "project",
                 "project_type": project.get("type"),
-                "reachable": environment._segment_is_navigable(agent.position, point),
+                # "reachable" = a legal route exists (planner); the straight-line test is kept separately for diagnostics
+                "reachable": straight_line_clear or environment.path_reachable(agent.position, point),
+                "straight_line_clear": straight_line_clear,
             }
             owner_role = agent._structure_owner_role(project.get("type"))
             if owner_role == "shared":

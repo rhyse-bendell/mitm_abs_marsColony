@@ -328,6 +328,7 @@ class ConstructionManager:
             "closure_started_at": None,
             "closure_attempt_count": 0,
             "closure_status": "idle",
+            "closure_assignment_declined": False,
             "provenance": {
                 "last_actor": None,
                 "contributors": [],
@@ -1049,7 +1050,9 @@ class ConstructionManager:
                 project["in_progress"] = True
                 project["validated_complete"] = False
             if project["status"] == "ready_for_validation":
-                if not project.get("closure_owner"):
+                # A tentative owner hint only: it is cleared (and not re-created) if that agent never actually commits
+                # to the closure (see decline_uncommitted_closure); an actual commitment goes through claim_project_closure.
+                if not project.get("closure_owner") and not project.get("closure_assignment_declined"):
                     preferred_owner = project.get("last_actor")
                     if not preferred_owner:
                         builders = sorted(project.get("builders", []))
@@ -1068,6 +1071,7 @@ class ConstructionManager:
                 project["closure_owner"] = None
                 project["closure_started_at"] = None
                 project["closure_attempt_count"] = 0
+                project["closure_assignment_declined"] = False
                 self._closure_reservations.pop(project.get("id"), None)
             discussion = project.get("validation_discussion") or {}
             if isinstance(discussion, dict):
@@ -1384,6 +1388,21 @@ class ConstructionManager:
         project["closure_status"] = "in_progress"
         return True
 
+    def decline_uncommitted_closure(self, project_id, *, agent_name):
+        """Clear a tentative (status 'assigned') closure owner that never committed. Returns True if cleared."""
+        project_id = str(project_id or "")
+        project = self.projects.get(project_id)
+        if not isinstance(project, dict):
+            return False
+        if str(project.get("closure_owner") or "") != str(agent_name) or str(project.get("closure_status") or "") != "assigned":
+            return False
+        self._closure_reservations.pop(project_id, None)
+        project["closure_owner"] = None
+        project["closure_started_at"] = None
+        project["closure_status"] = "idle"
+        project["closure_assignment_declined"] = True
+        return True
+
     def release_project_closure(self, project_id, *, agent_name=None):
         project_id = str(project_id or "")
         if not project_id:
@@ -1399,6 +1418,7 @@ class ConstructionManager:
             project["closure_owner"] = None
             project["closure_started_at"] = None
             project["closure_status"] = "idle"
+            project["closure_assignment_declined"] = True  # a released closure is not silently re-assigned to someone uncommitted
 
     def project_closure_owner(self, project_id, *, now_ts=0.0):
         project_id = str(project_id or "")

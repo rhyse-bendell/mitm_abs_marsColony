@@ -459,6 +459,13 @@ class Environment:
                 best = (rank, proxy)
         return best[1] if best else None
 
+    def path_reachable(self, start, target):
+        """Read-only: whether the planner can route from start to target. Unlike _segment_is_navigable (a straight-line
+        visibility test) this is true whenever a legal A* route exists; it does not move anyone or change world state."""
+        if start is None or target is None:
+            return False
+        return self.plan_path(start, target).get("status") == "ok"
+
     def plan_path(self, start, target, mode="grid_astar", grid_step=0.35):
         start = (float(start[0]), float(start[1]))
         target = (float(target[0]), float(target[1]))

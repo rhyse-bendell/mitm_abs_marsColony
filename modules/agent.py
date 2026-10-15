@@ -9229,7 +9229,9 @@ class Agent:
                             and str(a.get("target_id") or "") in {"", str(teammate_closure_project_id)}
                         ]
                         owner_stalled = not bool(owner_project_actions)
-                fallback_action = ExecutableActionType.WAIT  # support for a teammate's closure never substitutes a communication for the Pilot
+                # Pilot authority: a teammate's closure never replaces the Pilot's legal action (with WAIT or anything else);
+                # the closure context is reported, the Pilot's choice stands.
+                fallback_action = rewritten.selected_action
                 if owner_stalled and not can_specific_support:
                     self._emit_event(
                         sim_state,
@@ -9255,7 +9257,6 @@ class Agent:
                             "from_action": rewritten.selected_action.value,
                         },
                     )
-                    fallback_action = ExecutableActionType.WAIT
                 self._emit_event(
                     sim_state,
                     "closure_support_focus_applied",
@@ -9265,6 +9266,7 @@ class Agent:
                         "closure_owner": teammate_closure_owner,
                         "from_action": rewritten.selected_action.value,
                         "to_action": fallback_action.value,
+                        "substituted": False,
                         "can_specific_support": bool(can_specific_support),
                     },
                 )
@@ -9302,7 +9304,7 @@ class Agent:
             ExecutableActionType.EXTERNALIZE_PLAN,
         }:
             can_specific_support = self._can_offer_blocker_specific_support(blocked_support_project, environment, sim_state=sim_state)
-            fallback_action = ExecutableActionType.WAIT  # support for a teammate's closure never substitutes a communication for the Pilot
+            fallback_action = rewritten.selected_action  # Pilot authority: report the support context, never replace the Pilot's action
             support_signature = f"{blocked_support_project}|blocked_support|{rewritten.selected_action.value}"
             if self._closure_support_focus_exhausted(support_signature):
                 self._emit_event(
@@ -9310,7 +9312,6 @@ class Agent:
                     "closure_support_focus_skipped_exhausted",
                     {"origin": pivot_origin, "project_id": blocked_support_project, "from_action": rewritten.selected_action.value},
                 )
-                fallback_action = ExecutableActionType.WAIT
             self._emit_event(
                 sim_state,
                 "blocked_project_support_pressure_applied",
@@ -9319,16 +9320,9 @@ class Agent:
                     "project_id": blocked_support_project,
                     "from_action": rewritten.selected_action.value,
                     "to_action": fallback_action.value,
+                    "substituted": False,
                     "can_specific_support": bool(can_specific_support),
                 },
-            )
-            rewritten = BrainDecision(
-                selected_action=fallback_action,
-                target_id=None,
-                target_zone=decision.target_zone,
-                goal_update="support_active_closure",
-                reason_summary=f"Blocked project support pressure rerouted {decision.selected_action.value}.",
-                confidence=max(0.76, float(rewritten.confidence or decision.confidence or 0.0)),
             )
         handoff = dict(self.post_inspect_handoff or {})
         try:

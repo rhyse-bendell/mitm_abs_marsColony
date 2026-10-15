@@ -828,7 +828,7 @@ class RuleBrain(BrainProvider):
         Scarce resources are not the same as no work: a carried brick, a staged build, a validation- or
         repair-ready structure, an unfinished bridge, or a startable structure with a brick source all count.
         """
-        legal = {str(a.get("action_type")) for a in (legal_actions or [])}  # presence = legal; "reachable" only says a straight path exists now
+        legal = {str(a.get("action_type")) for a in (legal_actions or [])}  # presence = legal; "reachable" = the planner can route there now (straight_line_clear is the separate direct-segment test)
         # a brick source exists, or one is carried: stated directly now that transport is offered per project
         transport = ExecutableActionType.TRANSPORT_RESOURCES.value in legal or bool(brick_source_available)
         start_or_continue = bool(legal & {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value})
