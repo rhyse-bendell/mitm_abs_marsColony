@@ -739,7 +739,20 @@ class RuleBrain(BrainProvider):
             # talking, consulting or replanning cannot create the missing bricks.
             no_active_plan_pressure = 0.0
             coordination_deadlock_pressure = 0.0
+        # Observed failed validation (an action outcome), not hidden correctness: a failed project is a repair candidate, not
+        # ordinary validation-pending work. Whether the agent's own knowledge can ground the repair is read off the REPAIR
+        # affordance (the same check that gates execution), so "repair needed but ungrounded" is distinct from "repair ready".
+        repair_affordances = [
+            a for a in (context_packet.allowed_actions if is_request else context_packet.action_affordances)
+            if str(a.get("action_type")) == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value
+        ]
+        observed_repair_need = 1.0 if (repair_affordances or any(p.get("validation_failed") for p in built_state)) else 0.0
+        repair_executable = 1.0 if any(bool(a.get("repair_ready")) for a in repair_affordances) else 0.0
+        repair_knowledge_gap = 1.0 if (observed_repair_need > 0.0 and repair_executable <= 0.0) else 0.0
         return {
+            "observed_repair_need": observed_repair_need,
+            "repair_executable": repair_executable,
+            "repair_knowledge_gap": repair_knowledge_gap,
             "epistemic_deficit": min(1.0, len(known_gaps) / 4.0),
             "build_opportunity": 1.0 if readiness.get("ready_for_build") else 0.0,
             "coordination_need": (
@@ -751,7 +764,7 @@ class RuleBrain(BrainProvider):
                     else min(1.0, len(known_gaps) / 4.0)
                 )
             ),
-            "repair_pressure": min(1.0, (len(mismatch_signals) / 3.0) + (0.5 if any(p.get("needs_repair") for p in built_state) else 0.0)),
+            "repair_pressure": min(1.0, (len(mismatch_signals) / 3.0) + (0.5 * observed_repair_need) + (0.5 * repair_executable)),
             "loop_pressure": min(1.0, repeated / 4.0),
             "no_progress_pressure": min(1.0, no_progress_streak / 4.0),
             "observe_ineffective_pressure": min(1.0, observe_no_effect / 4.0),
@@ -762,7 +775,8 @@ class RuleBrain(BrainProvider):
             "validation_work_pending": 1.0 if validation_pending_projects else 0.0,
             # Nothing unfinished to supply or validate, and a buildable site has room: the next move is to
             # start a new structure (projects are instantiated by the START commit, not by transporting).
-            "new_structure_needed": 1.0 if (capacity_available and not active_projects and not validation_pending_projects) else 0.0,
+            # (An observed repair need is unfinished work too: it keeps "start something new" from being the default next step.)
+            "new_structure_needed": 1.0 if (capacity_available and not active_projects and not validation_pending_projects and observed_repair_need <= 0.0) else 0.0,
             "validation_pending_projects": min(1.0, len(validation_pending_projects) / 3.0),
             # 1.0 while any construction work could still advance (supply, build, validate, repair, start);
             # 0.0 when none can. Read from observed project state and the legal affordances only.
@@ -855,6 +869,8 @@ class RuleBrain(BrainProvider):
         """
         if str(project.get("project_status") or "").lower() == "complete":
             return False
+        if project.get("validation_failed"):
+            return False  # a failed attempt is an observed repair candidate until something changes (a repair clears it)
         readiness = project.get("validation_readiness")
         if isinstance(readiness, dict) and "validation_ready" in readiness:
             return bool(readiness.get("validation_ready"))
@@ -904,6 +920,8 @@ class RuleBrain(BrainProvider):
         mode_scores["CONSTRUCT"] = 0.35 + 1.7 * build_pull + 0.9 * features["active_incomplete_projects"]
         mode_scores["VALIDATE"] = 0.2 + 1.4 * features["artifact_validation_available"] + 0.5 * features["goal_pressure"] + 1.5 * features.get("validation_work_pending", 0.0) + 0.9 * features.get("validation_pending_projects", 0.0)
         mode_scores["REPAIR"] = 0.2 + 1.8 * features["repair_pressure"]
+        # Repair is needed but the agent cannot ground it yet: acquiring the missing knowledge is the rational next move.
+        mode_scores["ACQUIRE_DIK"] += 1.0 * features.get("repair_knowledge_gap", 0.0)
         mode_scores["RECOVERY"] = 0.2 + 1.8 * features["loop_pressure"] + self.policy_config.recovery_bonus * features["contradiction_pressure"]
         if not closure_only:
             mode_scores["LOGISTICS"] += 1.3 * features.get("no_progress_pressure", 0.0)
@@ -938,7 +956,8 @@ class RuleBrain(BrainProvider):
             "CONSTRUCT": features["build_opportunity"] > 0 and any(t in legal_types for t in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value}),
             "LOGISTICS": ExecutableActionType.TRANSPORT_RESOURCES.value in legal_types,
             "VALIDATE": ExecutableActionType.VALIDATE_CONSTRUCTION.value in legal_types and (features["active_incomplete_projects"] > 0 or features.get("validation_work_pending", 0.0) > 0),
-            "REPAIR": ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value in legal_types and features["repair_pressure"] > 0.0,
+            "REPAIR": ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value in legal_types and features["repair_pressure"] > 0.0
+            and (features.get("observed_repair_need", 0.0) <= 0.0 or features.get("repair_executable", 0.0) > 0.0),
             "ACQUIRE_DIK": ExecutableActionType.INSPECT_INFORMATION_SOURCE.value in legal_types,
             "COORDINATE": any(t in legal_types for t in {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.EXTERNALIZE_PLAN.value, ExecutableActionType.REQUEST_ASSISTANCE.value}),
         }
@@ -1074,6 +1093,9 @@ class RuleBrain(BrainProvider):
             or features.get("loop_pressure", 0.0) >= 0.85
             or features.get("contradiction_pressure", 0.0) >= 0.8
             or features.get("repair_pressure", 0.0) >= 0.85
+            # the validation attempt this method was committed to has produced its (failed) outcome: a stale retry budget
+            # must not keep the Pilot on ValidateProject against known failure evidence
+            or (current_mode == "VALIDATE" and features.get("observed_repair_need", 0.0) > 0.0 and features.get("validation_work_pending", 0.0) <= 0.0)
         )
 
     def _method_commit_window(self, method_id: str | None) -> int:
@@ -1448,7 +1470,14 @@ class RuleBrain(BrainProvider):
                 score -= 1.4 * features.get("stale_grounding_pressure", 0.0)
             if action_type == ExecutableActionType.TRANSPORT_RESOURCES.value and features.get("readiness_blocked", 0.0) > 0.0:
                 score += 1.25
+            if action_type == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value and affordance.get("repair_ready") is False:
+                score -= 3.0  # the agent's own knowledge cannot ground this repair yet: it would fail at execution
+            if action_type == ExecutableActionType.VALIDATE_CONSTRUCTION.value and affordance.get("validation_failed"):
+                score -= 2.5  # already failed with nothing changed since: re-validating is not the next step
+            if action_type == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value and affordance.get("consult_useful"):
+                score += 0.6 * features.get("repair_knowledge_gap", 0.0)
             if action_type == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value:
+                score += 1.0 * features.get("repair_knowledge_gap", 0.0)
                 score += 1.45 * features.get("need_to_refresh_assumptions", 0.0)
                 score += 0.55 * (1.0 - features.get("role_packet_inspected", 0.0))
             if action_type in {ExecutableActionType.VALIDATE_CONSTRUCTION.value, ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value}:

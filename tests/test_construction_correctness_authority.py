@@ -95,6 +95,8 @@ def test_repair_action_executes_through_construction_then_requires_validation(si
     cm.record_build_quality(pid, correct=False, actor="X")
     cm.update()
     assert cm.projects[pid]["status"] == "needs_repair"
+    cm.mark_validated(pid, is_valid=False, actor="X", sim_time=1.0)  # a repair needs an OBSERVED error: the failed validation
+    agent._rng.random = lambda: 0.0  # the fidelity roll applied to the repair itself succeeds in this test
 
     decision = BrainDecision(selected_action=ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, target_id=pid, confidence=0.9)
     # the agent's own information-readiness precondition is held satisfied; this test targets execution + Construction

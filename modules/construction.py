@@ -1248,6 +1248,27 @@ class ConstructionManager:
         project["last_build_error"] = {"actor": actor, "time": sim_time, "cause": cause}
         return True
 
+    @staticmethod
+    def observed_validation_failure(project):
+        """True once a validation attempt on this project has actually failed and no repair has been applied since.
+
+        This is the only correctness-related fact agents legitimately hold: it comes from an observed action outcome
+        (``mark_validated(False)`` sets closure_status 'failed'), never from the hidden ``correct`` flag.
+        """
+        if not isinstance(project, dict) or project.get("validated_complete"):
+            return False
+        return str(project.get("closure_status") or "") == "failed" and bool(project.get("validation_attempted"))
+
+    @classmethod
+    def observable_status(cls, project):
+        """Status as agents may know it. ``update()`` derives the truth status 'needs_repair' from the hidden ``correct``
+        flag as soon as a build error is introduced; until a failed validation is observed the project reads as an ordinary
+        one (validation-ready or in progress)."""
+        status = str((project or {}).get("status") or "")
+        if status == "needs_repair" and not cls.observed_validation_failure(project):
+            return "ready_for_validation" if project.get("ready_for_validation") else "in_progress"
+        return status
+
     def repair_project(self, project_id, *, actor=None, sim_time=None):
         """Apply a repair: clears a recorded build error. It does not validate the project."""
         project = self.projects.get(project_id)
@@ -1256,6 +1277,13 @@ class ConstructionManager:
         was_incorrect = project.get("correct", True) is False
         project["correct"] = True
         project["validated_complete"] = False
+        if was_incorrect:
+            project["repair_count"] = int(project.get("repair_count", 0) or 0) + 1
+            project["awaiting_revalidation"] = True
+        if str(project.get("closure_status") or "") == "failed":
+            project["closure_status"] = "idle"  # the failed attempt is superseded; the outcome is only known on revalidation
+            project["closure_owner"] = None
+            self._closure_reservations.pop(project_id, None)
         self.update_project_provenance(project_id, event="repair_applied" if was_incorrect else "repair_noop", actor=actor, sim_time=sim_time)
         self.update()
         return was_incorrect
@@ -1280,6 +1308,7 @@ class ConstructionManager:
             return
         project["validation_attempted"] = True
         project["last_validation_attempt_time"] = sim_time
+        project["last_validation_was_revalidation"] = bool(project.pop("awaiting_revalidation", False))
         if not is_valid:
             project["correct"] = False
             project["validated_complete"] = False

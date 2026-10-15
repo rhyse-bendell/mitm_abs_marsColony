@@ -96,16 +96,19 @@ class TeamKnowledgeManager:
         delivered = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
         staged = int(project.get("staged_resources", {}).get("bricks", 0) or 0)
         required = int(project.get("required_resources", {}).get("bricks", 0) or 0)
-        status = project.get("status", "in_progress")
+        from modules.construction import ConstructionManager
+
+        # The shared artifact carries only what the team has observed: the hidden build-correctness flag and the status
+        # derived from it stay out until a failed validation has actually been observed.
+        observed_failed = ConstructionManager.observed_validation_failure(project)
+        status = ConstructionManager.observable_status(project) or "in_progress"
         resource_complete = bool(project.get("resource_complete", False)) or (required > 0 and delivered >= required)
         build_ready = bool(project.get("build_ready", False))
         physically_complete = bool(project.get("structurally_complete", False))
         epistemically_supported = bool(project.get("epistemically_supported", False))
         progress_ratio = float(project.get("progress", min(1.0, (delivered / required)) if required > 0 else 0.0) or 0.0)
         validated = bool(project.get("validated_complete", False))
-        validation_state = "validated" if project.get("correct", True) and status == "complete" else (
-            "mismatch" if project.get("correct") is False else "in_progress"
-        )
+        validation_state = "validated" if status == "complete" else ("mismatch" if observed_failed else "in_progress")
         summary = f"{structure_type} progress={delivered}/{required} status={status}"
         knowledge_summary = list(project.get("expected_rules", []))
         contributors = sorted(project.get("builders", set())) if isinstance(project.get("builders"), set) else []
@@ -123,7 +126,8 @@ class TeamKnowledgeManager:
             "epistemically_supported": epistemically_supported,
             "progress_ratio": round(progress_ratio, 4),
             "validated": validated,
-            "correct": project.get("correct", True),
+            "correct": not observed_failed,
+            "validation_failed": observed_failed,
             "expected_rules": knowledge_summary,
             "held_rule_ids_at_build": held_rule_ids,
             "held_information_ids_at_build": held_information_ids,
@@ -227,7 +231,7 @@ class TeamKnowledgeManager:
             self.recent_updates.append(
                 {"event": "construction_completed", "artifact_id": artifact_id, "project_id": project_id, "time": sim_time}
             )
-        if previous_correct is False and bool(project.get("correct", True)):
+        if previous_correct is False and not observed_failed:
             self.recent_updates.append(
                 {"event": "construction_corrected", "artifact_id": artifact_id, "project_id": project_id, "time": sim_time}
             )
@@ -236,7 +240,7 @@ class TeamKnowledgeManager:
         content["status_changed_at"] = sim_time if (
             previous_status != status
             or previous_resource_complete != resource_complete
-            or previous_correct != bool(project.get("correct", True))
+            or previous_correct != (not observed_failed)
         ) else previous.get("status_changed_at", sim_time)
 
         changed = (
