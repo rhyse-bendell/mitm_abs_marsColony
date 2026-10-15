@@ -243,3 +243,21 @@ Unresolved scientific ambiguities carried forward (do not resolve silently): con
 - The Edit/Write tools are intermittently blocked by auto mode ("no usable answer"); the user authorized writing repo-local files through PowerShell/Python in that case (not destructive ops, not outside the repo, no force-push). Write multi-line commit messages to a file and use `git commit -F` (PowerShell mangles multi-line `-m`; avoid a BOM).
 - Simulator prints "Agent logs saved" per step to stdout; redirect/filter in diagnostics. Diagnostic scripts live only in the session scratchpad (not in the repo): a 1700 s headless run takes ~3.5 minutes.
 - Seed results before the exhaustion change (r0-r5, default task): every seed ended with 20 structures validated, `bridge_bc` complete, both piles at 0, site_c_house_011 unfinished; none had a defined success.
+
+
+## NEXT BLOCK (not started): team-coordination lifecycle (audit finding, 2026-10-15)
+Audit of the existing team-plan machinery shows the lifecycle is unreachable end-to-end, so coordination_propensity currently only
+drives proposal/consultation, never adoption:
+- `TeamKnowledgeManager.commit_team_plan` (modules/team_knowledge.py) has no caller; plans stay `proposed`.
+- The adoption paths that require a `committed` plan (e.g. the `assignment_accept` / committed_plan_alignment branch of
+  `Agent._evaluate_team_plan_fit`) are therefore unreachable.
+- Plan assignments are only ever `{proposer_role: "lead_next_action"}`, which `_normalize_team_plan_assignment` maps to `support`;
+  `support` returns `request_clarification: assignment_underspecified`.
+- `_evaluate_team_plan_fit` never returns a `disagree` response.
+Do not implement before the profile/logging block is certified; it needs a scientific specification (who commits, what adoption means).
+
+## Reported, not fixed: build_readiness_sensitivity sign
+`Agent._readiness_threshold() = max(1, 3 + threshold_shift)` with the `build_readiness_sensitivity -> decision_threshold/start_construction`
+hook. Measured: sensitivity 0.1 / 0.5 / 0.9 -> threshold 2.2 / 3.0 / 3.8. Higher "sensitivity" therefore makes the agent STRICTER
+(needs more readiness before building). Whether that matches the construct's intended direction is a scientific decision; it is frozen
+at 0.5 in compact_panel mode, so it does not affect the compact-panel study.

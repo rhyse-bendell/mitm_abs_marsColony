@@ -154,3 +154,37 @@ user's go-ahead because it changes action availability.
   (~170-195 consults by t=500; the same loop is present BEFORE the gate: 179/116 at t=500). It is a separate, pre-existing
   pathology (consult score ~5 vs <3 for everything else) and was NOT changed here. A try at excluding typed new-project START from the
   "continue active work" score boost was reverted: it was Pilot-policy tuning outside the narrow spec and did not help.
+
+
+## PART D RESULT: proof matrix, compact_panel, seeds 0-2, 600 s (2026-10-15)
+Raw sessions + summaries: D:\Post-doc Work\proof_matrix_2026-10-15\{runs,summaries}\ (24 runs, outside the repo; layout per scripts/proof_matrix.py).
+Residual mechanisms were 0.5 in every run; constituents were exactly the specified ones. Means over seeds 0-2:
+
+| cond | build err | val att | val fail | repair ep/app/ok | reval | validated | push | req/ok | extern | backup | pilot selections |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| A neutral | 10.7 | 10 | 6.7 | 7.3/7.7/3 | 5 | 3.3 | 3 | 0/0 | 3.7 | 54 | 387 |
+| B high teamwork | 4.3 | 5.3 | 3.7 | 2.7/3.3/1.7 | 2.3 | 1.7 | 4 | 1/0.3 | 4.3 | 17 | 687 |
+| C low teamwork | 8 | 4 | 4 | 1/2/0.7 | 0 | 0 | 0 | 0/0 | 2.3 | 46 | 422 |
+| D high taskwork | 5.7 | 6.7 | 4.3 | 9/4.3/2 | 3.7 | 2.3 | 2 | 0/0 | 4 | 28.7 | 581 |
+| E low taskwork | 6.3 | 11 | 7.7 | 2.3/2.7/1.7 | 2 | 1.7 | 1 | 0/0 | 2.3 | 38 | 536 |
+| F high push only | 11.7 | 13.7 | 8.3 | 17.3/11.7/5.3 | 8.3 | 5.3 | 15.3 | 0/0 | 4.3 | 49 | 415 |
+| G high extern, low memory | 1.3 | 1.3 | 1 | 1.7/0.3/0.3 | 0.3 | 0.3 | 1.3 | 0/0 | 5.7 | 3 | 583 |
+| H fast tasks, low teamwork | 5.3 | 1.3 | 1 | 0/0/0 | 0 | 0.3 | 0 | 0/0 | 2.3 | 45 | 476 |
+(forgetting/reacquisition only in G: 86 forgotten, 34.7 reacquired; state-changing substitution attempts: 0 everywhere
+(mecha_project_substitution_rejected = 0, planner_action_downgraded = 0).)
+Findings:
+- Validation-loop floor is gone (<=14 validation attempts per run, none repeated), BUT seed 2 reaches ~0 validations in almost every
+  condition: the pre-existing COORDINATE-mode consult_team_artifact loop (see NARROW FIX section) now dominates as the floor.
+  It is the main remaining pathology and swamps outcome comparisons; it should be the next fix.
+- Taskwork isolates execution efficiency: only task_execution_efficiency differs (D 1.0 / E 0.0); mean action durations scale
+  (transport 7.5 s vs 37.5 s, start 0.5 vs 3.75). Outcome effects (validated 2.3 vs 1.7) are small against seed variance.
+- Teamwork changes exactly the five generated constituents at the profile level (B/C). Behaviorally: push 4 vs 0, plans proposed
+  4.3 vs 2.3, plans agreed 9.3 vs 0, externalization 4.3 vs 2.3. DIK requests are essentially absent (request_attempts <= 1, request
+  successes 0.3 total) and 0 of 80 provision exchanges that named elements were solicited, so the request/solicited path is thin.
+- Backup is NOT interpretable as a propensity readout: backup_actions is HIGHER at zero backup_propensity (C 46, H 45) than at 1.0
+  (B 17). It counts any taskwork on another role's/shared structure, so it tracks total taskwork volume (low-teamwork runs spend less
+  time in coordination/consult behavior and do more transport on shared infrastructure). Do not interpret it without normalizing.
+- Raw logs are retained; 108 communication_exchange events across the matrix, 80 with provided_element_ids (exact DIK ids), so
+  provisions are reconstructable per element.
+- Regression (related test files, 511 tests): 81 failed vs 80 at c25d9c6; the single extra failure was a GUI-stub test broken by the
+  new profile control (fixed in the next commit); the remaining failures are a subset of the baseline failures.
