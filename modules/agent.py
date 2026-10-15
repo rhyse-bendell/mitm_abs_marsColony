@@ -500,7 +500,7 @@ class Agent:
             "duration_seconds_by_action": {}, "duration_count_by_action": {},
             "externalization_noop_duplicates": 0,
             "validation_attempts": 0, "validation_failures": 0, "revalidations": 0,
-            "repair_selections": 0, "repair_executions": 0, "repair_blocked": 0,
+            "repair_selections": 0, "repair_decision_episodes": 0, "repair_applications": 0, "repair_successes": 0, "repair_blocked": 0,
         }
         self.event_tallies = {}
         self._derived_gap_tokens = set()  # known_gaps entries recognized from the agent's own task-method requirements
@@ -893,6 +893,8 @@ class Agent:
             else:
                 self._close_pilot_episode(sim_state, "invalidated", "replaced_before_execution")
         stats["episodes"] += 1
+        if decision.selected_action == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION:
+            self.experimental_metrics["repair_decision_episodes"] += 1
         self.pilot_episode = {"id": f"{self.agent_id}:ep{stats['episodes']}", "key": key, "status": "open", "selections": 1, "ticks": 0, "started_at": float(getattr(sim_state, "time", 0.0))}
         self._emit_event(sim_state, "pilot_intent_started", {"episode_id": self.pilot_episode["id"], "action": key[0], "target_id": key[1], "action_args": dict(key[2])})
 
@@ -5354,6 +5356,7 @@ class Agent:
             "unknown_project",
             "missing_project_binding",
             "project_already_complete",
+            "materials_not_staged",
             "no_detected_mismatch",
             "epistemic_sufficiency_low_for_construction",
             "epistemic_sufficiency_low_for_repair",
@@ -5502,6 +5505,9 @@ class Agent:
                     blockers.append("plan_method_not_grounded")
             if project.get("status") == "complete":
                 blockers.append("project_already_complete")
+            if (action_type == ExecutableActionType.START_CONSTRUCTION and not self._is_typed_start(decision)
+                    and not bool(project.get("build_ready", False)) and not self._project_has_physical_build_progress(project)):
+                blockers.append("materials_not_staged")  # an existing project cannot be physically started before its materials are staged
         elif action_type == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION:
             closure_project_id = self._live_project_closure_commitment(environment, sim_state=sim_state)
             closure_active_for_project = bool(project_id and closure_project_id and project_id == closure_project_id)
@@ -11766,11 +11772,13 @@ class Agent:
                             continue
                         if environment.construction.repair_project(project_id, actor=self.name, sim_time=sim_state.time if sim_state is not None else None):
                             self._emit_event(sim_state, "construction_repair_episode", {"project_id": project_id, "decision_action": decision_action})
-                            self.experimental_metrics["repair_executions"] += 1
+                            self.experimental_metrics["repair_applications"] += 1
                             if self._rng.random() > fidelity and environment.construction.record_build_quality(
                                 project_id, correct=False, actor=self.name, sim_time=sim_state.time if sim_state is not None else None, cause="repair_fidelity"
                             ):
                                 self._emit_event(sim_state, "construction_build_error_introduced", {"project_id": project_id, "cause": "repair_fidelity", "fidelity": round(float(fidelity), 3)})
+                            else:
+                                self.experimental_metrics["repair_successes"] += 1  # the error was actually cleared
                         self._refresh_construction_provenance(environment, project_id, sim_state=sim_state, event="repair")
                     sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
                     self._emit_event(sim_state, "construction_artifact_provenance_updated", {"project_id": project_id, "event": "build_or_repair"})

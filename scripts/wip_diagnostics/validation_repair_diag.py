@@ -60,5 +60,5 @@ with tempfile.TemporaryDirectory() as tmp:
     print("BAD LEFT:", [(p, st.environment.construction.observable_status(q), q.get("correct")) for p,q in st.environment.construction.projects.items() if q.get("correct",True) is False][:8])
     tot=Counter()
     for a in st.agents:
-        for k in ("validation_attempts","validation_failures","revalidations","repair_selections","repair_executions","repair_blocked"): tot[k]+=a.experimental_metrics[k]
+        for k in ("validation_attempts","validation_failures","revalidations","repair_selections","repair_decision_episodes","repair_applications","repair_successes","repair_blocked"): tot[k]+=a.experimental_metrics[k]
     print("TOTALS", dict(tot), "validated", sum(1 for q in st.environment.construction.projects.values() if q.get("validated_complete")))

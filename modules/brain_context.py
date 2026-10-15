@@ -381,13 +381,19 @@ class BrainContextBuilder:
             progressed = any(bool(step.get("completed")) for step in steps)
             physically_complete = bool(project.get("structurally_complete"))
             needs_material = not bool(project.get("resource_complete")) and delivered < required and str(project.get("status") or "") != "ready_for_validation"
+            # Observable material state for THIS project (not hidden truth): the START affordance below is offered only once
+            # materials are staged; until then the deficit is stated and TRANSPORT remains the relevant path.
+            staged_bricks = int((project.get("staged_resources") or {}).get("bricks", 0) or 0)
+            materials_staged = bool(project.get("build_ready", False)) or (required > 0 and staged_bricks >= required)
+            base["materials_staged"] = materials_staged
+            base["materials_deficit"] = max(0, required - max(staged_bricks, 0))
             # Each fact below is stated per exact project; which one to work on is the Pilot's choice.
             if needs_material and bricks_available:
                 legal.append({**base, "action_type": ExecutableActionType.TRANSPORT_RESOURCES.value, "work_stage": "material_delivery", "duration_s": 30.0, "utility": utility_for(ExecutableActionType.TRANSPORT_RESOURCES)})
             if not physically_complete:
                 if progressed:
                     legal.append({**base, "action_type": ExecutableActionType.CONTINUE_CONSTRUCTION.value, "utility": utility_for(ExecutableActionType.CONTINUE_CONSTRUCTION)})
-                else:
+                elif materials_staged:
                     legal.append({**base, "action_type": ExecutableActionType.START_CONSTRUCTION.value, "start_mode": "existing_project", "utility": utility_for(ExecutableActionType.START_CONSTRUCTION)})
             else:
                 failed_here = bool(environment.construction.observed_validation_failure(project))

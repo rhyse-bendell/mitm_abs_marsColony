@@ -134,3 +134,23 @@ Severity: material for the proof matrix (inflates action counts, suppresses thro
 the repair semantics. Recommendation: fix BEFORE the profile/logging work (B/C/D), as a small affordance fix (expose a per-project
 materials_staged / start_blockers fact and withhold or flag START where build_ready is False) with a regression test. Awaiting the
 user's go-ahead because it changes action availability.
+
+
+## NARROW FIX: existing-project START requires staged materials (commit after 1f6a506)
+- Affordance: START_CONSTRUCTION (start_mode existing_project) is offered only when the project's materials are staged
+  (`build_ready` / staged >= required). Every project affordance now states `materials_staged` and `materials_deficit`
+  (observable task state); TRANSPORT to the exact project is unchanged. The typed new-project START is untouched.
+- Legality: a non-typed START on an unstaged, physically unstarted project is blocked with the hard token `materials_not_staged`
+  (reported, never rewritten into another project/action).
+- Tests: tests/test_start_materials_gate.py (1-6). Test 6 counts Pilot START selections on unstaged existing projects over 900 s of
+  seed 2 (neutral .5/.5): pre-fix 46 (45 on one project), after 0. Residual `materials_not_staged` events (<=23 per 900 s) are
+  the physical build step of a freshly created typed-START project that has no bricks yet; creation stays Pilot-authored.
+- Repair accounting is now three distinct counters: repair_decision_episodes (Pilot intents), repair_selections (every selection
+  incl. re-selections), repair_applications (applied repair actions; may exceed episodes because one intent can span several
+  applications), repair_successes (applications whose error was actually cleared; the rest failed the rule_accuracy roll).
+- Seeds 0/1/2 at 900 s (gate only): attempts 35/28/0, failures 26/18/0, revalidations 18/10/0, repair episodes 28/13/0,
+  applications 25/12/0, successes 9/9/0, validated 9/10/0 (before the gate: 18/7/3). Throughput is lower at seeds 0 and 2 and
+  seed-to-seed variance is large. Seed 2 has no validations because both agents sit in a COORDINATE-mode consult_team_artifact loop
+  (~170-195 consults by t=500; the same loop is present BEFORE the gate: 179/116 at t=500). It is a separate, pre-existing
+  pathology (consult score ~5 vs <3 for everything else) and was NOT changed here. A try at excluding typed new-project START from the
+  "continue active work" score boost was reverted: it was Pilot-policy tuning outside the narrow spec and did not help.

@@ -237,7 +237,7 @@ def test_12_repair_is_not_guaranteed_to_succeed(sim):
     cm.update()
     assert cm.projects[pid]["correct"] is False  # attempted, executed, still wrong
     assert any(n == "construction_build_error_introduced" and d.get("cause") == "repair_fidelity" for n, d in sim.captured_events)
-    assert agent.experimental_metrics["repair_executions"] == 1
+    assert agent.experimental_metrics["repair_applications"] == 1 and agent.experimental_metrics["repair_successes"] == 0
     assert _summary(sim, pid)["validation_failed"] is False  # and not visibly so until revalidated
 
 
@@ -252,8 +252,9 @@ def test_13_state_changing_events_are_pilot_authored():
         finally:
             state.stop()
     m = lambda k: sum(a.experimental_metrics[k] for a in state.agents)
-    assert events.count("construction_repair_episode") == m("repair_executions")
-    assert m("repair_executions") <= m("repair_selections")
+    assert events.count("construction_repair_episode") == m("repair_applications")
+    assert m("repair_applications") == 0 or m("repair_decision_episodes") > 0  # an application traces to a Pilot repair intent
+    assert m("repair_successes") <= m("repair_applications")
     assert events.count("construction_validation_attempted") == m("validation_attempts")
 
 
