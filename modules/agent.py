@@ -5357,6 +5357,7 @@ class Agent:
             "no_detected_mismatch",
             "epistemic_sufficiency_low_for_construction",
             "epistemic_sufficiency_low_for_repair",
+            "repair_project_rules_not_held",
             "epistemic_sufficiency_low_for_validation",
         }
         for blocker in list(blockers or []):
@@ -5504,7 +5505,10 @@ class Agent:
         elif action_type == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION:
             closure_project_id = self._live_project_closure_commitment(environment, sim_state=sim_state)
             closure_active_for_project = bool(project_id and closure_project_id and project_id == closure_project_id)
-            blockers.extend(self._repair_epistemic_blockers(environment, sim_state=sim_state))
+            grounding_gaps = self._repair_epistemic_blockers(environment, sim_state=sim_state, project_id=project_id)
+            blockers.extend(grounding_gaps)
+            if grounding_gaps:
+                blockers.append("repair_project_rules_not_held")  # hard: the specific missing rules stay visible as knowledge gaps
             # A repair needs an OBSERVED indication of error (a failed validation, or a diagnosed mismatch), not the hidden flag.
             mismatch_detected = environment.construction.observed_validation_failure(project) or any(
                 "mismatch with construction" in str(e).lower() for e in self.activity_log[-8:]
@@ -5529,23 +5533,21 @@ class Agent:
             self.experimental_metrics["repair_blocked"] += 1
         return sorted(set(blockers)), project_id
 
-    _REPAIR_EPISTEMIC_BLOCKERS = frozenset({
-        "insufficient_information_inspection", "insufficient_rule_knowledge", "missing_role_grounding",
-        "missing_cross_role_engineer_grounding", "stale_epistemic_grounding", "missing_task_prerequisite_rules",
-        "no_inspected_information_source",
-    })
+    def _repair_epistemic_blockers(self, environment, sim_state=None, project_id=None):
+        """Project-specific repair grounding (read-only).
 
-    def _repair_epistemic_blockers(self, environment, sim_state=None):
-        """What stands between this agent's knowledge and a repair it already knows is needed (read-only).
-
-        The Pilot sees this at decision time (REPAIR affordance ``repair_blockers``) and the same list gates execution,
-        so a repair the agent cannot ground is not selected only to fail later; acquiring the missing grounding stays a
-        Pilot choice (INSPECT / CONSULT / REQUEST ...).
+        A repair is executable when the failure of THIS project was observed (caller checks) and the agent currently holds
+        the task rules needed to reason about that project's validity. Global source-memory sufficiency is deliberately
+        NOT a gate (it may shape the Pilot's reacquisition preference elsewhere). The blocker names only missing rule ids,
+        never the hidden construction error. Acquiring the rules stays a Pilot choice (INSPECT / CONSULT / REQUEST).
         """
-        blockers = [b for b in self._build_readiness_blockers(environment, sim_state=sim_state) if b in self._REPAIR_EPISTEMIC_BLOCKERS]
-        if not self._epistemic_sufficiency(environment, sim_state=sim_state).get("sufficient_for_validation", False):
-            blockers.append("epistemic_sufficiency_low_for_repair")
-        return sorted(set(blockers))
+        project = environment.construction.projects.get(str(project_id or "")) if project_id else None
+        _info_ids, rule_ids = self._effective_knowledge_for_readiness(sim_state=sim_state)
+        held = {normalize_rule_token(r) for r in (rule_ids or set()) if normalize_rule_token(r)}
+        expected = [normalize_rule_token(r) for r in ((project or {}).get("expected_rules") or []) if normalize_rule_token(r)]
+        if expected:
+            return sorted("missing_expected_rule:" + r for r in expected if r not in held)
+        return [] if held else ["insufficient_rule_knowledge"]
 
     def _build_readiness_blockers(self, environment, sim_state=None, *, typed_start_target=None):
         blockers = []

@@ -397,7 +397,7 @@ class BrainContextBuilder:
                 # REPAIR is advertised only where an error has been OBSERVED (a failed validation). Whether the agent's own
                 # knowledge can ground the repair is stated up front (the same check that gates execution) so the Pilot can
                 # choose to acquire grounding instead of picking a repair that predictably fails.
-                repair_blockers = agent._repair_epistemic_blockers(environment) if hasattr(agent, "_repair_epistemic_blockers") else []
+                repair_blockers = agent._repair_epistemic_blockers(environment, project_id=project_id) if hasattr(agent, "_repair_epistemic_blockers") else []
                 legal.append({**base, "action_type": ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value, "utility": utility_for(ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, target_kind="build"),
                               "observed_repair_need": True, "repair_ready": not repair_blockers, "repair_blockers": list(repair_blockers)})
 

@@ -97,3 +97,40 @@ H. Coherent commits; push each tested stage to origin/main. I. Final 19-item rep
   seeds 0-2 table. Update tests that set project["status"]="needs_repair" directly only if they pass at baseline.
 - Parts B, C, D; DEVELOPMENT_STATE.md update (incl. coordination-lifecycle audit finding, build_readiness_sensitivity sign);
   non-GUI regression comparison; merge/push to origin/main; final 19-item report. Do not start the coordination block.
+
+
+## PART A RESOLVED (2026-10-15, second session)
+Decision (user): REPAIR uses a PROJECT-SPECIFIC grounding criterion, not the global validation-grade source-memory threshold.
+Executable when (1) the exact project's validation failure was observed and (2) the agent currently holds the project's
+expected_rules (or, for a project with none, at least one task rule). Raw project.correct is never used and the hidden error is
+not revealed; blockers name only missing rule ids (`missing_expected_rule:<id>`) plus the hard token `repair_project_rules_not_held`.
+- agent._repair_epistemic_blockers(environment, sim_state, project_id) is shared by the REPAIR affordance (repair_ready /
+  repair_blockers) and the execution gate; low source-memory confidence is no longer a gate (it still feeds the ACQUIRE_DIK/INSPECT
+  preference through epistemic features). rule_accuracy still governs application fidelity: repairs can fail (cause repair_fidelity).
+- Epistemic blockers are "advisory" in _partition_action_blockers; `repair_project_rules_not_held` was added to the hard tokens so an
+  ungrounded REPAIR is blocked (and recorded as a known gap) rather than executed.
+- tests/test_observed_validation_repair.py = required tests 1-14 (14 pass). test_construction_correctness_authority's repair test now
+  states the grounding premise (agent holds the project's expected rules).
+- Diagnostic (scripts/wip_diagnostics/validation_repair_diag.py, 900 s, neutral .5/.5):
+  seed | attempts | failures | revalidations | repair selections | repair executions | validated | stuck at end
+  0 | 45 | 27 | 25 | 23 | 37 | 18 | 2
+  1 | 20 | 13 | 13 | 21 | 14 | 7 | 0
+  2 | 11 |  8 |  4 | 11 |  6 | 3 | 6
+  Single project (seed 1, site_b_food_connector_001): build error t=88 -> failed validation t=90 -> consult/inspect (knowledge gap,
+  repair_ready False) -> repair_ready True t=101 -> repair t=276 (imperfect, repair_fidelity) -> revalidate fail -> repair -> revalidated t=281.
+  No validation loop. CAVEAT: repair_executions can exceed repair_selections (seed 0: 37 vs 23); selections are counted once per
+  Pilot episode, executions per applied action, so this is a counting-granularity difference, not an un-chosen repair (the execution
+  path only runs for decision_action == REPAIR). Worth a cleaner metric before the proof matrix.
+- Regression: of the related test files, 79 fail after vs 80 before (c25d9c6); the after-set is a subset of the before-set
+  (no new failures). They are pre-existing brittle/known failures.
+
+## FINDING (documented, NOT fixed): repeated start_construction / materials_not_staged
+START_CONSTRUCTION (start_mode existing_project) is advertised for any physically unstarted project, whether or not materials are
+staged (construction.execute_build_step returns "materials_not_staged" when build_ready is False). Once the validate loop was removed
+the Pilot repeatedly selects START on such projects (70-440 per agent at 900 s earlier; seed 2 shows 49 start_construction decisions
+under REPAIR mode) and the projects stay stuck (seed 2: 6 unfinished/needs_repair at the end; seed 0: 2). The affordance does not
+state the missing-materials fact per project, so the Pilot cannot discriminate (affordance-quality problem, not a Pilot-authority one).
+Severity: material for the proof matrix (inflates action counts, suppresses throughput, confounds taskwork measures) but separate from
+the repair semantics. Recommendation: fix BEFORE the profile/logging work (B/C/D), as a small affordance fix (expose a per-project
+materials_staged / start_blockers fact and withhold or flag START where build_ready is False) with a regression test. Awaiting the
+user's go-ahead because it changes action availability.
