@@ -578,7 +578,12 @@ class ConstructionManager:
             project["validation_discussion"] = discussion
         return discussion
 
-    def resolve_project_id(self, project_or_target_id, *, create_if_missing=False):
+    def resolve_project_id(self, project_or_target_id, *, create_if_missing=False, unambiguous_only=False):
+        """Map a project id or a site alias to a project id.
+
+        A site alias used to pick "the first unfinished project at that site". With ``unambiguous_only`` an alias that
+        names several unfinished projects resolves to nothing instead, so middleware cannot choose among them.
+        """
         requested = str(project_or_target_id or "").strip()
         if requested in self.projects:
             return requested
@@ -593,6 +598,8 @@ class ConstructionManager:
         site_projects = [p for p in self.projects.values() if p.get("site_id") == site_id]
         unfinished = [p for p in site_projects if p.get("status") != "complete"]
         if unfinished:
+            if unambiguous_only and len(unfinished) > 1:
+                return None
             unfinished.sort(key=lambda p: (0 if p.get("started") else 1, p.get("id")))
             return unfinished[0].get("id")
         if not create_if_missing:

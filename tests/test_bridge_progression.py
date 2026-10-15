@@ -76,6 +76,14 @@ def test_stagnation_regrounding_does_not_replace_a_productive_pilot_action(sim):
     assert "metacognitive_support_loop_broken" in events  # the loop breaker still works for non-productive behavior
 
 
+@pytest.mark.xfail(
+    reason=(
+        "Pilot-authority cleanup: this seeded colony outcome used to be reached partly because the Mecha swapped the Pilot's WAIT/consult choices "
+        "and blocked project targets for taskwork on projects of its own choosing. The Procedural Baseline has no policy of its own that finishes "
+        "Site B and the bridge; that is a Pilot-policy question, not something middleware may rescue."
+    ),
+    strict=False,
+)
 def test_seeded_run_completes_site_b_builds_the_bridge_and_works_at_site_c():
     random.seed(0)
     with tempfile.TemporaryDirectory() as tmp:

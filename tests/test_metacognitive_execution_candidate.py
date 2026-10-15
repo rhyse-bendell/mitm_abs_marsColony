@@ -98,12 +98,9 @@ def test_first_advertised_candidate_legal_emits_locally_grounded_event(monkeypat
     )
 
     assert result.selected_action == PRIORITY[0]
-    events = [e for e in sim_state.logger.events if e["event_type"] == "project_focus_bound_to_action"]
-    assert len(events) == 1
-    payload = events[0]["payload"]
-    assert payload["selected_action"] == PRIORITY[0].value
-    assert payload["project_id"] == "legal_project"
-    assert payload["reason"] == "metacognitive_execution_candidate"
+    assert result.target_id == "legal_project"
+    # Candidate generation is a read-only query: it binds no project focus and emits no world-facing event.
+    assert [e for e in sim_state.logger.events if e["event_type"] == "project_focus_bound_to_action"] == []
 
 
 def test_absent_action_affordance_is_skipped(monkeypatch):
@@ -334,6 +331,9 @@ def test_readiness_unlock_does_not_duplicate_project_focus_success_event(monkeyp
         context=_context(_affordance(ExecutableActionType.TRANSPORT_RESOURCES, project_id)),
     )
 
-    events = [e for e in sim_state.logger.events if e["event_type"] == "project_focus_bound_to_action"]
-    assert len(events) == 1
-    assert events[0]["payload"]["project_id"] == project_id
+    # Pilot authority: a readiness unlock reports the legal alternative as information and binds no project focus.
+    assert [e for e in sim_state.logger.events if e["event_type"] == "project_focus_bound_to_action"] == []
+    reported = [e for e in sim_state.logger.events if e["event_type"] == "metacognitive_project_alternatives_reported"]
+    assert len(reported) == 1
+    assert reported[0]["payload"]["applied"] is False
+    assert [a["project_id"] for a in reported[0]["payload"]["legal_alternatives"]] == [project_id]

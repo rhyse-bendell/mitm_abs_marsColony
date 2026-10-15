@@ -749,7 +749,7 @@ class TestRuleBrainRepairPatch(unittest.TestCase):
         finally:
             sim.stop()
 
-    def test_missing_binding_recovery_prefers_project_reacquisition(self):
+    def test_missing_binding_recovery_does_not_rebind_or_force_a_project(self):
         sim = SimulationState(phases=[], flash_mode=True)
         try:
             agent = sim.agents[0]
@@ -763,9 +763,10 @@ class TestRuleBrainRepairPatch(unittest.TestCase):
             }]
             with patch.object(agent, "_acquire_project_focus_for_action", return_value="Build_Table_B"):
                 agent._apply_externalization_and_construction_effects(sim.environment, sim, dt=0.1)
-            self.assertEqual(agent.transport_state.get("bound_project_id"), "Build_Table_B")
-            self.assertEqual(agent.progress_tracker.get("forced_pivot"), ExecutableActionType.TRANSPORT_RESOURCES.value)
-            self.assertTrue(any(e.get("event_type") == "recovery_pivot_to_project_reacquisition" for e in sim.logger.get_recent_events(300)))
+            # Recovery reports the failed transport; it neither binds the Mecha's pick of a project nor forces taskwork.
+            self.assertIsNone(agent.transport_state.get("bound_project_id"))
+            self.assertNotEqual(agent.progress_tracker.get("forced_pivot"), ExecutableActionType.TRANSPORT_RESOURCES.value)
+            self.assertFalse(any(e.get("event_type") == "recovery_pivot_to_project_reacquisition" for e in sim.logger.get_recent_events(300)))
         finally:
             sim.stop()
 

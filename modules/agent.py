@@ -887,7 +887,22 @@ class Agent:
             total_before += duration_s
         return "mid"
 
-    def _metacognitive_execution_candidate(self, environment, sim_state=None, context=None, preferred_project_id=None):
+    _PROJECT_TASKWORK_ACTIONS = frozenset(
+        {
+            ExecutableActionType.TRANSPORT_RESOURCES,
+            ExecutableActionType.START_CONSTRUCTION,
+            ExecutableActionType.CONTINUE_CONSTRUCTION,
+            ExecutableActionType.VALIDATE_CONSTRUCTION,
+            ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
+        }
+    )
+
+    def _metacognitive_project_alternatives(self, environment, sim_state=None, context=None, preferred_project_id=None):
+        """Read-only: legal project-taskwork options the current affordances expose.
+
+        This is information for a new Pilot decision. It creates nothing, emits nothing, and nothing in the Mecha
+        executes an alternative on the Pilot's behalf.
+        """
         order = [
             ExecutableActionType.VALIDATE_CONSTRUCTION,
             ExecutableActionType.TRANSPORT_RESOURCES,
@@ -896,22 +911,18 @@ class Agent:
             ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
         ]
         affordances = list(getattr(context, "action_affordances", []) or [])
+        alternatives = []
+        seen = set()
         for action_type in order:
-            for aff in (
-                a
-                for a in affordances
-                if isinstance(a, dict)
-                and str(a.get("action_type")) == action_type.value
-            ):
+            for aff in (a for a in affordances if isinstance(a, dict) and str(a.get("action_type")) == action_type.value):
+                if str(aff.get("start_mode") or "") == "new_project":
+                    continue
                 target_id = aff.get("target_id") or preferred_project_id
                 if preferred_project_id:
                     preferred_candidate_id = target_id
                     construction = getattr(environment, "construction", None)
                     if construction is not None and hasattr(construction, "resolve_project_id"):
-                        preferred_candidate_id = construction.resolve_project_id(
-                            target_id,
-                            create_if_missing=False,
-                        ) or target_id
+                        preferred_candidate_id = construction.resolve_project_id(target_id, create_if_missing=False, unambiguous_only=True) or target_id
                     if str(preferred_candidate_id or "") != str(preferred_project_id):
                         continue
                 probe = BrainDecision(selected_action=action_type, target_id=target_id, confidence=0.8)
@@ -927,19 +938,45 @@ class Agent:
                 resolved_project_id = project_id or target_id
                 if preferred_project_id and str(resolved_project_id or "") != str(preferred_project_id):
                     continue
-                self._emit_event(
-                    sim_state,
-                    "project_focus_bound_to_action",
-                    {
-                        "project_id": resolved_project_id,
-                        "selected_action": action_type.value,
-                        "reason": "metacognitive_execution_candidate",
-                    },
-                )
-                return BrainDecision(selected_action=action_type, target_id=resolved_project_id, confidence=0.85)
-        return None
+                key = (action_type.value, str(resolved_project_id or ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                alternatives.append(BrainDecision(selected_action=action_type, target_id=resolved_project_id, confidence=0.85))
+        return alternatives
+
+    def _metacognitive_execution_candidate(self, environment, sim_state=None, context=None, preferred_project_id=None):
+        """First legal alternative (read-only); used for reporting and readiness, never returned as the Pilot's action."""
+        alternatives = self._metacognitive_project_alternatives(environment, sim_state=sim_state, context=context, preferred_project_id=preferred_project_id)
+        return alternatives[0] if alternatives else None
+
+    def _report_project_alternatives(self, sim_state, *, origin, pilot_decision, alternatives, blockers=None):
+        """Tell the next Pilot decision which project actions are legal; the Pilot's own choice is left untouched."""
+        listed = [{"action": a.selected_action.value, "project_id": a.target_id} for a in (alternatives or [])]
+        meta = self.metacognitive_state
+        signature = (pilot_decision.selected_action.value, str(pilot_decision.target_id or ""), tuple((x["action"], str(x["project_id"])) for x in listed))
+        meta["legal_project_alternatives"] = listed
+        if meta.get("_alternatives_signature") == signature:
+            return
+        meta["_alternatives_signature"] = signature
+        self._emit_event(
+            sim_state,
+            "metacognitive_project_alternatives_reported",
+            {
+                "origin": origin,
+                "pilot_action": pilot_decision.selected_action.value,
+                "pilot_target_id": pilot_decision.target_id,
+                "blockers": list(blockers or [])[:6],
+                "legal_alternatives": listed[:12],
+                "applied": False,
+            },
+        )
 
     def _force_recovery_pivot(self, sim_state=None, *, to_action, reason, ttl_s=12.0):
+        if str(to_action) in {a.value for a in self._PROJECT_TASKWORK_ACTIONS}:
+            # Pilot authority: recovery may report that a project action would be legal, but it does not force one.
+            self._emit_event(sim_state, "recovery_pivot_declined_project_taskwork", {"to_action": str(to_action), "reason": str(reason), "applied": False})
+            return
         now_ts = self._tracker_now(sim_state)
         self.progress_tracker["forced_pivot"] = str(to_action)
         self.progress_tracker["forced_pivot_until"] = now_ts + max(1.0, float(ttl_s))
@@ -977,19 +1014,14 @@ class Agent:
             meta["last_readiness_unlock_tick"] = tick
             meta["execution_window_until"] = now_ts + 10.0
             meta["execution_window_origin"] = "readiness_unlocked"
-            unlocked_target = decision.target_id or (execution_candidate.target_id if execution_candidate is not None else None)
+            unlocked_target = decision.target_id
             meta["execution_window_project_id"] = unlocked_target
             self._emit_event(sim_state, "metacognitive_execution_window_started", {"origin": "readiness_unlocked", "until": meta["execution_window_until"], "project_id": unlocked_target})
             self._emit_event(sim_state, "metacognitive_handoff_to_execution", {"reason": "readiness_unlocked", "project_id": unlocked_target})
             self._emit_event(sim_state, "metacognitive_execution_bias_applied_after_readiness_unlock", {"project_id": unlocked_target})
             self._emit_event(sim_state, "metacognitive_switch_to_execution", {"reason": "readiness_unlocked"})
-            if execution_candidate is not None and execution_candidate.target_id:
-                self._start_execution_lock(
-                    environment,
-                    execution_candidate.target_id,
-                    sim_state=sim_state,
-                    reason="readiness_unlock_handoff",
-                )
+            if execution_candidate is not None:
+                self._report_project_alternatives(sim_state, origin="readiness_unlocked", pilot_decision=decision, alternatives=self._metacognitive_project_alternatives(environment, sim_state=sim_state, context=context))
 
         if float(meta.get("execution_window_until", 0.0) or 0.0) < now_ts and meta.get("execution_window_origin"):
             self._emit_event(sim_state, "metacognitive_execution_window_expired", {"origin": meta.get("execution_window_origin"), "project_id": meta.get("execution_window_project_id")})
@@ -1008,8 +1040,7 @@ class Agent:
                 self._emit_event(sim_state, "metacognitive_project_reactivated", {"project_id": project_id, "reason": "new_support_or_actionability"})
                 deferred.pop(project_id, None)
                 if action in {ExecutableActionType.WAIT, ExecutableActionType.REASSESS_PLAN}:
-                    self._set_metacognitive_mode("SWITCH_REPRIORITIZE", sim_state=sim_state, reason="reactivated_project", focus_target=project_id, profile="execution_heavy")
-                    return candidate
+                    self._report_project_alternatives(sim_state, origin="reactivated_project", pilot_decision=decision, alternatives=[candidate])
 
         teammate_closure_active = False
         for project in getattr(environment.construction, "projects", {}).values():
@@ -1019,9 +1050,8 @@ class Agent:
                 teammate_closure_active = True
                 break
         if action == ExecutableActionType.WAIT and execution_candidate is not None and not teammate_closure_active:
-            self._emit_event(sim_state, "metacognitive_wait_suppressed_due_to_viable_action", {"from_action": action.value, "to_action": execution_candidate.selected_action.value, "target_id": execution_candidate.target_id})
-            self._set_metacognitive_mode("EXECUTE", sim_state=sim_state, reason="wait_suppressed_viable_action", focus_target=execution_candidate.target_id, profile="execution_heavy")
-            return execution_candidate
+            # The Pilot chose WAIT. A legal project action is reported as information; it is not substituted.
+            self._report_project_alternatives(sim_state, origin="wait_with_viable_action", pilot_decision=decision, alternatives=self._metacognitive_project_alternatives(environment, sim_state=sim_state, context=context))
 
         if (
             meta.get("execution_window_origin")
@@ -1036,8 +1066,8 @@ class Agent:
         }
             and execution_candidate is not None
         ):
-            self._set_metacognitive_mode("EXECUTE", sim_state=sim_state, reason="execution_window", focus_target=execution_candidate.target_id, profile="execution_heavy")
-            return execution_candidate
+            self._set_metacognitive_mode("EXECUTE", sim_state=sim_state, reason="execution_window", profile="execution_heavy")
+            self._report_project_alternatives(sim_state, origin="execution_window", pilot_decision=decision, alternatives=self._metacognitive_project_alternatives(environment, sim_state=sim_state, context=context))
 
         # Stagnation describes a non-executing epistemic/support loop. A productive Pilot action
         # (transport / construct / validate / repair) is not that loop and is not replaced by the
@@ -1055,8 +1085,6 @@ class Agent:
             self._emit_event(sim_state, "metacognitive_support_loop_broken", {"support_stagnation": int(stagnation["support"]), "epistemic_stagnation": int(stagnation["epistemic"])})
             self._emit_event(sim_state, "metacognitive_switch_to_regrounding", {"reason": "stagnation"})
             self._set_metacognitive_mode("RECOVER_REGROUND", sim_state=sim_state, reason="stagnation", profile="recovery")
-            if phase_tempo == "late" and execution_candidate is not None:
-                return execution_candidate
             fallback = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
             if fallback.selected_action in {ExecutableActionType.INSPECT_INFORMATION_SOURCE, ExecutableActionType.REASSESS_PLAN, ExecutableActionType.COMMUNICATE}:
                 return fallback
@@ -1066,8 +1094,8 @@ class Agent:
             ExecutableActionType.EXTERNALIZE_PLAN,
             ExecutableActionType.INSPECT_INFORMATION_SOURCE,
         }:
-            self._set_metacognitive_mode("EXECUTE", sim_state=sim_state, reason="late_phase_tempo", focus_target=execution_candidate.target_id, profile="execution_heavy")
-            return execution_candidate
+            self._set_metacognitive_mode("EXECUTE", sim_state=sim_state, reason="late_phase_tempo", profile="execution_heavy")
+            self._report_project_alternatives(sim_state, origin="late_phase_tempo", pilot_decision=decision, alternatives=self._metacognitive_project_alternatives(environment, sim_state=sim_state, context=context))
         if phase_tempo == "early":
             self._set_metacognitive_mode("EXPLORE_GROUND", sim_state=sim_state, reason="early_phase_tempo", profile="discussion_heavy")
         elif phase_tempo == "mid":
@@ -1102,8 +1130,6 @@ class Agent:
                         "metacognitive_project_switch_suppressed_due_to_commitment",
                         {"project_id": focus_project, "reason": "active_commitment_window", "same_project_candidate": bool(same_project_candidate)},
                     )
-                    if same_project_candidate is not None:
-                        return same_project_candidate
                     return decision
                 entry = deferred.setdefault(str(focus_project), {"deferred_at": now_ts, "reason": "project_blocked", "return_condition": "new_externalized_support_or_actionability"})
                 entry["last_blockers"] = list(blockers[:6])
@@ -1116,10 +1142,11 @@ class Agent:
                         "metacognitive_execution_window_interrupted",
                         {"project_id": focus_project, "reason": "true_blocker_with_viable_alternative", "blockers": blockers[:6]},
                     )
-                self._emit_event(sim_state, "metacognitive_project_switch_allowed_due_to_true_block", {"project_id": focus_project, "blockers": blockers[:6], "alternative_project_id": execution_candidate.target_id})
+                self._emit_event(sim_state, "metacognitive_project_switch_allowed_due_to_true_block", {"project_id": focus_project, "blockers": blockers[:6], "alternative_project_id": execution_candidate.target_id, "applied": False})
                 self._emit_event(sim_state, "metacognitive_project_deferred", {"project_id": focus_project, "reason": "blocked_with_viable_alternative", "blockers": blockers[:6], "return_condition": entry["return_condition"]})
-                self._set_metacognitive_mode("SWITCH_REPRIORITIZE", sim_state=sim_state, reason="blocked_project_switch", focus_target=execution_candidate.target_id, profile="execution_heavy")
-                return execution_candidate
+                self._set_metacognitive_mode("SWITCH_REPRIORITIZE", sim_state=sim_state, reason="blocked_project_switch", profile="execution_heavy")
+                # The selected project is blocked: report why and which projects are legal, and let the Pilot choose again.
+                self._report_project_alternatives(sim_state, origin="blocked_project", pilot_decision=decision, alternatives=self._metacognitive_project_alternatives(environment, sim_state=sim_state, context=context), blockers=blockers)
         if action == ExecutableActionType.EXTERNALIZE_PLAN and commitment_project:
             prior_until = float(meta.get("execution_window_until", 0.0) or 0.0)
             meta["execution_window_until"] = max(prior_until, now_ts + 6.0)
@@ -4455,11 +4482,16 @@ class Agent:
             resolved_project_id = environment.construction.resolve_project_id(
                 requested_project_id,
                 create_if_missing=False,
+                unambiguous_only=True,
             )
             if resolved_project_id:
                 return resolved_project_id
             if probe_only:
                 return None
+        unfinished_projects = [p for p in environment.construction.projects.values() if isinstance(p, dict) and str(p.get("status")) != "complete"]
+        if len(unfinished_projects) > 1:
+            # Several unfinished projects and no exact target: the Mecha does not pick one for the Pilot.
+            return None
         if decision.selected_action in {ExecutableActionType.VALIDATE_CONSTRUCTION, ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION}:
             if probe_only:
                 return None
@@ -4499,47 +4531,20 @@ class Agent:
         return True
 
     def _acquire_project_focus_for_action(self, environment, *, action_type=None, requested_project_id=None, sim_state=None, reason=None):
+        """Ground the project the Pilot named; never choose one for it. Returns None when there is no viable named project."""
         reason_tag = str(reason or "project_focus_acquire")
-        candidates = []
-        locked_project_id = str(self.execution_lock_state.get("locked_project_id") or "")
-        if locked_project_id:
-            candidates.append(("execution_lock", locked_project_id))
-        bound_project_id = str(self.transport_state.get("bound_project_id") or "")
-        if bound_project_id:
-            candidates.append(("transport_bound", bound_project_id))
-        current_project_id = str((self.current_action or {}).get("project_id") or "")
-        if current_project_id:
-            candidates.append(("current_action", current_project_id))
-        if requested_project_id:
-            candidates.append(("requested", str(requested_project_id)))
-        for source, candidate_id in candidates:
-            if self._project_still_viable_for_binding(environment, candidate_id):
-                self._emit_event(
-                    sim_state,
-                    "project_focus_preserved_on_refresh" if source != "requested" else "project_focus_reacquired_for_action",
-                    {"project_id": candidate_id, "source": source, "reason": reason_tag},
-                )
-                return candidate_id
-        selected = self._select_build_target(
-            environment,
-            require_readiness=False,
-            include_project=True,
-            action_type=action_type,
-            requested_project_id=requested_project_id,
-            sim_state=sim_state,
-        )
-        selected_project_id = selected.get("project_id") if isinstance(selected, dict) else None
-        if selected_project_id and self._project_still_viable_for_binding(environment, selected_project_id):
+        requested = str(requested_project_id or "")
+        if requested and self._project_still_viable_for_binding(environment, requested):
+            self._emit_event(sim_state, "project_focus_reacquired_for_action", {"project_id": requested, "source": "requested", "reason": reason_tag})
+            return requested
+        signature = (requested, str(action_type), reason_tag)
+        if getattr(self, "_last_focus_not_substituted", None) != signature:
+            self._last_focus_not_substituted = signature
             self._emit_event(
                 sim_state,
-                "project_focus_reacquired_for_action",
-                {"project_id": selected_project_id, "source": "target_selection", "reason": reason_tag},
+                "project_focus_not_substituted",
+                {"requested_project_id": requested or None, "action_type": action_type, "reason": reason_tag},
             )
-            return selected_project_id
-        unlock = environment.construction.get_next_capacity_unlock() if hasattr(environment.construction, "get_next_capacity_unlock") else None
-        if isinstance(unlock, dict) and str(unlock.get("bridge_id") or "") == "bridge_bc":
-            self._emit_event(sim_state, "locked_capacity_unlock_identified", {"bridge_id": "bridge_bc", "reason": reason_tag})
-            return "bridge_bc"
         return None
 
     def _bind_project_to_decision_if_needed(self, decision, environment, *, sim_state=None, reason=None):
@@ -5344,41 +5349,8 @@ class Agent:
         project_id = state.get("locked_project_id")
         if not project_id:
             return decision
-        self._emit_event(sim_state, "execution_lock_build_bias_applied", {"project_id": project_id, "selected_action": decision.selected_action.value})
-        if decision.selected_action == ExecutableActionType.TRANSPORT_RESOURCES and str(decision.target_id or "") == str(project_id):
-            project = environment.construction.projects.get(project_id)
-            if self._project_materially_ready_for_build(project) and self._project_has_incomplete_build_steps(project):
-                self._emit_event(sim_state, "execution_lock_transport_suppressed", {"project_id": project_id})
-                return BrainDecision(
-                    selected_action=ExecutableActionType.CONTINUE_CONSTRUCTION,
-                    target_id=project_id,
-                    target_zone=decision.target_zone,
-                    goal_update="execution_lock_continue_build",
-                    reason_summary=f"Execution lock suppresses transport for materially ready {project_id}.",
-                    confidence=max(0.81, float(decision.confidence or 0.0)),
-                )
-        if decision.selected_action in {
-            ExecutableActionType.INSPECT_INFORMATION_SOURCE,
-            ExecutableActionType.CONSULT_TEAM_ARTIFACT,
-            ExecutableActionType.EXTERNALIZE_PLAN,
-            ExecutableActionType.REASSESS_PLAN,
-            ExecutableActionType.REQUEST_ASSISTANCE,
-            ExecutableActionType.WAIT,
-        }:
-            if self._execution_lock_viable_project(environment, project_id, sim_state=sim_state):
-                self._emit_event(
-                    sim_state,
-                    "execution_lock_switch_suppressed",
-                    {"project_id": project_id, "from_action": decision.selected_action.value, "to_action": ExecutableActionType.CONTINUE_CONSTRUCTION.value},
-                )
-                return BrainDecision(
-                    selected_action=ExecutableActionType.CONTINUE_CONSTRUCTION,
-                    target_id=project_id,
-                    target_zone=decision.target_zone,
-                    goal_update="execution_lock_continue_build",
-                    reason_summary=f"Execution lock preserves project-bound build continuity for {project_id}.",
-                    confidence=max(0.79, float(decision.confidence or 0.0)),
-                )
+        # Pilot authority: a lock records which project the Pilot was working; it does not turn another action into
+        # taskwork on that project. The Pilot may re-select the locked project itself.
         return decision
 
     def _select_build_target(self, environment, require_readiness=False, include_project=False, action_type=None, requested_project_id=None, sim_state=None, *, allow_project_creation=False, require_supplied_target=False):
@@ -5396,6 +5368,7 @@ class Agent:
             resolved_requested_project_id = environment.construction.resolve_project_id(
                 requested_project_id,
                 create_if_missing=allow_project_creation,
+                unambiguous_only=True,
             )
             if resolved_requested_project_id:
                 requested_project = environment.construction.projects.get(resolved_requested_project_id)
@@ -6774,6 +6747,7 @@ class Agent:
             decision = BrainDecision(selected_action=ExecutableActionType.WAIT, reason_summary="Fallback due to decision validation failure.", confidence=1.0)
         if response.controller_state:
             context.individual_cognitive_state["control_state"] = dict(response.controller_state)
+        self._pilot_decision_anchor = decision  # a fresh Pilot decision (e.g. a re-query) is Pilot-authored
         self._emit_event(
             sim_state,
             "pilot_selection_via_adapter",
@@ -8190,6 +8164,46 @@ class Agent:
     # Policy pivots let an agent move from blocked primary goals into repair-oriented
     # subgoals without claiming the blockage is resolved.
     def _apply_policy_pivots(self, decision, environment, sim_state=None, context=None, pivot_origin="runtime"):
+        """Run the recovery/regulation pivots, then enforce Pilot authority over project taskwork.
+
+        The pivots may rewrite non-project actions (see the documented scaffold behaviours). They may not turn a decision
+        into project-specific taskwork the Pilot did not choose, nor change the project or taskwork family the Pilot did
+        choose: such a rewrite is rejected, reported with the proposed alternative as information, and the Pilot's own
+        decision stands (and is then judged by the gate).
+        """
+        self._pilot_decision_anchor = decision
+        result = self._apply_policy_pivots_unguarded(decision, environment, sim_state=sim_state, context=context, pivot_origin=pivot_origin)
+        return self._enforce_pilot_project_authority(result, sim_state=sim_state, pivot_origin=pivot_origin)
+
+    @staticmethod
+    def _same_pilot_choice(a, b):
+        return (
+            a.selected_action == b.selected_action
+            and str(a.target_id or "") == str(b.target_id or "")
+            and decision_action_args(a) == decision_action_args(b)
+        )
+
+    def _enforce_pilot_project_authority(self, result, *, sim_state=None, pivot_origin="runtime"):
+        anchor = getattr(self, "_pilot_decision_anchor", None)
+        if anchor is None or result is anchor or result.selected_action not in self._PROJECT_TASKWORK_ACTIONS:
+            return result
+        if self._same_pilot_choice(result, anchor):
+            return result
+        self._emit_event(
+            sim_state,
+            "mecha_project_substitution_rejected",
+            {
+                "origin": pivot_origin,
+                "pilot_action": anchor.selected_action.value,
+                "pilot_target_id": anchor.target_id,
+                "proposed_action": result.selected_action.value,
+                "proposed_target_id": result.target_id,
+                "applied": False,
+            },
+        )
+        return anchor
+
+    def _apply_policy_pivots_unguarded(self, decision, environment, sim_state=None, context=None, pivot_origin="runtime"):
         context = context or (sim_state.brain_context_builder.build(sim_state, self) if sim_state is not None else None)
         rewritten = decision
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
@@ -9073,16 +9087,6 @@ class Agent:
             ExecutableActionType.TRANSPORT_RESOURCES,
         }:
             lock_project_id = rewritten.target_id
-            if not lock_project_id:
-                selected = self._select_build_target(
-                    environment,
-                    require_readiness=False,
-                    include_project=True,
-                    action_type=rewritten.selected_action.value,
-                    requested_project_id=rewritten.target_id,
-                    sim_state=sim_state,
-                )
-                lock_project_id = selected.get("project_id") if isinstance(selected, dict) else None
             if (
                 lock_project_id
                 and self._execution_lock_viable_project(environment, lock_project_id, sim_state=sim_state)
@@ -11339,23 +11343,8 @@ class Agent:
                         detail={"project_id": project_id, "failure_category": failure_category},
                     )
 
+                    # Recovery reports the failure; it does not pick the next project (that is a new Pilot decision).
                     next_action = ExecutableActionType.REASSESS_PLAN.value
-                    if failure_category == "missing_project_binding":
-                        rebound_project = self._acquire_project_focus_for_action(
-                            environment,
-                            action_type=ExecutableActionType.TRANSPORT_RESOURCES.value,
-                            requested_project_id=None,
-                            sim_state=sim_state,
-                            reason="recovery_missing_project_binding",
-                        )
-                        if rebound_project:
-                            self.transport_state["bound_project_id"] = rebound_project
-                            next_action = ExecutableActionType.TRANSPORT_RESOURCES.value
-                            self._emit_event(
-                                sim_state,
-                                "recovery_pivot_to_project_reacquisition",
-                                {"project_id": rebound_project, "failure_category": failure_category},
-                            )
                     if isinstance(project, dict) and str(project.get("status")) == "ready_for_validation":
                         next_action = ExecutableActionType.VALIDATE_CONSTRUCTION.value
                         self._start_project_closure_commitment(
@@ -11366,18 +11355,9 @@ class Agent:
                             reason="transport_terminal_project_satisfied",
                         )
                     else:
-                        next_transport_target = self._select_build_target(
-                            environment,
-                            require_readiness=False,
-                            include_project=True,
-                            action_type=ExecutableActionType.TRANSPORT_RESOURCES.value,
-                        )
-                        if isinstance(next_transport_target, dict) and next_transport_target.get("project_id"):
-                            next_action = ExecutableActionType.TRANSPORT_RESOURCES.value
-                        else:
-                            epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
-                            if bool(epistemic.get("stale_grounding")) or bool(epistemic.get("role_missing")):
-                                next_action = ExecutableActionType.INSPECT_INFORMATION_SOURCE.value
+                        epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
+                        if bool(epistemic.get("stale_grounding")) or bool(epistemic.get("role_missing")):
+                            next_action = ExecutableActionType.INSPECT_INFORMATION_SOURCE.value
 
                     self._force_recovery_pivot(
                         sim_state,

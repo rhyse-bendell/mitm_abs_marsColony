@@ -42,6 +42,9 @@ class AgentActionGate:
                 target_id=decision.target_id,
                 metadata={"action_args": decision_action_args(decision)},
             )
+        target_blocked = self._check_project_target_authority(decision=decision, construction=construction)
+        if target_blocked is not None:
+            return target_blocked
         if action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
             return self._evaluate_inspect(agent=agent, decision=decision, sim_state=sim_state)
         if action in {ExecutableActionType.COMMUNICATE, ExecutableActionType.REQUEST_ASSISTANCE}:
@@ -59,6 +62,49 @@ class AgentActionGate:
         if action == ExecutableActionType.CONNECT_STRUCTURES:
             return self._evaluate_connection(agent=agent, decision=decision, sim_state=sim_state)
         return self._evaluate_meta(agent=agent, decision=decision, sim_state=sim_state)
+
+    _PROJECT_TASKWORK = {
+        ExecutableActionType.TRANSPORT_RESOURCES,
+        ExecutableActionType.START_CONSTRUCTION,
+        ExecutableActionType.CONTINUE_CONSTRUCTION,
+        ExecutableActionType.VALIDATE_CONSTRUCTION,
+        ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
+    }
+
+    def _check_project_target_authority(self, *, decision: BrainDecision, construction) -> Optional[ActionGateResult]:
+        """Project-specific taskwork must name its project; the gate never picks one of several for the Pilot.
+
+        An exact project id (or the bridge) always passes. A site alias, ``active_construction`` or an absent target is
+        a legacy convenience that is accepted only when it names exactly one unfinished project; when several are
+        possible the request is blocked and the legal candidates are reported as information for a new Pilot decision.
+        """
+        if decision.selected_action not in self._PROJECT_TASKWORK or construction is None:
+            return None
+        if decision.selected_action == ExecutableActionType.START_CONSTRUCTION and decision_action_args(decision).get("structure_type"):
+            return None  # typed START creates a new project; it does not address an existing one
+        projects = getattr(construction, "projects", None) or {}
+        target = str(decision.target_id or "").strip()
+        if target in projects or target == "bridge_bc":
+            return None
+        unfinished = sorted(str(p.get("id")) for p in projects.values() if isinstance(p, dict) and str(p.get("status") or "") != "complete" and p.get("id"))
+        if target.lower() in self._ACTIVE_CONSTRUCTION_PLACEHOLDERS or not target:
+            candidates = unfinished
+        else:
+            is_alias = target in getattr(construction, "PROJECT_TO_SITE", {}) or target in getattr(construction, "LEGACY_PROJECT_TO_SITE", {})
+            if is_alias:
+                site_id = getattr(construction, "PROJECT_TO_SITE", {}).get(target) or getattr(construction, "LEGACY_PROJECT_TO_SITE", {}).get(target)
+                candidates = [pid for pid in unfinished if projects[pid].get("site_id") == site_id]
+            else:
+                candidates = unfinished
+        if len(candidates) <= 1:
+            return None
+        return ActionGateResult(
+            False,
+            decision,
+            blockers=["ambiguous_project_target" if target else "project_target_required"],
+            target_id=decision.target_id,
+            metadata={"legal_candidate_project_ids": candidates, "requested_target": target or None},
+        )
 
     def _pass(self, decision: BrainDecision) -> ActionGateResult:
         # TODO(architecture): expand family-specific legality checks here.
@@ -157,13 +203,23 @@ class AgentActionGate:
             return requested_id
         resolver = getattr(construction, "resolve_project_id", None)
         if callable(resolver):
-            return resolver(requested_id, create_if_missing=False)
+            return resolver(requested_id, create_if_missing=False, unambiguous_only=True)
         return None
 
     def _resolve_active_construction_project_id(self, *, agent, construction) -> Optional[str]:
         projects = getattr(construction, "projects", {}) or {}
         if not projects:
             return None
+        # ``active_construction`` is only an alias for the sole unfinished project. With several it is ambiguous, and the
+        # gate does not break the tie from agent state or ordering: the Pilot must name the project.
+        unfinished = [p for p in projects.values() if isinstance(p, dict) and str(p.get("status") or "") != "complete"]
+        if len(unfinished) != 1:
+            return None
+        return str(unfinished[0].get("id")) if unfinished[0].get("id") else None
+
+    def _legacy_active_construction_heuristic(self, *, agent, construction) -> Optional[str]:
+        """Retired tie-breaker (agent focus, closure ownership, ordering); no longer reachable from the gate."""
+        projects = getattr(construction, "projects", {}) or {}
 
         def existing(candidate: Any) -> Optional[str]:
             return self._resolve_existing_project_id(construction=construction, requested=candidate)
