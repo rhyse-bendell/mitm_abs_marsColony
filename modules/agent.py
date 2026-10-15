@@ -13006,6 +13006,8 @@ class Agent:
     def generate_message(self, recipient_name=None, *, include_requests=True, include_unsolicited=True):
         messages = []
         self._unsolicited_used = False
+        self._provided_element_ids = []  # exact DIK ids transmitted in this exchange (logged on communication_exchange)
+        self._provision_solicited = False  # True only when the provision answered an explicit prior request from the recipient
         role_source = f"{self.role}_Info"
         role_mem = self.source_memory_state.get(role_source, {})
         pending_role_share = set(role_mem.get("pending_role_share_ids", []))
@@ -13028,6 +13030,8 @@ class Agent:
             if rule_payload:
                 messages.append({"type": "TKP", "content": rule_payload, "sender": self.name})
             shared_ids = {f"data:{d.id}" for d in data_payload} | {f"information:{i.id}" for i in info_payload} | {f"rule:{normalize_rule_token(r)}" for r in rule_payload}
+            self._provided_element_ids = sorted(shared_ids)
+            self._provision_solicited = bool(shared_ids)
             if pending_role_share and shared_ids:
                 remaining = sorted(pending_role_share - shared_ids)
                 self.source_memory_state.setdefault(role_source, {})["pending_role_share_ids"] = remaining
@@ -13043,6 +13047,8 @@ class Agent:
             if rule_payload:
                 messages.append({"type": "TKP", "content": rule_payload, "sender": self.name})
             shared_ids = {f"data:{d.id}" for d in data_payload} | {f"information:{i.id}" for i in info_payload} | {f"rule:{normalize_rule_token(r)}" for r in rule_payload}
+            self._provided_element_ids = sorted(shared_ids)
+            self._provision_solicited = False
             if shared_ids:
                 remaining = sorted(pending_role_share - shared_ids)
                 self.source_memory_state.setdefault(role_source, {})["pending_role_share_ids"] = remaining
@@ -13224,6 +13230,8 @@ class Agent:
                     "sender": self.name,
                     "receiver": other_agent.name,
                     "message_types": message_types,
+                    "provided_element_ids": list(getattr(self, "_provided_element_ids", []) or []),
+                    "solicited": bool(getattr(self, "_provision_solicited", False)),
                     "meaningful": meaningful_exchange,
                     "receiver_dik_changed": receiver_dik_changed,
                     "receiver_gap_reduced": receiver_gap_reduced,
