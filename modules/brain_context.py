@@ -170,7 +170,7 @@ class BrainContextBuilder:
             "epistemic_refresh_pressure": float(epistemic.get("refresh_pressure", 0.0) or 0.0),
         }
 
-    def _affordances(self, agent, environment, build_readiness: Dict[str, Any] | None = None, phase_profile: Dict[str, Any] | None = None, team_state: Dict[str, Any] | None = None, support_subgoals: List[Dict[str, Any]] | None = None) -> List[Dict[str, Any]]:
+    def _affordances(self, agent, environment, build_readiness: Dict[str, Any] | None = None, phase_profile: Dict[str, Any] | None = None, team_state: Dict[str, Any] | None = None, support_subgoals: List[Dict[str, Any]] | None = None, task_methods: List[Dict[str, Any]] | None = None) -> List[Dict[str, Any]]:
         if phase_profile is None:
             phase_profile = self._phase_profile(environment)
         if build_readiness is None:
@@ -420,6 +420,8 @@ class BrainContextBuilder:
             from modules.support_reasoning import annotate_affordances
 
             annotate_affordances(legal, support_subgoals)
+        if task_methods:
+            self._annotate_task_methods(legal, task_methods)
 
         task_model = getattr(agent, "task_model", None)
         if not task_model:
@@ -444,6 +446,32 @@ class BrainContextBuilder:
                 affordance["task_parameters"] = dict(params.metadata)
             filtered.append(affordance)
         return filtered
+
+    @staticmethod
+    def _annotate_task_methods(affordances: List[Dict[str, Any]], task_methods: List[Dict[str, Any]]) -> None:
+        """Mark legal affordances that instantiate a task method this agent is competent in. Information only.
+
+        A binding names the structured action_args of the method's intended instance (e.g. structure_type=house), so the
+        match is against an affordance that is ALREADY legal; nothing is created and unavailable variants never appear.
+        A method that lists connect_structures prefers only connections the support reasoning already identified.
+        """
+        for aff in affordances:
+            serves = []
+            for method in task_methods:
+                if method["weight"] <= 0.0:
+                    continue
+                action = aff.get("action_type")
+                if action not in method["candidate_actions"]:
+                    continue
+                binding = method["action_bindings"].get(action)
+                if binding:
+                    args = aff.get("action_args") or {}
+                    if aff.get("start_mode") == "new_project" and all(str(args.get(k)) == str(v) for k, v in binding.items()):
+                        serves.append({"method_id": method["method_id"], "goal_id": method["goal_id"], "weight": method["weight"]})
+                elif action == "connect_structures" and aff.get("addresses_support_subgoals"):
+                    serves.append({"method_id": method["method_id"], "goal_id": method["goal_id"], "weight": method["weight"]})
+            if serves:
+                aff["serves_task_methods"] = serves
 
     @staticmethod
     def _support_reasoning(agent, sim_state, environment) -> Dict[str, Any]:
@@ -681,7 +709,8 @@ class BrainContextBuilder:
         build_readiness = self._build_readiness(agent, structure_summary, environment, team_state=team_state)
         team_state["consult_assessment"] = agent._consult_assessment(environment, sim_state=sim_state)
         support_reasoning = self._support_reasoning(agent, sim_state, environment)
-        action_affordances = self._affordances(agent, environment, build_readiness=build_readiness, phase_profile=phase_profile, team_state=team_state, support_subgoals=support_reasoning["subgoals"])
+        task_methods = agent._task_method_status(current_phase.get("name", "default"))
+        action_affordances = self._affordances(agent, environment, build_readiness=build_readiness, phase_profile=phase_profile, team_state=team_state, support_subgoals=support_reasoning["subgoals"], task_methods=task_methods)
 
         static_task_context = {
             "mission": self.scenario_name,
@@ -733,6 +762,7 @@ class BrainContextBuilder:
             "knowledge_summary": knowledge_summary,
             "known_gaps": list(agent.known_gaps),
             "support_reasoning": support_reasoning,
+            "task_methods": task_methods,
             "certainty_signals": {
                 "definitely_known": knowledge_summary[-5:],
                 "uncertain_or_missing": sorted(set(list(agent.known_gaps) + (["validated_plan_missing"] if active_plan is None else []))),

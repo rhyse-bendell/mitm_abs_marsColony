@@ -82,6 +82,19 @@ def _parse_float(value: str, default: float = 0.0) -> float:
     return float(value) if str(value).strip() else default
 
 
+def _parse_action_bindings(value: str, method_id: str) -> Dict[str, Dict[str, str]]:
+    text = str(value or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except ValueError as exc:
+        raise TaskModelError(f"Plan method {method_id}: action_bindings is not valid JSON: {exc}")
+    if not isinstance(parsed, dict) or any(not isinstance(v, dict) for v in parsed.values()):
+        raise TaskModelError(f"Plan method {method_id}: action_bindings must map an action id to an object of action_args")
+    return {str(k): {str(a): str(b) for a, b in v.items()} for k, v in parsed.items()}
+
+
 def _split_pipe(value: str) -> List[str]:
     if not value:
         return []
@@ -178,6 +191,10 @@ class PlanMethod:
     completion_conditions: str
     enabled: bool
     notes: str
+    # Optional, backward-compatible: roles the method belongs to (empty = all) and, per candidate action, the structured
+    # action_args its intended instance carries (e.g. {"start_construction": {"structure_type": "house"}}).
+    role_scope: List[str] = field(default_factory=list)
+    action_bindings: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -607,6 +624,8 @@ class TaskModelLoader:
                 completion_conditions=row["completion_conditions"],
                 enabled=_parse_bool(row["enabled"]),
                 notes=row["notes"],
+                role_scope=[r.lower() for r in _split_pipe(row.get("role_scope", "")) if r.lower() != "all"],
+                action_bindings=_parse_action_bindings(row.get("action_bindings", ""), row["method_id"]),
             )
             out[method.method_id] = method
         return out

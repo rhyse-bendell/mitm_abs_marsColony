@@ -1238,7 +1238,7 @@ class RuleBrain(BrainProvider):
             suppressed_sources.add("Team_Info")
         for idx, affordance in enumerate(sorted_affordances):
             action_type = str(affordance.get("action_type") or ExecutableActionType.WAIT.value)
-            if allowed and action_type not in allowed and not affordance.get("addresses_support_subgoals"):
+            if allowed and action_type not in allowed and not affordance.get("addresses_support_subgoals") and not affordance.get("serves_task_methods"):
                 continue  # a knowledge-grounded support subgoal is not confined to the current method step's action family
             score = 1.0 + float(affordance.get("utility", 0.0))
             if action_type == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value:
@@ -1293,6 +1293,11 @@ class RuleBrain(BrainProvider):
                     score -= 3.0  # same artifact version, no new context or knowledge: tendency cannot make this repeatable
                 elif affordance.get("consult_useful"):
                     score += 0.8 * float(mechanism_profile.get("artifact_consultation_tendency", 0.5))
+            served = affordance.get("serves_task_methods")
+            if served:
+                # The affordance instantiates a task-defined plan method the agent is competent in (weight reflects its
+                # own held DIK); the method prefers this legal variant, it does not select it.
+                score += 1.3 * max(float(m.get("weight", 0.0)) for m in served)
             if affordance.get("addresses_support_subgoals"):
                 # A recognised (knowledge-grounded) support deficit this action would address; goal alignment scales it.
                 score += 0.9 + 1.4 * float(mechanism_profile.get("goal_alignment", 0.5))

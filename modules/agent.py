@@ -530,6 +530,8 @@ class Agent:
             "pending_outbound_messages": [],
             "commitment_expired_emitted": False,
         }
+        self.pilot_episode = None  # the open Pilot decision episode (one chosen intent, however many ticks it takes)
+        self.pilot_episode_stats = {"selections": 0, "episodes": 0, "continued": 0, "completed": 0, "blocked": 0, "invalidated": 0, "ticks": 0}
         self.artifact_consult_memory = {}  # artifact_id -> what was read (version signature, context, DIK gained)
         self.artifact_consult_sig_memory = {}  # content signature -> context when it was last read (a re-posted identical plan is not new)
         self.artifact_coordination_state = {
@@ -630,6 +632,55 @@ class Agent:
         sim_state.logger.log_event(sim_state.time, event_type, enriched)
         if event_type in self.ACTION_FAILURE_EVENTS or event_type == "action_execution_succeeded":
             self._note_action_outcome(sim_state, event_type, enriched)
+        if event_type in self.ACTION_FAILURE_EVENTS and event_type != "action_execution_succeeded":
+            self._close_pilot_episode(sim_state, "blocked", event_type)
+        elif event_type == "executable_action_completed" and enriched.get("action_type") != "move_to":
+            episode = self.pilot_episode
+            if episode and episode.get("status") != "closed" and episode["key"][0] == enriched.get("decision_action"):
+                self._close_pilot_episode(sim_state, "completed", "executable_action_completed")
+
+    # ---- Pilot decision episodes: one chosen intent counts once however many selections/ticks it spans
+    @staticmethod
+    def _pilot_episode_key(decision):
+        return (decision.selected_action.value, str(decision.target_id or ""), tuple(sorted((str(k), str(v)) for k, v in dict(decision_action_args(decision) or {}).items())))
+
+    def _track_pilot_selection(self, sim_state, decision):
+        stats = self.pilot_episode_stats
+        stats["selections"] += 1
+        key = self._pilot_episode_key(decision)
+        episode = self.pilot_episode
+        if episode and episode["status"] == "open" and episode["key"] == key:
+            # Re-selecting an intent that never began executing (e.g. a scaffold turned it into something else).
+            episode["selections"] += 1
+            stats["continued"] += 1
+            self._emit_event(sim_state, "pilot_intent_continued", {"episode_id": episode["id"], "action": key[0], "target_id": key[1], "selections": episode["selections"]})
+            return
+        if episode and episode["status"] != "closed":
+            if episode["status"] == "executing":
+                self._close_pilot_episode(sim_state, "completed", "action_ended_before_next_selection")
+            else:
+                self._close_pilot_episode(sim_state, "invalidated", "replaced_before_execution")
+        stats["episodes"] += 1
+        self.pilot_episode = {"id": f"{self.agent_id}:ep{stats['episodes']}", "key": key, "status": "open", "selections": 1, "ticks": 0, "started_at": float(getattr(sim_state, "time", 0.0))}
+        self._emit_event(sim_state, "pilot_intent_started", {"episode_id": self.pilot_episode["id"], "action": key[0], "target_id": key[1], "action_args": dict(key[2])})
+
+    def _note_pilot_episode_translation(self, sim_state):
+        episode = self.pilot_episode
+        if not episode or episode["status"] != "open":
+            return
+        first = (self.current_action or [{}])[0]
+        if first.get("blockers") or first.get("blocked_action"):
+            self._close_pilot_episode(sim_state, "blocked", "translation_blocked")
+        else:
+            episode["status"] = "executing"
+
+    def _close_pilot_episode(self, sim_state, outcome, reason):
+        episode = self.pilot_episode
+        if not episode or episode["status"] == "closed":
+            return
+        episode["status"] = "closed"
+        self.pilot_episode_stats[outcome] += 1
+        self._emit_event(sim_state, f"pilot_intent_{outcome}", {"episode_id": episode["id"], "action": episode["key"][0], "target_id": episode["key"][1], "reason": reason, "selections": episode["selections"], "ticks": episode["ticks"]})
 
     def _note_action_outcome(self, sim_state, event_type, payload):
         """Structured outcome of an attempted action, visible to the Pilot on its next decision.
@@ -896,6 +947,21 @@ class Agent:
             ExecutableActionType.CONTINUE_CONSTRUCTION,
             ExecutableActionType.VALIDATE_CONSTRUCTION,
             ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
+        }
+    )
+
+    # Actions that create or change shared state. Scaffold pivots may not turn a Pilot's choice INTO one of these.
+    _PILOT_STATE_MUTATING_ACTIONS = frozenset(
+        {
+            ExecutableActionType.TRANSPORT_RESOURCES,
+            ExecutableActionType.START_CONSTRUCTION,
+            ExecutableActionType.CONTINUE_CONSTRUCTION,
+            ExecutableActionType.VALIDATE_CONSTRUCTION,
+            ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
+            ExecutableActionType.CONNECT_STRUCTURES,
+            ExecutableActionType.EXTERNALIZE_PLAN,
+            ExecutableActionType.COMMUNICATE,
+            ExecutableActionType.REQUEST_ASSISTANCE,
         }
     )
 
@@ -6513,6 +6579,47 @@ class Agent:
             )
 
         self._refresh_goal_stack_view()
+    def _task_method_status(self, phase_name=None):
+        """Task-defined plan methods this agent can pursue, with how well its OWN held DIK supports each (read-only).
+
+        weight 0.0: required information/data missing (no competence, no pursuit); 0.35: information and data held but
+        some required rules/knowledge are not (the existing 'low_trust' state); 1.0: everything required is held.
+        World truth never contributes; role_scope and phase_scope come from the task package.
+        """
+        if not self.task_model:
+            return []
+        data_ids, info_ids, knowledge_ids = self._held_dik_ids()
+        role = str(self.role or "").lower()
+        out = []
+        for method in self.task_model.plan_methods.values():
+            if not method.enabled:
+                continue
+            if method.role_scope and role not in method.role_scope:
+                continue
+            if phase_name is not None and not self._phase_matches(method.phase_scope, phase_name):
+                continue
+            missing_info = [i for i in method.required_information if i and i not in info_ids]
+            missing_data = [d for d in method.required_data if d and d not in data_ids]
+            missing_rules = [r for r in method.required_rules if r and r not in knowledge_ids]
+            missing_knowledge = [k for k in method.required_knowledge if k and k not in knowledge_ids]
+            if missing_info or missing_data:
+                weight = 0.0
+            elif missing_rules or missing_knowledge:
+                weight = 0.35
+            else:
+                weight = 1.0
+            out.append(
+                {
+                    "method_id": method.method_id,
+                    "goal_id": method.goal_id,
+                    "weight": weight,
+                    "missing": {"information": missing_info, "data": missing_data, "rules": missing_rules, "knowledge": missing_knowledge},
+                    "candidate_actions": [s.strip() for raw in method.candidate_steps for s in raw.split(">") if s.strip()],
+                    "action_bindings": {k: dict(v) for k, v in method.action_bindings.items()},
+                }
+            )
+        return out
+
     def _validate_plan_method_grounding(self, response, context):
         notes = []
         status = "accepted"
@@ -6893,6 +7000,17 @@ class Agent:
         args = decision_action_args(decision)
         for aff in list(getattr(context, "action_affordances", []) or []):
             if (
+                aff.get("serves_task_methods")
+                and aff.get("action_type") == decision.selected_action.value
+                and str(aff.get("target_id") or "") == str(decision.target_id or "")
+                and dict(aff.get("action_args") or {}) == dict(args or {})
+            ):
+                self._emit_event(
+                    sim_state,
+                    "task_method_action_selected",
+                    {"agent": self.name, "action": decision.selected_action.value, "action_args": dict(args or {}), "method_ids": [m["method_id"] for m in aff["serves_task_methods"]], "goal_ids": [m.get("goal_id") for m in aff["serves_task_methods"]]},
+                )
+            if (
                 aff.get("addresses_support_subgoals")
                 and aff.get("action_type") == decision.selected_action.value
                 and str(aff.get("target_id") or "") == str(decision.target_id or "")
@@ -6931,6 +7049,7 @@ class Agent:
         if response.controller_state:
             context.individual_cognitive_state["control_state"] = dict(response.controller_state)
         self._pilot_decision_anchor = decision  # a fresh Pilot decision (e.g. a re-query) is Pilot-authored
+        self._track_pilot_selection(sim_state, decision)
         self._emit_support_reasoning_events(sim_state, context, decision)
         self._emit_event(
             sim_state,
@@ -8369,7 +8488,7 @@ class Agent:
 
     def _enforce_pilot_project_authority(self, result, *, sim_state=None, pivot_origin="runtime"):
         anchor = getattr(self, "_pilot_decision_anchor", None)
-        if anchor is None or result is anchor or result.selected_action not in self._PROJECT_TASKWORK_ACTIONS:
+        if anchor is None or result is anchor or result.selected_action not in self._PILOT_STATE_MUTATING_ACTIONS:
             return result
         if self._same_pilot_choice(result, anchor):
             return result
@@ -9434,6 +9553,7 @@ class Agent:
             self.control_state.update(updated_control_state)
             self._sync_method_state_from_control()
         self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment, sim_state=sim_state)
+        self._note_pilot_episode_translation(sim_state)
         self.next_rulebrain_recalc_time = now_ts + float(self.rulebrain_recalc_interval_s)
         self.planner_state["deterministic_rulebrain_decision_count"] = int(self.planner_state.get("deterministic_rulebrain_decision_count", 0) or 0) + 1
         self._emit_event(sim_state, "local_policy_refresh_used", {"reason": planner_reason, "backend": backend, "selected_action": decision.selected_action.value, "control_mode": self.control_state.get("mode"), "mode_dwell_steps": self.control_state.get("mode_dwell_steps")})
@@ -10603,6 +10723,9 @@ class Agent:
             if not rule_brain_runtime:
                 self._poll_planner_request(sim_state, environment)
             self._poll_dik_integration_request(sim_state)
+        if self.pilot_episode and self.pilot_episode["status"] != "closed":
+            self.pilot_episode["ticks"] += 1
+            self.pilot_episode_stats["ticks"] += 1
         if self.active_actions:
             self._advance_active_actions(dt, sim_state=sim_state)
         else:
@@ -10873,6 +10996,7 @@ class Agent:
                 if not ready:
                     self._emit_event(sim_state, "externalization_en_route", {"target_id": "whiteboard", "access_reason": access.get("reason")})
                     continue
+                action["effect_done"] = True  # the artifact effect runs once on arrival; only then may the action complete
                 if self._artifact_action_is_redundant(ExecutableActionType.EXTERNALIZE_PLAN.value, environment, sim_state=sim_state, artifact_id="whiteboard"):
                     _set_action_stage(action, "mutation_execution_blocked", {"target_id": "whiteboard", "failure_category": "redundant_externalization"})
                     self._emit_event(sim_state, "artifact_externalization_suppressed_redundant", {"target_id": "whiteboard"})
@@ -10953,6 +11077,7 @@ class Agent:
                 if not ready:
                     self._emit_event(sim_state, "artifact_consult_en_route", {"target_id": "whiteboard", "access_reason": access.get("reason")})
                     continue
+                action["effect_done"] = True  # the artifact effect runs once on arrival; only then may the action complete
                 _set_action_stage(action, "mutation_execution_started", {"target_id": "whiteboard"})
                 artifacts = dict(sim_state.team_knowledge_manager.artifacts or {})
                 if artifacts:
@@ -12005,6 +12130,10 @@ class Agent:
             ):
                 access = sim_state.environment.get_interaction_access(self.position, "whiteboard", role=self.role)
                 if not access.get("accessible"):
+                    continue
+                if not action.get("effect_done"):
+                    # Arrived this tick: let the effect step run it before the action can complete. (It used to complete and
+                    # be removed first, so the travelled consult never executed and the Pilot had to select it a second time.)
                     continue
             if (
                 action.get("type") == "idle"
