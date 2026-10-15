@@ -1185,6 +1185,7 @@ class Agent:
     )
 
     # Actions that create or change shared state. Scaffold pivots may not turn a Pilot's choice INTO one of these.
+    _REGROUNDING_REPLACEABLE_ACTIONS = frozenset({ExecutableActionType.WAIT, ExecutableActionType.OBSERVE_ENVIRONMENT})  # stagnation fallback scope (see _apply_metacognitive_regulation)
     _PILOT_STATE_MUTATING_ACTIONS = frozenset(
         {
             ExecutableActionType.TRANSPORT_RESOURCES,
@@ -1402,9 +1403,17 @@ class Agent:
         # ever runs left the artifact permanently "unseen", so the Pilot re-chose it forever. A consult that would teach
         # nothing (same version, nothing new) is still subject to the fallback.
         useful_consult = action == ExecutableActionType.CONSULT_TEAM_ARTIFACT and bool(self._consult_assessment(environment, sim_state=sim_state).get("useful"))
-        if (stagnation["support"] >= 3 or stagnation["epistemic"] >= 4) and not productive_pilot_action and useful_consult:
+        stagnating = stagnation["support"] >= 3 or stagnation["epistemic"] >= 4
+        if stagnating and not productive_pilot_action and useful_consult:
             self._emit_event(sim_state, "metacognitive_regrounding_deferred_useful_consult", {"support_stagnation": int(stagnation["support"]), "epistemic_stagnation": int(stagnation["epistemic"])})
-        if (stagnation["support"] >= 3 or stagnation["epistemic"] >= 4) and not productive_pilot_action and not useful_consult:
+        # Authority: the fallback may only replace choices that carry no strategy of their own - idling, observing, or a consult
+        # the assessment says would teach nothing. Strategic or state-relevant Pilot choices (inspect, externalize, communicate,
+        # request assistance, meeting, connect structures, move) are never substituted with the baseline's follow-up; the
+        # stagnation is reported and the Pilot's choice stands.
+        regrounding_replaceable = action in self._REGROUNDING_REPLACEABLE_ACTIONS or (action == ExecutableActionType.CONSULT_TEAM_ARTIFACT and not useful_consult)
+        if stagnating and not productive_pilot_action and not regrounding_replaceable:
+            self._emit_event(sim_state, "metacognitive_stagnation_reported_not_substituted", {"pilot_action": action.value, "support_stagnation": int(stagnation["support"]), "epistemic_stagnation": int(stagnation["epistemic"])})
+        if stagnating and not productive_pilot_action and regrounding_replaceable:
             self._emit_event(sim_state, "metacognitive_support_loop_broken", {"support_stagnation": int(stagnation["support"]), "epistemic_stagnation": int(stagnation["epistemic"])})
             self._emit_event(sim_state, "metacognitive_switch_to_regrounding", {"reason": "stagnation"})
             self._set_metacognitive_mode("RECOVER_REGROUND", sim_state=sim_state, reason="stagnation", profile="recovery")

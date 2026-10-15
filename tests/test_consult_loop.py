@@ -148,3 +148,21 @@ def test_7_seeded_run_executes_its_consults_and_episodes_are_counted():
     assert sum(s["episodes"] for s in stats) == len(started) == len(set(started))  # every episode counted once
     assert sum(s["selections"] for s in stats) == sum(s["episodes"] + s["continued"] for s in stats)
     assert len(executed) >= 0.5 * len(selections), (len(executed), len(selections))  # pre-fix: ~6 executed of ~300 selected
+
+@pytest.mark.parametrize("kind", [
+    ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+    ExecutableActionType.EXTERNALIZE_PLAN,
+    ExecutableActionType.COMMUNICATE,
+    ExecutableActionType.REQUEST_ASSISTANCE,
+    ExecutableActionType.MEETING,
+    ExecutableActionType.CONNECT_STRUCTURES,
+])
+def test_8_stagnation_fallback_never_replaces_strategic_pilot_choices(sim, kind):
+    agent = sim.agents[0]
+    _artifact(sim)
+    _stagnate(agent)
+    decision = BrainDecision(selected_action=kind, target_id="whiteboard" if kind == ExecutableActionType.EXTERNALIZE_PLAN else None, confidence=0.8)
+    result = agent._apply_metacognitive_regulation(decision, sim.environment, sim_state=sim)
+    assert result is decision and result.selected_action == kind
+    assert any(n == "metacognitive_stagnation_reported_not_substituted" and d.get("pilot_action") == kind.value for n, d in sim.captured_events)
+    assert not any(n == "metacognitive_support_loop_broken" for n, _ in sim.captured_events)
