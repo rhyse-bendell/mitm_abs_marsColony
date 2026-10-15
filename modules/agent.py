@@ -486,10 +486,13 @@ class Agent:
             "request_attempts": 0, "request_successes": 0,
             "externalization_episodes": 0, "team_plan_proposals": 0,
             "dik_acquired": 0, "dik_forgotten": 0, "dik_reacquired": 0,
-            "taskwork_actions": 0, "taskwork_seconds": 0.0, "backup_actions": 0, "shared_infrastructure_actions": 0,
+            "taskwork_actions": 0, "taskwork_completed": 0, "taskwork_seconds": 0.0, "backup_actions": 0, "shared_infrastructure_actions": 0,
             "taskwork_by_kind": {},
+            "duration_seconds_by_action": {}, "duration_count_by_action": {},
+            "externalization_noop_duplicates": 0,
         }
         self.event_tallies = {}
+        self._derived_gap_tokens = set()  # known_gaps entries recognized from the agent's own task-method requirements
         self.rule_accuracy = 0.5
 
         self.construct_values = {}
@@ -682,6 +685,37 @@ class Agent:
             if eid in self.outstanding_dik_requests:
                 self.outstanding_dik_requests.pop(eid)
                 self.experimental_metrics["request_successes"] += 1
+
+    def _update_recognized_gaps(self, sim_state):
+        """Recognize DIK gaps from the agent's OWN task-method requirements (no world truth, no peeking at teammates).
+
+        A task method belonging to this agent's role names the information/data it needs. Elements it does not hold and
+        that another role's brief owns cannot be inspected by this agent, so they are recognized gaps it can ask about
+        (elements from its own brief or the team brief it simply inspects). Tokens use the existing known_gaps format and
+        clear when the element is acquired.
+        """
+        if not getattr(self, "task_model", None):
+            return
+        phase = (getattr(sim_state, "environment", None) and sim_state.environment.get_current_phase() or {}).get("name", "default")
+        elements = self.task_model.dik_elements
+        role = str(self.role or "").lower()
+        wanted = set()
+        for status in self._task_method_status(phase):
+            if role not in status.get("role_scope", []):
+                continue  # only the methods that belong to THIS role define its own task requirements
+            for kind in ("information", "data"):
+                for eid in status["missing"][kind]:
+                    element = elements.get(eid)
+                    owner = str(getattr(element, "role_scope", "") or "").lower()
+                    if element is not None and owner not in {"", "all", "team", role}:
+                        wanted.add(f"{kind}:{eid}")
+        for token in self._derived_gap_tokens - wanted:
+            self.known_gaps.discard(token)
+        new = wanted - self._derived_gap_tokens
+        self.known_gaps.update(wanted)
+        self._derived_gap_tokens = wanted
+        if new:
+            self._emit_event(sim_state, "dik_gap_recognized_from_method", {"gap_tokens": sorted(new)})
 
     def _update_memory(self, sim_state):
         """Seeded periodic forgetting of acquired data/information (retention reliability only).
@@ -1584,6 +1618,8 @@ class Agent:
         )
         for existing in queue:
             content = existing.get("content", {}) if isinstance(existing, dict) else {}
+            if not isinstance(content, dict):
+                continue  # other queued message kinds (e.g. a TKRQ id list) are not project-state obligations
             existing_key = (
                 str(content.get("project_id") or ""),
                 str(content.get("state_event") or ""),
@@ -6804,6 +6840,7 @@ class Agent:
                 {
                     "method_id": method.method_id,
                     "goal_id": method.goal_id,
+                    "role_scope": list(method.role_scope),
                     "weight": weight,
                     "missing": {"information": missing_info, "data": missing_data, "rules": missing_rules, "knowledge": missing_knowledge},
                     "candidate_actions": [s.strip() for raw in method.candidate_steps for s in raw.split(">") if s.strip()],
@@ -10868,6 +10905,7 @@ class Agent:
         self.perceive_environment(sim_state)
         self._env_ref = environment
         self._sync_dik_ledger(sim_state)
+        self._update_recognized_gaps(sim_state)
         self._update_memory(sim_state)
         self.sim_step_count += 1
         self._record_team_plan_commitment_tick(sim_state)
@@ -11174,6 +11212,29 @@ class Agent:
                 ) / 3.0
                 if rules and fidelity < 0.5:
                     rules = rules[:-1]
+                plan_targets = [str(action.get('project_id') or "active_construction")]
+                plan_signature = (
+                    tuple([str(self.goal)] if self.goal else []),
+                    tuple(plan_targets),
+                    tuple(sorted(str(r) for r in rules)),
+                    self.role,
+                )
+                previous_plan = self.artifact_coordination_state.get("last_proposed_plan")
+                if (
+                    hasattr(sim_state.team_knowledge_manager, "propose_team_plan")
+                    and previous_plan
+                    and previous_plan["signature"] == plan_signature
+                    and previous_plan["artifact_id"] in sim_state.team_knowledge_manager.artifacts
+                    and float(sim_state.time) < float(previous_plan["expires_at"])
+                ):
+                    # Same goal, targets, role and evidence as this agent's still-live plan: not a new plan.
+                    self.experimental_metrics["externalization_noop_duplicates"] += 1
+                    self._emit_event(sim_state, "externalization_noop_duplicate_plan", {"plan_artifact_id": previous_plan["artifact_id"]})
+                    _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": previous_plan["artifact_id"]})
+                    self._record_plan_externalization(environment, sim_state=sim_state)
+                    if action.get("target") is not None and self.target is not None and tuple(self.target) == tuple(action.get("target")):
+                        self.target = None
+                    continue
                 if hasattr(sim_state.team_knowledge_manager, "propose_team_plan"):
                     plan_id = f"{self.name}-{int(sim_state.time*10)}"
                     proposed_artifact = sim_state.team_knowledge_manager.propose_team_plan(
@@ -11193,6 +11254,11 @@ class Agent:
                         supporters=[self.name],
                     )
                     self._attach_carried_information(proposed_artifact, sim_state)
+                    self.artifact_coordination_state["last_proposed_plan"] = {
+                        "signature": plan_signature,
+                        "artifact_id": getattr(proposed_artifact, "artifact_id", None),
+                        "expires_at": sim_state.time + max(45.0, 50.0 + (60.0 * ext_signal)),
+                    }
                     self.experimental_metrics["team_plan_proposals"] += 1
                     self._emit_event(sim_state, "team_plan_proposed", {"plan_id": plan_id})
                 else:
@@ -12315,6 +12381,12 @@ class Agent:
         for action in completed:
             if action.get("decision_action") in {a.value for a in self._PROJECT_TASKWORK_ACTIONS}:
                 self.experimental_metrics["taskwork_seconds"] += float(action.get("duration", 0.0) or 0.0)
+                self.experimental_metrics["taskwork_completed"] += 1
+                kind = str(action.get("decision_action"))
+                secs = self.experimental_metrics["duration_seconds_by_action"]
+                cnt = self.experimental_metrics["duration_count_by_action"]
+                secs[kind] = float(secs.get(kind, 0.0)) + float(action.get("duration", 0.0) or 0.0)
+                cnt[kind] = int(cnt.get(kind, 0)) + 1
             if action.get("decision_action") == ExecutableActionType.CONNECT_STRUCTURES.value:
                 self._execute_connect_structures(action, sim_state)
             self.perform_action([action])

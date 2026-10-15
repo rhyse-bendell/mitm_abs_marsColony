@@ -80,7 +80,8 @@ class TestPhaseAwareProgression(unittest.TestCase):
                 sim.update(1.0)
             env.construction.create_project("site_b", "house")  # the run's own trajectory is not under test: guarantee a project that needs bricks
             sim.team_knowledge_manager.artifacts.clear()  # ...and no coordination material that would make idle talk "productive"
-            agent.known_gaps.clear()
+            for member in sim.agents:
+                member.known_gaps.clear()  # teammates' recognized gaps also read as help signals
 
             packet = BrainContextBuilder().build(sim, agent)
             start_u = self._utility(packet, "start_construction")

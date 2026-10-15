@@ -1431,7 +1431,9 @@ class SimulationState:
         team = {}
         for row in per_agent.values():
             for key, value in row.items():
-                if key in {"resolved_constituents", "event_tallies", "pilot_decision", "taskwork_by_kind"}:
+                if isinstance(value, dict):
+                    if key == "resolved_constituents":
+                        continue
                     target = team.setdefault(key, {})
                     for k, v in value.items():
                         if isinstance(v, (int, float)):

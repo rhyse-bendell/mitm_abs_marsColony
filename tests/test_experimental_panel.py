@@ -438,3 +438,76 @@ def test_identical_seeded_configurations_give_identical_profiles_and_baseline_tr
             tmp.cleanup()
         return profiles, trace, metrics
     assert run() == run()
+
+# ----------------------------------------------- gap recognition and exchange metrics
+def test_dik_gaps_are_recognized_only_from_the_agents_own_role_methods_and_only_for_requestable_elements(make_sim):
+    sim = make_sim()
+    architect = sim.agents[0]
+    architect.mental_model["information"].clear()
+    architect._update_recognized_gaps(sim)
+    # PM_CONNECT_HOUSE_RESOURCES (Architect) needs the Engineer's connector rules, which the Architect cannot inspect itself
+    assert "information:I_ENG_CONNECTOR_RULES" in architect.known_gaps
+    assert not [g for g in architect.known_gaps if g.startswith("information:I_ARCH_")]  # its own brief is inspected, not requested
+    assert not [g for g in architect.known_gaps if g.startswith("information:I_BOT_")]  # other roles' methods are not this agent's requirements
+    sim.task_model.dik_elements  # task metadata only: nothing here reads a teammate's holdings
+    architect._derived_gap_tokens  # tracked so acquisition clears it
+    obj = architect._create_dik_object_from_element(sim.task_model.dik_elements["I_ENG_CONNECTOR_RULES"], source_id="test")
+    architect.mental_model["information"].add(obj)
+    architect._update_recognized_gaps(sim)
+    assert "information:I_ENG_CONNECTOR_RULES" not in architect.known_gaps
+
+
+def test_a_request_exchange_is_counted_and_fulfilment_is_recorded_when_the_element_arrives(make_sim):
+    sim = make_sim()
+    asker, giver = sim.agents[0], sim.agents[1]
+    asker.mental_model["information"].clear()
+    asker._update_recognized_gaps(sim)
+    _held(sim, giver, "I_ENG_CONNECTOR_RULES")
+    sim.time = 10.0
+    asker.communicate_with(giver, sim_state=sim, mode="request")
+    assert asker.experimental_metrics["request_attempts"] == 1 and "I_ENG_CONNECTOR_RULES" in asker.outstanding_dik_requests
+    giver.communicate_with(asker, sim_state=sim, mode="provide")  # the giver answers when it next communicates
+    asker._sync_dik_ledger(sim)
+    assert giver.experimental_metrics["provision_attempts"] == 1 and giver.experimental_metrics["provision_successes"] == 1
+    assert asker.experimental_metrics["request_successes"] == 1 and "I_ENG_CONNECTOR_RULES" not in asker.outstanding_dik_requests
+
+# ------------------------------------------------------- identical plan externalization
+def _externalizer(sim, monkeypatch):
+    from modules.agent import Agent
+
+    target = sim.agents[0]
+    target.control_state["mode"] = "COORDINATE"
+
+    def pilot(self, sim_state, context, trigger_reason, runtime=None):
+        if self is not target:
+            return BrainDecision(selected_action=A.WAIT, confidence=0.9)
+        decision = BrainDecision(selected_action=A.EXTERNALIZE_PLAN, target_id="whiteboard", confidence=0.9)
+        self._pilot_decision_anchor = decision
+        self._track_pilot_selection(sim_state, decision)
+        return decision
+
+    monkeypatch.setattr(Agent, "_select_decision_through_pilot_adapter", pilot)
+    return target
+
+
+def test_identical_plan_externalization_does_not_mint_endless_semantic_copies(make_sim, monkeypatch):
+    sim = make_sim()
+    target = _externalizer(sim, monkeypatch)
+    for _ in range(90):
+        sim.update(1.0)
+    mine = [a for a in sim.team_knowledge_manager.artifacts.values() if a.artifact_type == "team_plan" and a.author == target.name]
+    assert target.experimental_metrics["externalization_noop_duplicates"] >= 1  # repeats of unchanged content were recognized
+    assert len(mine) == target.experimental_metrics["team_plan_proposals"] <= 3
+
+
+def test_a_substantive_plan_revision_still_produces_a_new_plan(make_sim, monkeypatch):
+    sim = make_sim()
+    target = _externalizer(sim, monkeypatch)
+    for _ in range(40):
+        sim.update(1.0)
+    before = target.experimental_metrics["team_plan_proposals"]
+    assert before >= 1
+    target.mental_model["knowledge"].add_rule("a genuinely new rule the plan can cite", [])
+    for _ in range(40):
+        sim.update(1.0)
+    assert target.experimental_metrics["team_plan_proposals"] > before  # new evidence -> a distinguishable new plan version
