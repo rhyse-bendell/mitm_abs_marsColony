@@ -98,6 +98,17 @@ class MarsColonyInterface:
     }
     MAX_AGENT_PANELS = 6
     DEFAULT_AGENT_COUNT = 3
+    # Experiment-tab "test drive" defaults: Procedural Baseline Pilot, compact seven-constituent panel, neutral gestalts,
+    # deterministic seed, 600 sim-seconds. speed 10 x base_dt 0.1 = 1.0 sim-s per 100 ms tick (the headless proof-matrix step).
+    TEST_DRIVE_DEFAULTS = {
+        "profile_mode": "compact_panel",
+        "teamwork": 0.5,
+        "taskwork": 0.5,
+        "seed": 0,
+        "duration_s": 600,
+        "speed": 10.0,
+        "experiment_name": "test_drive_baseline",
+    }
     DEFAULT_AGENT_IDENTITIES = [
         {"role": "Architect", "display_name": "Architect", "label": "Architect", "template_id": "mars_architect"},
         {"role": "Engineer", "display_name": "Engineer", "label": "Engineer", "template_id": "mars_engineer"},
@@ -118,7 +129,7 @@ class MarsColonyInterface:
         self.root = tk.Tk()
         self.root.title("Mars Colony Simulation")
 
-        self.speed_multiplier = DoubleVar(value=1.0)
+        self.speed_multiplier = DoubleVar(value=self.TEST_DRIVE_DEFAULTS["speed"])
         self.flash_mode = BooleanVar(value=False)
 
         self.sim = None
@@ -1830,6 +1841,7 @@ class MarsColonyInterface:
                     "packet_access": selected_packets,
                     "brain_config": {k: v for k, v in brain_config.items() if v},
                     "planner_config": planner_config,
+                    **{k: v for k, v in identity.get("task_defaults", {}).items() if v},
                 })
 
         return agent_configs
@@ -1902,6 +1914,13 @@ class MarsColonyInterface:
         labels = getattr(self, "_profile_mode_labels", {}) or {}
         return labels.get(var.get(), "broad_legacy") if var is not None else "broad_legacy"
 
+    def _selected_seed(self):
+        var = getattr(self, "seed_var", None)
+        try:
+            return int(var.get()) if var is not None else None
+        except (TypeError, ValueError):
+            return self.TEST_DRIVE_DEFAULTS["seed"]
+
     def _collect_experiment_settings(self):
         selected_backend, backend_options = self._collect_brain_backend_config()
         planner_config = self._collect_global_planner_config()
@@ -1919,6 +1938,7 @@ class MarsColonyInterface:
             "planner_config": planner_config,
             "construction_parameters": construction_parameters,
             "profile_mode": self._selected_profile_mode(),
+            "seed": self._selected_seed(),
             "base_dt": 1.0,
         }
 
@@ -2120,6 +2140,7 @@ class MarsColonyInterface:
             planner_config=settings["planner_config"],
             construction_parameters=settings["construction_parameters"],
             experimental_settings={"profile_mode": settings.get("profile_mode", "broad_legacy")},
+            seed=settings.get("seed"),
             startup_progress_callback=startup_progress_callback,
         )
 
@@ -2129,6 +2150,7 @@ class MarsColonyInterface:
         self._cancel_run_loop()
         self._reset_persistent_startup_views()
         self._update_control_states()
+        self._refresh_test_drive_summary()
 
         self.update_environment_plot()
         self.update_agent_table(force=True)
@@ -2337,6 +2359,9 @@ class MarsColonyInterface:
             return
 
         self.sim.update(self.base_dt)
+        if self._interactive_duration_reached():
+            self.stop_experiment()
+            return
         self.update_environment_plot()
         self.update_agent_table()
         self.update_event_monitor()
@@ -2349,6 +2374,14 @@ class MarsColonyInterface:
         self.update_dik_derivations_tab()
         self.update_rule_derivations_tab()
         self._schedule_next_tick()
+
+    def _interactive_duration_reached(self):
+        var = getattr(self, "stop_at_sim_time_var", None)
+        try:
+            limit = float(var.get()) if var is not None else 0.0
+        except (TypeError, ValueError):
+            return False
+        return limit > 0 and float(getattr(self.sim, "time", 0.0) or 0.0) >= limit
 
     def _update_control_states(self):
         start_enabled = self.run_state in {self.STATE_IDLE, self.STATE_PAUSED, self.STATE_STOPPED}
@@ -3816,6 +3849,89 @@ class MarsColonyInterface:
             self.zone_state_text,
         )
 
+    def _create_test_drive_panel(self, parent):
+        """Plain-language summary of what a bare Start will run, plus one-click reset to the test-drive defaults."""
+        d = self.TEST_DRIVE_DEFAULTS
+        self.seed_var = IntVar(value=d["seed"])
+        self.stop_at_sim_time_var = IntVar(value=d["duration_s"])
+        self.test_drive_summary_var = StringVar(value="")
+        frame = ttk.LabelFrame(parent, text="Test Drive (what Start will run)", padding=(8, 6))
+        frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        frame.columnconfigure(3, weight=1)
+        ttk.Label(frame, text="Seed").grid(row=0, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.seed_var, width=8).grid(row=0, column=1, sticky="w", padx=(4, 16))
+        ttk.Label(frame, text="Stop at sim-seconds (0 = no limit)").grid(row=0, column=2, sticky="w")
+        ttk.Entry(frame, textvariable=self.stop_at_sim_time_var, width=8).grid(row=0, column=3, sticky="w", padx=4)
+        ttk.Button(frame, text="Reset to Test Drive Defaults", command=self.reset_to_test_drive_defaults).grid(row=0, column=4, sticky="e")
+        ttk.Label(frame, textvariable=self.test_drive_summary_var, justify="left", wraplength=860).grid(row=1, column=0, columnspan=5, sticky="w", pady=(6, 0))
+        for var in (self.seed_var, self.stop_at_sim_time_var, self.speed_multiplier):
+            var.trace_add("write", self._refresh_test_drive_summary)
+
+    def _pilot_display_name(self):
+        backend = (self.brain_backend_var.get() or "").strip()
+        if backend in {"rule_brain", "procedural_baseline"}:
+            return "Procedural Baseline Pilot (backend '" + backend + "', no LLM)"
+        return f"{backend} (LLM/provider backend - NOT the test-drive default)"
+
+    def _refresh_test_drive_summary(self, *_):
+        if not hasattr(self, "test_drive_summary_var") or not getattr(self, "agent_card_order", None):
+            return
+        try:
+            lines = [
+                f"Pilot: {self._pilot_display_name()}",
+                f"Profile mode: {self.profile_mode_var.get()}   |   Seed: {self._selected_seed()}"
+                f"   |   Auto-stop: {int(self.stop_at_sim_time_var.get())} sim-s   |   Speed x{self.speed_multiplier.get():g}",
+            ]
+            count = max(1, min(self.MAX_AGENT_PANELS, int(self.num_agents_var.get())))
+            for role in self.agent_card_order[:count]:
+                prof = self.agent_profiles[role]
+                preset = {"High": 0.75, "Low": 0.25}
+                team = prof["team_value"].get() if prof["team"].get() == "Custom" else preset[prof["team"].get()]
+                task = prof["task_value"].get() if prof["task"].get() == "Custom" else preset[prof["task"].get()]
+                explicit = [n for n, v in self.agent_constituents[role].items() if str(v.get()).strip()]
+                legacy = "  | LEGACY low-level overrides ON" if self.legacy_override_enabled[role].get() else ""
+                lines.append(
+                    f"{role}: Teamwork {float(team):.2f}, Taskwork {float(task):.2f}; constituents "
+                    + ("inherited from profile (memory reliability 1.0)" if not explicit else "overridden: " + ", ".join(explicit))
+                    + legacy
+                )
+            session = getattr(getattr(getattr(self, "sim", None), "logger", None), "output_session", None)
+            folder = getattr(session, "session_folder", None)
+            if folder:
+                lines.append(f"Output (state {self.run_state}): {folder}")
+            else:
+                lines.append(f"Output: a new session folder under Outputs is created when you press Start (state {self.run_state})")
+            self.test_drive_summary_var.set("\n".join(lines))
+        except Exception:  # informational only; never block the UI
+            pass
+
+    def reset_to_test_drive_defaults(self):
+        """Restore the plain Procedural Baseline test-drive configuration (not the broad-legacy / saturated profile)."""
+        if self.run_state in {self.STATE_RUNNING, self.STATE_STARTING}:
+            return
+        d = self.TEST_DRIVE_DEFAULTS
+        self.profile_mode_var.set(next(label for label, key in self._profile_mode_labels.items() if key == d["profile_mode"]))
+        self.brain_backend_var.set(self.BACKEND_DEFAULTS["brain_backend"])
+        self.fallback_backend_var.set(self.BACKEND_DEFAULTS["fallback_backend"])
+        self.seed_var.set(d["seed"])
+        self.stop_at_sim_time_var.set(d["duration_s"])
+        self.timesteps_per_run_var.set(d["duration_s"])
+        self.speed_multiplier.set(d["speed"])
+        self.num_runs.set(1)
+        self.experiment_name_var.set(d["experiment_name"])
+        for role in self.agent_card_order:
+            prof = self.agent_profiles[role]
+            prof["team"].set("Custom")
+            prof["task"].set("Custom")
+            prof["team_value"].set(d["teamwork"])
+            prof["task_value"].set(d["taskwork"])
+            for var in self.agent_constituents[role].values():
+                var.set("")
+            self.legacy_override_enabled[role].set(False)
+            self.agent_brain_settings[role]["backend"].set("")
+        self._refresh_test_drive_summary()
+        self._update_backend_field_states()
+
     def _create_experiment_global_settings(self, parent):
         settings_panel = tk.LabelFrame(
             parent,
@@ -3828,8 +3944,9 @@ class MarsColonyInterface:
             highlightthickness=1,
         )
         settings_panel.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 6))
+        self._create_test_drive_panel(settings_panel)
         settings_frame = ttk.Frame(settings_panel)
-        settings_frame.grid(row=0, column=0, sticky="ew")
+        settings_frame.grid(row=1, column=0, sticky="ew")
         settings_frame.columnconfigure(1, weight=1)
 
         ttk.Label(settings_frame, text="Speed Multiplier").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
@@ -3856,7 +3973,7 @@ class MarsColonyInterface:
         self._add_help_text(settings_frame, 5, "Select how many agent panels are active for this run (1-6).")
 
         ttk.Label(settings_frame, text="Experiment Name").grid(row=6, column=0, sticky="w", padx=(0, 8), pady=3)
-        self.experiment_name_var = StringVar()
+        self.experiment_name_var = StringVar(value=self.TEST_DRIVE_DEFAULTS["experiment_name"])
         ttk.Entry(settings_frame, textvariable=self.experiment_name_var, width=34).grid(row=6, column=1, sticky="w", pady=3)
         self._add_help_text(settings_frame, 7, "Optional label used in output folders and logs.")
 
@@ -3869,12 +3986,12 @@ class MarsColonyInterface:
         from modules.experimental_profile import available_profile_modes
 
         self._profile_mode_labels = {label: key for key, label in available_profile_modes().items()}
-        self.profile_mode_var = StringVar(value=available_profile_modes().get("broad_legacy", "Broad legacy profile"))
+        self.profile_mode_var = StringVar(value=available_profile_modes().get(self.TEST_DRIVE_DEFAULTS["profile_mode"], "Compact seven-variable panel"))
         ttk.Combobox(settings_frame, textvariable=self.profile_mode_var, values=list(self._profile_mode_labels), state="readonly", width=30).grid(row=40, column=1, sticky="w", pady=(6, 3))
         self._add_help_text(settings_frame, 41, "Broad legacy: gestalts also drive the lower-level mechanisms. Compact seven-variable panel: only the seven constituents vary; residual mechanisms are frozen at the compact-panel reference (0.5).")
 
         ttk.Label(settings_frame, text="Timesteps per Run").grid(row=10, column=0, sticky="w", padx=(0, 8), pady=(6, 3))
-        self.timesteps_per_run_var = IntVar(value=300)
+        self.timesteps_per_run_var = IntVar(value=self.TEST_DRIVE_DEFAULTS["duration_s"])
         ttk.Entry(settings_frame, textvariable=self.timesteps_per_run_var, width=10).grid(row=10, column=1, sticky="w", pady=(6, 3))
         self._add_help_text(settings_frame, 11, "Exact number of simulation updates per run in batch mode.")
 
@@ -4064,6 +4181,7 @@ class MarsColonyInterface:
             "display_name": StringVar(value=agent_row.get("display_name") or role),
             "alias": StringVar(value=agent_row.get("label") or role),
             "template_id": agent_row.get("template_id"),
+            "task_defaults": dict(agent_row.get("task_defaults") or {}),
         }
 
         card = tk.LabelFrame(
@@ -4101,14 +4219,14 @@ class MarsColonyInterface:
         ttk.Label(profile_frame, text="Teamwork Potential").grid(row=0, column=0, sticky="w")
         ttk.Label(profile_frame, text="Taskwork Potential").grid(row=0, column=1, sticky="w")
 
-        team_potential = StringVar(value="High")
-        task_potential = StringVar(value="High")
-        team_value = DoubleVar(value=0.75)
-        task_value = DoubleVar(value=0.75)
+        team_potential = StringVar(value="Custom")
+        task_potential = StringVar(value="Custom")
+        team_value = DoubleVar(value=self.TEST_DRIVE_DEFAULTS["teamwork"])
+        task_value = DoubleVar(value=self.TEST_DRIVE_DEFAULTS["taskwork"])
         self.agent_profiles[role] = {"team": team_potential, "task": task_potential, "team_value": team_value, "task_value": task_value}
 
-        ttk.OptionMenu(profile_frame, team_potential, "High", "High", "Low", "Custom", command=lambda _, r=role: update_traits_from_profile(r)).grid(row=1, column=0, sticky="w", pady=(2, 2))
-        ttk.OptionMenu(profile_frame, task_potential, "High", "High", "Low", "Custom", command=lambda _, r=role: update_traits_from_profile(r)).grid(row=1, column=1, sticky="w", pady=(2, 2))
+        ttk.OptionMenu(profile_frame, team_potential, "Custom", "High", "Low", "Custom", command=lambda _, r=role: update_traits_from_profile(r)).grid(row=1, column=0, sticky="w", pady=(2, 2))
+        ttk.OptionMenu(profile_frame, task_potential, "Custom", "High", "Low", "Custom", command=lambda _, r=role: update_traits_from_profile(r)).grid(row=1, column=1, sticky="w", pady=(2, 2))
         tk.Scale(profile_frame, variable=team_value, from_=0.0, to=1.0, resolution=0.05, orient="horizontal", length=180).grid(row=2, column=0, sticky="w")
         tk.Scale(profile_frame, variable=task_value, from_=0.0, to=1.0, resolution=0.05, orient="horizontal", length=180).grid(row=2, column=1, sticky="w")
 
@@ -4359,6 +4477,13 @@ class MarsColonyInterface:
                     "brain_config": dict(d.brain_config or {}),
                     "planner_config": dict(d.planner_config or {}),
                     "default_packet_access": list(d.source_access_override or []),
+                    # task-package agent defaults the headless path applies; the GUI must pass them too (standard Mars config)
+                    "task_defaults": {
+                        "agent_id": d.agent_id or d.agent_name,
+                        "initial_goal_seeds": list(d.initial_goal_seeds or []),
+                        "communication_params": dict(d.communication_params or {}),
+                        "task_overrides": dict(d.task_overrides or {}),
+                    },
                 }
             )
         by_role = {row["role"]: row for row in default_rows}
@@ -4425,6 +4550,13 @@ class MarsColonyInterface:
 
         self._refresh_all_agent_inheritance_display()
         self._update_visible_agent_cards()
+        watched = [self.profile_mode_var, self.brain_backend_var, self.num_agents_var]
+        for role in self.agent_card_order:
+            watched += [self.agent_profiles[role][k] for k in ("team", "task", "team_value", "task_value")]
+            watched += list(self.agent_constituents[role].values()) + [self.legacy_override_enabled[role]]
+        for var in watched:
+            var.trace_add("write", self._refresh_test_drive_summary)
+        self._refresh_test_drive_summary()
         self.batch_status_var = StringVar(value="Batch idle.")
         ttk.Label(
             self.tab_experiment,
@@ -4452,6 +4584,7 @@ class MarsColonyInterface:
         else:
             self.run_state = self.STATE_IDLE
         self._update_control_states()
+        self._refresh_test_drive_summary()
         print("Simulation stopped and data saved.")
 
 
