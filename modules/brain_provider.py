@@ -422,6 +422,17 @@ class RuleBrain(BrainProvider):
         ExecutableActionType.OBSERVE_ENVIRONMENT.value,
         ExecutableActionType.WAIT.value,
     )
+    # First-pass experimental panel: how strongly each constituent propensity (centered at 0.5, so neutral = no change) moves
+    # the desirability of a legal action THAT HAS A REAL OPPORTUNITY. Hypothesized simulator defaults, not calibrated.
+    EXPERIMENTAL_TERM_WEIGHTS = {
+        "dik_push": 2.4,
+        "solicited_provision_floor": 1.0,
+        "dik_request": 2.4,
+        "externalization": 2.0,
+        "coordination_plan": 2.0,
+        "coordination_consult": 1.2,
+        "backup": 2.2,
+    }
     MODE_ACTION_PREFERENCES = {
         "BOOTSTRAP": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value: 1.3, ExecutableActionType.OBSERVE_ENVIRONMENT.value: 0.5},
         "ACQUIRE_DIK": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value: 1.6, ExecutableActionType.CONSULT_TEAM_ARTIFACT.value: 0.4, ExecutableActionType.REQUEST_ASSISTANCE.value: 0.4},
@@ -1301,9 +1312,38 @@ class RuleBrain(BrainProvider):
             if affordance.get("addresses_support_subgoals"):
                 # A recognised (knowledge-grounded) support deficit this action would address; goal alignment scales it.
                 score += 0.9 + 1.4 * float(mechanism_profile.get("goal_alignment", 0.5))
+            weights = self.EXPERIMENTAL_TERM_WEIGHTS
+
+            def centered(name):
+                return 2.0 * (float(mechanism_profile.get(name, 0.5)) - 0.5)
+
+            if action_type == ExecutableActionType.COMMUNICATE.value:
+                unsolicited = int(affordance.get("provision_unsolicited", 0) or 0)
+                if unsolicited > 0:
+                    score += weights["dik_push"] * centered("dik_push_propensity") * min(1.0, unsolicited / 2.0)
+                if int(affordance.get("provision_solicited", 0) or 0) > 0:
+                    score += weights["solicited_provision_floor"]  # answering an explicit request is not governed by push
             if action_type == ExecutableActionType.REQUEST_ASSISTANCE.value:
-                score += 0.9 * features["epistemic_deficit"] + 0.5 * float(mechanism_profile.get("help_tendency", 0.5))
+                # (help_tendency used to feed this term; backup now owns it. A request is about a recognized DIK gap.)
+                score += 0.9 * features["epistemic_deficit"]
                 score -= 0.8 * features["loop_pressure"]
+                if int(affordance.get("dik_gap_count", 0) or 0) > 0:
+                    score += weights["dik_request"] * centered("dik_request_propensity")
+            if action_type == ExecutableActionType.EXTERNALIZE_PLAN.value:
+                if affordance.get("externalize_gap"):
+                    score += weights["externalization"] * centered("artifact_externalization_tendency")
+                if affordance.get("team_plan_opportunity"):
+                    score += weights["coordination_plan"] * centered("coordination_propensity")
+            if (
+                action_type == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value
+                and affordance.get("consult_artifact_type") == "team_plan"
+                and affordance.get("consult_useful")
+            ):
+                score += weights["coordination_consult"] * centered("coordination_propensity")
+            if affordance.get("backup_need"):
+                score += weights["backup"] * centered("backup_propensity")
+            if action_type == ExecutableActionType.REQUEST_ASSISTANCE.value:
+                pass
             if action_type in {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.REQUEST_ASSISTANCE.value}:
                 if not bool(affordance.get("reachable", True)):
                     score -= 2.5

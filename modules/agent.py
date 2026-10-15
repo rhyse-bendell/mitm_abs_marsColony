@@ -469,6 +469,27 @@ class Agent:
         self.goal_alignment = 0.5
         self.help_tendency = 0.5
         self.build_speed = 0.5
+        # First-pass experimental constituents (resolved per agent by modules/experimental_profile.py; neutral defaults here).
+        self.dik_push_propensity = 0.5
+        self.dik_request_propensity = 0.5
+        self.coordination_propensity = 0.5
+        self.backup_propensity = 0.5
+        self.memory_reliability = 1.0  # retention only; 1.0 = no ordinary decay
+        self.experimental_profile = {}
+        self.dik_ledger = {}  # element id -> acquisition / reinforcement / forgetting bookkeeping (data + information)
+        self._memory_rng_cache = None
+        self.last_memory_update_time = 0.0
+        self.outstanding_dik_requests = {}  # requested element id -> request time (for request-success bookkeeping)
+        self.received_dik_from = {}  # teammate name -> count of DIK elements they provided to this agent
+        self.experimental_metrics = {
+            "provision_attempts": 0, "provision_successes": 0, "unsolicited_provision_attempts": 0,
+            "request_attempts": 0, "request_successes": 0,
+            "externalization_episodes": 0, "team_plan_proposals": 0,
+            "dik_acquired": 0, "dik_forgotten": 0, "dik_reacquired": 0,
+            "taskwork_actions": 0, "taskwork_seconds": 0.0, "backup_actions": 0, "shared_infrastructure_actions": 0,
+            "taskwork_by_kind": {},
+        }
+        self.event_tallies = {}
         self.rule_accuracy = 0.5
 
         self.construct_values = {}
@@ -625,11 +646,175 @@ class Agent:
         text = str(value)
         return text if len(text) <= limit else f"{text[:limit - 12]}…[len={len(text)}]"
 
+    TALLIED_EVENTS = frozenset(
+        {
+            "team_plan_commitment_started", "team_plan_adopted_locally", "team_plan_agreed", "team_plan_assignment_accepted",
+            "team_plan_assignment_applied", "team_plan_proposed", "artifact_consulted",
+        }
+    )
+
+    # ---- DIK ledger, retention-only memory, process measures (first-pass experimental panel)
+    def _memory_random(self):
+        if self._memory_rng_cache is None:
+            self._memory_rng_cache = random.Random(f"{self.run_seed}:{self.agent_id}:memory") if self.run_seed is not None else random.Random()
+        return self._memory_rng_cache
+
+    def _held_dik_objects(self):
+        return {**{d.id: ("data", d) for d in self.mental_model["data"]}, **{i.id: ("information", i) for i in self.mental_model["information"]}}
+
+    def _sync_dik_ledger(self, sim_state):
+        """Record acquisitions/reacquisitions of data and information elements (cheap diff; no per-acquisition-site hooks)."""
+        now = float(getattr(sim_state, "time", 0.0))
+        held = self._held_dik_objects()
+        for eid in sorted(held):
+            kind, obj = held[eid]
+            entry = self.dik_ledger.get(eid)
+            if entry is None:
+                mode = (getattr(obj, "acquired_by", {}) or {}).get(self.name, {})
+                self.dik_ledger[eid] = {"kind": kind, "acquired_at": now, "last_reinforced_at": now, "mode": str(mode.get("mode", "unknown")), "source": str(mode.get("from", getattr(obj, "source_id", "")) or ""), "forgotten_at": None, "forgotten_count": 0, "reacquired_count": 0}
+                self.experimental_metrics["dik_acquired"] += 1
+                entry = self.dik_ledger[eid]
+            elif entry["forgotten_at"] is not None:
+                entry.update({"forgotten_at": None, "last_reinforced_at": now, "mode": "reacquired"})
+                entry["reacquired_count"] += 1
+                self.experimental_metrics["dik_reacquired"] += 1
+                self._emit_event(sim_state, "dik_reacquired", {"element_id": eid, "kind": kind})
+            if eid in self.outstanding_dik_requests:
+                self.outstanding_dik_requests.pop(eid)
+                self.experimental_metrics["request_successes"] += 1
+
+    def _update_memory(self, sim_state):
+        """Seeded periodic forgetting of acquired data/information (retention reliability only).
+
+        No false memories, corruption, interference or confidence. World truth and externalized artifacts are untouched,
+        and a forgotten element can be legitimately reacquired (re-inspection, communication, artifact consult).
+        """
+        from modules.experimental_profile import load_experimental_profile_config
+
+        cfg = load_experimental_profile_config()["memory"]
+        now = float(getattr(sim_state, "time", 0.0))
+        interval = float(cfg["update_interval_s"])
+        if now - self.last_memory_update_time < interval:
+            return
+        self.last_memory_update_time = now
+        reliability = max(0.0, min(1.0, float(self.memory_reliability)))
+        if reliability >= 1.0:
+            return
+        p_forget = min(1.0, (1.0 - reliability) * float(cfg["base_hazard_per_s"]) * interval)
+        rng = self._memory_random()
+        held = self._held_dik_objects()
+        for eid in sorted(held):
+            entry = self.dik_ledger.get(eid)
+            if entry is None or entry["forgotten_at"] is not None or now - entry["last_reinforced_at"] < float(cfg["grace_s"]):
+                continue
+            if rng.random() >= p_forget:
+                continue
+            kind, obj = held[eid]
+            self.mental_model[kind].discard(obj)
+            entry["forgotten_at"] = now
+            entry["forgotten_count"] += 1
+            self.experimental_metrics["dik_forgotten"] += 1
+            self._reopen_sources_for_forgotten(eid)
+            self._emit_event(sim_state, "dik_forgotten", {"element_id": eid, "kind": kind, "held_for_s": round(now - entry["acquired_at"], 1)})
+
+    def _reopen_sources_for_forgotten(self, element_id):
+        """A source whose content was (partly) forgotten can be inspected again; nothing else about the world changes."""
+        tm = getattr(self, "task_model", None)
+        env_map = getattr(getattr(self, "_env_ref", None), "source_packet_name_map", None)
+        if not tm:
+            return
+        for row in getattr(tm, "source_contents", []) or []:
+            if getattr(row, "element_id", None) != element_id:
+                continue
+            source_id = getattr(row, "source_id", None)
+            packet = (env_map or {}).get(source_id, source_id)
+            if packet in self.source_inspection_state:
+                self.source_inspection_state[packet] = "unseen"
+                mem = self.source_memory_state.get(packet)
+                if isinstance(mem, dict):
+                    mem["exhausted"] = False
+                    mem["exhausted_for_acquisition"] = False
+
+    def experimental_metrics_snapshot(self):
+        retained = [e for e in self.dik_ledger.values() if e["forgotten_at"] is None]
+        return {**{k: (dict(v) if isinstance(v, dict) else v) for k, v in self.experimental_metrics.items()}, "dik_retained": len(retained), "event_tallies": dict(self.event_tallies), "pilot_decision": dict(self.pilot_episode_stats)}
+
+    def _structure_owner_role(self, structure_type):
+        """Role a structure type belongs to per the task package's methods ('shared' for connectors), else None."""
+        stype = str(structure_type or "").lower()
+        if stype.endswith("_connector"):
+            return "shared"
+        for method in (getattr(getattr(self, "task_model", None), "plan_methods", {}) or {}).values():
+            bound = (method.action_bindings or {}).get("start_construction", {}).get("structure_type")
+            if bound and bound.lower() == stype and method.role_scope:
+                return method.role_scope[0]
+        return None
+
+    def _note_taskwork(self, project_id, kind, sim_state=None, duration=None):
+        metrics = self.experimental_metrics
+        metrics["taskwork_actions"] += 1
+        by_kind = metrics["taskwork_by_kind"]
+        by_kind[kind] = int(by_kind.get(kind, 0)) + 1
+        if str(project_id) == "bridge_bc":
+            metrics["shared_infrastructure_actions"] += 1
+            return
+        project = (getattr(getattr(sim_state, "environment", None), "construction", None) and sim_state.environment.construction.projects.get(project_id)) or {}
+        owner = self._structure_owner_role(project.get("type"))
+        if owner == "shared":
+            metrics["shared_infrastructure_actions"] += 1
+        elif owner and owner != str(self.role).lower():
+            metrics["backup_actions"] += 1
+
+    def _route_request_receiver(self, nearby):
+        """Whom to ask, from what THIS agent can know: its teammate model, who has provided DIK before, and role ownership
+        of the missing element (task-package role-brief metadata). Falls back to the nearest teammate; never reads a
+        teammate's actual holdings."""
+        gaps = [str(g).partition(":")[2] for g in self._extract_requested_dik_ids(self.known_gaps) if str(g).split(":")[0] in {"data", "information"}]
+        elements = getattr(getattr(self, "task_model", None), "dik_elements", {}) or {}
+        best = None
+        for dist, other in nearby:
+            score = 0.0
+            model = (self.theory_of_mind or {}).get(other.name) or {}
+            known = set(model.get("knowledge_ids") or set())
+            for eid in gaps:
+                if eid in known:
+                    score += 3.0
+                element = elements.get(eid)
+                scope = str(getattr(element, "role_scope", "") or "").lower()
+                if scope and scope == str(other.role).lower():
+                    score += 2.0
+            score += min(2.0, 0.5 * int(self.received_dik_from.get(other.name, 0)))
+            key = (-score, dist)
+            if best is None or key < best[0]:
+                best = (key, other)
+        return best[1]
+
+    def _experimental_opportunities(self, sim_state, environment):
+        """Read-only facts the Pilot's constituent-weighted desirability terms need (no opportunity -> no effect)."""
+        held_ids = {f"data:{d.id}" for d in self.mental_model["data"]} | {f"information:{i.id}" for i in self.mental_model["information"]}
+        role_mem = self.source_memory_state.get(f"{self.role}_Info", {}) or {}
+        unsolicited = [i for i in (role_mem.get("pending_role_share_ids") or []) if i in held_ids]
+        solicited = set()
+        for name, model in (self.theory_of_mind or {}).items():
+            if isinstance(model, dict):
+                solicited |= {i for i in (model.get("requested_dik_ids") or set()) if i in held_ids}
+        gaps = self._extract_requested_dik_ids(self.known_gaps)
+        active_plan = self._get_active_team_plan(sim_state) if sim_state is not None else {}
+        return {
+            "provision_unsolicited": len(unsolicited),
+            "provision_solicited": len(solicited),
+            "dik_gap_count": len(gaps),
+            "externalize_gap": bool(self._workspace_externalization_gap_exists(environment)),
+            "team_plan_opportunity": not bool(active_plan),
+        }
+
     def _emit_event(self, sim_state, event_type, payload):
         if sim_state is None:
             return
         enriched = {"agent_id": self.agent_id, "agent": self.name, **dict(payload or {})}
         sim_state.logger.log_event(sim_state.time, event_type, enriched)
+        if event_type in self.TALLIED_EVENTS:
+            self.event_tallies[event_type] = int(self.event_tallies.get(event_type, 0)) + 1
         if event_type in self.ACTION_FAILURE_EVENTS or event_type == "action_execution_succeeded":
             self._note_action_outcome(sim_state, event_type, enriched)
         if event_type in self.ACTION_FAILURE_EVENTS and event_type != "action_execution_succeeded":
@@ -4257,6 +4442,7 @@ class Agent:
             "reasons": list(reasons),
             "artifact_changed_since_consult": "artifact_changed_since_consult" in reasons,
             "carries_unheld_dik": carried_new,
+            "artifact_type": artifact.artifact_type,
             "blocker_relevant": "blocker_context_changed" in reasons,
             "goal_relevant": "goal_context_changed" in reasons,
             "suppression_reason": None if reasons else "same_version_no_new_context",
@@ -10680,6 +10866,9 @@ class Agent:
             raise ValueError("Agent.update requires sim_state in the SimulationState-authoritative runtime")
         self.update_knowledge(environment, sim_state=sim_state)
         self.perceive_environment(sim_state)
+        self._env_ref = environment
+        self._sync_dik_ledger(sim_state)
+        self._update_memory(sim_state)
         self.sim_step_count += 1
         self._record_team_plan_commitment_tick(sim_state)
         if self._team_plan_requires_uptake(sim_state):
@@ -11004,6 +11193,8 @@ class Agent:
                         supporters=[self.name],
                     )
                     self._attach_carried_information(proposed_artifact, sim_state)
+                    self.experimental_metrics["team_plan_proposals"] += 1
+                    self._emit_event(sim_state, "team_plan_proposed", {"plan_id": plan_id})
                 else:
                     sim_state.team_knowledge_manager.externalize_artifact(
                         artifact_id=artifact_id,
@@ -11037,6 +11228,7 @@ class Agent:
                 _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": artifact_id})
                 self._emit_event(sim_state, "artifact_externalization_action_executed", {"agent": self.name, "project_id": project_id, "epistemic_action": epistemic_action, "artifact_id": artifact_id})
                 self._record_plan_externalization(environment, sim_state=sim_state)
+                self.experimental_metrics["externalization_episodes"] += 1
                 if action.get("target") is not None and self.target is not None and tuple(self.target) == tuple(action.get("target")):
                     self.target = None
                 sim_state.logger.log_event(sim_state.time, "externalization_created", {"agent": self.name, "artifact_id": artifact_id, "type": "whiteboard_plan"})
@@ -11302,6 +11494,7 @@ class Agent:
                         event="validation_passed" if (is_valid and has_required_rules) else "validation_failed",
                     )
                     project = environment.construction.projects.get(project_id, project)
+                    self._note_taskwork(project_id, "validate", sim_state=sim_state)
                     support_missing = dict((readiness_report.get("evidence_summary") or {}).get("support_missing") or {})
                     actually_completed = bool(project.get("validated_complete", False))
                     sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
@@ -11440,6 +11633,8 @@ class Agent:
                         actor=self.name,
                         sim_time=sim_state.time if sim_state is not None else None,
                     )
+                    if build_ok:
+                        self._note_taskwork(project_id, "repair" if decision_action == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value else "build", sim_state=sim_state)
                     if not build_ok and decision_action != ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value:
                         if self._execution_lock_active_for_project(project_id):
                             self._release_execution_lock(sim_state, reason=f"real_blocker:{build_reason}")
@@ -11716,6 +11911,7 @@ class Agent:
                     if not bridge:
                         continue
                     delivered_ok = environment.construction.build_bridge_bc(quantity=1)
+                    self._note_taskwork("bridge_bc", "transport", sim_state=sim_state)
                     self._emit_event(sim_state, "bridge_resource_delivered", {"bridge_id":"bridge_bc","delivered_resources": int(bridge.delivered_resources), "required_resources": int(bridge.required_resources)})
                     if bool(delivered_ok):
                         self._emit_event(sim_state, "bridge_completed_site_unlocked", {"bridge_id":"bridge_bc", "site_id":"site_c"})
@@ -11890,6 +12086,8 @@ class Agent:
 
                 environment.construction.assign_builder(project_id, self.name)
                 delivered_ok = environment.construction.deliver_resource(project_id, "bricks", quantity=1, from_carried=True)
+                if delivered_ok:
+                    self._note_taskwork(project_id, "transport", sim_state=sim_state)
                 if not delivered_ok:
                     _log_mutation_blocked(
                         "construction_transport_blocked",
@@ -12059,7 +12257,10 @@ class Agent:
                     )
                 else:
                     _, receiver = sorted(nearby, key=lambda row: row[0])[0]
-                    outcome = self.communicate_with(receiver, sim_state=sim_state) or {}
+                    request_mode = action.get("assist_action") == ExecutableActionType.REQUEST_ASSISTANCE.value
+                    if request_mode:
+                        receiver = self._route_request_receiver(nearby)
+                    outcome = self.communicate_with(receiver, sim_state=sim_state, mode="request" if request_mode else "provide") or {}
                     changed = bool(outcome.get("meaningful"))
                     if changed:
                         self.communication_state["last_exchange_tick"] = int(getattr(self, "sim_step_count", 0))
@@ -12112,6 +12313,8 @@ class Agent:
                 completed.append(action)
 
         for action in completed:
+            if action.get("decision_action") in {a.value for a in self._PROJECT_TASKWORK_ACTIONS}:
+                self.experimental_metrics["taskwork_seconds"] += float(action.get("duration", 0.0) or 0.0)
             if action.get("decision_action") == ExecutableActionType.CONNECT_STRUCTURES.value:
                 self._execute_connect_structures(action, sim_state)
             self.perform_action([action])
@@ -12676,8 +12879,9 @@ class Agent:
             )
         return {"changed": changed, "stalled": stalled, "signature": signature, "unchanged_count": unchanged_count}
 
-    def generate_message(self, recipient_name=None):
+    def generate_message(self, recipient_name=None, *, include_requests=True, include_unsolicited=True):
         messages = []
+        self._unsolicited_used = False
         role_source = f"{self.role}_Info"
         role_mem = self.source_memory_state.get(role_source, {})
         pending_role_share = set(role_mem.get("pending_role_share_ids", []))
@@ -12705,7 +12909,8 @@ class Agent:
                 self.source_memory_state.setdefault(role_source, {})["pending_role_share_ids"] = remaining
                 if not remaining:
                     self.source_memory_state.setdefault(role_source, {})["role_contribution_shared"] = True
-        elif pending_role_share:
+        elif pending_role_share and include_unsolicited:
+            self._unsolicited_used = True
             data_payload, info_payload, rule_payload = self._build_dik_payload_for_ids(set(sorted(pending_role_share)[:3]))
             if data_payload:
                 messages.append({"type": "TDP", "content": data_payload, "sender": self.name})
@@ -12723,7 +12928,7 @@ class Agent:
             anchored = {f"rule:{rid}" for rid in closure_missing_rule_ids}
             non_rule_ids = {mid for mid in set(missing_ids) if not str(mid).startswith("rule:")}
             missing_ids = sorted(set(anchored).union(non_rule_ids))
-        if missing_ids:
+        if missing_ids and include_requests:
             req_message = {"type": "TKRQ", "content": sorted(missing_ids), "sender": self.name}
             if closure_project_id and closure_missing_rule_ids:
                 req_message["project_id"] = closure_project_id
@@ -12735,8 +12940,11 @@ class Agent:
             messages.append({"type": "TGTO", "content": self.current_goal()["goal"], "sender": self.name})
         return messages
 
-    def communicate_with(self, other_agent, sim_state=None):
-        messages = self.generate_message(recipient_name=other_agent.name)
+    def communicate_with(self, other_agent, sim_state=None, mode="provide"):
+        """One exchange. COMMUNICATE ("provide") carries provision/goal/plan content; REQUEST_ASSISTANCE ("request") carries
+        the agent's recognized DIK gaps. Push and request are therefore distinct behaviours, not generic talk."""
+        messages = self.generate_message(recipient_name=other_agent.name, include_requests=(mode == "request"), include_unsolicited=(mode != "request"))
+        unsolicited_used = bool(getattr(self, "_unsolicited_used", False))
         if sim_state is not None:
             active_team_plan = self._get_active_team_plan(sim_state)
             if isinstance(active_team_plan, dict) and active_team_plan:
@@ -12853,6 +13061,20 @@ class Agent:
             )
         )
 
+        metrics = self.experimental_metrics
+        if any(t in {"TDP", "TIP", "TKP"} for t in message_types):
+            metrics["provision_attempts"] += 1
+            metrics["provision_successes"] += int(bool(receiver_dik_changed))
+            metrics["unsolicited_provision_attempts"] += int(unsolicited_used)
+        if "TKRQ" in message_types:
+            metrics["request_attempts"] += 1
+            now_req = float(getattr(sim_state, "time", 0.0))
+            for msg in messages:
+                if msg.get("type") == "TKRQ":
+                    for token in msg.get("content", []) or []:
+                        kind, _, eid = str(token).partition(":")
+                        if kind in {"data", "information"} and eid:
+                            self.outstanding_dik_requests.setdefault(eid, now_req)
         # Update Theory of Mind estimates
         if other_agent._should_apply_tom_update():
             other_agent.theory_of_mind[self.name] = {
@@ -12937,6 +13159,10 @@ class Agent:
             history.append(str(mtype))
             self.communication_state["last_received_epistemic_types"] = history[-6:]
 
+        if mtype in {"TDP", "TIP"} and sender:
+            fresh = [x for x in content if x not in self.mental_model["data" if mtype == "TDP" else "information"]]
+            if fresh:
+                self.received_dik_from[sender] = int(self.received_dik_from.get(sender, 0)) + len(fresh)
         if mtype == "TDP":
             for d in content:
                 if d not in self.mental_model["data"]:

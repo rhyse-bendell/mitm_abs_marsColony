@@ -260,11 +260,13 @@ def test_execution_still_blocks_a_validation_that_is_not_ready(sim):
 def test_seeded_baseline_run_validates_built_projects_instead_of_waiting():
     random.seed(0)
     with tempfile.TemporaryDirectory() as tmp:
-        state = SimulationState(phases=None, project_root=tmp, flash_mode=True, experiment_name="validation_e2e")
+        # Seeded simulator (not just the global RNG): the outcome of one trajectory is what this test pins down. The horizon is
+        # long enough that the check is "validates what it builds", not "wins a 240 s race" (policy changes shift timing).
+        state = SimulationState(phases=None, project_root=tmp, flash_mode=True, experiment_name="validation_e2e", seed=0)
         events = []
         state.logger.register_event_listener(lambda e: events.append((e["time"], e["event_type"], e["payload_data"])))
         try:
-            for _ in range(240):
+            for _ in range(400):
                 state.update(1.0)
             projects = state.environment.construction.projects
         finally:

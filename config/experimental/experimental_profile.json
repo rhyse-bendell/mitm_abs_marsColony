@@ -1,0 +1,68 @@
+{
+  "schema": "experimental_profile/1",
+  "status": "FIRST-PASS bounded experimental panel. Every default, coefficient and mapping below is a CURRENT HYPOTHESIZED SIMULATOR DEFAULT, not an empirically calibrated truth, and not the full eventual MiT parameterization.",
+  "precedence": [
+    "1. constituent default (this file)",
+    "2. gestalt-generated value: default + weight * transform(construct), clamped to 0..1 (only for constituents with a generated_by rule)",
+    "3. explicit constituent override (config 'constituent_overrides'); it REPLACES the generated value, it is never added to it",
+    "4. legacy low-level mechanism overrides (compatibility/debug); these replace the mechanism value the constituent produced and are logged"
+  ],
+  "constructs": ["teamwork_potential", "taskwork_potential"],
+  "constituents": {
+    "dik_push_propensity": {
+      "label": "DIK push propensity",
+      "default": 0.5,
+      "generated_by": {"construct": "teamwork_potential", "weight": 0.8, "transform": "linear_centered"},
+      "mechanisms": ["dik_push_propensity"],
+      "runtime": "Pilot desirability of COMMUNICATE when the agent holds unshared role DIK (unsolicited provision); no effect without a provision opportunity"
+    },
+    "dik_request_propensity": {
+      "label": "DIK request propensity",
+      "default": 0.5,
+      "generated_by": {"construct": "teamwork_potential", "weight": 0.8, "transform": "linear_centered"},
+      "mechanisms": ["dik_request_propensity"],
+      "runtime": "Pilot desirability of REQUEST_ASSISTANCE when a DIK gap is recognized; no effect without a recognized gap; routing by teammate model/role knowledge"
+    },
+    "externalization_propensity": {
+      "label": "Externalization propensity",
+      "default": 0.5,
+      "generated_by": {"construct": "teamwork_potential", "weight": 0.6, "transform": "linear_centered"},
+      "mechanisms": ["artifact_externalization_tendency"],
+      "runtime": "Pilot desirability of EXTERNALIZE_PLAN when there is a knowledge/workspace gap to externalize; also the existing externalization hooks"
+    },
+    "memory_reliability": {
+      "label": "Memory reliability (retention only)",
+      "default": 1.0,
+      "generated_by": null,
+      "mechanisms": ["memory_reliability"],
+      "runtime": "Seeded periodic forgetting of acquired data/information elements; 1.0 = no ordinary decay. Independent of rule_accuracy and of both gestalts."
+    },
+    "coordination_propensity": {
+      "label": "Coordination propensity",
+      "default": 0.5,
+      "generated_by": {"construct": "teamwork_potential", "weight": 0.85, "transform": "linear_centered"},
+      "mechanisms": ["goal_alignment", "coordination_propensity"],
+      "runtime": "Pilot desirability of proposing/consulting team plans when a coordination opportunity exists; goal_alignment also scales existing team-goal adoption"
+    },
+    "backup_propensity": {
+      "label": "Backup propensity",
+      "default": 0.5,
+      "generated_by": {"construct": "teamwork_potential", "weight": 0.8, "transform": "linear_centered"},
+      "mechanisms": ["help_tendency", "backup_propensity"],
+      "runtime": "Pilot desirability of legal taskwork on another role's structure or shared infrastructure when the need is observable"
+    },
+    "task_execution_efficiency": {
+      "label": "Task execution efficiency",
+      "default": 0.5,
+      "generated_by": {"construct": "taskwork_potential", "weight": 0.8, "transform": "linear_centered"},
+      "mechanisms": ["build_speed"],
+      "runtime": "Existing action-duration hooks (transport/construction/repair/validation); supplies no knowledge and changes no goal preference"
+    }
+  },
+  "memory": {
+    "update_interval_s": 5.0,
+    "grace_s": 60.0,
+    "base_hazard_per_s": 0.004,
+    "note": "p_forget per element per update = min(1, (1 - memory_reliability) * base_hazard_per_s * update_interval_s) once the element is older than grace_s since its last reinforcement. Hypothesized simulator default; retention only (no false memory, corruption, interference or confidence)."
+  }
+}

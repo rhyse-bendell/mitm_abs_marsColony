@@ -30,6 +30,7 @@ from modules.metrics import MetricsCollector
 from modules.runtime_witness_audit import RuntimeWitnessAudit
 from modules.team_knowledge import TeamKnowledgeManager
 from modules.experimental_config import load_experimental_mapper, normalize_mechanism_override_inputs
+from modules.experimental_profile import resolve_experimental_profile
 from modules.task_model import load_task_model
 
 LOCAL_BACKEND_ALIASES = {"local_http", "openai_compatible_local", "ollama_local", "ollama"}
@@ -148,12 +149,14 @@ class SimulationState:
         startup_progress_callback=None,
         execution_metadata=None,
         seed=None,
+        experimental_settings=None,
     ):
         # Deterministic run seed: seeds the global RNG and gives every agent its own RNG stream.
         self.terminal_state = None  # set once by _check_terminal_state()
         self.terminal_time = None
         self.resources_exhausted_time = None  # world condition, recorded once; not terminal unless the task policy says so
         self.seed = None if seed is None else int(seed)
+        self.experimental_settings = dict(experimental_settings or {})  # run-level gestalt constructs / constituent overrides (headless or GUI)
         if self.seed is not None:
             random.seed(self.seed)
         self.task_model = load_task_model(task_id=task_id)
@@ -382,6 +385,7 @@ class SimulationState:
         else:
             self.speed_multiplier = self.SPEED_MULTIPLIERS.get(speed, 1.0)
 
+        configs_from_task_defaults = agent_configs is None
         if agent_configs is None:
             if self.task_model.agent_defaults:
                 agent_configs = []
@@ -446,6 +450,20 @@ class SimulationState:
                 agent.run_seed = self.seed
                 agent._rng = random.Random(f"{self.seed}:{agent.agent_id}")
             construct_values = dict(config.get("constructs", {}))
+            run_settings = self.experimental_settings
+            agent_settings = dict((run_settings.get("per_agent") or {}).get(config.get("name", role_id), {}) or {})
+            # Run-level gestalts replace the task defaults but only fill gaps in explicitly supplied agent configs;
+            # per-agent run settings always win.
+            for key, value in dict(run_settings.get("constructs") or {}).items():
+                if configs_from_task_defaults or key not in construct_values:
+                    construct_values[key] = value
+            construct_values.update(dict(agent_settings.get("constructs") or {}))
+            constituent_overrides = {
+                **dict(run_settings.get("constituent_overrides") or {}),
+                **dict(agent_settings.get("constituent_overrides") or {}),
+                **dict(config.get("constituent_overrides") or {}),
+            }
+            experimental_profile = resolve_experimental_profile(construct_values, constituent_overrides)
             mechanism_defaults = {
                 "communication_propensity": float(getattr(agent, "communication_propensity", 0.5)),
                 "goal_alignment": float(getattr(agent, "goal_alignment", 0.5)),
@@ -467,11 +485,23 @@ class SimulationState:
                         "explicit_override_size": len(explicit_overrides),
                     },
                 )
+            # Precedence: constituent-owned mechanism values (default -> gestalt-generated -> explicit constituent override)
+            # replace what the legacy construct rules would produce; legacy low-level overrides (compat/debug) come last.
+            legacy_collisions = {
+                k: {"constituent_value": experimental_profile["constituent_mechanisms"][k], "legacy_override": float(v)}
+                for k, v in mechanism_overrides.items()
+                if k in experimental_profile["constituent_mechanisms"] and abs(float(v) - experimental_profile["constituent_mechanisms"][k]) > 1e-9
+            }
+            combined_overrides = {**experimental_profile["constituent_mechanisms"], **mechanism_overrides}
             resolved_constructs, resolved_mechanisms, resolved_hooks = self.construct_mapper.resolve_agent_profile(
                 construct_values=construct_values,
-                mechanism_overrides=mechanism_overrides,
+                mechanism_overrides=combined_overrides,
                 mechanism_defaults=mechanism_defaults,
             )
+            experimental_profile["legacy_mechanism_overrides_supplied"] = dict(mechanism_overrides)
+            experimental_profile["legacy_overrides_of_constituent_mechanisms"] = legacy_collisions
+            agent.experimental_profile = experimental_profile
+            self.logger.log_event(self.time, "agent_experimental_profile", {"agent": config.get("name", role_id), **experimental_profile})
             agent.construct_values = resolved_constructs
             agent.mechanism_overrides = mechanism_overrides
             agent.mechanism_profile = resolved_mechanisms
@@ -515,6 +545,7 @@ class SimulationState:
             fallback = config.get("accessible_packet_ids") or config.get("packet_access")
             agent.allowed_packet = mapped_packets or fallback
             agent.task_model = self.task_model
+            agent._env_ref = self.environment
             agent.initial_goal_seeds = list(config.get("initial_goal_seeds", []) or [])
             agent._seed_task_defined_goals(sim_state=self)
             for seed in agent.initial_goal_seeds[:3]:
@@ -817,6 +848,7 @@ class SimulationState:
             "construct_values": dict(getattr(agent, "construct_values", {})),
             "mechanism_overrides": dict(getattr(agent, "mechanism_overrides", {})),
             "mechanism_profile": dict(getattr(agent, "mechanism_profile", {})),
+            "experimental_profile": dict(getattr(agent, "experimental_profile", {})),
             "hook_effects": {f"{k[0]}::{k[1]}::{k[2]}": float(v) for k, v in sorted(getattr(agent, "hook_effects", {}).items())},
             "mechanism_hook_keys": [f"{k[0]}::{k[1]}::{k[2]}" for k in sorted(getattr(agent, "hook_effects", {}).keys())],
         }
@@ -988,9 +1020,49 @@ class SimulationState:
         return True
 
 
+    def _condition_provenance(self):
+        """Hashes of the task package and experimental config files, so a condition can be reconstructed exactly."""
+        import hashlib
+
+        root = Path(__file__).resolve().parents[1]
+        task_dir = root / "config" / "tasks" / str(getattr(self.task_model, "task_id", "mars_colony"))
+        out = {}
+        for label, directory in (("task", task_dir), ("experimental", root / "config" / "experimental")):
+            for path in sorted(directory.glob("*")):
+                if path.is_file() and path.suffix in {".csv", ".json"}:
+                    out[f"{label}/{path.name}"] = hashlib.sha1(path.read_bytes()).hexdigest()[:12]
+        return out
+
+    def _experimental_manifest(self):
+        from modules.experimental_profile import load_experimental_profile_config
+
+        cfg = load_experimental_profile_config()
+        return {
+            "panel": "first_pass_compact_experimental_panel",
+            "schema": cfg.get("schema"),
+            "status": cfg.get("status"),
+            "precedence": list(cfg.get("precedence", [])),
+            "run_level_settings": dict(self.experimental_settings),
+            "memory_config": dict(cfg.get("memory", {})),
+            "per_agent": {
+                a.name: {
+                    "gestalt_constructs": dict((getattr(a, "experimental_profile", {}) or {}).get("gestalt_constructs", {})),
+                    "generated_constituents": dict((getattr(a, "experimental_profile", {}) or {}).get("generated_constituents", {})),
+                    "explicit_constituent_overrides": dict((getattr(a, "experimental_profile", {}) or {}).get("explicit_constituent_overrides", {})),
+                    "resolved_constituents": dict((getattr(a, "experimental_profile", {}) or {}).get("resolved_constituents", {})),
+                    "legacy_overrides_of_constituent_mechanisms": dict((getattr(a, "experimental_profile", {}) or {}).get("legacy_overrides_of_constituent_mechanisms", {})),
+                    "resolved_mechanisms": dict(getattr(a, "mechanism_profile", {})),
+                    "hook_effects": {f"{k[0]}::{k[1]}::{k[2]}": float(v) for k, v in sorted(getattr(a, "hook_effects", {}).items())},
+                }
+                for a in self.agents
+            },
+            "provenance_hashes": self._condition_provenance(),
+        }
+
     def _backend_settings_for_manifest(self):
         cfg = self.brain_backend_config
         return {
+            "experimental_panel": self._experimental_manifest() if getattr(self, "agents", None) else {"run_level_settings": dict(self.experimental_settings)},
             "configured_brain_backend": self.configured_brain_backend,
             "effective_brain_backend": self.effective_brain_backend,
             "brain_backend": self.configured_brain_backend,
@@ -1353,6 +1425,27 @@ class SimulationState:
             self.logger.log_event(self.time, "terminal_state_reached", {"terminal_state": reason, "sim_time": float(self.time), "mission_success_evaluated": False})
         return reason
 
+    def _experimental_process_measures(self):
+        """Smallest set of process measures needed to verify the seven manipulations; per agent and summed per team."""
+        per_agent = {a.name: {"resolved_constituents": dict((getattr(a, "experimental_profile", {}) or {}).get("resolved_constituents", {})), **a.experimental_metrics_snapshot()} for a in self.agents}
+        team = {}
+        for row in per_agent.values():
+            for key, value in row.items():
+                if key in {"resolved_constituents", "event_tallies", "pilot_decision", "taskwork_by_kind"}:
+                    target = team.setdefault(key, {})
+                    for k, v in value.items():
+                        if isinstance(v, (int, float)):
+                            target[k] = target.get(k, 0) + v
+                elif isinstance(value, (int, float)):
+                    team[key] = team.get(key, 0) + value
+        team.pop("resolved_constituents", None)
+        links = [dict(l) for l in self.environment.construction.connectors]
+        return {
+            "per_agent": per_agent,
+            "team": team,
+            "connections": {"total": len(links), "cross_site": sum(1 for l in links if l.get("cross_site_connection"))},
+        }
+
     def _final_measures(self):
         """Authoritative end-of-run state read from the simulator (construction / environment)."""
         construction = self.environment.construction
@@ -1406,6 +1499,7 @@ class SimulationState:
                 "bridges": bridges,
                 "site_capacity": construction.get_site_capacity_summary(),
             },
+            "experimental": self._experimental_process_measures(),
             "action_feedback": {
                 "repeated_action_failure_events": int(events_by_type.get("repeated_action_failure", 0)),
                 "agents_final_action_outcomes": {a.agent_id: list(getattr(a, "recent_action_outcomes", [])[-3:]) for a in self.agents},

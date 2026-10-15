@@ -218,6 +218,7 @@ class BrainContextBuilder:
         communication_no_effect_streak = int((getattr(agent, "communication_state", {}) or {}).get("no_effect_streak", 0) or 0)
 
         consult_assessment = dict((team_state or {}).get("consult_assessment") or {})
+        opportunities = dict((team_state or {}).get("experimental_opportunities") or {})
 
         def utility_for(action: ExecutableActionType, target_kind: str | None = None):
             if action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
@@ -273,6 +274,17 @@ class BrainContextBuilder:
              "consult_reasons": list(consult_assessment.get("reasons") or []), "consult_artifact_id": consult_assessment.get("artifact_id")},
         ]
         for item in legal:
+            # Read-only facts for the Pilot's constituent-weighted terms; no opportunity -> the propensity has no effect.
+            if item.get("action_type") == ExecutableActionType.COMMUNICATE.value:
+                item["provision_unsolicited"] = int(opportunities.get("provision_unsolicited", 0))
+                item["provision_solicited"] = int(opportunities.get("provision_solicited", 0))
+            elif item.get("action_type") == ExecutableActionType.REQUEST_ASSISTANCE.value:
+                item["dik_gap_count"] = int(opportunities.get("dik_gap_count", 0))
+            elif item.get("action_type") == ExecutableActionType.EXTERNALIZE_PLAN.value:
+                item["externalize_gap"] = bool(opportunities.get("externalize_gap"))
+                item["team_plan_opportunity"] = bool(opportunities.get("team_plan_opportunity"))
+            elif item.get("action_type") == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value:
+                item["consult_artifact_type"] = consult_assessment.get("artifact_type")
             if item.get("action_type") in {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.REQUEST_ASSISTANCE.value}:
                 item["reachable"] = nearby_teammates > 0
                 item["productive"] = productive_coordination
@@ -351,6 +363,11 @@ class BrainContextBuilder:
                 "project_type": project.get("type"),
                 "reachable": environment._segment_is_navigable(agent.position, point),
             }
+            owner_role = agent._structure_owner_role(project.get("type"))
+            if owner_role == "shared":
+                base["backup_need"] = "shared_infrastructure"
+            elif owner_role and owner_role != str(agent.role).lower():
+                base["backup_need"] = "other_role_structure"
             required = int((project.get("required_resources") or {}).get("bricks", 0) or 0)
             delivered = int((project.get("delivered_resources") or {}).get("bricks", 0) or 0)
             steps = list(project.get("build_steps") or [])
@@ -393,9 +410,9 @@ class BrainContextBuilder:
             delivered = int(capacity_unlock.get("delivered_resources", 0) or 0)
             bridge_status = str(capacity_unlock.get("bridge_status") or "not_started")
             if delivered < required:
-                legal.append({"action_type": ExecutableActionType.TRANSPORT_RESOURCES.value, "target_id": bridge_id, "target_class": "bridge", "target_kind": "bridge", "work_stage": "bridge_material_delivery", "reachable": True, "utility": 0.96})
+                legal.append({"action_type": ExecutableActionType.TRANSPORT_RESOURCES.value, "target_id": bridge_id, "target_class": "bridge", "target_kind": "bridge", "work_stage": "bridge_material_delivery", "reachable": True, "utility": 0.96, "backup_need": "shared_infrastructure"})
             elif bridge_status != "complete":
-                legal.append({"action_type": ExecutableActionType.CONTINUE_CONSTRUCTION.value, "target_id": bridge_id, "target_class": "bridge", "target_kind": "bridge", "work_stage": "bridge_build", "reachable": True, "utility": 0.94})
+                legal.append({"action_type": ExecutableActionType.CONTINUE_CONSTRUCTION.value, "target_id": bridge_id, "target_class": "bridge", "target_kind": "bridge", "work_stage": "bridge_build", "reachable": True, "utility": 0.94, "backup_need": "shared_infrastructure"})
 
         list_connections = getattr(environment.construction, "list_connection_options", None)
         for option in (list_connections() if callable(list_connections) else []):
@@ -708,6 +725,7 @@ class BrainContextBuilder:
 
         build_readiness = self._build_readiness(agent, structure_summary, environment, team_state=team_state)
         team_state["consult_assessment"] = agent._consult_assessment(environment, sim_state=sim_state)
+        team_state["experimental_opportunities"] = agent._experimental_opportunities(sim_state, environment)
         support_reasoning = self._support_reasoning(agent, sim_state, environment)
         task_methods = agent._task_method_status(current_phase.get("name", "default"))
         action_affordances = self._affordances(agent, environment, build_readiness=build_readiness, phase_profile=phase_profile, team_state=team_state, support_subgoals=support_reasoning["subgoals"], task_methods=task_methods)
@@ -751,6 +769,11 @@ class BrainContextBuilder:
             "build_speed": getattr(agent, "build_speed", 0.5),
             "rule_accuracy": getattr(agent, "rule_accuracy", 0.5),
             "artifact_consultation_tendency": agent._trait_value("artifact_consultation_tendency"),
+            "artifact_externalization_tendency": agent._trait_value("artifact_externalization_tendency"),
+            "dik_push_propensity": agent._trait_value("dik_push_propensity"),
+            "dik_request_propensity": agent._trait_value("dik_request_propensity"),
+            "coordination_propensity": agent._trait_value("coordination_propensity"),
+            "backup_propensity": agent._trait_value("backup_propensity"),
         }
         individual_cognitive_state = {
             "goal_stack": list(agent.goal_stack),

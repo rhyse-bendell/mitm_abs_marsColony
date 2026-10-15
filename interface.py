@@ -1754,12 +1754,18 @@ class MarsColonyInterface:
                 team_pot = self.agent_profiles[role]["team"].get()
                 task_pot = self.agent_profiles[role]["task"].get()
 
+                # Gestalt presets no longer inject low-level mechanism values: they resolve through the seven-constituent
+                # profile (modules/experimental_profile.py). The legacy sliders are compatibility/debug overrides and only
+                # apply when explicitly enabled; explicit constituent entries override the gestalt-generated values.
                 mechanism_overrides = {}
-                mechanism_overrides.update(profile_traits.get(f"{team_pot}_Team", {}))
-                mechanism_overrides.update(profile_traits.get(f"{task_pot}_Task", {}))
-
-                for trait_key, var in self.agent_traits[role].items():
-                    mechanism_overrides[trait_key] = var.get()  # override with current slider value
+                if self.legacy_override_enabled[role].get():
+                    for trait_key, var in self.agent_traits[role].items():
+                        mechanism_overrides[trait_key] = var.get()
+                constituent_overrides = {}
+                for name, var in self.agent_constituents[role].items():
+                    text = str(var.get()).strip()
+                    if text:
+                        constituent_overrides[name] = max(0.0, min(1.0, float(text)))
 
                 selected_packets = [
                     packet_name
@@ -1820,6 +1826,7 @@ class MarsColonyInterface:
                         "taskwork_potential": self.agent_profiles[role]["task_value"].get() if task_pot == "Custom" else profile_constructs[task_pot],
                     },
                     "mechanism_overrides": dict(mechanism_overrides),
+                    "constituent_overrides": dict(constituent_overrides),
                     "packet_access": selected_packets,
                     "brain_config": {k: v for k, v in brain_config.items() if v},
                     "planner_config": planner_config,
@@ -4126,6 +4133,42 @@ class MarsColonyInterface:
             self.agent_traits[role][trait] = DoubleVar(value=0.5)
             self._create_trait_slider(task_traits_frame, row=idx // 2, col=idx % 2, label=trait_labels[trait], variable=self.agent_traits[role][trait])
 
+        from modules.experimental_profile import CONSTITUENTS, load_experimental_profile_config, resolve_experimental_profile
+
+        constituent_frame = ttk.LabelFrame(card, text="Experimental constituents (first pass) - blank = generated from Teamwork/Taskwork Potential", padding=(8, 6))
+        constituent_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        constituent_frame.columnconfigure(1, weight=1)
+        constituent_cfg = load_experimental_profile_config()["constituents"]
+        self.agent_constituents[role] = {}
+        self.agent_constituent_resolved[role] = {}
+        self.legacy_override_enabled[role] = BooleanVar(value=False)
+
+        def _gestalt_value(which):
+            choice = self.agent_profiles[role][which].get()
+            return float(self.agent_profiles[role][f"{which}_value"].get()) if choice == "Custom" else {"High": 0.75, "Low": 0.25}[choice]
+
+        def refresh_resolved(*_):
+            try:
+                overrides = {n: float(v.get()) for n, v in self.agent_constituents[role].items() if str(v.get()).strip()}
+                profile = resolve_experimental_profile({"teamwork_potential": _gestalt_value("team"), "taskwork_potential": _gestalt_value("task")}, overrides)
+            except Exception:
+                return  # half-typed entry; the next edit refreshes
+            for name, var in self.agent_constituent_resolved[role].items():
+                var.set(f"{profile['resolved_constituents'][name]:.2f}  ({profile['constituent_source'][name]})")
+
+        for idx, name in enumerate(CONSTITUENTS):
+            self.agent_constituents[role][name] = StringVar(value="")
+            self.agent_constituent_resolved[role][name] = StringVar(value="")
+            ttk.Label(constituent_frame, text=constituent_cfg[name]["label"]).grid(row=idx, column=0, sticky="w")
+            ttk.Entry(constituent_frame, textvariable=self.agent_constituents[role][name], width=6).grid(row=idx, column=1, sticky="w", padx=6)
+            ttk.Label(constituent_frame, textvariable=self.agent_constituent_resolved[role][name]).grid(row=idx, column=2, sticky="w")
+            self.agent_constituents[role][name].trace_add("write", refresh_resolved)
+        for gestalt_var in (self.agent_profiles[role]["team"], self.agent_profiles[role]["task"], self.agent_profiles[role]["team_value"], self.agent_profiles[role]["task_value"]):
+            gestalt_var.trace_add("write", refresh_resolved)
+        ttk.Button(constituent_frame, text="Reset to profile", command=lambda r=role: [v.set("") for v in self.agent_constituents[r].values()]).grid(row=len(CONSTITUENTS), column=0, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(constituent_frame, text="Apply legacy low-level sliders as debug overrides", variable=self.legacy_override_enabled[role]).grid(row=len(CONSTITUENTS), column=1, columnspan=2, sticky="w", pady=(4, 0))
+        refresh_resolved()
+
         packet_frame = ttk.LabelFrame(card, text="Packet Access", padding=(8, 6))
         packet_frame.grid(row=5, column=0, columnspan=2, sticky="ew")
         packet_frame.columnconfigure(0, weight=1)
@@ -4277,6 +4320,9 @@ class MarsColonyInterface:
         self.active_roles = {}
         self.agent_profiles = {}
         self.agent_traits = {}
+        self.agent_constituents = {}  # role -> {constituent: StringVar}; blank = use the profile-generated value
+        self.agent_constituent_resolved = {}  # role -> {constituent: StringVar} resolved preview
+        self.legacy_override_enabled = {}  # role -> BooleanVar: legacy low-level sliders act as debug overrides only when ticked
         self.packet_access = {}
         self.agent_identity = {}
         self.agent_brain_settings = {}
