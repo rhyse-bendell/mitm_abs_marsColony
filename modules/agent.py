@@ -965,6 +965,12 @@ class Agent:
         }
     )
 
+    def _non_mutating_scaffold_choice(self, candidate, *, reason):
+        """Scaffold pivots may keep the Pilot busy (reassess/inspect/wait) but may not create shared state for it."""
+        if candidate.selected_action not in self._PILOT_STATE_MUTATING_ACTIONS:
+            return candidate
+        return BrainDecision(selected_action=ExecutableActionType.REASSESS_PLAN, goal_update="scaffold_regrounding_only", reason_summary=f"{reason} (state-creating alternative not substituted)", confidence=0.6)
+
     def _metacognitive_project_alternatives(self, environment, sim_state=None, context=None, preferred_project_id=None):
         """Read-only: legal project-taskwork options the current affordances expose.
 
@@ -1041,8 +1047,8 @@ class Agent:
         )
 
     def _force_recovery_pivot(self, sim_state=None, *, to_action, reason, ttl_s=12.0):
-        if str(to_action) in {a.value for a in self._PROJECT_TASKWORK_ACTIONS}:
-            # Pilot authority: recovery may report that a project action would be legal, but it does not force one.
+        if str(to_action) in {a.value for a in self._PILOT_STATE_MUTATING_ACTIONS}:
+            # Pilot authority: recovery may report that a state-creating action would be legal, but it does not force one.
             self._emit_event(sim_state, "recovery_pivot_declined_project_taskwork", {"to_action": str(to_action), "reason": str(reason), "applied": False})
             return
         now_ts = self._tracker_now(sim_state)
@@ -1161,8 +1167,10 @@ class Agent:
             self._emit_event(sim_state, "metacognitive_support_loop_broken", {"support_stagnation": int(stagnation["support"]), "epistemic_stagnation": int(stagnation["epistemic"])})
             self._emit_event(sim_state, "metacognitive_switch_to_regrounding", {"reason": "stagnation"})
             self._set_metacognitive_mode("RECOVER_REGROUND", sim_state=sim_state, reason="stagnation", profile="recovery")
-            fallback = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
-            if fallback.selected_action in {ExecutableActionType.INSPECT_INFORMATION_SOURCE, ExecutableActionType.REASSESS_PLAN, ExecutableActionType.COMMUNICATE}:
+            fallback = self._non_mutating_scaffold_choice(
+                self._choose_post_inspect_followup_decision(environment, sim_state=sim_state), reason="stagnation regrounding"
+            )
+            if fallback.selected_action in {ExecutableActionType.INSPECT_INFORMATION_SOURCE, ExecutableActionType.REASSESS_PLAN}:
                 return fallback
 
         if phase_tempo == "late" and execution_candidate is not None and action in {
@@ -1896,12 +1904,7 @@ class Agent:
         if not readiness_after:
             promoted = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
             if promoted.selected_action in {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION, ExecutableActionType.VALIDATE_CONSTRUCTION}:
-                self._force_recovery_pivot(
-                    sim_state,
-                    to_action=promoted.selected_action.value,
-                    reason=f"readiness_recompute_handoff:{trigger_source}",
-                    ttl_s=6.0,
-                )
+                # Information only: the readiness change makes this legal; the Pilot decides (no forced pivot).
                 self._emit_event(
                     sim_state,
                     "readiness_handoff_promoted_execution",
@@ -5417,6 +5420,9 @@ class Agent:
             actor=self.name,
             sim_time=float(getattr(sim_state, "time", getattr(self, "current_time", 0.0))),
         )
+        if attached:
+            sites = {str((construction.projects.get(pid) or {}).get("site_id") or "") for pid in (from_id, to_id)}
+            payload["cross_site_connection"] = len(sites) > 1
         self._emit_event(sim_state, "connection_attempt_succeeded" if attached else "connection_attempt_failed", {**payload, "reason": reason})
         return bool(attached)
 
@@ -8746,16 +8752,16 @@ class Agent:
                             "origin": pivot_origin,
                             "project_id": closure_project_id,
                             "from_action": rewritten.selected_action.value,
-                            "to_action": ExecutableActionType.COMMUNICATE.value,
+                            "to_action": ExecutableActionType.REASSESS_PLAN.value,
                             "blockers": blocker_classification["epistemic_blockers"],
                         },
                     )
                     rewritten = BrainDecision(
-                        selected_action=ExecutableActionType.COMMUNICATE,
+                        selected_action=ExecutableActionType.REASSESS_PLAN,
                         target_id=None,
                         target_zone=decision.target_zone,
                         goal_update="closure_epistemic_repair",
-                        reason_summary=f"Closure epistemic blockers require communication repair for {closure_project_id}",
+                        reason_summary=f"Closure epistemic blockers for {closure_project_id}; reassess (communication is the Pilot's choice)",
                         confidence=max(0.78, float(rewritten.confidence or decision.confidence or 0.0)),
                     )
             if (
@@ -8837,11 +8843,11 @@ class Agent:
                             )
                     elif comm_available:
                         rewritten = BrainDecision(
-                            selected_action=ExecutableActionType.COMMUNICATE,
+                            selected_action=ExecutableActionType.REASSESS_PLAN,
                             target_id=None,
                             target_zone=decision.target_zone,
                             goal_update="closure_epistemic_repair",
-                            reason_summary=f"Closure repair suppressed non-relevant inspect ({target_id}); communicate for blocker-specific DIK.",
+                            reason_summary=f"Closure repair suppressed non-relevant inspect ({target_id}); reassess (requesting DIK is the Pilot's choice).",
                             confidence=max(0.78, float(rewritten.confidence or decision.confidence or 0.0)),
                         )
                     elif stalled_repair:
@@ -8945,11 +8951,7 @@ class Agent:
                             and str(a.get("target_id") or "") in {"", str(teammate_closure_project_id)}
                         ]
                         owner_stalled = not bool(owner_project_actions)
-                fallback_action = (
-                    ExecutableActionType.COMMUNICATE
-                    if can_specific_support and self._can_attempt_verbal_plan_communication(sim_state)
-                    else ExecutableActionType.WAIT
-                )
+                fallback_action = ExecutableActionType.WAIT  # support for a teammate's closure never substitutes a communication for the Pilot
                 if owner_stalled and not can_specific_support:
                     self._emit_event(
                         sim_state,
@@ -9023,11 +9025,7 @@ class Agent:
             ExecutableActionType.EXTERNALIZE_PLAN,
         }:
             can_specific_support = self._can_offer_blocker_specific_support(blocked_support_project, environment, sim_state=sim_state)
-            fallback_action = (
-                ExecutableActionType.COMMUNICATE
-                if can_specific_support and self._can_attempt_verbal_plan_communication(sim_state)
-                else ExecutableActionType.WAIT
-            )
+            fallback_action = ExecutableActionType.WAIT  # support for a teammate's closure never substitutes a communication for the Pilot
             support_signature = f"{blocked_support_project}|blocked_support|{rewritten.selected_action.value}"
             if self._closure_support_focus_exhausted(support_signature):
                 self._emit_event(
@@ -9078,7 +9076,7 @@ class Agent:
                     "suppressed_repeat_count": int(artifact_state.get("repeated_suppressed_artifact_action_count", 0) or 0),
                 },
             )
-            rewritten = escape_decision
+            rewritten = self._non_mutating_scaffold_choice(escape_decision, reason="whiteboard escape hatch")
             artifact_state["escape_hatch_pending"] = False
         if (
             handoff.get("pending")
@@ -9113,7 +9111,7 @@ class Agent:
                     },
                 )
                 if not same_family:
-                    rewritten = followup
+                    rewritten = self._non_mutating_scaffold_choice(followup, reason="post-inspect followup")
             self._emit_event(
                 sim_state,
                 "post_inspect_followup_reroute_skipped",
@@ -9290,7 +9288,7 @@ class Agent:
                             "no_effect_streak": no_effect_streak,
                         },
                     )
-                    rewritten = fallback
+                    rewritten = self._non_mutating_scaffold_choice(fallback, reason="communication loop")
                     self._register_no_progress(sim_state, kind="communication_loop_detected", detail={"no_effect_streak": no_effect_streak})
         if sim_state is not None and rewritten.selected_action == ExecutableActionType.OBSERVE_ENVIRONMENT:
             observe_streak = int(self.progress_tracker.get("observe_no_effect", 0) or 0)
@@ -9298,28 +9296,9 @@ class Agent:
                 fallback = self._choose_post_inspect_followup_decision(environment, sim_state=sim_state)
                 if fallback.selected_action != ExecutableActionType.OBSERVE_ENVIRONMENT:
                     self._emit_event(sim_state, "observe_suppressed_due_to_no_effect_streak", {"observe_no_effect_streak": observe_streak, "pivot_to": fallback.selected_action.value})
-                    rewritten = fallback
+                    rewritten = self._non_mutating_scaffold_choice(fallback, reason="observe loop")
         if rewritten.selected_action in {ExecutableActionType.CONSULT_TEAM_ARTIFACT, ExecutableActionType.EXTERNALIZE_PLAN}:
-            if (
-                rewritten.selected_action == ExecutableActionType.CONSULT_TEAM_ARTIFACT
-                and self._has_meaningful_consultable_artifact(sim_state)
-            ):
-                last_consult = float((self.artifact_coordination_state or {}).get("last_consulted_time", -999.0) or -999.0)
-                consulted_recently = (float(getattr(sim_state, "time", 0.0)) - last_consult) <= 6.0
-                if consulted_recently and self._workspace_externalization_gap_exists(environment):
-                    self._emit_event(
-                        sim_state,
-                        "consult_deprioritized_for_workspace_gap_externalization",
-                        {"origin": pivot_origin, "last_consulted_time": last_consult},
-                    )
-                    rewritten = BrainDecision(
-                        selected_action=ExecutableActionType.EXTERNALIZE_PLAN,
-                        target_id=rewritten.target_id,
-                        target_zone=rewritten.target_zone,
-                        goal_update=rewritten.goal_update,
-                        reason_summary="Recent consult already performed; slight policy rebalance toward epistemic workspace coverage.",
-                        confidence=max(0.7, float(rewritten.confidence or 0.0)),
-                    )
+            # (Removed: a scaffold that turned a Pilot's consult into externalize_plan. Externalizing is the Pilot's choice.)
             is_redundant = self._artifact_action_is_redundant(rewritten.selected_action.value, environment, sim_state=sim_state, artifact_id="whiteboard")
             if is_redundant:
                 self._record_artifact_suppression("whiteboard", sim_state=sim_state)
@@ -9327,19 +9306,9 @@ class Agent:
                 self._emit_event(sim_state, evt, {"origin": pivot_origin, "reason": "recent_no_novelty"})
                 if self._should_force_artifact_escape_hatch("whiteboard", sim_state=sim_state):
                     self.artifact_coordination_state["escape_hatch_pending"] = True
-                if self._can_attempt_verbal_plan_communication(sim_state):
-                    self._emit_event(
-                        sim_state,
-                        "verbal_plan_communication_preferred_over_artifact",
-                        {"origin": pivot_origin, "suppressed_action": rewritten.selected_action.value},
-                    )
-                    rewritten = BrainDecision(
-                        selected_action=ExecutableActionType.COMMUNICATE,
-                        reason_summary="Artifact action suppressed as redundant; prefer verbal coordination.",
-                        confidence=max(0.72, float(rewritten.confidence or 0.0)),
-                    )
-                else:
-                    rewritten = self._choose_whiteboard_escape_decision(environment, sim_state=sim_state)
+                rewritten = self._non_mutating_scaffold_choice(
+                    self._choose_whiteboard_escape_decision(environment, sim_state=sim_state), reason="redundant artifact action"
+                )
         if (
             live_commitment
             and live_source_id
@@ -11134,15 +11103,8 @@ class Agent:
                         )
                         self._record_artifact_suppression(preferred.artifact_id, sim_state=sim_state)
                         self._emit_event(sim_state, "artifact_consult_suppressed_redundant", {"target_id": "whiteboard", "artifact_id": preferred.artifact_id})
-                        if self._can_attempt_verbal_plan_communication(sim_state):
-                            self._emit_event(sim_state, "verbal_plan_communication_preferred_over_artifact", {"artifact_id": preferred.artifact_id, "suppressed_action": ExecutableActionType.CONSULT_TEAM_ARTIFACT.value})
-                            self._force_recovery_pivot(
-                                sim_state,
-                                to_action=ExecutableActionType.COMMUNICATE.value,
-                                reason="runtime_redundant_artifact_consult",
-                                ttl_s=4.0,
-                            )
-                        elif self._should_force_artifact_escape_hatch(preferred.artifact_id, sim_state=sim_state):
+                        # (Removed: forcing a communication after a redundant consult. Whether to communicate is the Pilot's choice.)
+                        if self._should_force_artifact_escape_hatch(preferred.artifact_id, sim_state=sim_state):
                             self.artifact_coordination_state["escape_hatch_pending"] = True
                             self._force_recovery_pivot(
                                 sim_state,

@@ -1480,6 +1480,9 @@ class ConstructionManager:
             "connection_type": support_type,
             "from_project_id": start_id,
             "to_project_id": end_id,
+            # Telemetry only: connector spacing/site abstraction is unresolved in the human-task sources, so a connection
+            # between structures at different sites is neither forbidden nor endorsed here.
+            "cross_site_connection": str(start_project.get("site_id") or "") != str(end_project.get("site_id") or ""),
             "added_by": actor,
             "added_at": sim_time,
         }
