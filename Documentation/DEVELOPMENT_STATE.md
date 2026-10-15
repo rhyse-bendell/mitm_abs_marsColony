@@ -285,10 +285,7 @@ Branch wip/validation-repair-checkpoint (merged to main; see git log). What is n
   H 0.3 -> 1; seed 2 is no longer ~0 in any condition except C. Teamwork B vs C: push 14 vs 0, requests 6.7 (6 answered) vs 0,
   externalization 8 vs 2.7, plans agreed 39.7 vs 0, repairs succeeded 7 vs 1.
 ## REMAINING ISSUES (known, not fixed)
-1. Low teamwork (condition C) never validates: the grounded agent (Engineer) never selects REPAIR even though every failed water
-   generator is repair-ready for it; the mode score for VALIDATE (4.0) stays far above REPAIR (1.15) while other validation
-   candidates exist. Architect/Botanist lack R_WATERGEN_VALIDITY and recognise no gap (known_gaps 0) because request propensity is 0.
-   This is Pilot policy (mode scoring), not a gate; do not tune without a decision.
+1. (RESOLVED, see below) Low teamwork (condition C) never validated because VALIDATE (~4.0-4.5) outvoted REPAIR (<=2.0) while unrelated validation candidates existed. Fix: `REPAIR += 3.5 * repair_executable` in `_compute_mode_scores` (gated on the REPAIR affordance's own `repair_ready`; no mechanism/teamwork term, no knowledge granted). Compact-panel seeds 0-2 (600 s) old -> new C: validated 0 -> 3.3, repair successes 1 -> 3.7, revalidations 0 -> 4.3, requests/pushes remain 0, externalizations/plans unchanged 2.7. Other conditions: B 7.3 -> 7.3, D 4.7 -> 5.7, E 3.3 -> 4.3, F 5.3 -> 8.0, G 2 -> 2.7, H 1 -> 1.7, A 3.7 -> 2.3 (A seeds 0 and 2 diverged at t=160 and ended in a consult/wait stall with no observed repair need -- a separate pre-existing stall class, not addressed). Full suite: identical 111 pre-existing failures before/after. Tests: tests/test_repair_mode_pressure.py.
 2. backup_actions tracks taskwork volume: backup share (backup/taskwork) is 0.24-0.51 with no systematic relation to backup_propensity
    (B 0.40 vs C 0.37). Needs an operationalization built on an observably stalled/needy teammate.
 3. Coordination lifecycle (commit/adoption) is unreachable: see NEXT BLOCK above. Not started.

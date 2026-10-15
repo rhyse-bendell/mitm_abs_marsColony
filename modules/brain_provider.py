@@ -920,6 +920,10 @@ class RuleBrain(BrainProvider):
         mode_scores["CONSTRUCT"] = 0.35 + 1.7 * build_pull + 0.9 * features["active_incomplete_projects"]
         mode_scores["VALIDATE"] = 0.2 + 1.4 * features["artifact_validation_available"] + 0.5 * features["goal_pressure"] + 1.5 * features.get("validation_work_pending", 0.0) + 0.9 * features.get("validation_pending_projects", 0.0)
         mode_scores["REPAIR"] = 0.2 + 1.8 * features["repair_pressure"]
+        # An observed failed validation the agent's own knowledge can already ground is unfinished work that must not be
+        # outvoted by unrelated validation candidates (VALIDATE reaches ~4.2-5.4 from pending-work terms plus incumbency hysteresis). Gated on the
+        # REPAIR affordance's own repair_ready check, so it grants no knowledge; independent of mechanism/teamwork settings.
+        mode_scores["REPAIR"] += 3.5 * features.get("repair_executable", 0.0)
         # Repair is needed but the agent cannot ground it yet: acquiring the missing knowledge is the rational next move.
         mode_scores["ACQUIRE_DIK"] += 1.0 * features.get("repair_knowledge_gap", 0.0)
         mode_scores["RECOVERY"] = 0.2 + 1.8 * features["loop_pressure"] + self.policy_config.recovery_bonus * features["contradiction_pressure"]
