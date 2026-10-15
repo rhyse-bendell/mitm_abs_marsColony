@@ -95,12 +95,13 @@ def test_repair_action_executes_through_construction_then_requires_validation(si
     cm.record_build_quality(pid, correct=False, actor="X")
     cm.update()
     assert cm.projects[pid]["status"] == "needs_repair"
+    cm.mark_validated(pid, is_valid=False, actor="X", sim_time=1.0)  # a repair needs an OBSERVED error: the failed validation
+    agent._rng.random = lambda: 0.0  # the fidelity roll applied to the repair itself succeeds in this test
 
     decision = BrainDecision(selected_action=ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, target_id=pid, confidence=0.9)
-    # the agent's own information-readiness precondition is held satisfied; this test targets execution + Construction
-    grounded = {"score": 1.0, "role_missing": False, "stale_grounding": False, "refresh_pressure": 0.0, "construction_state_needs_recheck": False, "sufficient_for_validation": True}
-    with patch.object(agent, "_build_readiness_blockers", return_value=[]), patch.object(agent, "_epistemic_sufficiency", return_value=grounded):
-        actions = agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
+    # project-specific repair grounding: the agent holds the rules needed to reason about this project's validity
+    agent.mental_model["knowledge"].rules.extend(cm.projects[pid]["expected_rules"])
+    actions = agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
     agent.position = sim.environment.get_interaction_target_position(pid, from_position=agent.position)
     agent.active_actions = [dict(a, progress=0.0) for a in actions]
     agent._apply_externalization_and_construction_effects(sim.environment, sim, 1.0)

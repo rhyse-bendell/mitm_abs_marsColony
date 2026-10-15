@@ -243,3 +243,53 @@ Unresolved scientific ambiguities carried forward (do not resolve silently): con
 - The Edit/Write tools are intermittently blocked by auto mode ("no usable answer"); the user authorized writing repo-local files through PowerShell/Python in that case (not destructive ops, not outside the repo, no force-push). Write multi-line commit messages to a file and use `git commit -F` (PowerShell mangles multi-line `-m`; avoid a BOM).
 - Simulator prints "Agent logs saved" per step to stdout; redirect/filter in diagnostics. Diagnostic scripts live only in the session scratchpad (not in the repo): a 1700 s headless run takes ~3.5 minutes.
 - Seed results before the exhaustion change (r0-r5, default task): every seed ended with 20 structures validated, `bridge_bc` complete, both piles at 0, site_c_house_011 unfinished; none had a defined success.
+
+
+## NEXT BLOCK (not started): team-coordination lifecycle (audit finding, 2026-10-15)
+Audit of the existing team-plan machinery shows the lifecycle is unreachable end-to-end, so coordination_propensity currently only
+drives proposal/consultation, never adoption:
+- `TeamKnowledgeManager.commit_team_plan` (modules/team_knowledge.py) has no caller; plans stay `proposed`.
+- The adoption paths that require a `committed` plan (e.g. the `assignment_accept` / committed_plan_alignment branch of
+  `Agent._evaluate_team_plan_fit`) are therefore unreachable.
+- Plan assignments are only ever `{proposer_role: "lead_next_action"}`, which `_normalize_team_plan_assignment` maps to `support`;
+  `support` returns `request_clarification: assignment_underspecified`.
+- `_evaluate_team_plan_fit` never returns a `disagree` response.
+Do not implement before the profile/logging block is certified; it needs a scientific specification (who commits, what adoption means).
+
+## Reported, not fixed: build_readiness_sensitivity sign
+`Agent._readiness_threshold() = max(1, 3 + threshold_shift)` with the `build_readiness_sensitivity -> decision_threshold/start_construction`
+hook. Measured: sensitivity 0.1 / 0.5 / 0.9 -> threshold 2.2 / 3.0 / 3.8. Higher "sensitivity" therefore makes the agent STRICTER
+(needs more readiness before building). Whether that matches the construct's intended direction is a scientific decision; it is frozen
+at 0.5 in compact_panel mode, so it does not affect the compact-panel study.
+
+
+## Validation/repair + profile-mode + consult-authority block (2026-10-15) - SUMMARY FOR RESUMING
+Branch wip/validation-repair-checkpoint (merged to main; see git log). What is now true:
+- Hidden construction correctness no longer reaches the Pilot or shared artifacts; only an OBSERVED failed validation does.
+  REPAIR is offered per project after an observed failure and is executable when the agent holds the project's expected rules
+  (project-specific grounding, not global source-memory sufficiency). rule_accuracy still governs repair fidelity.
+- Existing-project START requires staged materials (deficit exposed per project); typed new-project START is untouched.
+- Profile modes: broad_legacy (default) and compact_panel (7 residual mechanisms frozen at 0.5) in config/experimental/experimental_profile.json.
+- scripts/proof_matrix.py persists raw sessions; communication_exchange records provided_element_ids and solicited.
+- CONSULT LOOP: root cause was MIDDLEWARE ACTION SUBSTITUTION, not excessive Pilot consultation. The Pilot's consult was correct
+  (artifact unseen, carries unheld DIK). `_apply_metacognitive_regulation` (support_stagnation >= 3) replaced it with reassess_plan
+  before it executed, so the artifact stayed unseen and was re-chosen forever (seed 2: 467 selections, 6 executions, taskwork 77,
+  validated 0). Fixes: (1) a consult the existing `_consult_assessment` marks useful is not replaced; (2) the stagnation fallback
+  is now restricted to choices that carry no strategy of their own (WAIT, OBSERVE_ENVIRONMENT, and a consult that would teach
+  nothing). It previously could rewrite INSPECT, EXTERNALIZE_PLAN, COMMUNICATE, REQUEST_ASSISTANCE, MEETING and CONNECT_STRUCTURES
+  with the baseline's follow-up; those now stand and the stagnation is reported
+  (`metacognitive_stagnation_reported_not_substituted`). Tests: tests/test_consult_loop.py (1-8).
+  Seed 2 (600 s) before -> after: consult selections 467 -> 84, episodes 467 -> 82, executions 6 -> 53, distinct artifacts 5 -> 10,
+  DIK gained 0 -> 6, externalizations 2 -> 3, taskwork 77 -> 175, validated 0 -> 1. Seeds 0/1 unchanged.
+- Compact-panel proof matrix (seeds 0-2, 600 s), prior -> new means: validated B 1.7 -> 7.3, D 2.3 -> 4.7, F 5.3 -> 5.3, G 0.3 -> 2,
+  H 0.3 -> 1; seed 2 is no longer ~0 in any condition except C. Teamwork B vs C: push 14 vs 0, requests 6.7 (6 answered) vs 0,
+  externalization 8 vs 2.7, plans agreed 39.7 vs 0, repairs succeeded 7 vs 1.
+## REMAINING ISSUES (known, not fixed)
+1. Low teamwork (condition C) never validates: the grounded agent (Engineer) never selects REPAIR even though every failed water
+   generator is repair-ready for it; the mode score for VALIDATE (4.0) stays far above REPAIR (1.15) while other validation
+   candidates exist. Architect/Botanist lack R_WATERGEN_VALIDITY and recognise no gap (known_gaps 0) because request propensity is 0.
+   This is Pilot policy (mode scoring), not a gate; do not tune without a decision.
+2. backup_actions tracks taskwork volume: backup share (backup/taskwork) is 0.24-0.51 with no systematic relation to backup_propensity
+   (B 0.40 vs C 0.37). Needs an operationalization built on an observably stalled/needy teammate.
+3. Coordination lifecycle (commit/adoption) is unreachable: see NEXT BLOCK above. Not started.
+4. DIK requests are rare outside high teamwork; "solicited" provisions are only observable there.

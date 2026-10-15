@@ -71,6 +71,15 @@ MESSAGE_TYPES = {
     "TCR": "Team Correction or Repair"
 }
 
+
+def _observed_status(project):
+    """Project status as agents may know it: the hidden build-correctness flag is not part of it (see
+    ConstructionManager.observable_status)."""
+    from modules.construction import ConstructionManager
+
+    return ConstructionManager.observable_status(project)
+
+
 @dataclass
 class PlannerCadenceConfig:
     """Planner cadence and degraded-mode controls for one agent.
@@ -490,6 +499,8 @@ class Agent:
             "taskwork_by_kind": {},
             "duration_seconds_by_action": {}, "duration_count_by_action": {},
             "externalization_noop_duplicates": 0,
+            "validation_attempts": 0, "validation_failures": 0, "revalidations": 0,
+            "repair_selections": 0, "repair_decision_episodes": 0, "repair_applications": 0, "repair_successes": 0, "repair_blocked": 0,
         }
         self.event_tallies = {}
         self._derived_gap_tokens = set()  # known_gaps entries recognized from the agent's own task-method requirements
@@ -866,6 +877,8 @@ class Agent:
     def _track_pilot_selection(self, sim_state, decision):
         stats = self.pilot_episode_stats
         stats["selections"] += 1
+        if decision.selected_action == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION:
+            self.experimental_metrics["repair_selections"] += 1
         key = self._pilot_episode_key(decision)
         episode = self.pilot_episode
         if episode and episode["status"] == "open" and episode["key"] == key:
@@ -880,6 +893,8 @@ class Agent:
             else:
                 self._close_pilot_episode(sim_state, "invalidated", "replaced_before_execution")
         stats["episodes"] += 1
+        if decision.selected_action == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION:
+            self.experimental_metrics["repair_decision_episodes"] += 1
         self.pilot_episode = {"id": f"{self.agent_id}:ep{stats['episodes']}", "key": key, "status": "open", "selections": 1, "ticks": 0, "started_at": float(getattr(sim_state, "time", 0.0))}
         self._emit_event(sim_state, "pilot_intent_started", {"episode_id": self.pilot_episode["id"], "action": key[0], "target_id": key[1], "action_args": dict(key[2])})
 
@@ -1170,6 +1185,7 @@ class Agent:
     )
 
     # Actions that create or change shared state. Scaffold pivots may not turn a Pilot's choice INTO one of these.
+    _REGROUNDING_REPLACEABLE_ACTIONS = frozenset({ExecutableActionType.WAIT, ExecutableActionType.OBSERVE_ENVIRONMENT})  # stagnation fallback scope (see _apply_metacognitive_regulation)
     _PILOT_STATE_MUTATING_ACTIONS = frozenset(
         {
             ExecutableActionType.TRANSPORT_RESOURCES,
@@ -1382,7 +1398,22 @@ class Agent:
         }
         if productive_pilot_action and recent_progress:
             stagnation["epistemic"] = 0
-        if (stagnation["support"] >= 3 or stagnation["epistemic"] >= 4) and not productive_pilot_action:
+        # A consult the existing consult assessment says would teach something (unseen / revised artifact, unheld carried DIK,
+        # changed blocker or goal context) is not the non-executing loop this fallback exists to break; replacing it before it
+        # ever runs left the artifact permanently "unseen", so the Pilot re-chose it forever. A consult that would teach
+        # nothing (same version, nothing new) is still subject to the fallback.
+        useful_consult = action == ExecutableActionType.CONSULT_TEAM_ARTIFACT and bool(self._consult_assessment(environment, sim_state=sim_state).get("useful"))
+        stagnating = stagnation["support"] >= 3 or stagnation["epistemic"] >= 4
+        if stagnating and not productive_pilot_action and useful_consult:
+            self._emit_event(sim_state, "metacognitive_regrounding_deferred_useful_consult", {"support_stagnation": int(stagnation["support"]), "epistemic_stagnation": int(stagnation["epistemic"])})
+        # Authority: the fallback may only replace choices that carry no strategy of their own - idling, observing, or a consult
+        # the assessment says would teach nothing. Strategic or state-relevant Pilot choices (inspect, externalize, communicate,
+        # request assistance, meeting, connect structures, move) are never substituted with the baseline's follow-up; the
+        # stagnation is reported and the Pilot's choice stands.
+        regrounding_replaceable = action in self._REGROUNDING_REPLACEABLE_ACTIONS or (action == ExecutableActionType.CONSULT_TEAM_ARTIFACT and not useful_consult)
+        if stagnating and not productive_pilot_action and not regrounding_replaceable:
+            self._emit_event(sim_state, "metacognitive_stagnation_reported_not_substituted", {"pilot_action": action.value, "support_stagnation": int(stagnation["support"]), "epistemic_stagnation": int(stagnation["epistemic"])})
+        if stagnating and not productive_pilot_action and regrounding_replaceable:
             self._emit_event(sim_state, "metacognitive_support_loop_broken", {"support_stagnation": int(stagnation["support"]), "epistemic_stagnation": int(stagnation["epistemic"])})
             self._emit_event(sim_state, "metacognitive_switch_to_regrounding", {"reason": "stagnation"})
             self._set_metacognitive_mode("RECOVER_REGROUND", sim_state=sim_state, reason="stagnation", profile="recovery")
@@ -5084,7 +5115,7 @@ class Agent:
             isinstance(project, dict)
             and (
                 bool(project.get("structurally_complete"))
-                or str(project.get("status") or "") in {"ready_for_validation", "needs_repair"}
+                or _observed_status(project) in {"ready_for_validation", "needs_repair"}
             )
             and _project_action_viable(ExecutableActionType.VALIDATE_CONSTRUCTION)
         ):
@@ -5341,9 +5372,11 @@ class Agent:
             "unknown_project",
             "missing_project_binding",
             "project_already_complete",
+            "materials_not_staged",
             "no_detected_mismatch",
             "epistemic_sufficiency_low_for_construction",
             "epistemic_sufficiency_low_for_repair",
+            "repair_project_rules_not_held",
             "epistemic_sufficiency_low_for_validation",
         }
         for blocker in list(blockers or []):
@@ -5488,14 +5521,18 @@ class Agent:
                     blockers.append("plan_method_not_grounded")
             if project.get("status") == "complete":
                 blockers.append("project_already_complete")
+            if (action_type == ExecutableActionType.START_CONSTRUCTION and not self._is_typed_start(decision)
+                    and not bool(project.get("build_ready", False)) and not self._project_has_physical_build_progress(project)):
+                blockers.append("materials_not_staged")  # an existing project cannot be physically started before its materials are staged
         elif action_type == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION:
-            epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
             closure_project_id = self._live_project_closure_commitment(environment, sim_state=sim_state)
             closure_active_for_project = bool(project_id and closure_project_id and project_id == closure_project_id)
-            blockers.extend(self._build_readiness_blockers(environment, sim_state=sim_state))
-            if not epistemic.get("sufficient_for_validation", False):
-                blockers.append("epistemic_sufficiency_low_for_repair")
-            mismatch_detected = (project.get("correct", True) is False) or any(
+            grounding_gaps = self._repair_epistemic_blockers(environment, sim_state=sim_state, project_id=project_id)
+            blockers.extend(grounding_gaps)
+            if grounding_gaps:
+                blockers.append("repair_project_rules_not_held")  # hard: the specific missing rules stay visible as knowledge gaps
+            # A repair needs an OBSERVED indication of error (a failed validation, or a diagnosed mismatch), not the hidden flag.
+            mismatch_detected = environment.construction.observed_validation_failure(project) or any(
                 "mismatch with construction" in str(e).lower() for e in self.activity_log[-8:]
             )
             if not mismatch_detected and not closure_active_for_project:
@@ -5514,7 +5551,25 @@ class Agent:
             if any(str(b).startswith("missing_expected_rule:") for b in blockers):
                 blockers.append("missing_validation_rule_knowledge")
 
+        if blockers and action_type == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION and not probe_only:
+            self.experimental_metrics["repair_blocked"] += 1
         return sorted(set(blockers)), project_id
+
+    def _repair_epistemic_blockers(self, environment, sim_state=None, project_id=None):
+        """Project-specific repair grounding (read-only).
+
+        A repair is executable when the failure of THIS project was observed (caller checks) and the agent currently holds
+        the task rules needed to reason about that project's validity. Global source-memory sufficiency is deliberately
+        NOT a gate (it may shape the Pilot's reacquisition preference elsewhere). The blocker names only missing rule ids,
+        never the hidden construction error. Acquiring the rules stays a Pilot choice (INSPECT / CONSULT / REQUEST).
+        """
+        project = environment.construction.projects.get(str(project_id or "")) if project_id else None
+        _info_ids, rule_ids = self._effective_knowledge_for_readiness(sim_state=sim_state)
+        held = {normalize_rule_token(r) for r in (rule_ids or set()) if normalize_rule_token(r)}
+        expected = [normalize_rule_token(r) for r in ((project or {}).get("expected_rules") or []) if normalize_rule_token(r)]
+        if expected:
+            return sorted("missing_expected_rule:" + r for r in expected if r not in held)
+        return [] if held else ["insufficient_rule_knowledge"]
 
     def _build_readiness_blockers(self, environment, sim_state=None, *, typed_start_target=None):
         blockers = []
@@ -5880,7 +5935,7 @@ class Agent:
             required = project.get("required_resources", {}).get("bricks", 0)
             delivered = project.get("delivered_resources", {}).get("bricks", 0)
             remaining = max(0, required - delivered)
-            status = str(project.get("status") or "")
+            status = _observed_status(project)
             if validation_selection:
                 if status == "ready_for_validation":
                     score = -1000 + remaining
@@ -6488,7 +6543,7 @@ class Agent:
                 return True, "ok"
             construction = getattr(environment, "construction", None)
             for project in (getattr(construction, "projects", {}) or {}).values():
-                if project.get("status") in {"needs_repair", "ready_for_validation"}:
+                if _observed_status(project) in {"needs_repair", "ready_for_validation"}:
                     return True, "ok"
             return False, "no_live_construction_mismatch"
         return True, "ok"
@@ -6602,7 +6657,7 @@ class Agent:
         for project in getattr(environment.construction, "projects", {}).values():
             if not isinstance(project, dict):
                 continue
-            status = str(project.get("status") or "")
+            status = _observed_status(project)
             if status == "needs_repair":
                 blocked_projects.append(str(project.get("id")))
                 continue
@@ -9225,10 +9280,9 @@ class Agent:
         for project in getattr(environment.construction, "projects", {}).values():
             if not isinstance(project, dict):
                 continue
-            status = str(project.get("status") or "")
-            if status == "needs_repair":
-                blocked_support_project = str(project.get("id") or "")
-                break
+            status = _observed_status(project)
+            # (An observed repair need no longer turns the Pilot's INSPECT/CONSULT into WAIT: acquiring the grounding a repair
+            # needs is a Pilot choice, and silently replacing it would block the only route to a groundable repair.)
             if status == "ready_for_validation" and str(project.get("closure_status") or "") in {"assigned", "in_progress", "failed"}:
                 blocked_support_project = str(project.get("id") or "")
                 break
@@ -11560,6 +11614,11 @@ class Agent:
                         event="validation_passed" if (is_valid and has_required_rules) else "validation_failed",
                     )
                     project = environment.construction.projects.get(project_id, project)
+                    self.experimental_metrics["validation_attempts"] += 1
+                    if not (is_valid and has_required_rules):
+                        self.experimental_metrics["validation_failures"] += 1
+                    if project.get("last_validation_was_revalidation"):
+                        self.experimental_metrics["revalidations"] += 1
                     self._note_taskwork(project_id, "validate", sim_state=sim_state)
                     support_missing = dict((readiness_report.get("evidence_summary") or {}).get("support_missing") or {})
                     actually_completed = bool(project.get("validated_complete", False))
@@ -11688,7 +11747,9 @@ class Agent:
                     delivered_before = int(project.get("delivered_resources", {}).get("bricks", 0) or 0)
 
                     fidelity = (self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5) + self._trait_value("rule_accuracy")) / 2.0
-                    if self._rng.random() > fidelity:
+                    is_repair_action = decision_action == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value
+                    # (A repair applies the same fidelity roll AFTER it clears the error, so a repair can itself be imperfect.)
+                    if not is_repair_action and self._rng.random() > fidelity:
                         if environment.construction.record_build_quality(
                             project_id, correct=False, actor=self.name, sim_time=sim_state.time if sim_state is not None else None, cause="construction_fidelity"
                         ):
@@ -11727,6 +11788,13 @@ class Agent:
                             continue
                         if environment.construction.repair_project(project_id, actor=self.name, sim_time=sim_state.time if sim_state is not None else None):
                             self._emit_event(sim_state, "construction_repair_episode", {"project_id": project_id, "decision_action": decision_action})
+                            self.experimental_metrics["repair_applications"] += 1
+                            if self._rng.random() > fidelity and environment.construction.record_build_quality(
+                                project_id, correct=False, actor=self.name, sim_time=sim_state.time if sim_state is not None else None, cause="repair_fidelity"
+                            ):
+                                self._emit_event(sim_state, "construction_build_error_introduced", {"project_id": project_id, "cause": "repair_fidelity", "fidelity": round(float(fidelity), 3)})
+                            else:
+                                self.experimental_metrics["repair_successes"] += 1  # the error was actually cleared
                         self._refresh_construction_provenance(environment, project_id, sim_state=sim_state, event="repair")
                     sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
                     self._emit_event(sim_state, "construction_artifact_provenance_updated", {"project_id": project_id, "event": "build_or_repair"})
@@ -12954,6 +13022,8 @@ class Agent:
     def generate_message(self, recipient_name=None, *, include_requests=True, include_unsolicited=True):
         messages = []
         self._unsolicited_used = False
+        self._provided_element_ids = []  # exact DIK ids transmitted in this exchange (logged on communication_exchange)
+        self._provision_solicited = False  # True only when the provision answered an explicit prior request from the recipient
         role_source = f"{self.role}_Info"
         role_mem = self.source_memory_state.get(role_source, {})
         pending_role_share = set(role_mem.get("pending_role_share_ids", []))
@@ -12976,6 +13046,8 @@ class Agent:
             if rule_payload:
                 messages.append({"type": "TKP", "content": rule_payload, "sender": self.name})
             shared_ids = {f"data:{d.id}" for d in data_payload} | {f"information:{i.id}" for i in info_payload} | {f"rule:{normalize_rule_token(r)}" for r in rule_payload}
+            self._provided_element_ids = sorted(shared_ids)
+            self._provision_solicited = bool(shared_ids)
             if pending_role_share and shared_ids:
                 remaining = sorted(pending_role_share - shared_ids)
                 self.source_memory_state.setdefault(role_source, {})["pending_role_share_ids"] = remaining
@@ -12991,6 +13063,8 @@ class Agent:
             if rule_payload:
                 messages.append({"type": "TKP", "content": rule_payload, "sender": self.name})
             shared_ids = {f"data:{d.id}" for d in data_payload} | {f"information:{i.id}" for i in info_payload} | {f"rule:{normalize_rule_token(r)}" for r in rule_payload}
+            self._provided_element_ids = sorted(shared_ids)
+            self._provision_solicited = False
             if shared_ids:
                 remaining = sorted(pending_role_share - shared_ids)
                 self.source_memory_state.setdefault(role_source, {})["pending_role_share_ids"] = remaining
@@ -13172,6 +13246,8 @@ class Agent:
                     "sender": self.name,
                     "receiver": other_agent.name,
                     "message_types": message_types,
+                    "provided_element_ids": list(getattr(self, "_provided_element_ids", []) or []),
+                    "solicited": bool(getattr(self, "_provision_solicited", False)),
                     "meaningful": meaningful_exchange,
                     "receiver_dik_changed": receiver_dik_changed,
                     "receiver_gap_reduced": receiver_gap_reduced,

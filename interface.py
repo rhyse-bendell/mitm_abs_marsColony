@@ -1897,6 +1897,11 @@ class MarsColonyInterface:
             "carry_capacity": max(1, int(self.construction_param_vars["carry_capacity"].get())),
         }
 
+    def _selected_profile_mode(self):
+        var = getattr(self, "profile_mode_var", None)
+        labels = getattr(self, "_profile_mode_labels", {}) or {}
+        return labels.get(var.get(), "broad_legacy") if var is not None else "broad_legacy"
+
     def _collect_experiment_settings(self):
         selected_backend, backend_options = self._collect_brain_backend_config()
         planner_config = self._collect_global_planner_config()
@@ -1913,6 +1918,7 @@ class MarsColonyInterface:
             "brain_backend_options": backend_options,
             "planner_config": planner_config,
             "construction_parameters": construction_parameters,
+            "profile_mode": self._selected_profile_mode(),
             "base_dt": 1.0,
         }
 
@@ -2113,6 +2119,7 @@ class MarsColonyInterface:
             brain_backend_options=settings["brain_backend_options"],
             planner_config=settings["planner_config"],
             construction_parameters=settings["construction_parameters"],
+            experimental_settings={"profile_mode": settings.get("profile_mode", "broad_legacy")},
             startup_progress_callback=startup_progress_callback,
         )
 
@@ -3857,6 +3864,14 @@ class MarsColonyInterface:
         self.num_runs = IntVar(value=1)
         ttk.Entry(settings_frame, textvariable=self.num_runs, width=10).grid(row=8, column=1, sticky="w", pady=(6, 3))
         self._add_help_text(settings_frame, 9, "How many repeated runs to execute with the same setup.")
+
+        ttk.Label(settings_frame, text="Profile mode").grid(row=40, column=0, sticky="w", padx=(0, 8), pady=(6, 3))
+        from modules.experimental_profile import available_profile_modes
+
+        self._profile_mode_labels = {label: key for key, label in available_profile_modes().items()}
+        self.profile_mode_var = StringVar(value=available_profile_modes().get("broad_legacy", "Broad legacy profile"))
+        ttk.Combobox(settings_frame, textvariable=self.profile_mode_var, values=list(self._profile_mode_labels), state="readonly", width=30).grid(row=40, column=1, sticky="w", pady=(6, 3))
+        self._add_help_text(settings_frame, 41, "Broad legacy: gestalts also drive the lower-level mechanisms. Compact seven-variable panel: only the seven constituents vary; residual mechanisms are frozen at the compact-panel reference (0.5).")
 
         ttk.Label(settings_frame, text="Timesteps per Run").grid(row=10, column=0, sticky="w", padx=(0, 8), pady=(6, 3))
         self.timesteps_per_run_var = IntVar(value=300)

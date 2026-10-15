@@ -36,9 +36,13 @@ class BrainContextBuilder:
         for project in projects:
             target_id = project.get("target_id") or environment.construction.SITE_TO_BUILD_TARGET.get(project.get("site_id"))
             target = build_targets.get(target_id, {})
-            raw_status = project.get("status") or "absent"
+            # Only observed facts reach the Pilot. The hidden build-correctness flag (and the 'needs_repair' status Construction
+            # derives from it) is world truth; a failed validation (closure_status 'failed') is the observed evidence of error.
+            construction = environment.construction
+            validation_failed = bool(construction.observed_validation_failure(project))
+            raw_status = construction.observable_status(project) or "absent"
             state = "built" if raw_status == "complete" else "in_progress"
-            usable = raw_status == "complete" and bool(project.get("correct", True))
+            usable = raw_status == "complete"
             required = project.get("required_resources", {}).get("bricks", 0)
             delivered = project.get("delivered_resources", {}).get("bricks", 0)
             material_progress = min(1.0, delivered / required) if required else 0.0
@@ -54,7 +58,10 @@ class BrainContextBuilder:
                     "zone": target.get("zone"),
                     "structure_type": project.get("type", "unknown"),
                     "state": state,
-                    "validated_correctness": bool(project.get("correct", True)),
+                    "validated_correctness": not validation_failed,
+                    "validation_attempted": bool(project.get("validation_attempted")),
+                    "validation_failed": validation_failed,
+                    "observed_repair_need": validation_failed,
                     "usable": usable,
                     "progress": round(build_progress, 2),
                     "material_progress": round(material_progress, 2),
@@ -64,7 +71,7 @@ class BrainContextBuilder:
                     "required_resources": int(required or 0),
                     "delivered_resources": int(delivered or 0),
                     "ready_for_validation": raw_status == "ready_for_validation",
-                    "needs_repair": project.get("correct", True) is False,
+                    "needs_repair": validation_failed,
                     "overloaded": bool(project.get("overloaded", False)),
                     "functional_connections": [f"zone_link:{target.get('zone')}"] if target.get("zone") else [],
                     "validation_readiness": {
@@ -374,18 +381,31 @@ class BrainContextBuilder:
             progressed = any(bool(step.get("completed")) for step in steps)
             physically_complete = bool(project.get("structurally_complete"))
             needs_material = not bool(project.get("resource_complete")) and delivered < required and str(project.get("status") or "") != "ready_for_validation"
+            # Observable material state for THIS project (not hidden truth): the START affordance below is offered only once
+            # materials are staged; until then the deficit is stated and TRANSPORT remains the relevant path.
+            staged_bricks = int((project.get("staged_resources") or {}).get("bricks", 0) or 0)
+            materials_staged = bool(project.get("build_ready", False)) or (required > 0 and staged_bricks >= required)
+            base["materials_staged"] = materials_staged
+            base["materials_deficit"] = max(0, required - max(staged_bricks, 0))
             # Each fact below is stated per exact project; which one to work on is the Pilot's choice.
             if needs_material and bricks_available:
                 legal.append({**base, "action_type": ExecutableActionType.TRANSPORT_RESOURCES.value, "work_stage": "material_delivery", "duration_s": 30.0, "utility": utility_for(ExecutableActionType.TRANSPORT_RESOURCES)})
             if not physically_complete:
                 if progressed:
                     legal.append({**base, "action_type": ExecutableActionType.CONTINUE_CONSTRUCTION.value, "utility": utility_for(ExecutableActionType.CONTINUE_CONSTRUCTION)})
-                else:
+                elif materials_staged:
                     legal.append({**base, "action_type": ExecutableActionType.START_CONSTRUCTION.value, "start_mode": "existing_project", "utility": utility_for(ExecutableActionType.START_CONSTRUCTION)})
             else:
-                legal.append({**base, "action_type": ExecutableActionType.VALIDATE_CONSTRUCTION.value, "utility": utility_for(ExecutableActionType.VALIDATE_CONSTRUCTION, target_kind="build")})
-            if progressed:
-                legal.append({**base, "action_type": ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value, "utility": utility_for(ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, target_kind="build")})
+                failed_here = bool(environment.construction.observed_validation_failure(project))
+                legal.append({**base, "action_type": ExecutableActionType.VALIDATE_CONSTRUCTION.value, "utility": utility_for(ExecutableActionType.VALIDATE_CONSTRUCTION, target_kind="build"),
+                              "validation_failed": failed_here, "validation_candidate": not failed_here})
+            if progressed and environment.construction.observed_validation_failure(project):
+                # REPAIR is advertised only where an error has been OBSERVED (a failed validation). Whether the agent's own
+                # knowledge can ground the repair is stated up front (the same check that gates execution) so the Pilot can
+                # choose to acquire grounding instead of picking a repair that predictably fails.
+                repair_blockers = agent._repair_epistemic_blockers(environment, project_id=project_id) if hasattr(agent, "_repair_epistemic_blockers") else []
+                legal.append({**base, "action_type": ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value, "utility": utility_for(ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, target_kind="build"),
+                              "observed_repair_need": True, "repair_ready": not repair_blockers, "repair_blockers": list(repair_blockers)})
 
         has_productive_target = any(
             item.get("action_type")
