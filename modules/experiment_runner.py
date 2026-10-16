@@ -51,6 +51,8 @@ def run_condition(
     trajectory = []
     try:
         for i in range(int(duration_s / step_s)):
+            if state.controller_error is not None:
+                break  # explicit controller-error stop: reported in the summary, never silently continued
             state.update(step_s)
             if (i + 1) % int(100 / step_s) == 0:
                 cm = state.environment.construction
@@ -70,6 +72,8 @@ def run_condition(
             "duration_s": duration_s,
             "experimental_settings": dict(experimental_settings or {}),
             "manifest_condition": state._experimental_manifest(),
+            "controller_error": state.controller_error,
+            "terminal_state": state.terminal_state,
             "controller_assignments": state.controller_manifest(),
             "controller_composition_id": state.controller_manifest().get("composition_id"),
             "measures": measures,

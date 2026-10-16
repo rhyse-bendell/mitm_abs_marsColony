@@ -280,14 +280,21 @@ def resolve_pilot_display_name(backend: str) -> str:
     return str(backend or "unknown")
 
 
+class LegacyOllamaBackendRetiredError(ValueError):
+    """A legacy brain_backend string tried to select Ollama on its own. Controller identity comes only from ControllerSpec."""
+
+
 def create_brain_provider(config: BrainBackendConfig | None = None) -> BrainProvider:
     config = config or BrainBackendConfig()
     selected = config.backend.lower()
     if selected == "local_stub":
         return LocalLLMBrainStub()
     if selected in {"local_http", "openai_compatible_local", "ollama_local", "ollama"}:
-        fallback = ProceduralBaselinePilot()
-        return OllamaLocalBrainProvider(config=config, fallback=fallback)
+        # Retired: a brain_backend string no longer instantiates Ollama. SimulationState routes these aliases through a
+        # `local_ollama` ControllerSpec (the only Ollama path); anything else must use ControllerSpec directly.
+        raise LegacyOllamaBackendRetiredError(
+            f"brain_backend {selected!r} no longer selects Ollama by itself; assign the agent a ControllerSpec with controller_type='local_ollama' (and an installed model) instead"
+        )
     if selected == "cloud_stub":
         return CloudBrainStub()
     if selected in {"rule_brain", "procedural_baseline", "procedural_baseline_pilot"}:

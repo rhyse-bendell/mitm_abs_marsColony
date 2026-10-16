@@ -870,6 +870,10 @@ class Agent:
             self._note_plan_assignment_completion(sim_state, enriched)
         if event_type in self.ACTION_FAILURE_EVENTS or event_type == "action_execution_succeeded":
             self._note_action_outcome(sim_state, event_type, enriched)
+        elif event_type == "action_legality_failed" and self._is_sync_llm_pilot(sim_state):
+            # Translation-time legality failures (readiness, materials, start not committed, ...) are inert for the Procedural Baseline's
+            # statistics; a generative Pilot has no other way to learn that its choice did nothing, so it is told (blocker names only).
+            self._note_action_outcome(sim_state, event_type, enriched)
         if event_type in self.ACTION_FAILURE_EVENTS and event_type != "action_execution_succeeded":
             self._close_pilot_episode(sim_state, "blocked", event_type)
         elif event_type == "executable_action_completed" and enriched.get("action_type") != "move_to":
@@ -1903,6 +1907,14 @@ class Agent:
         self.source_cooldowns = dict(method_state.get("source_cooldowns", {}))
         self.source_exhaustion = dict(method_state.get("source_exhaustion", {}))
         self.last_method_switch_reason = method_state.get("last_method_switch_reason")
+
+    def _is_sync_llm_pilot(self, sim_state=None):
+        """True when this agent's Pilot is a synchronous generative controller (Local Ollama): decided in the Pilot path, never through the
+        async planner / DIK-integration / bootstrap-fallback machinery, and never rewritten by Mecha scaffolds."""
+        if sim_state is None or not hasattr(sim_state, "get_agent_brain_runtime"):
+            return False
+        adapter = (sim_state.get_agent_brain_runtime(self) or {}).get("adapter")
+        return bool(getattr(adapter, "synchronous_llm_pilot", False))
 
     def _is_rule_brain_runtime(self, sim_state=None):
         if sim_state is None:
@@ -7821,8 +7833,31 @@ class Agent:
             from modules.procedural_baseline_pilot import ProceduralBaselinePilotAdapter
 
             adapter = ProceduralBaselinePilotAdapter(provider=runtime.get("provider"))
-        request = self._build_sync_pilot_request(sim_state, context, trigger_reason)
-        response = adapter.choose_action(request)
+        canonical_only = bool(getattr(adapter, "consumes_canonical_context_only", False))
+        if canonical_only:
+            # A generative Pilot gets the canonical context only: none of the baseline-parity observation fields are attached.
+            request = self._build_brain_request(
+                sim_state, context, False, trigger_reason,
+                request_id=f"{self.agent_id}-sync-{self.sim_step_count}-{uuid.uuid5(uuid.NAMESPACE_OID, f'{self.agent_id}:{self.sim_step_count}:{trigger_reason}').hex[:6]}",
+            )
+            self._last_controller_request_id = request.request_id
+            try:
+                response = adapter.choose_action(request)
+            finally:
+                trace = getattr(adapter, "last_trace", None)
+                if trace is not None and trace.get("request_id") == request.request_id and not trace.get("_recorded"):
+                    trace["_recorded"] = True
+                    sim_state.record_controller_trace({k: v for k, v in trace.items() if k != "_recorded"} | {"controller_type": self.controller_type_id()})
+                    self._emit_event(sim_state, "controller_decision", {
+                        "controller_type": self.controller_type_id(), "model": trace.get("model"), "request_id": trace.get("request_id"), "prompt_hash": trace.get("prompt_hash"),
+                        "validation_outcome": trace.get("validation_outcome"), "retry_count": trace.get("retry_count"), "parsed_affordance_id": trace.get("parsed_affordance_id"),
+                        "parsed_action": trace.get("parsed_action"), "wall_clock_inference_s": round(float(trace.get("wall_clock_inference_s") or 0.0), 3),
+                        "estimated_prompt_tokens": (trace.get("budget") or {}).get("estimated_prompt_tokens"), "omitted_item_counts": (trace.get("budget") or {}).get("omitted_item_counts"),
+                        "tier1_over_budget": (trace.get("budget") or {}).get("tier1_over_budget"),
+                        "token_metadata": ((trace.get("attempts") or [{}])[-1] or {}).get("token_metadata")})
+        else:
+            request = self._build_sync_pilot_request(sim_state, context, trigger_reason)
+            response = adapter.choose_action(request)
         grounded = self._ground_validate_and_decide(response, context, request, sim_state, runtime)
         response = grounded["response"]
         decision = grounded["decision"]
@@ -10345,6 +10380,46 @@ class Agent:
         self._emit_event(sim_state, "local_policy_refresh_used", {"reason": planner_reason, "backend": backend, "selected_action": decision.selected_action.value, "control_mode": self.control_state.get("mode"), "mode_dwell_steps": self.control_state.get("mode_dwell_steps")})
         return True
 
+    def _run_llm_pilot_controller(self, sim_state, environment, planner_reason):
+        """Decision cycle for a synchronous generative Pilot (Local Ollama).
+
+        The Pilot's choice goes through the same grounding/validation and ActionGate/translation path as every Pilot, with NO policy pivots,
+        project rebinding, successor rewrites or bootstrap/fallback scaffolds in between: the Mecha neither strengthens nor substitutes the
+        model's strategy. If the controller cannot produce a valid choice the failure is recorded explicitly (never replaced by RuleBrain).
+        Wall-clock inference time is measured separately and does not advance simulated time."""
+        from modules.ollama_pilot import ControllerFailure
+
+        runtime = sim_state.get_agent_brain_runtime(self)
+        context = sim_state.brain_context_builder.build(sim_state, self)
+        try:
+            decision = self._select_decision_through_pilot_adapter(sim_state, context, planner_reason, runtime=runtime)
+        except ControllerFailure as failure:
+            self._handle_controller_failure(sim_state, failure)
+            return False
+        self.current_action = self._translate_brain_decision_to_legacy_action(decision, environment, sim_state=sim_state)
+        self._note_pilot_episode_translation(sim_state)
+        first = (self.current_action[0] if isinstance(self.current_action, list) and self.current_action else self.current_action) or {}
+        sim_state.record_controller_trace({
+            "kind": "translation_outcome", "request_id": getattr(self, "_last_controller_request_id", None), "agent_id": self.agent_id, "role": self.role, "sim_time": float(sim_state.time),
+            "controller_type": self.controller_type_id(), "selected_action": decision.selected_action.value, "target_id": decision.target_id,
+            "translated_action_type": first.get("type") if isinstance(first, dict) else None, "gate_blocked": bool(isinstance(first, dict) and first.get("blocked_action")),
+            "blockers": list(first.get("blockers") or []) if isinstance(first, dict) else [],
+        })
+        return True
+
+    def _handle_controller_failure(self, sim_state, failure):
+        policy = str((getattr(self, "controller_spec", None).full_settings() if getattr(self, "controller_spec", None) else {}).get("failure_policy") or "stop_run")
+        trace = dict(getattr(failure, "trace", {}) or {})
+        trace.update(kind="ollama_decision", controller_failure=True, failure_policy=policy)
+        sim_state.record_controller_trace(trace)
+        self._emit_event(sim_state, "controller_failure", {"controller_type": self.controller_type_id(), "message": str(failure), "failure_policy": policy,
+                                                            "retry_count": trace.get("retry_count"), "validation_outcome": trace.get("validation_outcome"), "prompt_hash": trace.get("prompt_hash")})
+        if policy == "idle_and_log":
+            # Explicit, configured, logged idling of THIS agent for one tick. It is not a strategy substitution by another controller.
+            self.current_action = [{"type": "idle", "duration": 1.0, "priority": 1, "decision_action": ExecutableActionType.WAIT.value, "controller_failure_idle": True}]
+        else:
+            sim_state.halt_for_controller_error(self, failure)
+
     def _attempt_local_rule_brain_refresh(self, sim_state, environment, planner_reason):
         """Backward-compatible alias for deterministic RuleBrain controller path."""
         return self._run_rule_brain_controller(sim_state, environment, planner_reason)
@@ -11508,9 +11583,10 @@ class Agent:
         if uptake_summary is not None:
             self._adopt_committed_team_plan(sim_state, uptake_summary, reason="active_team_plan_requires_uptake", source=uptake_source)
         rule_brain_runtime = self._is_rule_brain_runtime(sim_state)
+        sync_llm_pilot = self._is_sync_llm_pilot(sim_state)
         if not planner_lifecycle_already_polled:
             self._check_inflight_timeout(sim_state)
-            if not rule_brain_runtime:
+            if not rule_brain_runtime and not sync_llm_pilot:
                 self._poll_planner_request(sim_state, environment)
             self._poll_dik_integration_request(sim_state)
         if self.pilot_episode and self.pilot_episode["status"] != "closed":
@@ -11522,11 +11598,15 @@ class Agent:
             trigger_reason = self._plan_trigger_reason(sim_state, environment)
             dik_trigger_reason = self._dik_integration_trigger_reason(sim_state, trigger_reason)
             dik_allowed, dik_reason = self._dik_integration_allowed(sim_state, dik_trigger_reason)
+            if sync_llm_pilot:
+                dik_allowed = False  # no LLM-driven DIK integration side channel: the controller only chooses among offered affordances
             if dik_allowed and self.dik_integration_state.get("status") != "in_flight":
                 self._emit_event(sim_state, "dik_integration_invocation_requested", {"tick": self.sim_step_count, "trigger_reason": dik_reason})
                 self._submit_dik_integration_request_async(sim_state, dik_reason)
             planner_allowed, planner_reason = self._planner_decision_allowed(sim_state, trigger_reason)
-            if rule_brain_runtime:
+            if sync_llm_pilot:
+                self._run_llm_pilot_controller(sim_state, environment, planner_reason or trigger_reason or "llm_pilot_tick")
+            elif rule_brain_runtime:
                 if self.planner_state.get("status") == "in_flight":
                     self.clear_planner_inflight_state(sim_state=sim_state, reason="rule_brain_authoritative_controller")
                 if not self._run_rule_brain_controller(sim_state, environment, planner_reason or trigger_reason or "rule_brain_tick"):
@@ -11586,7 +11666,7 @@ class Agent:
                 runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend}
                 self._emit_event(sim_state, "ui_safe_fallback_used", {"reason": planner_reason, "request_state": self.planner_state.get("status"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
                 sim_state.logger.log_event(sim_state.time, "planner_skipped_without_plan", {"agent": self.name, "reason": planner_reason})
-            if not rule_brain_runtime:
+            if not rule_brain_runtime and not sync_llm_pilot:
                 bootstrap_decision = self._bootstrap_override_decision(environment, sim_state=sim_state)
                 if bootstrap_decision is not None:
                     self.current_action = self._translate_brain_decision_to_legacy_action(bootstrap_decision, environment, sim_state=sim_state)

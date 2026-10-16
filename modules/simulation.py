@@ -153,6 +153,16 @@ class SimulationState:
         experimental_settings=None,
         controller_assignments=None,
     ):
+        # Legacy Ollama backend aliases are not a controller-selection path: remember them so each agent is ROUTED through a local_ollama
+        # ControllerSpec (see _resolve_agent_controller_spec), and keep the run-level provider container procedural.
+        from modules.controller_spec import LEGACY_OLLAMA_BACKENDS
+
+        self._legacy_global_ollama = None
+        if str(brain_backend or "").lower() in LEGACY_OLLAMA_BACKENDS:
+            self._legacy_global_ollama = {"alias": str(brain_backend).lower(), "options": dict(brain_backend_options or {})}
+            brain_backend = "rule_brain"
+        self.controller_error = None  # set when a controller fails with failure_policy=stop_run; the run then stops advancing
+        self.ollama_preflight_results = {}
         # Deterministic run seed: seeds the global RNG and gives every agent its own RNG stream.
         self.terminal_state = None  # set once by _check_terminal_state()
         self.terminal_time = None
@@ -437,7 +447,8 @@ class SimulationState:
             merged_brain_config = dict(config.get("brain_config", {}))
             controller_spec = self._resolve_agent_controller_spec(config, role_id)
             if controller_spec is not None:
-                controller_spec.require_enabled()  # declared-but-unimplemented controllers never run (no inference in this framework)
+                controller_spec.require_ready()  # unimplemented controllers / a missing Ollama model never run
+                self._preflight_controller(config.get("name", role_id), controller_spec)  # Ollama unreachable / model not installed -> fail before the simulation starts
                 legacy_backend = merged_brain_config.get("backend")
                 merged_brain_config["backend"] = controller_spec.backend()
                 if legacy_backend and resolve_pilot_id(legacy_backend) != resolve_pilot_id(merged_brain_config["backend"]):
@@ -911,8 +922,11 @@ class SimulationState:
         }
 
     def _resolve_agent_controller_spec(self, config, role_id):
-        """This agent's own ControllerSpec: run-level assignment by agent name or role, else the agent config's `controller`; None = legacy backend."""
-        from modules.controller_spec import ControllerSpec
+        """This agent's own ControllerSpec: run-level assignment by agent name or role, else the agent config's `controller`.
+
+        A legacy Ollama brain_backend alias (global or per agent) is ROUTED to an equivalent local_ollama spec (logged), never instantiated
+        independently. None = the Procedural Baseline resolved from the run's configured backend."""
+        from modules.controller_spec import LEGACY_OLLAMA_BACKENDS, LOCAL_OLLAMA, ControllerSpec
 
         name = config.get("name", config.get("display_name", role_id))
         assigned = self.controller_assignments_input
@@ -921,7 +935,53 @@ class SimulationState:
                 return ControllerSpec.from_value(assigned[key])
         if config.get("controller") is not None:
             return ControllerSpec.from_value(config.get("controller"))
+        brain = dict(config.get("brain_config") or {})
+        alias = str(brain.get("backend") or "").lower()
+        options = brain
+        if alias not in LEGACY_OLLAMA_BACKENDS and not alias and self._legacy_global_ollama:
+            alias, options = self._legacy_global_ollama["alias"], {**self._legacy_global_ollama["options"], **brain}
+        if alias in LEGACY_OLLAMA_BACKENDS:
+            settings = {k: v for k, v in {"model": options.get("local_model"), "base_url": options.get("local_base_url"), "timeout_s": options.get("timeout_s")}.items() if v}
+            spec = ControllerSpec(LOCAL_OLLAMA, settings).validated()
+            self.logger.log_event(self.time, "legacy_ollama_backend_routed_to_controller_spec", {"agent": name, "legacy_backend": alias, "controller_type": LOCAL_OLLAMA, "settings": dict(settings)})
+            return spec
         return None
+
+    def _preflight_controller(self, agent_name, spec):
+        from modules.controller_spec import LOCAL_OLLAMA
+
+        if spec.controller_type != LOCAL_OLLAMA:
+            return
+        from modules import ollama_pilot
+
+        settings = spec.full_settings()
+        key = (settings["base_url"], settings["model"])
+        if key not in self.ollama_preflight_results:
+            self.ollama_preflight_results[key] = ollama_pilot.preflight(settings)  # raises ControllerUnavailableError with a clear reason
+        self.logger.log_event(self.time, "ollama_preflight_ok", {"agent": agent_name, "model": settings["model"], "base_url": settings["base_url"], **{k: v for k, v in self.ollama_preflight_results[key].items() if k != "installed_models"}})
+
+    def halt_for_controller_error(self, agent, failure):
+        """failure_policy=stop_run: record an explicit controller-error terminal state; no fallback controller is ever consulted."""
+        if self.controller_error is not None:
+            return
+        self.controller_error = {"agent": agent.name, "agent_id": agent.agent_id, "role": agent.role, "controller_type": agent.controller_type_id(), "sim_time": float(self.time), "message": str(failure)}
+        self.terminal_state = "controller_error"
+        self.terminal_time = float(self.time)
+        self.logger.log_event(self.time, "controller_error_run_halted", dict(self.controller_error))
+        self.logger.log_event(self.time, "terminal_state_reached", {"terminal_state": "controller_error", "sim_time": float(self.time), "mission_success_evaluated": False})
+
+    def record_controller_trace(self, record):
+        """Durable per-decision controller record (exact prompt, raw response, validation, latency...) in logs/controller_decisions.jsonl."""
+        import json as _json
+        from pathlib import Path as pathlib_Path
+
+        try:
+            folder = pathlib_Path(self.logger.output_session.session_folder) / "logs"
+            folder.mkdir(parents=True, exist_ok=True)
+            with open(folder / "controller_decisions.jsonl", "a", encoding="utf-8") as fh:
+                fh.write(_json.dumps(record, default=str, ensure_ascii=True) + "\n")
+        except Exception as exc:  # observability must not break the run
+            self.logger.log_event(self.time, "controller_trace_write_failed", {"error": repr(exc)})
 
     def _validate_controller_assignment_keys(self):
         from modules.controller_spec import ControllerConfigError
@@ -960,12 +1020,22 @@ class SimulationState:
                 },
                 "seeds": {"world_seed": self.seed, "controller_generation_seed": settings.get("controller_generation_seed")},
             }
+            if spec_for_id is not None and spec_for_id.controller_type == "local_ollama":
+                pre = self.ollama_preflight_results.get((settings.get("base_url"), settings.get("model"))) or {}
+                per_agent[a.name]["ollama"] = {"local_inference_only": True, "model": settings.get("model"), "base_url": settings.get("base_url"), "service_version": pre.get("version"),
+                                              "resolved_model": pre.get("resolved_model"), "installed_models_at_start": pre.get("installed_models"),
+                                              "temperature": settings.get("temperature"), "controller_generation_seed": settings.get("controller_generation_seed"),
+                                              "max_output_tokens": settings.get("max_output_tokens"), "max_context_tokens": settings.get("max_context_tokens"),
+                                              "prompt_budget_tokens": settings.get("prompt_budget_tokens"), "prompt_version": settings.get("prompt_version"),
+                                              "inference_parameters": dict(settings.get("inference_parameters") or {}), "failure_policy": settings.get("failure_policy"),
+                                              "max_retries": settings.get("max_retries"), "implementation_version": spec_for_id.type_info.implementation_version}
             if spec_for_id is not None:
                 specs[a.name] = spec_for_id
         return {
             "schema": "controller_assignment/1",
             "composition_id": condition_identity(specs) if len(specs) == len(self.agents) else None,
             "per_agent": per_agent,
+            "controller_error": self.controller_error,
             "known_controller_types": {k: {"enabled": v.enabled, "implementation": v.implementation} for k, v in CONTROLLER_TYPES.items()},
             "seed_policy": "world_seed drives the simulation and Procedural Baseline streams; controller_generation_seed is a separate per-agent field reserved for generative controllers",
         }
@@ -985,7 +1055,26 @@ class SimulationState:
             adapter = GenericBrainProviderPilotAdapter(provider=provider, pilot_id=pilot_id, display_name=pilot_display_name)
         return pilot_id, pilot_display_name, adapter
 
+    def _register_ollama_runtime(self, agent, spec):
+        """Runtime for a local_ollama controller: its own adapter + a shape-compatible provider shim. No fallback backend exists."""
+        from modules.ollama_pilot import OllamaControllerProvider, OllamaPilotAdapter
+
+        settings = spec.full_settings()
+        adapter = OllamaPilotAdapter(settings, agent_id=agent.agent_id, role=agent.role)
+        provider = OllamaControllerProvider(adapter)
+        cfg = BrainBackendConfig(backend="local_ollama_controller", local_base_url=settings["base_url"], local_model=str(settings["model"]), timeout_s=float(settings["timeout_s"]),
+                                 max_retries=int(settings["max_retries"]), fallback_backend="none")
+        self.agent_brain_runtime[agent.agent_id] = {
+            "config": cfg, "provider": provider, "adapter": adapter, "pilot_id": adapter.pilot_id, "configured_pilot_id": adapter.pilot_id,
+            "pilot_display_name": adapter.display_name, "configured_backend": cfg.backend, "effective_backend": cfg.backend, "hard_demoted": False,
+            "hard_demoted_reason": None, "fallback_count": 0, "last_outcome_signature": None,
+            "bootstrap": {"status": "not_run", "latency_ms": None, "validated_response": None, "summary_text": None, "summary_structured": None, "included_count": 0},
+        }
+
     def _register_agent_brain_runtime(self, agent):
+        spec = getattr(agent, "controller_spec", None)
+        if spec is not None and spec.controller_type == "local_ollama":
+            return self._register_ollama_runtime(agent, spec)
         cfg = BrainBackendConfig(
             backend=str(agent.brain_config.get("backend", self.configured_brain_backend) or self.configured_brain_backend),
             local_base_url=str(agent.brain_config.get("local_base_url", self.brain_backend_config.local_base_url) or self.brain_backend_config.local_base_url),
@@ -1459,6 +1548,8 @@ class SimulationState:
         return cfg
 
     def update(self, base_dt):
+        if self.controller_error is not None:
+            return  # explicit controller-error terminal state: nothing advances and no other controller takes over
         dt = base_dt * self.speed_multiplier
         rule_brain_runtime = str(self.effective_brain_backend or self.configured_brain_backend).lower() == "rule_brain"
         for agent in self.agents:

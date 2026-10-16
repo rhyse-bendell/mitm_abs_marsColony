@@ -68,16 +68,16 @@ def test_compositions_all_one_two_all_and_same_or_different_models_are_expressib
     assert len(ids) == 6  # composition (and per-agent model) is part of the condition identity
 
 
-def test_invalid_specs_are_rejected_and_placeholders_never_instantiate(sim):
+def test_invalid_specs_are_rejected_and_incomplete_ollama_specs_never_instantiate(sim):
     with pytest.raises(cs.ControllerConfigError):
         cs.ControllerSpec.from_value("gpt_somebody")
     with pytest.raises(cs.ControllerConfigError):
         cs.ControllerSpec.from_value({"controller_type": "procedural_baseline", "settings": {"model": "x"}})  # procedural carries no generative settings
     with pytest.raises(cs.ControllerConfigError):
         cs.resolve_controller_assignments(ROLES, {"Gardener": "procedural_baseline"})
-    with pytest.raises(cs.ControllerNotEnabledError):
-        cs.ControllerSpec.from_value("local_ollama").backend()
-    with tempfile.TemporaryDirectory() as tmp, pytest.raises(cs.ControllerNotEnabledError):
+    with pytest.raises(cs.ControllerConfigError):
+        cs.ControllerSpec.from_value("local_ollama").require_ready()  # an Ollama controller needs an explicit installed model
+    with tempfile.TemporaryDirectory() as tmp, pytest.raises(cs.ControllerConfigError):
         SimulationState(phases=None, project_root=tmp, flash_mode=True, experiment_name="x", seed=1, controller_assignments={"Botanist": "local_ollama"})
     with tempfile.TemporaryDirectory() as tmp, pytest.raises(cs.ControllerConfigError):
         SimulationState(phases=None, project_root=tmp, flash_mode=True, experiment_name="x", seed=1, controller_assignments={"Nobody": "procedural_baseline"})
@@ -85,8 +85,9 @@ def test_invalid_specs_are_rejected_and_placeholders_never_instantiate(sim):
 
 def test_generative_settings_have_a_defined_place_and_procedural_has_none():
     ollama = cs.ControllerSpec.from_value("local_ollama").to_dict()
-    assert set(ollama["settings"]) == set(cs.GENERATIVE_SETTING_FIELDS) and ollama["enabled"] is False
+    assert set(ollama["settings"]) == set(cs.GENERATIVE_SETTING_FIELDS) and ollama["enabled"] is True and ollama["settings"]["model"] is None
     assert {"model", "temperature", "controller_generation_seed", "max_context_tokens", "max_output_tokens", "timeout_s", "prompt_version", "inference_parameters"} <= set(ollama["settings"])
+    assert ollama["settings"]["base_url"] == "http://127.0.0.1:11434" and ollama["settings"]["failure_policy"] == "stop_run"
     assert cs.ControllerSpec.from_value("procedural_baseline").to_dict()["settings"] == {}
 
 
@@ -225,8 +226,12 @@ def test_batch_conditions_carry_controller_composition():
 def test_no_remote_provider_code_is_involved(monkeypatch):
     import urllib.request
 
-    src = (Path("modules") / "controller_spec.py").read_text(encoding="utf-8") + (Path("modules") / "controller_context.py").read_text(encoding="utf-8")
-    assert not any(tok in src for tok in ("urllib", "requests", "http.client", "openai", "anthropic", "brain_provider"))
+    import ast
+
+    for fname in ("controller_spec.py", "controller_context.py"):
+        tree = ast.parse((Path("modules") / fname).read_text(encoding="utf-8"))
+        imported = {n.module if isinstance(n, ast.ImportFrom) else a.name for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom)) for a in (getattr(n, "names", None) or [None])}
+        assert not any(m and any(m.startswith(p) for p in ("urllib", "requests", "http", "socket", "openai", "anthropic", "modules.brain_provider")) for m in imported), (fname, imported)
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("network call attempted")))
     from modules import brain_provider
 

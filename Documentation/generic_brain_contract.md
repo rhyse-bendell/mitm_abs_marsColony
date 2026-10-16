@@ -46,6 +46,31 @@ Headless: `--controller Botanist=procedural_baseline` (repeatable) or `controlle
 Seeds: the world seed (`SimulationState.seed`) is separate from the reserved per-agent `controller_generation_seed`; resolving controller settings never touches the world RNG.
 GUI: each agent card has its own Controller selector (Procedural Baseline only for now) plus a reserved per-agent frame for that controller's settings; convenience buttons reset/apply to all.
 
+## Local Ollama controller (`controller_type = local_ollama`; local inference only)
+Modules: `ollama_client.py` (loopback-only transport), `ollama_prompt.py` (canonical prompt + deterministic budget), `ollama_pilot.py` (PilotAdapter + preflight), `controller_spec.py` (settings).
+- **Single selection path.** Controller identity comes only from `ControllerSpec`. A `brain_backend` string can no longer build an Ollama provider (`create_brain_provider` raises `LegacyOllamaBackendRetiredError`);
+  the legacy aliases (`local_http`, `openai_compatible_local`, `ollama_local`, `ollama`) given globally or per agent are ROUTED by `SimulationState` to an equivalent `local_ollama` spec (event
+  `legacy_ollama_backend_routed_to_controller_spec`; a non-loopback legacy endpoint is rejected). The GUI no longer offers them.
+- **Connection.** Plain http to 127.0.0.0/8, `::1` or `localhost` only (checked before any socket; env proxies ignored; redirects refused; no credentials). Only `GET /api/version`, `GET /api/tags`, `POST /api/chat`
+  are ever called: no pull/delete/create, no service start, no API key. Preflight (service reachable + exact installed model tag) runs before the simulation is constructed; failure raises `ControllerUnavailableError`
+  (headless) or blocks Start with a dialog (GUI).
+- **Settings (per agent).** `model` (required), `base_url`, `temperature`, `controller_generation_seed` (Ollama `options.seed`), `max_context_tokens` (`num_ctx`), `max_output_tokens` (`num_predict`), `prompt_budget_tokens`,
+  `timeout_s`, `prompt_version`, `max_retries`, `failure_policy` (`stop_run` | `idle_and_log`), `think` (default false), `inference_parameters` (safe options only: top_p, top_k, min_p, repeat_penalty, ...).
+- **Prompt.** Built only from `canonical_context`: system message (role, rules, response format) + one `CONTEXT:` JSON object (identity, task, goals, observations, known gaps, team_plan, legal_actions, held_dik, communications_and_artifacts,
+  recent_outcomes). Each legal action gets an `affordance_id` (`a0..`) and a curated set of its own fields (no utility scores). Hidden truth, other agents' DIK, the live team store, paths/logs and Python objects never appear.
+- **Budget.** Deterministic tiers: tier 1 (identity, task, goals, observations, gaps, plan assignment, legal actions) is always sent (only optional detail may shrink, in a fixed order, and the affordance list never shrinks);
+  tier 2 (held DIK, artifacts/communications, blockers and recent outcomes) and tier 3 (older shared updates, construction updates, older events) fill the remaining budget item by item, most relevant/recent first.
+  Token estimate is `chars/2.8` (conservative; the real `prompt_eval_count` is recorded). Omitted counts per section, shrink steps and `tier1_over_budget` are stored in the decision trace.
+- **Response.** `{"affordance_id": "<id>", "arguments": {}, "decision_note": "<=200 chars, optional>"}` enforced with an Ollama JSON-schema `format` (affordance_id is an enum of the offered ids) and re-validated. `arguments` may only repeat
+  the chosen affordance's own `action_args`. The note is not executable. The choice becomes an ordinary `AgentBrainResponse` and goes through the same grounding, ActionGate and translation as every Pilot.
+- **Failure.** Unparsable/unknown/illegal replies and inference errors get a concise correction listing the legal ids and up to `max_retries` retries. After that the controller raises `ControllerFailure`: the failure is traced and, with
+  `stop_run` (default), the run halts with `terminal_state = controller_error`; with `idle_and_log` that agent idles one tick, explicitly logged. The Procedural Baseline is never consulted for an Ollama agent.
+- **Mecha behaviour.** Ollama agents are decided in the synchronous Pilot path (no async planner, DIK-integration, bootstrap fallback, policy pivots or project rebinding). Translation-time `action_legality_failed` outcomes are fed back to a generative Pilot
+  as blocker names in `recent_action_outcomes` (unchanged for the Procedural Baseline). Inference wall-clock never advances simulated time.
+- **Records.** Manifest: `controller_assignments.per_agent[agent].ollama` (model, resolved tag, service version, installed models at start, all settings, implementation version). Events: `controller_decision`, `controller_failure`,
+  `controller_error_run_halted`. Durable trace: `logs/controller_decisions.jsonl` (exact system/user prompt, hash, options, budget metadata, every attempt's raw reply/error/latency/Ollama token metadata, parsed affordance/action,
+  validation outcome, retry count, wall-clock latency, plus a `translation_outcome` row per decision).
+
 ## Canonical controller context (`modules/controller_context.py`, schema `controller_context/1`)
 Every request carries `task_context["canonical_context"]`, a whitelist projection of legitimate agent state: identity, task, goals, observations, held DIK, known gaps,
 communications/artifacts, `team_plan_context`, recent outcomes/blockers and the legal action candidates. Hidden world truth (e.g. construction correctness), other agents' private DIK,

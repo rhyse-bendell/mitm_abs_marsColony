@@ -4,13 +4,16 @@ Controller assignment is PER AGENT: every Mars role resolves independently to it
 implementation (`controller_type`) and that controller's own settings (`settings`); the agent's experimental profile (gestalts and the
 seven constituents) is configured separately and never folded into controller identity.
 
-Only `procedural_baseline` is enabled. `local_ollama` is a declared placeholder: its settings have a defined place (model, temperature,
-controller_generation_seed, context/output limits, timeout, prompt version, inference parameters) so configurations, conditions and
-manifests can already describe mixed teams, but instantiating it raises ControllerNotEnabledError. No network or provider code is
-imported or invoked from this module.
+ControllerSpec is the ONLY source of controller identity. The legacy `brain_backend` strings that used to instantiate an Ollama provider
+independently are retired: `LEGACY_OLLAMA_BACKENDS` are routed through a `local_ollama` ControllerSpec by the simulation (or rejected),
+and `create_brain_provider` no longer builds an Ollama provider.
 
-Randomness: the world/simulation seed is `SimulationState.seed`. `controller_generation_seed` is a separate, optional, per-agent
-setting reserved for future generative controllers; it is never derived from, and never consumes, the world RNG.
+Controllers:
+- `procedural_baseline`: the Procedural Baseline Pilot (no settings).
+- `local_ollama`: a LOCAL Ollama model on a loopback endpoint (see modules/ollama_pilot.py). Settings below. No cloud provider exists.
+
+Randomness: the world/simulation seed is `SimulationState.seed`. `controller_generation_seed` is a separate, optional, per-agent setting for
+generative controllers; it is never derived from, and never consumes, the world RNG.
 """
 from __future__ import annotations
 
@@ -21,17 +24,32 @@ SCHEMA = "controller_assignment/1"
 PROCEDURAL_BASELINE = "procedural_baseline"
 LOCAL_OLLAMA = "local_ollama"
 
-# Reserved settings for generative controllers (all optional; unset = controller default). Procedural agents carry none.
+# Legacy brain_backend aliases that used to construct an Ollama provider on their own. They are no longer a controller-selection path.
+LEGACY_OLLAMA_BACKENDS = ("local_http", "openai_compatible_local", "ollama_local", "ollama")
+
 GENERATIVE_SETTING_FIELDS = (
-    "model",  # model name/tag, e.g. "qwen2.5:7b"
+    "model",  # installed local model name/tag, e.g. "qwen3.5:9b" (required; never pulled automatically)
+    "base_url",  # loopback Ollama endpoint
     "temperature",
-    "controller_generation_seed",  # per-agent generation seed; independent of the world seed
-    "max_context_tokens",
-    "max_output_tokens",
-    "timeout_s",
+    "controller_generation_seed",  # per-agent generation seed (Ollama options.seed); independent of the world seed
+    "max_context_tokens",  # Ollama num_ctx
+    "max_output_tokens",  # Ollama num_predict
+    "prompt_budget_tokens",  # budget for the prompt itself; None = max_context - max_output - reserve
+    "timeout_s",  # wall-clock per inference request
     "prompt_version",
-    "inference_parameters",  # free-form dict of additional inference options (top_p, num_predict, ...)
+    "max_retries",  # bounded retries after an unparsable/illegal reply
+    "failure_policy",  # what happens when retries are exhausted: "stop_run" (default) | "idle_and_log" (explicit, logged; never another controller)
+    "think",  # request model 'thinking' output (default False; no hidden chain-of-thought is requested)
+    "inference_parameters",  # additional SAFE Ollama options only (see SAFE_INFERENCE_PARAMETERS)
 )
+
+LOCAL_OLLAMA_DEFAULTS: Dict[str, Any] = {
+    "model": None, "base_url": "http://127.0.0.1:11434", "temperature": 0.2, "controller_generation_seed": None, "max_context_tokens": 8192,
+    "max_output_tokens": 400, "prompt_budget_tokens": None, "timeout_s": 120.0, "prompt_version": "canonical_choice_v1", "max_retries": 2,
+    "failure_policy": "stop_run", "think": False, "inference_parameters": {},
+}
+FAILURE_POLICIES = ("stop_run", "idle_and_log")
+SAFE_INFERENCE_PARAMETERS = ("top_p", "top_k", "min_p", "repeat_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty", "num_keep", "mirostat", "mirostat_tau", "mirostat_eta", "typical_p")
 
 
 class ControllerNotEnabledError(RuntimeError):
@@ -47,7 +65,7 @@ class ControllerType:
     controller_type: str
     label: str
     enabled: bool
-    backend: Optional[str]  # legacy brain-backend id the runtime resolves this controller through
+    backend: Optional[str]  # runtime backend id this controller resolves through (never a free provider choice)
     implementation: str
     implementation_version: Optional[str]
     settings_fields: tuple = ()
@@ -55,7 +73,7 @@ class ControllerType:
 
 CONTROLLER_TYPES: Dict[str, ControllerType] = {
     PROCEDURAL_BASELINE: ControllerType(PROCEDURAL_BASELINE, "Procedural Baseline", True, "rule_brain", "modules.procedural_baseline_pilot.ProceduralBaselinePilotAdapter", "1", ()),
-    LOCAL_OLLAMA: ControllerType(LOCAL_OLLAMA, "Local Ollama (not yet available)", False, None, "(not implemented)", None, GENERATIVE_SETTING_FIELDS),
+    LOCAL_OLLAMA: ControllerType(LOCAL_OLLAMA, "Local Ollama", True, "local_ollama_controller", "modules.ollama_pilot.OllamaPilotAdapter", "1", GENERATIVE_SETTING_FIELDS),
 }
 
 
@@ -72,6 +90,44 @@ def controller_type_from_label(label: str) -> str:
         if label in {ct.label, key}:
             return key
     raise ControllerConfigError(f"unknown controller label {label!r}")
+
+
+def _validate_local_ollama_settings(settings: Mapping[str, Any]) -> None:
+    from modules.ollama_client import NonLoopbackEndpointError, validate_loopback_endpoint
+
+    if settings.get("base_url") is not None:
+        try:
+            validate_loopback_endpoint(str(settings["base_url"]))
+        except NonLoopbackEndpointError as exc:
+            raise ControllerConfigError(f"local_ollama endpoint rejected: {exc}") from exc
+
+    def num(name, lo=None, hi=None, kind=float):
+        v = settings.get(name)
+        if v is None:
+            return
+        try:
+            v = kind(v)
+        except (TypeError, ValueError):
+            raise ControllerConfigError(f"local_ollama setting {name!r} must be a {kind.__name__}, got {settings.get(name)!r}") from None
+        if (lo is not None and v < lo) or (hi is not None and v > hi):
+            raise ControllerConfigError(f"local_ollama setting {name!r}={v} out of range [{lo}, {hi}]")
+
+    num("temperature", 0.0, 2.0)
+    num("controller_generation_seed", None, None, int)
+    num("max_context_tokens", 512, 1_048_576, int)
+    num("max_output_tokens", 16, 32768, int)
+    num("prompt_budget_tokens", 256, 1_048_576, int)
+    num("timeout_s", 1.0, 3600.0)
+    num("max_retries", 0, 5, int)
+    if settings.get("failure_policy") is not None and settings["failure_policy"] not in FAILURE_POLICIES:
+        raise ControllerConfigError(f"failure_policy must be one of {FAILURE_POLICIES}")
+    params = settings.get("inference_parameters")
+    if params is not None:
+        if not isinstance(params, Mapping):
+            raise ControllerConfigError("inference_parameters must be an object")
+        unsafe = sorted(set(params) - set(SAFE_INFERENCE_PARAMETERS))
+        if unsafe:
+            raise ControllerConfigError(f"inference_parameters {unsafe} are not allowed; safe options: {list(SAFE_INFERENCE_PARAMETERS)} (model, seed, temperature, num_ctx, num_predict have their own fields)")
 
 
 @dataclass(frozen=True)
@@ -104,6 +160,8 @@ class ControllerSpec:
         unknown = set(self.settings) - set(ct.settings_fields)
         if unknown:
             raise ControllerConfigError(f"controller {self.controller_type!r} accepts settings {list(ct.settings_fields)}; got unknown {sorted(unknown)}")
+        if self.controller_type == LOCAL_OLLAMA:
+            _validate_local_ollama_settings(self.settings)
         return self
 
     # -- views ----------------------------------------------------------------------------------------------------------
@@ -120,14 +178,24 @@ class ControllerSpec:
             raise ControllerNotEnabledError(f"controller {self.controller_type!r} is declared but not implemented; enabled controllers: {enabled_controller_types()}")
         return self
 
+    def require_ready(self) -> "ControllerSpec":
+        """Settings sufficient to instantiate (a local_ollama controller needs an explicit model)."""
+        self.require_enabled()
+        if self.controller_type == LOCAL_OLLAMA and not str(self.settings.get("model") or "").strip():
+            raise ControllerConfigError("local_ollama controller requires an explicit installed model (settings.model)")
+        return self
+
     def backend(self) -> str:
-        """Legacy brain-backend id the existing per-agent runtime resolves for this controller (enabled controllers only)."""
+        """Runtime backend id this controller resolves through (enabled controllers only)."""
         self.require_enabled()
         return str(self.type_info.backend)
 
     def full_settings(self) -> Dict[str, Any]:
-        """Every settings field the controller type defines (unset ones as None) so a manifest shows the reserved place."""
-        out: Dict[str, Any] = {k: None for k in self.type_info.settings_fields}
+        """Every settings field the controller type defines, defaults filled in, so a manifest records the exact resolved configuration."""
+        if self.controller_type == LOCAL_OLLAMA:
+            out = {k: (dict(v) if isinstance(v, dict) else v) for k, v in LOCAL_OLLAMA_DEFAULTS.items()}
+        else:
+            out = {k: None for k in self.type_info.settings_fields}
         out.update(dict(self.settings))
         return out
 
@@ -170,11 +238,17 @@ def assignments_to_serializable(specs: Mapping[str, ControllerSpec]) -> Dict[str
 
 
 def parse_cli_assignments(pairs: Iterable[str]) -> Dict[str, Any]:
-    """`--controller Botanist=local_ollama --controller Engineer=procedural_baseline` -> {"Botanist": ..., "Engineer": ...}."""
+    """`--controller Botanist=local_ollama:qwen3.5:9b` -> {"Botanist": {"controller_type": "local_ollama", "settings": {"model": "qwen3.5:9b"}}};
+    `--controller Engineer=procedural_baseline` -> {"Engineer": "procedural_baseline"}."""
     out: Dict[str, Any] = {}
     for pair in pairs or []:
         if "=" not in pair:
-            raise ControllerConfigError(f"expected Role=controller_type, got {pair!r}")
-        role, ctype = pair.split("=", 1)
-        out[role.strip()] = ctype.strip()
+            raise ControllerConfigError(f"expected Role=controller_type[:model], got {pair!r}")
+        role, rest = pair.split("=", 1)
+        ctype, _, model = rest.partition(":")
+        ctype = ctype.strip()
+        if ctype == LOCAL_OLLAMA and model.strip():
+            out[role.strip()] = {"controller_type": LOCAL_OLLAMA, "settings": {"model": model.strip()}}
+        else:
+            out[role.strip()] = ctype
     return out

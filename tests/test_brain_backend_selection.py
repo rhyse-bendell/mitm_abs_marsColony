@@ -1,3 +1,6 @@
+import pytest as _pytest_vehicle
+
+pytestmark = _pytest_vehicle.mark.legacy_async_planner_vehicle
 import json
 import tempfile
 import unittest
@@ -251,9 +254,13 @@ class TestBrainBackendSelection(unittest.TestCase):
             sim.stop()
 
 
-    def test_ollama_alias_routes_to_local_provider(self):
-        provider = create_brain_provider(BrainBackendConfig(backend="ollama"))
-        self.assertIsInstance(provider, OllamaLocalBrainProvider)
+    def test_ollama_alias_no_longer_instantiates_a_provider(self):
+        # Controller identity comes only from ControllerSpec (controller_type='local_ollama'); a backend string cannot select Ollama.
+        from modules.brain_provider import LegacyOllamaBackendRetiredError
+
+        for alias in ("ollama", "local_http", "ollama_local", "openai_compatible_local"):
+            with self.assertRaises(LegacyOllamaBackendRetiredError):
+                create_brain_provider(BrainBackendConfig(backend=alias))
 
     def test_fallback_event_includes_model_and_hint_for_404(self):
         with tempfile.TemporaryDirectory() as tmpdir:

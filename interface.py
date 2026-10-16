@@ -34,12 +34,28 @@ from modules.brain_provider import RuleBrain
 from modules import data_browser
 
 
-def _controller_assignment_from_vars(controller_vars, role):
-    """One agent's controller assignment from its own selector (defaults to the Procedural Baseline when no selector exists)."""
+OLLAMA_GUI_FIELDS = (  # (settings key, kind) -- blank = leave to the controller default
+    ("model", str), ("temperature", float), ("controller_generation_seed", int), ("max_output_tokens", int), ("max_context_tokens", int),
+    ("prompt_budget_tokens", int), ("timeout_s", float), ("prompt_version", str), ("max_retries", int), ("failure_policy", str),
+)
+
+
+def _controller_assignment_from_vars(controller_vars, role, ollama_vars=None):
+    """One agent's controller assignment from its OWN selector and OWN settings (defaults to the Procedural Baseline when no selector exists)."""
     from modules.controller_spec import controller_type_from_label
 
     var = (controller_vars or {}).get(role)
-    return {"controller_type": controller_type_from_label(var.get()) if var is not None else "procedural_baseline", "settings": {}}
+    ctype = controller_type_from_label(var.get()) if var is not None else "procedural_baseline"
+    settings = {}
+    if ctype == "local_ollama":
+        for key, kind in OLLAMA_GUI_FIELDS:
+            raw = str(((ollama_vars or {}).get(role) or {}).get(key).get()).strip() if ((ollama_vars or {}).get(role) or {}).get(key) is not None else ""
+            if raw != "":
+                try:
+                    settings[key] = kind(raw)
+                except ValueError:
+                    raise ValueError(f"{role}: Local Ollama setting '{key}' must be a {kind.__name__}, got {raw!r}") from None
+    return {"controller_type": ctype, "settings": settings}
 
 
 class MarsColonyInterface:
@@ -2044,7 +2060,7 @@ class MarsColonyInterface:
                     "constituent_overrides": dict(constituent_overrides),
                     "packet_access": selected_packets,
                     "brain_config": {k: v for k, v in brain_config.items() if v},
-                    "controller": _controller_assignment_from_vars(getattr(self, "agent_controller_vars", {}), role),
+                    "controller": _controller_assignment_from_vars(getattr(self, "agent_controller_vars", {}), role, getattr(self, "agent_ollama_vars", {})),
                     "planner_config": planner_config,
                     **{k: v for k, v in identity.get("task_defaults", {}).items() if v},
                 })
@@ -2150,7 +2166,63 @@ class MarsColonyInterface:
 
     # ---- per-agent controller selection (never a team-wide switch)
     def _controller_assignment_for_role(self, role):
-        return _controller_assignment_from_vars(getattr(self, "agent_controller_vars", {}), role)
+        return _controller_assignment_from_vars(getattr(self, "agent_controller_vars", {}), role, getattr(self, "agent_ollama_vars", {}))
+
+    # ---- Local Ollama (per agent, local inference only)
+    def _ollama_status_check(self, role):
+        """Refresh THIS agent's Ollama status + installed-model list. Loopback only; nothing is started or downloaded."""
+        from modules import ollama_pilot
+        from modules.ollama_client import OllamaError
+
+        v = self.agent_ollama_vars[role]
+        base = (v["base_url"].get() or "http://127.0.0.1:11434").strip()
+        try:
+            client = ollama_pilot.client_factory(base, 5.0)
+            status = client.status()
+            if not status.get("available"):
+                v["status"].set(f"Ollama NOT available at {base}: {status.get('error')}")
+                v["installed"] = []
+            else:
+                names = client.installed_model_names()
+                v["installed"] = names
+                v["status"].set(f"Ollama {status.get('version')} available - {len(names)} local model(s)")
+        except (OllamaError, ValueError) as exc:
+            v["installed"] = []
+            v["status"].set(f"Ollama check failed: {exc}")
+        combo = self.agent_ollama_model_combos.get(role)
+        if combo is not None:
+            combo.configure(values=list(v["installed"]))
+        self._refresh_test_drive_summary()
+
+    def _on_controller_changed(self, role):
+        frame = self.agent_controller_settings_frames.get(role)
+        if frame is None:
+            return
+        if self.agent_controller_vars[role].get() == "Local Ollama":
+            frame.grid()
+            self._ollama_status_check(role)
+        else:
+            frame.grid_remove()
+        self._refresh_test_drive_summary()
+
+    def _controller_preflight_error(self):
+        """Message if any agent is set to Local Ollama but its service/model is unusable (Start must not proceed), else None."""
+        from modules import ollama_pilot
+
+        try:
+            assignments = self.controller_assignments()
+        except ValueError as exc:
+            return str(exc)
+        for role, spec in assignments.items():
+            if spec["controller_type"] != "local_ollama":
+                continue
+            settings = dict(spec["settings"])
+            settings.setdefault("base_url", "http://127.0.0.1:11434")
+            try:
+                ollama_pilot.preflight({**settings, "timeout_s": 5.0})
+            except Exception as exc:  # noqa: BLE001 - any preflight problem blocks Start with its reason
+                return f"{role}: {exc}"
+        return None
 
     def controller_assignments(self):
         """{role: {controller_type, settings}} for the agents currently on screen; each agent is independent."""
@@ -2588,6 +2660,10 @@ class MarsColonyInterface:
             return
 
         self.sim.update(self.base_dt)
+        if getattr(self.sim, "controller_error", None):
+            self.stop_experiment()
+            messagebox.showerror("Controller error - run stopped", str(self.sim.controller_error.get("message")))
+            return
         if self._interactive_duration_reached():
             self.stop_experiment()
             return
@@ -2627,6 +2703,11 @@ class MarsColonyInterface:
     def start_experiment(self):
         if self.run_state in {self.STATE_RUNNING, self.STATE_STARTING}:
             return
+        if self.run_state in {self.STATE_IDLE, self.STATE_STOPPED} or self.sim is None:
+            problem = self._controller_preflight_error()
+            if problem:
+                messagebox.showerror("Controller not ready", f"Start was not attempted.\n\n{problem}")
+                return
 
         if self.run_state in {self.STATE_IDLE, self.STATE_STOPPED} or self.sim is None:
             self._begin_async_startup()
@@ -4114,7 +4195,13 @@ class MarsColonyInterface:
                 f"   |   Auto-stop: {int(self.stop_at_sim_time_var.get())} sim-s   |   Speed x{self.speed_multiplier.get():g}",
             ]
             count = max(1, min(self.MAX_AGENT_PANELS, int(self.num_agents_var.get())))
-            lines.append("Controllers: " + ", ".join(f"{r}={self.agent_controller_vars[r].get()}" for r in self.agent_card_order[:count] if r in self.agent_controller_vars))
+            def _ctl(r):
+                label = self.agent_controller_vars[r].get()
+                if label == "Local Ollama":
+                    return f"Local Ollama[{(self.agent_ollama_vars[r]['model'].get() or 'no model').strip()}]"
+                return label
+
+            lines.append("Controllers: " + ", ".join(f"{r}={_ctl(r)}" for r in self.agent_card_order[:count] if r in self.agent_controller_vars))
             for role in self.agent_card_order[:count]:
                 prof = self.agent_profiles[role]
                 preset = {"High": 0.75, "Low": 0.25}
@@ -4231,7 +4318,7 @@ class MarsColonyInterface:
         ttk.Label(settings_frame, text="Brain Backend").grid(row=12, column=0, sticky="w", padx=(0, 8), pady=(6, 3))
         self.brain_backend_var = StringVar(value=self.BACKEND_DEFAULTS["brain_backend"])
         self.brain_backend_var.trace_add("write", lambda *_: self._refresh_all_agent_inheritance_display())
-        backend_combo = ttk.Combobox(settings_frame, textvariable=self.brain_backend_var, values=["procedural_baseline", "rule_brain", "local_http", "ollama"], state="readonly", width=22)
+        backend_combo = ttk.Combobox(settings_frame, textvariable=self.brain_backend_var, values=["procedural_baseline", "rule_brain"], state="readonly", width=22)
         backend_combo.grid(row=12, column=1, sticky="w", pady=(6, 3))
         backend_combo.bind("<<ComboboxSelected>>", lambda _e: self._update_backend_field_states())
         self._add_help_text(settings_frame, 13, "Select which decision system agents use by default.")
@@ -4449,12 +4536,39 @@ class MarsColonyInterface:
         ttk.Label(header, text="Controller").grid(row=3, column=0, sticky="w", pady=(2, 0))
         self.agent_controller_vars[role] = StringVar(value=controller_label(PROCEDURAL_BASELINE))
         ttk.Combobox(header, textvariable=self.agent_controller_vars[role], values=[controller_label(t) for t in enabled_controller_types()], state="readonly", width=24).grid(row=3, column=1, sticky="w", padx=(10, 0), pady=(2, 0))
-        # Reserved: a per-agent frame for the selected controller's own settings (model, temperature, seed, limits, prompt version).
-        controller_settings_frame = ttk.Frame(header)
-        controller_settings_frame.grid(row=4, column=0, columnspan=2, sticky="ew")
+        # This agent's OWN controller settings (shown only when this agent is Local Ollama). Nothing here is shared with other agents.
+        controller_settings_frame = ttk.LabelFrame(header, text="Local Ollama - local inference only", padding=(6, 4))
+        controller_settings_frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        controller_settings_frame.columnconfigure(1, weight=1)
         controller_settings_frame.grid_remove()
         self.agent_controller_settings_frames[role] = controller_settings_frame
-        self.agent_controller_vars[role].trace_add("write", lambda *_: self._refresh_test_drive_summary())
+        from modules.controller_spec import LOCAL_OLLAMA_DEFAULTS
+
+        ovars = {"status": StringVar(value="Ollama status: not checked"), "base_url": StringVar(value=LOCAL_OLLAMA_DEFAULTS["base_url"]), "installed": []}
+        defaults = {"model": "", "temperature": "0.2", "controller_generation_seed": "", "max_output_tokens": "400", "max_context_tokens": "8192",
+                    "prompt_budget_tokens": "", "timeout_s": "120", "prompt_version": LOCAL_OLLAMA_DEFAULTS["prompt_version"], "max_retries": "2", "failure_policy": "stop_run"}
+        for key, _kind in OLLAMA_GUI_FIELDS:
+            ovars[key] = StringVar(value=defaults[key])
+        self.agent_ollama_vars[role] = ovars
+        ttk.Label(controller_settings_frame, textvariable=ovars["status"], foreground="#3f556e", wraplength=520, justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Button(controller_settings_frame, text="Check Ollama / refresh models", command=lambda r=role: self._ollama_status_check(r)).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 4))
+        labels = {"model": "Model (installed)", "temperature": "Temperature", "controller_generation_seed": "Generation seed (blank = none)", "max_output_tokens": "Max output tokens",
+                  "max_context_tokens": "Context window (tokens)", "prompt_budget_tokens": "Prompt budget (blank = auto)", "timeout_s": "Timeout (s)", "prompt_version": "Prompt version",
+                  "max_retries": "Max retries", "failure_policy": "On failure"}
+        for i, (key, _kind) in enumerate(OLLAMA_GUI_FIELDS):
+            ttk.Label(controller_settings_frame, text=labels[key]).grid(row=2 + i, column=0, sticky="w")
+            if key == "model":
+                combo = ttk.Combobox(controller_settings_frame, textvariable=ovars[key], values=[], width=28)
+                self.agent_ollama_model_combos[role] = combo
+                widget = combo
+            elif key == "failure_policy":
+                widget = ttk.Combobox(controller_settings_frame, textvariable=ovars[key], values=["stop_run", "idle_and_log"], state="readonly", width=14)
+            else:
+                widget = ttk.Entry(controller_settings_frame, textvariable=ovars[key], width=14)
+            widget.grid(row=2 + i, column=1, sticky="w", padx=6, pady=1)
+            if key != "model":
+                ovars[key].trace_add("write", lambda *_: self._refresh_test_drive_summary())
+        self.agent_controller_vars[role].trace_add("write", lambda *_a, r=role: self._on_controller_changed(r))
 
         profile_frame = ttk.LabelFrame(card, text="Experimental Profile", padding=(8, 6))
         profile_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 6))
@@ -4602,7 +4716,7 @@ class MarsColonyInterface:
         }
 
         fields = [
-            ("Backend Override", ttk.Combobox(advanced_body, textvariable=self.agent_brain_settings[role]["backend"], values=["", "procedural_baseline", "rule_brain", "local_http", "ollama"], state="readonly", width=18), "Optional per-agent backend override. Leave blank to inherit global default.", "backend"),
+            ("Backend Override", ttk.Combobox(advanced_body, textvariable=self.agent_brain_settings[role]["backend"], values=["", "procedural_baseline", "rule_brain"], state="readonly", width=18), "Optional per-agent backend override. Leave blank to inherit global default.", "backend"),
             ("Model Override", ttk.Entry(advanced_body, textvariable=self.agent_brain_settings[role]["local_model"], width=20), "Optional model override for this agent. Leave blank to inherit global model.", "local_model"),
             ("Fallback Override", ttk.Combobox(advanced_body, textvariable=self.agent_brain_settings[role]["fallback_backend"], values=["", "procedural_baseline", "rule_brain"], state="readonly", width=18), "Fallback used by this agent if its selected backend fails. Leave blank to inherit global fallback.", "fallback_backend"),
             ("Planner Cadence (steps)", ttk.Entry(advanced_body, textvariable=self.agent_planner_settings[role]["planner_interval_steps"], width=8), "Higher values reduce how often this agent's brain is queried.", None),
@@ -4700,7 +4814,9 @@ class MarsColonyInterface:
         self.agent_traits = {}
         self.agent_constituents = {}  # role -> {constituent: StringVar}; blank = use the profile-generated value
         self.agent_controller_vars = {}  # role -> StringVar: that agent's OWN controller (never a team-wide switch)
-        self.agent_controller_settings_frames = {}  # role -> frame reserved for that agent's controller-specific settings (future Local Ollama)
+        self.agent_controller_settings_frames = {}  # role -> that agent's own controller-settings frame (Local Ollama)
+        self.agent_ollama_vars = {}  # role -> {setting: StringVar, status, installed}: per-agent, never shared
+        self.agent_ollama_model_combos = {}
         self.agent_constituent_resolved = {}  # role -> {constituent: StringVar} resolved preview
         self.legacy_override_enabled = {}  # role -> BooleanVar: legacy low-level sliders act as debug overrides only when ticked
         self.packet_access = {}

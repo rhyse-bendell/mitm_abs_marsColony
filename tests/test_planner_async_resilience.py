@@ -1,3 +1,6 @@
+import pytest as _pytest_vehicle
+
+pytestmark = _pytest_vehicle.mark.legacy_async_planner_vehicle
 import json
 import tempfile
 import time
