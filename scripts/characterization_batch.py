@@ -33,8 +33,11 @@ sys.path.insert(0, str(ROOT))
 NEUTRAL = {"teamwork_potential": 0.5, "taskwork_potential": 0.5}
 
 
-def _cond(constructs=None, overrides=None, factor=None, level=None):
-    return {"constructs": {**NEUTRAL, **(constructs or {})}, "constituent_overrides": dict(overrides or {}), "factor": factor, "level": level}
+def _cond(constructs=None, overrides=None, factor=None, level=None, controllers=None):
+    spec = {"constructs": {**NEUTRAL, **(constructs or {})}, "constituent_overrides": dict(overrides or {}), "factor": factor, "level": level}
+    if controllers:
+        spec["controller_assignments"] = dict(controllers)  # per-agent controller composition is part of the condition identity
+    return spec
 
 
 CONDITIONS = {"A_neutral": _cond(factor="neutral", level=0.5)}
@@ -56,7 +59,10 @@ def run_paths(out, name, seed):
 
 def _settings(name):
     c = CONDITIONS[name]
-    return {"constructs": dict(c["constructs"]), "constituent_overrides": dict(c["constituent_overrides"]), "profile_mode": "compact_panel"}
+    out = {"constructs": dict(c["constructs"]), "constituent_overrides": dict(c["constituent_overrides"]), "profile_mode": "compact_panel"}
+    if c.get("controller_assignments"):
+        out["controller_assignments"] = dict(c["controller_assignments"])
+    return out
 
 
 def execute_run(name, seed, duration, run_root):
@@ -195,7 +201,7 @@ def main(argv=None):
         design = json.loads(Path(args.conditions_file).read_text(encoding="utf-8"))
         CONDITIONS.clear()
         for cname, spec in design.items():
-            CONDITIONS[cname] = _cond(spec.get("constructs"), spec.get("constituent_overrides"), spec.get("factor"), spec.get("level"))
+            CONDITIONS[cname] = _cond(spec.get("constructs"), spec.get("constituent_overrides"), spec.get("factor"), spec.get("level"), spec.get("controller_assignments"))
     if args.list_conditions:
         for cname, spec in CONDITIONS.items():
             print(cname, json.dumps({"constructs": spec["constructs"], "constituent_overrides": spec["constituent_overrides"]}))

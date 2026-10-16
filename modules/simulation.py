@@ -151,6 +151,7 @@ class SimulationState:
         execution_metadata=None,
         seed=None,
         experimental_settings=None,
+        controller_assignments=None,
     ):
         # Deterministic run seed: seeds the global RNG and gives every agent its own RNG stream.
         self.terminal_state = None  # set once by _check_terminal_state()
@@ -158,6 +159,9 @@ class SimulationState:
         self.resources_exhausted_time = None  # world condition, recorded once; not terminal unless the task policy says so
         self.seed = None if seed is None else int(seed)
         self.experimental_settings = dict(experimental_settings or {})  # run-level gestalt constructs / constituent overrides (headless or GUI)
+        # Per-agent controller assignment {role-or-agent-name: controller_type | {controller_type, settings}}. Independent of the experimental
+        # profile and of the world seed. Agents without an entry keep the run's configured brain backend (Procedural Baseline by default).
+        self.controller_assignments_input = dict(controller_assignments or self.experimental_settings.get("controller_assignments") or {})
         if self.seed is not None:
             random.seed(self.seed)
         self.task_model = load_task_model(task_id=task_id)
@@ -431,6 +435,13 @@ class SimulationState:
             merged_planner_config = dict(self.planner_defaults)
             merged_planner_config.update(dict(config.get("planner_config", {})))
             merged_brain_config = dict(config.get("brain_config", {}))
+            controller_spec = self._resolve_agent_controller_spec(config, role_id)
+            if controller_spec is not None:
+                controller_spec.require_enabled()  # declared-but-unimplemented controllers never run (no inference in this framework)
+                legacy_backend = merged_brain_config.get("backend")
+                merged_brain_config["backend"] = controller_spec.backend()
+                if legacy_backend and resolve_pilot_id(legacy_backend) != resolve_pilot_id(merged_brain_config["backend"]):
+                    self.logger.log_event(self.time, "controller_spec_superseded_legacy_backend", {"agent": config.get("name", role_id), "legacy_backend": legacy_backend, "controller_type": controller_spec.controller_type})
             merged_brain_config.setdefault("backend", self.configured_brain_backend)
             merged_brain_config.setdefault("local_model", self.brain_backend_config.local_model)
             merged_brain_config.setdefault("fallback_backend", self.brain_backend_config.fallback_backend)
@@ -450,6 +461,7 @@ class SimulationState:
                 communication_params=config.get("communication_params"),
                 initial_goal_seeds=config.get("initial_goal_seeds"),
             )
+            agent.controller_spec = controller_spec
             if self.seed is not None:
                 agent.run_seed = self.seed
                 agent._rng = random.Random(f"{self.seed}:{agent.agent_id}")
@@ -571,6 +583,7 @@ class SimulationState:
             self.agents.append(agent)
 
         self.environment.agents = self.agents
+        self._validate_controller_assignment_keys()
         self.runtime_witness_audit = RuntimeWitnessAudit(self)
         self.metrics = MetricsCollector(self)
         self.logger.register_event_listener(self.runtime_witness_audit.on_event)
@@ -866,6 +879,7 @@ class SimulationState:
             "display_name": agent.display_name,
             "label": agent.agent_label,
             "role": agent.role,
+            "controller_type": agent.controller_type_id(),
             "configured_backend": runtime["configured_backend"],
             "effective_backend": runtime.get("effective_backend"),
             "hard_demoted": bool(runtime.get("hard_demoted")),
@@ -894,6 +908,66 @@ class SimulationState:
             "experimental_profile": dict(getattr(agent, "experimental_profile", {})),
             "hook_effects": {f"{k[0]}::{k[1]}::{k[2]}": float(v) for k, v in sorted(getattr(agent, "hook_effects", {}).items())},
             "mechanism_hook_keys": [f"{k[0]}::{k[1]}::{k[2]}" for k in sorted(getattr(agent, "hook_effects", {}).keys())],
+        }
+
+    def _resolve_agent_controller_spec(self, config, role_id):
+        """This agent's own ControllerSpec: run-level assignment by agent name or role, else the agent config's `controller`; None = legacy backend."""
+        from modules.controller_spec import ControllerSpec
+
+        name = config.get("name", config.get("display_name", role_id))
+        assigned = self.controller_assignments_input
+        for key in (name, role_id):
+            if key in assigned:
+                return ControllerSpec.from_value(assigned[key])
+        if config.get("controller") is not None:
+            return ControllerSpec.from_value(config.get("controller"))
+        return None
+
+    def _validate_controller_assignment_keys(self):
+        from modules.controller_spec import ControllerConfigError
+
+        known = {a.name for a in self.agents} | {a.role for a in self.agents}
+        unknown = sorted(set(self.controller_assignments_input) - known)
+        if unknown:
+            raise ControllerConfigError(f"controller assignment names unknown agents {unknown}; agents are {sorted(a.name for a in self.agents)}")
+
+    def controller_manifest(self):
+        """Per-agent controller configuration (separate from the experimental profile), plus the seeds, for the session manifest."""
+        from modules.controller_spec import CONTROLLER_TYPES, PROCEDURAL_BASELINE, condition_identity
+
+        per_agent, specs = {}, {}
+        for a in self.agents:
+            spec = getattr(a, "controller_spec", None)
+            backend = str((getattr(a, "brain_config", {}) or {}).get("backend", self.configured_brain_backend))
+            if spec is None:
+                legacy_procedural = resolve_pilot_id(backend) == "procedural_baseline"
+                from modules.controller_spec import ControllerSpec
+                spec_for_id = ControllerSpec(PROCEDURAL_BASELINE) if legacy_procedural else None
+            else:
+                spec_for_id = spec
+            record = spec_for_id.to_dict() if spec_for_id is not None else {"controller_type": f"legacy_backend:{backend}", "settings": {}, "enabled": True, "implementation": "legacy generic provider", "implementation_version": None}
+            profile = getattr(a, "experimental_profile", {}) or {}
+            settings = dict(record.get("settings") or {})
+            per_agent[a.name] = {
+                "agent_id": a.agent_id,
+                "role": a.role,
+                "controller": record,
+                "explicit_assignment": spec is not None,
+                "brain_backend": backend,
+                "experimental_profile": {
+                    "gestalt_constructs": dict(profile.get("gestalt_constructs", {})),
+                    "resolved_constituents": dict(profile.get("resolved_constituents", {})),
+                },
+                "seeds": {"world_seed": self.seed, "controller_generation_seed": settings.get("controller_generation_seed")},
+            }
+            if spec_for_id is not None:
+                specs[a.name] = spec_for_id
+        return {
+            "schema": "controller_assignment/1",
+            "composition_id": condition_identity(specs) if len(specs) == len(self.agents) else None,
+            "per_agent": per_agent,
+            "known_controller_types": {k: {"enabled": v.enabled, "implementation": v.implementation} for k, v in CONTROLLER_TYPES.items()},
+            "seed_policy": "world_seed drives the simulation and Procedural Baseline streams; controller_generation_seed is a separate per-agent field reserved for generative controllers",
         }
 
     @staticmethod
@@ -1122,6 +1196,7 @@ class SimulationState:
         cfg = self.brain_backend_config
         return {
             "experimental_panel": self._experimental_manifest() if getattr(self, "agents", None) else {"run_level_settings": dict(self.experimental_settings)},
+            "controller_assignments": self.controller_manifest() if getattr(self, "agents", None) else {},
             "configured_brain_backend": self.configured_brain_backend,
             "effective_brain_backend": self.effective_brain_backend,
             "brain_backend": self.configured_brain_backend,

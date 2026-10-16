@@ -31,6 +31,27 @@ Agents are now assembled from task data + optional template inheritance:
 
 Mars Architect/Engineer/Botanist behavior remains represented via templates/default rows in task package data.
 
+## Per-agent controllers (`modules/controller_spec.py`)
+Controller assignment is **per agent**, never per team/session. Each role resolves independently to a `ControllerSpec`:
+`{"controller_type": "procedural_baseline" | "local_ollama", "settings": {...}}`. The experimental profile (gestalts, seven constituents) is configured
+separately and is not part of controller identity. Only `procedural_baseline` is enabled; `local_ollama` is a declared placeholder whose reserved settings are
+`model, temperature, controller_generation_seed, max_context_tokens, max_output_tokens, timeout_s, prompt_version, inference_parameters` (a procedural spec carries none).
+A declared-but-unimplemented controller can be described, serialised and recorded in a manifest but raises `ControllerNotEnabledError` if a simulation tries to instantiate it.
+
+Resolution path (the Environment and Middleware contain no team-level controller conditionals): `SimulationState(controller_assignments=...)` (or `experimental_settings["controller_assignments"]`,
+or an agent config's `controller`) -> per-agent `ControllerSpec` -> that agent's `brain_config` backend -> its own provider + `PilotAdapter` runtime -> the canonical Pilot contract.
+Headless: `--controller Botanist=procedural_baseline` (repeatable) or `controller_assignments` in a condition JSON / batch condition. Controller composition is part of the condition identity
+(`condition_identity`), of `session_manifest.json -> controller_assignments` (per agent: agent_id, role, controller + implementation/version, experimental profile + resolved seven, seeds) and of every
+`pilot_selection_via_adapter` event (`controller_type`, `controller_agent_id`).
+Seeds: the world seed (`SimulationState.seed`) is separate from the reserved per-agent `controller_generation_seed`; resolving controller settings never touches the world RNG.
+GUI: each agent card has its own Controller selector (Procedural Baseline only for now) plus a reserved per-agent frame for that controller's settings; convenience buttons reset/apply to all.
+
+## Canonical controller context (`modules/controller_context.py`, schema `controller_context/1`)
+Every request carries `task_context["canonical_context"]`, a whitelist projection of legitimate agent state: identity, task, goals, observations, held DIK, known gaps,
+communications/artifacts, `team_plan_context`, recent outcomes/blockers and the legal action candidates. Hidden world truth (e.g. construction correctness), other agents' private DIK,
+the Environment/SimulationState, logs/filesystem and the live team-knowledge store are never copied; `assert_canonical_context_clean` rejects forbidden keys at any depth.
+The Procedural Baseline receives the same object (it keeps using the richer packet internally; behaviour is unchanged).
+
 ## Team-plan context (controller-neutral)
 Every Pilot (Procedural Baseline, LLM-backed, future) receives the same legitimate team-plan facts from the middleware; none reads `TeamKnowledgeManager`.
 The facts are built by `Agent.team_plan_context()` and exposed as `team_state["team_plan_context"]` (schema `team_plan_context/1`), mirrored in the

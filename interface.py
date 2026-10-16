@@ -34,6 +34,14 @@ from modules.brain_provider import RuleBrain
 from modules import data_browser
 
 
+def _controller_assignment_from_vars(controller_vars, role):
+    """One agent's controller assignment from its own selector (defaults to the Procedural Baseline when no selector exists)."""
+    from modules.controller_spec import controller_type_from_label
+
+    var = (controller_vars or {}).get(role)
+    return {"controller_type": controller_type_from_label(var.get()) if var is not None else "procedural_baseline", "settings": {}}
+
+
 class MarsColonyInterface:
     """Tkinter-based dashboard for configuring and observing simulation runs."""
     _PILE_DRAW_SIZE = 0.24
@@ -2036,6 +2044,7 @@ class MarsColonyInterface:
                     "constituent_overrides": dict(constituent_overrides),
                     "packet_access": selected_packets,
                     "brain_config": {k: v for k, v in brain_config.items() if v},
+                    "controller": _controller_assignment_from_vars(getattr(self, "agent_controller_vars", {}), role),
                     "planner_config": planner_config,
                     **{k: v for k, v in identity.get("task_defaults", {}).items() if v},
                 })
@@ -2135,8 +2144,31 @@ class MarsColonyInterface:
             "construction_parameters": construction_parameters,
             "profile_mode": self._selected_profile_mode(),
             "seed": self._selected_seed(),
+            "controller_assignments": self.controller_assignments(),
             "base_dt": 1.0,
         }
+
+    # ---- per-agent controller selection (never a team-wide switch)
+    def _controller_assignment_for_role(self, role):
+        return _controller_assignment_from_vars(getattr(self, "agent_controller_vars", {}), role)
+
+    def controller_assignments(self):
+        """{role: {controller_type, settings}} for the agents currently on screen; each agent is independent."""
+        var = getattr(self, "num_agents_var", None)
+        count = max(1, min(self.MAX_AGENT_PANELS, int(var.get()))) if var is not None else len(getattr(self, "agent_card_order", []))
+        return {role: self._controller_assignment_for_role(role) for role in list(getattr(self, "agent_card_order", []))[:count]}
+
+    def reset_all_controllers(self):
+        from modules.controller_spec import PROCEDURAL_BASELINE, controller_label
+
+        for var in self.agent_controller_vars.values():
+            var.set(controller_label(PROCEDURAL_BASELINE))
+
+    def apply_controller_to_all(self, label=None):
+        """Convenience: copy one agent's selection (default: the first) onto every agent. Each agent remains independently editable afterwards."""
+        source = label or self.agent_controller_vars[self.agent_card_order[0]].get()
+        for var in self.agent_controller_vars.values():
+            var.set(source)
 
     @staticmethod
     def _resolve_default_packet_access(default_packet_access):
@@ -2336,6 +2368,7 @@ class MarsColonyInterface:
             planner_config=settings["planner_config"],
             construction_parameters=settings["construction_parameters"],
             experimental_settings={"profile_mode": settings.get("profile_mode", "broad_legacy")},
+            controller_assignments=settings.get("controller_assignments"),
             seed=settings.get("seed"),
             startup_progress_callback=startup_progress_callback,
         )
@@ -4059,6 +4092,8 @@ class MarsColonyInterface:
         ttk.Label(frame, text="Stop at sim-seconds (0 = no limit)").grid(row=0, column=2, sticky="w")
         ttk.Entry(frame, textvariable=self.stop_at_sim_time_var, width=8).grid(row=0, column=3, sticky="w", padx=4)
         ttk.Button(frame, text="Reset to Test Drive Defaults", command=self.reset_to_test_drive_defaults).grid(row=0, column=4, sticky="e")
+        ttk.Button(frame, text="Reset all controllers to Procedural Baseline", command=self.reset_all_controllers).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Button(frame, text="Apply first agent's controller to all", command=self.apply_controller_to_all).grid(row=2, column=3, columnspan=2, sticky="e", pady=(6, 0))
         ttk.Label(frame, textvariable=self.test_drive_summary_var, justify="left", wraplength=860).grid(row=1, column=0, columnspan=5, sticky="w", pady=(6, 0))
         for var in (self.seed_var, self.stop_at_sim_time_var, self.speed_multiplier):
             var.trace_add("write", self._refresh_test_drive_summary)
@@ -4079,6 +4114,7 @@ class MarsColonyInterface:
                 f"   |   Auto-stop: {int(self.stop_at_sim_time_var.get())} sim-s   |   Speed x{self.speed_multiplier.get():g}",
             ]
             count = max(1, min(self.MAX_AGENT_PANELS, int(self.num_agents_var.get())))
+            lines.append("Controllers: " + ", ".join(f"{r}={self.agent_controller_vars[r].get()}" for r in self.agent_card_order[:count] if r in self.agent_controller_vars))
             for role in self.agent_card_order[:count]:
                 prof = self.agent_profiles[role]
                 preset = {"High": 0.75, "Low": 0.25}
@@ -4125,6 +4161,7 @@ class MarsColonyInterface:
                 var.set("")
             self.legacy_override_enabled[role].set(False)
             self.agent_brain_settings[role]["backend"].set("")
+        self.reset_all_controllers()
         self._refresh_test_drive_summary()
         self._update_backend_field_states()
 
@@ -4407,6 +4444,18 @@ class MarsColonyInterface:
         ttk.Label(header, text="Alias").grid(row=2, column=0, sticky="w", pady=(2, 0))
         ttk.Entry(header, textvariable=self.agent_identity[role]["alias"], width=20).grid(row=2, column=1, sticky="w", padx=(10, 0), pady=(2, 0))
 
+        from modules.controller_spec import PROCEDURAL_BASELINE, controller_label, enabled_controller_types
+
+        ttk.Label(header, text="Controller").grid(row=3, column=0, sticky="w", pady=(2, 0))
+        self.agent_controller_vars[role] = StringVar(value=controller_label(PROCEDURAL_BASELINE))
+        ttk.Combobox(header, textvariable=self.agent_controller_vars[role], values=[controller_label(t) for t in enabled_controller_types()], state="readonly", width=24).grid(row=3, column=1, sticky="w", padx=(10, 0), pady=(2, 0))
+        # Reserved: a per-agent frame for the selected controller's own settings (model, temperature, seed, limits, prompt version).
+        controller_settings_frame = ttk.Frame(header)
+        controller_settings_frame.grid(row=4, column=0, columnspan=2, sticky="ew")
+        controller_settings_frame.grid_remove()
+        self.agent_controller_settings_frames[role] = controller_settings_frame
+        self.agent_controller_vars[role].trace_add("write", lambda *_: self._refresh_test_drive_summary())
+
         profile_frame = ttk.LabelFrame(card, text="Experimental Profile", padding=(8, 6))
         profile_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         profile_frame.columnconfigure(0, weight=1)
@@ -4650,6 +4699,8 @@ class MarsColonyInterface:
         self.agent_profiles = {}
         self.agent_traits = {}
         self.agent_constituents = {}  # role -> {constituent: StringVar}; blank = use the profile-generated value
+        self.agent_controller_vars = {}  # role -> StringVar: that agent's OWN controller (never a team-wide switch)
+        self.agent_controller_settings_frames = {}  # role -> frame reserved for that agent's controller-specific settings (future Local Ollama)
         self.agent_constituent_resolved = {}  # role -> {constituent: StringVar} resolved preview
         self.legacy_override_enabled = {}  # role -> BooleanVar: legacy low-level sliders act as debug overrides only when ticked
         self.packet_access = {}

@@ -323,3 +323,18 @@ Details, numbers and limitations: `Documentation/checkpoints/2026-10-16_coordina
 - Regression (non-GUI files, 11 parallel chunks): f2ba5ae 112 failing tests, this block 114; the differences are one intended test update (`test_experimental_panel::test_a_substantive_plan_revision...`, now requires explicit supersession) and load-flaky tests that pass in isolation on both trees.
 - NEXT (not started, do not start without the user): backup operationalization; request/push ecology; per-agent controller assignment / Ollama.
 
+
+## DONE: message-channel plan adoption + per-agent controller framework (2026-10-16)
+- Plan adoption through either legitimate channel (`aad83c7`): a committed plan received WITH its contents (id, committed status, assignments, unexpired) by communication is taken up without an artifact read;
+  a bare "a plan exists"/summary without assignments is not. Source (`artifact` | `message`) is on the known-plan record, `team_plan_adopted_locally.acquisition_source` and `team_plan_context.known_plan.read_via`;
+  an older relayed copy never replaces a newer one.
+- Per-agent controller framework (NO Ollama inference, no remote code): `modules/controller_spec.py` (`ControllerSpec{controller_type, settings}`; `procedural_baseline` enabled, `local_ollama` a declared
+  placeholder with reserved settings model/temperature/controller_generation_seed/max_context_tokens/max_output_tokens/timeout_s/prompt_version/inference_parameters; instantiating it raises
+  `ControllerNotEnabledError`), `modules/controller_context.py` (canonical whitelist context `controller_context/1`, attached to every request as `task_context["canonical_context"]`, forbidden-key guard).
+  `SimulationState(controller_assignments=...)` / agent config `controller` / condition JSON `controller_assignments` / `--controller ROLE=TYPE` resolve each agent independently into its own provider+PilotAdapter runtime;
+  the explicit spec supersedes a differing legacy backend setting (logged `controller_spec_superseded_legacy_backend`). Manifest: `controller_assignments` (per agent: id, role, controller + implementation/version, experimental profile + resolved seven,
+  seeds `world_seed` vs `controller_generation_seed`) and `composition_id`; decision telemetry carries `controller_type`/`controller_agent_id`. GUI: per-agent Controller selector + reserved settings frame + reset/apply-to-all buttons (no global LLM switch).
+- Validation: 12 Procedural Baseline runs (coord 0.1/0.5/0.9 x seeds 0-3, 600 s) are identical before/after the refactor (selected/executed actions, validated structures, team-plan measures, middleware rewrites, profile resolution); no stalls or rewrites.
+  Tests: `tests/test_controller_framework.py` (16), message-adoption tests in `tests/test_team_plan_coordination_hardening.py`.
+- NEXT (not started, needs the user): LOCAL OLLAMA ONLY controller implementation behind `ControllerSpec` (adapter + canonical-context prompt + response validation); no cloud providers.
+

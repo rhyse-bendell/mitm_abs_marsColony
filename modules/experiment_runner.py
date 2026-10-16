@@ -4,7 +4,9 @@ A condition is: seed, duration, optional backend, and `experimental_settings`:
     {"constructs": {"teamwork_potential": x, "taskwork_potential": y},
      "constituent_overrides": {<any of the seven constituents>: value},
      "profile_mode": "broad_legacy" (default) | "compact_panel",   # how residual (non-constituent) mechanisms are set
-     "per_agent": {"Architect": {"constructs": {...}, "constituent_overrides": {...}}}}
+     "per_agent": {"Architect": {"constructs": {...}, "constituent_overrides": {...}}},
+     "controller_assignments": {"Botanist": "procedural_baseline", ...}}   # per-agent controller; unlisted agents stay Procedural Baseline
+Controller composition is part of the condition identity (summary["controller_composition_id"]) and of the session manifest.
 Explicit constituent overrides replace gestalt-generated values (see modules/experimental_profile.py).
 """
 
@@ -28,6 +30,7 @@ def run_condition(
     project_root: Optional[str | Path] = None,
     brain_backend: str = "rule_brain",
     step_s: float = 1.0,
+    controller_assignments: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run one seeded condition to ``duration_s`` and return a JSON-serializable summary (also written to the session)."""
     random.seed(int(seed))
@@ -43,6 +46,7 @@ def run_condition(
         seed=int(seed),
         brain_backend=brain_backend,
         experimental_settings=dict(experimental_settings or {}),
+        controller_assignments=controller_assignments,
     )
     trajectory = []
     try:
@@ -66,6 +70,8 @@ def run_condition(
             "duration_s": duration_s,
             "experimental_settings": dict(experimental_settings or {}),
             "manifest_condition": state._experimental_manifest(),
+            "controller_assignments": state.controller_manifest(),
+            "controller_composition_id": state.controller_manifest().get("composition_id"),
             "measures": measures,
             "trajectory": trajectory,
         }
@@ -99,6 +105,7 @@ def main(argv=None) -> int:
     parser.add_argument("--condition-json", default=None, help="JSON file with experimental_settings (CLI flags are applied on top)")
     parser.add_argument("--profile-mode", default=None, help="broad_legacy (default) or compact_panel: how residual mechanisms are set")
     parser.add_argument("--backend", default="rule_brain")
+    parser.add_argument("--controller", action="append", default=[], metavar="ROLE=TYPE", help="per-agent controller, e.g. --controller Botanist=procedural_baseline (repeatable)")
     parser.add_argument("--out", default=None, help="write the summary JSON here")
     parser.add_argument("--project-root", default=None, help="session output root (default: temporary)")
     args = parser.parse_args(argv)
@@ -112,7 +119,10 @@ def main(argv=None) -> int:
     settings["constituent_overrides"].update(parse_overrides(args.set))
     if args.profile_mode:
         settings["profile_mode"] = args.profile_mode
-    summary = run_condition(seed=args.seed, duration_s=args.duration, experimental_settings=settings, project_root=args.project_root, brain_backend=args.backend, experiment_name="headless_condition")
+    from modules.controller_spec import parse_cli_assignments
+
+    controllers = {**dict(settings.get("controller_assignments") or {}), **parse_cli_assignments(args.controller)}
+    summary = run_condition(seed=args.seed, duration_s=args.duration, experimental_settings=settings, project_root=args.project_root, brain_backend=args.backend, experiment_name="headless_condition", controller_assignments=controllers or None)
     text = json.dumps(summary, indent=2, default=str)
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")

@@ -7552,7 +7552,7 @@ class Agent:
                     "action_affordance_absent_reason",
                     {"action_type": action_id, "reason": "not_in_context_action_affordances", "affordance_signature": signature},
                 )
-        return AgentBrainRequest(
+        request = AgentBrainRequest(
             request_id=request_id or f"{self.agent_id}-{uuid.uuid4().hex[:8]}",
             tick=self.sim_step_count,
             sim_time=float(sim_state.time),
@@ -7591,6 +7591,13 @@ class Agent:
             control_state_snapshot=compact_control_snapshot,
             recent_action_outcomes=[dict(o) for o in list(context.individual_cognitive_state.get("recent_action_outcomes", []) or [])[-6:]],
         )
+        # The canonical, controller-neutral view (whitelisted legitimate state only): identical in shape for every controller.
+        from modules.controller_context import assert_canonical_context_clean, build_canonical_context
+
+        request.task_context["canonical_context"] = assert_canonical_context_clean(
+            build_canonical_context(context, agent_id=self.agent_id, role=self.role, controller_type=self.controller_type_id())
+        )
+        return request
 
     def _is_productive_action(self, action_type):
         return action_type in {
@@ -7716,6 +7723,16 @@ class Agent:
             "policy_seed_key": "ctx" if self.run_seed is None else f"ctx:{self.run_seed}:{self.agent_id}",
         }
 
+    def controller_type_id(self):
+        """Which controller drives this agent: its explicit ControllerSpec type, else the procedural baseline or the legacy backend it resolves to."""
+        spec = getattr(self, "controller_spec", None)
+        if spec is not None:
+            return spec.controller_type
+        backend = str((getattr(self, "brain_config", {}) or {}).get("backend", "rule_brain"))
+        from modules.brain_provider import resolve_pilot_id
+
+        return "procedural_baseline" if resolve_pilot_id(backend) == "procedural_baseline" else f"legacy_backend:{backend}"
+
     def _build_sync_pilot_request(self, sim_state, context, trigger_reason):
         """Canonical AgentBrainRequest for a synchronous (non-LLM) Pilot decision."""
         request = self._build_brain_request(
@@ -7825,6 +7842,8 @@ class Agent:
             "pilot_selection_via_adapter",
             {
                 "pilot_id": getattr(adapter, "pilot_id", None),
+                "controller_type": self.controller_type_id(),
+                "controller_agent_id": self.agent_id,
                 "request_id": request.request_id,
                 "response_id": response.response_id,
                 "affordance_signature": getattr(self, "last_affordance_signature", None),
