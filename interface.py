@@ -2447,6 +2447,7 @@ class MarsColonyInterface:
 
     def _finalize_simulation_install(self, sim):
         self.sim = sim
+        sim.async_inference = True  # model calls run on a worker thread; the Tk thread never waits for Ollama
         self.run_state = self.STATE_IDLE
         self._cancel_run_loop()
         self._reset_persistent_startup_views()
@@ -2660,6 +2661,10 @@ class MarsColonyInterface:
             return
 
         self.sim.update(self.base_dt)
+        self._update_ollama_runtime_status()
+        if getattr(self.sim, "inference_pending", lambda: False)() and not getattr(self.sim, "controller_error", None):
+            self._schedule_next_tick()  # waiting on a local model: simulated time is held, the GUI stays live (Pause/Stop work), no heavy redraw
+            return
         if getattr(self.sim, "controller_error", None):
             self.stop_experiment()
             messagebox.showerror("Controller error - run stopped", str(self.sim.controller_error.get("message")))
@@ -2679,6 +2684,19 @@ class MarsColonyInterface:
         self.update_dik_derivations_tab()
         self.update_rule_derivations_tab()
         self._schedule_next_tick()
+
+    def _update_ollama_runtime_status(self):
+        """Per-agent 'Ollama: ready | thinking | error' (written by the inference worker/barrier; read-only here)."""
+        sim = self.sim
+        if sim is None:
+            return
+        for agent in getattr(sim, "agents", []):
+            ovars = getattr(self, "agent_ollama_vars", {}).get(getattr(agent, "role", None))
+            if not ovars or "runtime" not in ovars:
+                continue
+            adapter = (sim.get_agent_brain_runtime(agent) or {}).get("adapter")
+            status = getattr(adapter, "runtime_status", None) if getattr(adapter, "synchronous_llm_pilot", False) else None
+            ovars["runtime"].set(f"Ollama: {status}" if status else "")
 
     def _interactive_duration_reached(self):
         var = getattr(self, "stop_at_sim_time_var", None)
@@ -4544,13 +4562,14 @@ class MarsColonyInterface:
         self.agent_controller_settings_frames[role] = controller_settings_frame
         from modules.controller_spec import LOCAL_OLLAMA_DEFAULTS
 
-        ovars = {"status": StringVar(value="Ollama status: not checked"), "base_url": StringVar(value=LOCAL_OLLAMA_DEFAULTS["base_url"]), "installed": []}
+        ovars = {"runtime": StringVar(value=""), "status": StringVar(value="Ollama status: not checked"), "base_url": StringVar(value=LOCAL_OLLAMA_DEFAULTS["base_url"]), "installed": []}
         defaults = {"model": "", "temperature": "0.2", "controller_generation_seed": "", "max_output_tokens": "400", "max_context_tokens": "8192",
                     "prompt_budget_tokens": "", "timeout_s": "120", "prompt_version": LOCAL_OLLAMA_DEFAULTS["prompt_version"], "max_retries": "2", "failure_policy": "stop_run"}
         for key, _kind in OLLAMA_GUI_FIELDS:
             ovars[key] = StringVar(value=defaults[key])
         self.agent_ollama_vars[role] = ovars
         ttk.Label(controller_settings_frame, textvariable=ovars["status"], foreground="#3f556e", wraplength=520, justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(controller_settings_frame, textvariable=ovars["runtime"], foreground="#1f6f43", font=("TkDefaultFont", 9, "bold")).grid(row=1, column=1, sticky="e")
         ttk.Button(controller_settings_frame, text="Check Ollama / refresh models", command=lambda r=role: self._ollama_status_check(r)).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 4))
         labels = {"model": "Model (installed)", "temperature": "Temperature", "controller_generation_seed": "Generation seed (blank = none)", "max_output_tokens": "Max output tokens",
                   "max_context_tokens": "Context window (tokens)", "prompt_budget_tokens": "Prompt budget (blank = auto)", "timeout_s": "Timeout (s)", "prompt_version": "Prompt version",

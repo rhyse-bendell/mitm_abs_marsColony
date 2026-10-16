@@ -163,6 +163,12 @@ class SimulationState:
             brain_backend = "rule_brain"
         self.controller_error = None  # set when a controller fails with failure_policy=stop_run; the run then stops advancing
         self.ollama_preflight_results = {}
+        self.ollama_warmup_results = {}
+        # Non-blocking inference (opt-in; the Tk GUI sets it): model calls run on a worker thread and the simulation is HELD (not advanced) while any
+        # is pending, so simulated time never includes inference wall time. Off (default) = the original synchronous call.
+        self.async_inference = False
+        self.inference_closed = False
+        self._inference_executor = None
         # Deterministic run seed: seeds the global RNG and gives every agent its own RNG stream.
         self.terminal_state = None  # set once by _check_terminal_state()
         self.terminal_time = None
@@ -958,6 +964,13 @@ class SimulationState:
         key = (settings["base_url"], settings["model"])
         if key not in self.ollama_preflight_results:
             self.ollama_preflight_results[key] = ollama_pilot.preflight(settings)  # raises ControllerUnavailableError with a clear reason
+        if settings.get("warmup", True) and key not in self.ollama_warmup_results:
+            cb = getattr(self, "startup_progress_callback", None)
+            if callable(cb):
+                cb("warming_model", 0, 0, agent_name, f"Warming model {settings['model']} (local load; the first load can take a minute)")
+            warm = ollama_pilot.warm_up(settings)
+            self.ollama_warmup_results[key] = warm
+            self.logger.log_event(self.time, "ollama_warmup" if warm.get("warmed") else "ollama_warmup_failed", {"agent": agent_name, "model": settings["model"], **{k: (round(v, 3) if isinstance(v, float) else v) for k, v in warm.items()}})
         self.logger.log_event(self.time, "ollama_preflight_ok", {"agent": agent_name, "model": settings["model"], "base_url": settings["base_url"], **{k: v for k, v in self.ollama_preflight_results[key].items() if k != "installed_models"}})
 
     def halt_for_controller_error(self, agent, failure):
@@ -1550,6 +1563,10 @@ class SimulationState:
     def update(self, base_dt):
         if self.controller_error is not None:
             return  # explicit controller-error terminal state: nothing advances and no other controller takes over
+        if self.inference_closed:
+            return  # stopped run: nothing advances
+        if self.async_inference and self.inference_pending():
+            return  # inference barrier: no simulated time passes while a model call is pending
         dt = base_dt * self.speed_multiplier
         rule_brain_runtime = str(self.effective_brain_backend or self.configured_brain_backend).lower() == "rule_brain"
         for agent in self.agents:
@@ -1743,7 +1760,30 @@ class SimulationState:
             },
         }
 
+    def inference_executor(self):
+        if self._inference_executor is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            self._inference_executor = ThreadPoolExecutor(max_workers=max(1, len(self.agents)), thread_name_prefix="ollama-infer")
+        return self._inference_executor
+
+    def inference_pending(self):
+        """True while any agent has a model call that has not returned."""
+        return any((getattr(a, "_llm_job", None) is not None and not a._llm_job["future"].done()) for a in self.agents)
+
+    def _close_inference(self):
+        """Run is stopping: no further attempts are started, late results are discarded, nothing waits for the model."""
+        self.inference_closed = True
+        for a in self.agents:
+            adapter = (self.get_agent_brain_runtime(a) or {}).get("adapter") if hasattr(self, "get_agent_brain_runtime") else None
+            if hasattr(adapter, "cancel"):
+                adapter.cancel()
+            a._llm_job = None
+        if self._inference_executor is not None:
+            self._inference_executor.shutdown(wait=False, cancel_futures=True)
+
     def stop(self):
+        self._close_inference()
         if self.run_stopped_wallclock_at is None:
             self.run_stopped_wallclock_at = time.perf_counter()
         self.runtime_witness_audit_result = self.runtime_witness_audit.finalize()

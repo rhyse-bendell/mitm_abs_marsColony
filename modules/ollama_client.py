@@ -128,9 +128,18 @@ class OllamaClient:
         return None
 
     # ------------------------------------------------------------------ inference
+    def warm(self, *, model: str, keep_alive: str = "30m", timeout_s: Optional[float] = None) -> Dict[str, Any]:
+        """Load an ALREADY-INSTALLED model into memory (POST /api/chat with an empty message list; Ollama's documented load-only call) and keep it
+        resident for `keep_alive`. Generates nothing. A missing model is an error here, never a download."""
+        started = time.perf_counter()
+        reply = self._request("POST", "/api/chat", {"model": model, "messages": [], "stream": False, "keep_alive": keep_alive}, timeout_s=timeout_s)
+        return {"latency_s": time.perf_counter() - started, "load_duration_s": (reply.get("load_duration") or 0) / 1e9, "done_reason": reply.get("done_reason")}
+
     def chat(self, *, model: str, messages: List[Dict[str, str]], options: Dict[str, Any], response_format: Any = None, think: Optional[bool] = False,
-             timeout_s: Optional[float] = None) -> Dict[str, Any]:
+             timeout_s: Optional[float] = None, keep_alive: Optional[str] = None) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"model": model, "messages": messages, "stream": False, "options": dict(options)}
+        if keep_alive:
+            payload["keep_alive"] = keep_alive
         if response_format is not None:
             payload["format"] = response_format
         if think is not None:

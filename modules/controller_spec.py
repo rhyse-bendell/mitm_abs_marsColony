@@ -40,13 +40,15 @@ GENERATIVE_SETTING_FIELDS = (
     "max_retries",  # bounded retries after an unparsable/illegal reply
     "failure_policy",  # what happens when retries are exhausted: "stop_run" (default) | "idle_and_log" (explicit, logged; never another controller)
     "think",  # request model 'thinking' output (default False; no hidden chain-of-thought is requested)
+    "warmup",  # load the model before simulated time starts (default True; loads an installed model only, never downloads)
+    "keep_alive",  # how long Ollama keeps the model resident between calls (default "30m")
     "inference_parameters",  # additional SAFE Ollama options only (see SAFE_INFERENCE_PARAMETERS)
 )
 
 LOCAL_OLLAMA_DEFAULTS: Dict[str, Any] = {
     "model": None, "base_url": "http://127.0.0.1:11434", "temperature": 0.2, "controller_generation_seed": None, "max_context_tokens": 8192,
-    "max_output_tokens": 400, "prompt_budget_tokens": None, "timeout_s": 120.0, "prompt_version": "canonical_choice_v1", "max_retries": 2,
-    "failure_policy": "stop_run", "think": False, "inference_parameters": {},
+    "max_output_tokens": 400, "prompt_budget_tokens": None, "timeout_s": 120.0, "prompt_version": "canonical_choice_v2", "max_retries": 2,
+    "failure_policy": "stop_run", "think": False, "warmup": True, "keep_alive": "30m", "inference_parameters": {},
 }
 FAILURE_POLICIES = ("stop_run", "idle_and_log")
 SAFE_INFERENCE_PARAMETERS = ("top_p", "top_k", "min_p", "repeat_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty", "num_keep", "mirostat", "mirostat_tau", "mirostat_eta", "typical_p")

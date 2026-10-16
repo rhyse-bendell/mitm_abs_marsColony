@@ -27,7 +27,7 @@ ROLES = ["Architect", "Botanist", "Engineer"]
 # ------------------------------------------------------------------ fakes
 def first_inspect_reply(messages, options, model):
     ctx = json.loads(messages[1]["content"].split("CONTEXT:\n", 1)[1].split("\n\nChoose", 1)[0])
-    legal = ctx["legal_actions"]
+    legal = ctx["executable_actions"]
     pick = next((a for a in legal if a["action_type"] == "inspect_information_source"), legal[0])
     return json.dumps({"affordance_id": pick["affordance_id"], "arguments": {}, "decision_note": "test"})
 
@@ -48,7 +48,7 @@ class FakeOllama:
     def list_models(self):
         return [{"name": m} for m in self.models]
 
-    def chat(self, *, model, messages, options, response_format=None, think=False, timeout_s=None):
+    def chat(self, *, model, messages, options, response_format=None, think=False, timeout_s=None, keep_alive=None):
         self.chat_calls.append({"model": model, "messages": messages, "options": options, "format": response_format, "think": think})
         content = self.reply(messages, options, model)
         return {"content": content, "latency_s": 0.01, "done_reason": "stop", "token_metadata": {"prompt_eval_count": 10, "eval_count": 5}}
@@ -349,15 +349,15 @@ def test_prompt_budget_is_deterministic_tiered_and_never_drops_affordances(fake_
     canon["held_dik"]["information"] = [f"I_FAKE_{i}" for i in range(200)]
     small, again, large = build_prompt(canon, budget_tokens=1500), build_prompt(canon, budget_tokens=1500), build_prompt(canon, budget_tokens=40000)
     assert small["prompt_hash"] == again["prompt_hash"] and small["metadata"] == again["metadata"]
-    assert len(small["affordance_map"]) == len(canon["legal_actions"]) == small["metadata"]["sections"]["legal_actions"]["included_items"]  # affordances are never traded for history
+    assert len(small["affordance_map"]) == len(canon["executable_actions"]) == small["metadata"]["sections"]["executable_actions"]["included_items"]  # affordances are never traded for history
     assert small["metadata"]["omitted_item_counts"] and small["metadata"]["estimated_prompt_tokens"] < large["metadata"]["estimated_prompt_tokens"]
     om = small["metadata"]["sections"]
     assert om["recent_outcomes.older_events"]["omitted_items"] >= om["recent_outcomes.actions"]["omitted_items"] or om["recent_outcomes.older_events"]["included_items"] <= om["recent_outcomes.actions"]["included_items"]
     assert not large["metadata"]["omitted_item_counts"]
     body = json.loads(small["user"].split("CONTEXT:\n", 1)[1].split("\n\nChoose", 1)[0])  # complete, valid JSON: never cut off at the end
-    assert {"identity", "goals", "observations", "known_gaps", "team_plan", "legal_actions"} <= set(body)
+    assert {"identity", "goals", "observations", "known_gaps", "team_plan", "executable_actions"} <= set(body)
     tiny = build_prompt(canon, budget_tokens=200)
-    assert tiny["metadata"]["tier1_over_budget"] is True and len(tiny["affordance_map"]) == len(canon["legal_actions"])
+    assert tiny["metadata"]["tier1_over_budget"] is True and len(tiny["affordance_map"]) == len(canon["executable_actions"])
     _stop(st)
 
 
@@ -399,7 +399,7 @@ def test_invented_illegal_or_malformed_choices_are_rejected_and_retried_within_t
     monkeypatch.setattr(ad, "client", FakeOllama(reply=lambda m, o, mod: (calls.append(m), bad if len(calls) == 1 else good)[1]))
     resp = ad.choose_action(req)
     assert ad.last_trace["retry_count"] == 1 and ad.last_trace["attempts"][0]["error"] and resp.plan.next_action.action_type.value == ctx.action_affordances[0]["action_type"]
-    assert "rejected" in calls[1][-1]["content"] and "currently legal ids" in calls[1][-1]["content"]  # a concise correction naming the legal affordances
+    assert "rejected" in calls[1][-1]["content"] and "currently executable ids" in calls[1][-1]["content"]  # a concise correction naming the legal affordances
 
 
 def test_retry_exhaustion_raises_a_controller_failure_and_never_consults_the_baseline(monkeypatch, request_obj):

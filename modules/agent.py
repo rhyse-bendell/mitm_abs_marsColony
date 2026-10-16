@@ -7819,7 +7819,7 @@ class Agent:
                 )
                 break
 
-    def _select_decision_through_pilot_adapter(self, sim_state, context, trigger_reason, runtime=None):
+    def _select_decision_through_pilot_adapter(self, sim_state, context, trigger_reason, runtime=None, *, allow_defer=False):
         """Synchronous Pilot selection through this agent's PilotAdapter.
 
         Used for the Procedural Baseline (synchronous, no async planner machinery). The request
@@ -7841,23 +7841,63 @@ class Agent:
                 request_id=f"{self.agent_id}-sync-{self.sim_step_count}-{uuid.uuid5(uuid.NAMESPACE_OID, f'{self.agent_id}:{self.sim_step_count}:{trigger_reason}').hex[:6]}",
             )
             self._last_controller_request_id = request.request_id
+            if allow_defer and getattr(sim_state, "async_inference", False):
+                self._submit_inference_job(sim_state, adapter, request, context, runtime, trigger_reason)
+                return None  # the decision is taken when the worker's result is consumed (see _run_llm_pilot_controller)
             try:
                 response = adapter.choose_action(request)
             finally:
-                trace = getattr(adapter, "last_trace", None)
-                if trace is not None and trace.get("request_id") == request.request_id and not trace.get("_recorded"):
-                    trace["_recorded"] = True
-                    sim_state.record_controller_trace({k: v for k, v in trace.items() if k != "_recorded"} | {"controller_type": self.controller_type_id()})
-                    self._emit_event(sim_state, "controller_decision", {
-                        "controller_type": self.controller_type_id(), "model": trace.get("model"), "request_id": trace.get("request_id"), "prompt_hash": trace.get("prompt_hash"),
-                        "validation_outcome": trace.get("validation_outcome"), "retry_count": trace.get("retry_count"), "parsed_affordance_id": trace.get("parsed_affordance_id"),
-                        "parsed_action": trace.get("parsed_action"), "wall_clock_inference_s": round(float(trace.get("wall_clock_inference_s") or 0.0), 3),
-                        "estimated_prompt_tokens": (trace.get("budget") or {}).get("estimated_prompt_tokens"), "omitted_item_counts": (trace.get("budget") or {}).get("omitted_item_counts"),
-                        "tier1_over_budget": (trace.get("budget") or {}).get("tier1_over_budget"),
-                        "token_metadata": ((trace.get("attempts") or [{}])[-1] or {}).get("token_metadata")})
+                self._record_controller_decision_trace(sim_state, adapter, request)
         else:
             request = self._build_sync_pilot_request(sim_state, context, trigger_reason)
             response = adapter.choose_action(request)
+        return self._finalize_pilot_selection(sim_state, context, runtime, adapter, request, response)
+
+    def _record_controller_decision_trace(self, sim_state, adapter, request):
+        trace = getattr(adapter, "last_trace", None)
+        if trace is not None and trace.get("request_id") == request.request_id and not trace.get("_recorded"):
+            trace["_recorded"] = True
+            sim_state.record_controller_trace({k: v for k, v in trace.items() if k != "_recorded"} | {"controller_type": self.controller_type_id()})
+            self._emit_event(sim_state, "controller_decision", {
+                "controller_type": self.controller_type_id(), "model": trace.get("model"), "request_id": trace.get("request_id"), "prompt_hash": trace.get("prompt_hash"),
+                "validation_outcome": trace.get("validation_outcome"), "retry_count": trace.get("retry_count"), "parsed_affordance_id": trace.get("parsed_affordance_id"),
+                "parsed_action": trace.get("parsed_action"), "wall_clock_inference_s": round(float(trace.get("wall_clock_inference_s") or 0.0), 3),
+                "estimated_prompt_tokens": (trace.get("budget") or {}).get("estimated_prompt_tokens"), "omitted_item_counts": (trace.get("budget") or {}).get("omitted_item_counts"),
+                "tier1_over_budget": (trace.get("budget") or {}).get("tier1_over_budget"),
+                "token_metadata": ((trace.get("attempts") or [{}])[-1] or {}).get("token_metadata")})
+
+    def _submit_inference_job(self, sim_state, adapter, request, context, runtime, trigger_reason):
+        """Hand the model call to a worker thread. The worker touches ONLY the adapter and a private copy of the request; it never reads or writes
+        simulator state, and the simulation does not advance while any job is pending (SimulationState.update barrier), so nothing is shared."""
+        import copy
+        import time as _time
+
+        request.task_context = copy.deepcopy(request.task_context)
+        adapter.runtime_status = "thinking"
+
+        def work():
+            try:
+                reply = adapter.choose_action(request)
+            except BaseException:
+                adapter.runtime_status = "error"
+                raise
+            adapter.runtime_status = "ready"
+            return reply
+
+        self._llm_job = {"future": sim_state.inference_executor().submit(work), "adapter": adapter, "request": request, "context": context, "runtime": runtime,
+                         "trigger_reason": trigger_reason, "submitted_wall": _time.perf_counter(), "submitted_sim_time": float(sim_state.time)}
+
+    def _complete_inference_job(self, sim_state):
+        """Main-thread consumption of a finished job: same trace recording, grounding, gate and translation as the synchronous path."""
+        job, self._llm_job = self._llm_job, None
+        adapter, request = job["adapter"], job["request"]
+        try:
+            response = job["future"].result()
+        finally:
+            self._record_controller_decision_trace(sim_state, adapter, request)
+        return self._finalize_pilot_selection(sim_state, job["context"], job["runtime"], adapter, request, response)
+
+    def _finalize_pilot_selection(self, sim_state, context, runtime, adapter, request, response):
         grounded = self._ground_validate_and_decide(response, context, request, sim_state, runtime)
         response = grounded["response"]
         decision = grounded["decision"]
@@ -10390,9 +10430,20 @@ class Agent:
         from modules.ollama_pilot import ControllerFailure
 
         runtime = sim_state.get_agent_brain_runtime(self)
-        context = sim_state.brain_context_builder.build(sim_state, self)
+        job = getattr(self, "_llm_job", None)
         try:
-            decision = self._select_decision_through_pilot_adapter(sim_state, context, planner_reason, runtime=runtime)
+            if job is not None:
+                if not job["future"].done():
+                    return False  # still thinking: this agent takes no decision (the simulation is held by the inference barrier)
+                if getattr(sim_state, "inference_closed", False):
+                    self._llm_job = None
+                    return False  # the run was stopped: a late result never mutates it
+                decision = self._complete_inference_job(sim_state)
+            else:
+                context = sim_state.brain_context_builder.build(sim_state, self)
+                decision = self._select_decision_through_pilot_adapter(sim_state, context, planner_reason, runtime=runtime, allow_defer=True)
+                if decision is None:
+                    return False  # submitted to the worker; consumed on a later tick
         except ControllerFailure as failure:
             self._handle_controller_failure(sim_state, failure)
             return False

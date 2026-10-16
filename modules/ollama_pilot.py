@@ -58,6 +58,19 @@ def preflight(settings: Dict[str, Any]) -> Dict[str, Any]:
     return {"available": True, "version": status.get("version"), "resolved_model": resolved, "installed_models": installed, "base_url": status.get("base_url")}
 
 
+def warm_up(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Load the selected (already installed) model before simulated time starts. -> {warmed, latency_s, load_duration_s} or {warmed: False, error}.
+    Failure is reported, not fatal: the first real call is then simply cold, and any real problem surfaces through the normal inference error path."""
+    client = client_factory(settings.get("base_url"), float(settings.get("timeout_s") or 120.0))
+    if not hasattr(client, "warm"):
+        return {"warmed": False, "error": "client has no warm-up support"}
+    try:
+        info = client.warm(model=str(settings["model"]), keep_alive=str(settings.get("keep_alive") or "30m"), timeout_s=max(300.0, float(settings.get("timeout_s") or 120.0)))
+    except OllamaError as exc:
+        return {"warmed": False, "error": f"{type(exc).__name__}: {exc}"}
+    return {"warmed": True, **info}
+
+
 def _parse_json_object(text: str) -> Dict[str, Any]:
     t = (text or "").strip()
     fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", t, flags=re.S)
@@ -84,6 +97,11 @@ class OllamaPilotAdapter:
         self.client = client_factory(settings.get("base_url"), float(settings.get("timeout_s") or 120.0))
         self.last_trace: Optional[Dict[str, Any]] = None
         self.traces_written = 0
+        self.runtime_status = "ready"  # "ready" | "thinking" | "error" (per-agent GUI label); written by whoever drives the call
+        self.cancelled = False  # set when the run stops: no further attempts are started and the late result is discarded
+
+    def cancel(self) -> None:
+        self.cancelled = True
 
     # ------------------------------------------------------------------ PilotAdapter protocol
     def choose_fallback_action(self, *, agent=None, context_packet=None, reason="", sim_state=None):
@@ -114,7 +132,7 @@ class OllamaPilotAdapter:
         canonical = assert_canonical_context_clean(dict((request.task_context or {}).get("canonical_context") or {}))
         if not canonical:
             raise ControllerFailure("no canonical context in request", {"error": "missing_canonical_context"})
-        built = build_prompt(canonical, budget_tokens=self._budget_tokens(), prompt_version=str(self.settings.get("prompt_version") or "canonical_choice_v1"))
+        built = build_prompt(canonical, budget_tokens=self._budget_tokens(), prompt_version=str(self.settings.get("prompt_version") or "canonical_choice_v2"))
         amap, schema = built["affordance_map"], built["schema"]
         trace: Dict[str, Any] = {
             "kind": "ollama_decision", "request_id": request.request_id, "agent_id": self.agent_id, "role": self.role, "sim_time": float(request.sim_time),
@@ -129,12 +147,15 @@ class OllamaPilotAdapter:
         messages: List[Dict[str, str]] = [{"role": "system", "content": built["system"]}, {"role": "user", "content": built["user"]}]
         max_retries = int(self.settings.get("max_retries", 2))
         for attempt in range(max_retries + 1):
+            if self.cancelled:
+                trace["validation_outcome"] = "cancelled"
+                raise ControllerFailure("run stopped while inference was pending", trace)
             record: Dict[str, Any] = {"attempt": attempt, "raw_response": None, "error": None, "latency_s": None, "token_metadata": {}, "done_reason": None}
             trace["attempts"].append(record)
             trace["retry_count"] = attempt
             try:
                 reply = self.client.chat(model=self.model, messages=messages, options=self._options(), response_format=schema, think=bool(self.settings.get("think", False)),
-                                         timeout_s=float(self.settings.get("timeout_s") or 120.0))
+                                         timeout_s=float(self.settings.get("timeout_s") or 120.0), **({"keep_alive": str(self.settings["keep_alive"])} if self.settings.get("keep_alive") else {}))
             except OllamaError as exc:  # transport/timeout/service problems: recorded, retried within the same bound, never replaced by another controller
                 record["error"] = f"{type(exc).__name__}: {exc}"
                 trace["validation_outcome"] = "inference_error"
@@ -190,7 +211,7 @@ class OllamaPilotAdapter:
     def _correction(error: str, amap: Dict[str, Dict[str, Any]]) -> str:
         legal = "; ".join(f"{i}={a.get('action_type')}:{a.get('target_id')}" for i, a in list(amap.items())[:60])
         return (f"Your reply was rejected ({error}). Reply with only a JSON object {{\"affordance_id\": ..., \"arguments\": {{}}, \"decision_note\": ...}} "
-                f"where affordance_id is exactly one of the currently legal ids: {legal}.")
+                f"where affordance_id is exactly one of the currently executable ids: {legal}.")
 
     def _response(self, request: AgentBrainRequest, aff: Dict[str, Any], note: str, trace: Dict[str, Any]) -> AgentBrainResponse:
         step = {"step_index": 0, "action_type": ExecutableActionType(aff["action_type"]).value, "target_id": aff.get("target_id"), "target_zone": aff.get("target_zone"),

@@ -164,7 +164,7 @@ def test_canonical_context_is_per_agent_clean_and_does_not_leak_private_dik(sim)
     assert ca["identity"]["role"] == "Architect" and cb["identity"]["role"] == "Botanist" and ca["identity"]["agent_id"] != cb["identity"]["agent_id"]
     assert "I_BOT_GREENHOUSE_DEPENDENCIES" in json.dumps(cb["held_dik"]) and "I_BOT_GREENHOUSE_DEPENDENCIES" not in json.dumps(ca["held_dik"])
     assert not find_forbidden_keys(ca) and not find_forbidden_keys(cb)
-    assert set(ca) == {"schema", "identity", "task", "goals", "observations", "held_dik", "known_gaps", "communications_and_artifacts", "team_plan_context", "recent_outcomes", "legal_actions"}
+    assert set(ca) == {"schema", "identity", "task", "goals", "observations", "held_dik", "known_gaps", "communications_and_artifacts", "team_plan_context", "recent_outcomes", "last_rejection", "executable_actions", "blocked_actions"}
 
 
 def test_forbidden_keys_are_rejected_at_any_depth():
@@ -179,7 +179,7 @@ def test_request_carries_the_canonical_context_for_the_baseline_too(sim):
     context = sim.brain_context_builder.build(sim, a)
     request = a._build_sync_pilot_request(sim, context, "test")
     canon = request.task_context["canonical_context"]
-    assert canon["identity"]["controller_type"] == "procedural_baseline" and canon["legal_actions"] == list(context.action_affordances)
+    assert canon["identity"]["controller_type"] == "procedural_baseline" and sorted(map(repr, canon["executable_actions"])) + sorted(map(repr, [{k: v for k, v in b.items() if k != "blockers"} for b in canon["blocked_actions"]])) == sorted(map(repr, canon["executable_actions"])) + sorted(map(repr, [b for b in context.action_affordances if b not in canon["executable_actions"]]))
     assert not find_forbidden_keys(request.task_context["canonical_context"])
 
 

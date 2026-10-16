@@ -3,7 +3,7 @@
 The prompt is built ONLY from the controller-neutral canonical context (modules/controller_context.py). Nothing else about the simulator
 reaches the model. Budgeting is by priority tiers, never by truncating the serialised text:
 
-  tier 1 (always sent, never dropped): identity, task, goals, observations, known gaps/blockers, team-plan assignment, legal affordances
+  tier 1 (always sent, never dropped): identity, task, goals, observations, known gaps/blockers, the last rejected action, team-plan assignment, executable and blocked actions
   tier 2 (as budget allows, item by item): held DIK, communications/artifacts, recent action outcomes
   tier 3 (as budget allows, item by item): older history and lower-relevance context
 
@@ -17,15 +17,15 @@ import hashlib
 import json
 from typing import Any, Dict, List, Tuple
 
-PROMPT_VERSION = "canonical_choice_v1"
+PROMPT_VERSION = "canonical_choice_v2"
 
 SYSTEM_PROMPTS = {
-    "canonical_choice_v1": (
+    "canonical_choice_v2": (
         "You control one crew member in a Mars colony construction task. You know only what appears in the CONTEXT below; "
-        "nothing else about the world is available to you. Each turn you must choose exactly ONE of the listed legal_actions "
-        "by its affordance_id. You cannot create new actions, targets or arguments. "
+        "nothing else about the world is available to you. Each turn you must choose exactly ONE of the listed executable_actions "
+        "by its affordance_id. blocked_actions are listed for information only: they have no affordance_id and cannot be chosen. You cannot create new actions, targets or arguments. "
         "Reply with a single JSON object and nothing else: "
-        '{"affordance_id": "<one id from legal_actions>", "arguments": {}, "decision_note": "<optional, at most one short sentence>"}. '
+        '{"affordance_id": "<one id from executable_actions>", "arguments": {}, "decision_note": "<optional, at most one short sentence>"}. '
         "Put arguments only if the chosen action lists action_args; copy them unchanged."
     ),
 }
@@ -66,6 +66,13 @@ def curate_affordance(index: int, aff: Dict[str, Any], optional: bool = True) ->
     return row
 
 
+def curate_blocked(aff: Dict[str, Any]) -> Dict[str, Any]:
+    """A blocked action: what it is and why it is blocked. No affordance_id (it cannot be selected)."""
+    row = {k: aff[k] for k in ("action_type", "target_id", "action_args", "observed_failure_age_s") if k in aff and aff[k] not in (None, [], {}, "")}
+    row["blockers"] = [_short(b, 80) for b in (aff.get("blockers") or [])][:6]
+    return row
+
+
 def _short(text: Any, n: int) -> str:
     s = str(text or "")
     return s if len(s) <= n else s[: n - 1] + "…"
@@ -93,7 +100,9 @@ def build_prompt(canonical: Dict[str, Any], *, budget_tokens: int, prompt_versio
     if prompt_version not in SYSTEM_PROMPTS:
         raise ValueError(f"unknown prompt version {prompt_version!r}")
     system = SYSTEM_PROMPTS[prompt_version]
-    legal = list(canonical.get("legal_actions") or [])
+    legal = list(canonical.get("executable_actions") or [])
+    blocked = list(canonical.get("blocked_actions") or [])
+    rejection = canonical.get("last_rejection")
     amap = {affordance_id(i): a for i, a in enumerate(legal)}
     targeted = {str(a.get("target_id")) for a in legal if a.get("target_id")}
     obs = dict(canonical.get("observations") or {})
@@ -123,7 +132,11 @@ def build_prompt(canonical: Dict[str, Any], *, budget_tokens: int, prompt_versio
         sec = dict(t1)
         sec["known_gaps"] = t1["known_gaps"][:keep_gaps]
         sec["observations"] = {**observation_scalars, "nearby_agents": nearby[:keep_nearby], "projects": built_all[:keep_projects]}
-        sec["legal_actions"] = [curate_affordance(i, a, optional=optional_fields) for i, a in enumerate(legal)]
+        sec["executable_actions"] = [curate_affordance(i, a, optional=optional_fields) for i, a in enumerate(legal)]
+        if blocked:
+            sec["blocked_actions"] = [curate_blocked(a) for a in blocked]
+        if rejection:
+            sec["last_rejection"] = rejection
         return sec
 
     def tier1_cost() -> int:
@@ -149,7 +162,8 @@ def build_prompt(canonical: Dict[str, Any], *, budget_tokens: int, prompt_versio
     used = tier1_cost()
 
     meta_sections: Dict[str, Any] = {}
-    meta_sections["legal_actions"] = {"tier": 1, "total_items": len(legal), "included_items": len(sections["legal_actions"]), "omitted_items": 0, "optional_fields_dropped": not optional_fields}
+    meta_sections["blocked_actions"] = {"tier": 1, "total_items": len(blocked), "included_items": len(sections.get("blocked_actions", [])), "omitted_items": 0}
+    meta_sections["executable_actions"] = {"tier": 1, "total_items": len(legal), "included_items": len(sections["executable_actions"]), "omitted_items": 0, "optional_fields_dropped": not optional_fields}
     meta_sections["observations.projects"] = {"tier": 1, "total_items": len(built_all), "included_items": keep_projects, "omitted_items": len(built_all) - keep_projects}
     meta_sections["observations.nearby_agents"] = {"tier": 1, "total_items": len(nearby), "included_items": keep_nearby, "omitted_items": len(nearby) - keep_nearby}
     meta_sections["known_gaps"] = {"tier": 1, "total_items": len(t1["known_gaps"]), "included_items": keep_gaps, "omitted_items": len(t1["known_gaps"]) - keep_gaps}
@@ -181,9 +195,9 @@ def build_prompt(canonical: Dict[str, Any], *, budget_tokens: int, prompt_versio
             sections.setdefault(group, {})[key] = included
         meta_sections[name] = {"tier": tier, "total_items": len(items), "included_items": len(included), "omitted_items": len(items) - len(included)}
 
-    ordered_keys = ["identity", "task", "goals", "observations", "known_gaps", "team_plan", "legal_actions", "held_dik", "communications_and_artifacts", "recent_outcomes"]
-    user_body = {k: sections[k] for k in ordered_keys if k in sections}
-    user = "CONTEXT:\n" + _dumps(user_body) + "\n\nChoose exactly one affordance_id from legal_actions and reply with the JSON object only."
+    ordered_keys = ["identity", "task", "goals", "observations", "known_gaps", "team_plan", "last_rejection", "blocked_actions", "executable_actions", "held_dik", "communications_and_artifacts", "recent_outcomes"]
+    user_body = "{" + ",".join(f"{_dumps(k)}:{_dumps(sections[k])}" for k in ordered_keys if k in sections) + "}"  # top-level order = prominence order; values key-sorted (deterministic)
+    user = "CONTEXT:\n" + user_body + "\n\nChoose exactly one affordance_id from executable_actions and reply with the JSON object only."
     schema = {
         "type": "object",
         "properties": {"affordance_id": {"type": "string", "enum": list(amap)}, "arguments": {"type": "object"}, "decision_note": {"type": "string", "maxLength": 200}},
