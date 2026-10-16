@@ -19,6 +19,130 @@ import numpy as np  # noqa: E402
 ACTIONS = ["start_construction", "continue_construction", "transport_resources", "repair_or_correct_construction", "validate_construction"]
 
 
+STALL_WINDOW_S = 150
+STALL_STRIDE_S = 10
+STALL_FIRST_WINDOW_END_S = 250  # skip the start-up grounding phase: windows must begin at or after t=100
+STALL_DOMINANCE = 0.6
+WORLD_PROGRESS_EVENTS = {"construction_material_progress_updated", "construction_progress_updated", "construction_resource_delivered", "construction_build_progress_updated",
+                         "construction_validation_attempted", "construction_repair_episode", "construction_completed", "project_connection_added", "project_created_by_start",
+                         "construction_validated_correct", "construction_validated_incorrect"}
+
+
+def scan_events(events_csv, duration):
+    """Measurement-only process-evidence scan of a raw events.csv (works identically on any batch, old or new).
+
+    Probable stall = a 150 s window (ending at t>=250) with NO world/project-state progress event, NO first-time DIK acquisition,
+    NO meaningful communication outcome, AND a repeated pattern (one action holds >= 60% of the Pilot selections in the
+    window). The detector reads logs after the fact; it cannot influence behaviour. It is generic: it names no action.
+    """
+    import collections
+
+    out = {"stall_seconds": 0, "flag_probable_stall": 0, "stall_at_end": 0, "first_stall_t": None, "longest_no_progress_s": 0, "inspect_no_gain_count": 0,
+           "inspect_no_gain_max_streak": 0, "inspect_total_completed": 0, "e2e_rewrites_total": 0, "e2e_rewrites_json": "{}", "strategic_substitutions_rejected": 0,
+           "stall_dominant_pattern": ""}
+    progress_t, dik_t, comm_t = [], [], []
+    selections = []  # (t, agent, action, target)
+    seen_dik = set()
+    last_sel = {}
+    first_attempt_pending = {}
+    e2e = collections.Counter()
+    e2e_bootstrap = collections.Counter()  # rewrites by the documented start-up grounding scaffold (BOOTSTRAP mode), reported separately
+    bootstrap_forced = {}
+    streak = collections.Counter()
+    try:
+        f = open(events_csv, "r", encoding="utf-8", newline="")
+    except OSError:
+        return out
+    with f:
+        for r in csv.DictReader(f):
+            t, n = float(r["time"]), r["event_type"]
+            if n in WORLD_PROGRESS_EVENTS:
+                progress_t.append(t)
+                continue
+            if n in ("pilot_selection_via_adapter", "startup_bootstrap_grounding_forced", "executable_action_attempted", "inspect_completed", "inspect_success_no_new_dik", "inspect_success_dik_changed",
+                     "communication_exchange", "dik_acquired_from_inspect", "dik_acquired_from_artifact", "shared_source_dik_acquired_agent", "mecha_strategic_substitution_rejected"):
+                p = json.loads(r["payload"])
+            else:
+                continue
+            a = p.get("agent")
+            if n == "pilot_selection_via_adapter":
+                selections.append((t, a, p.get("selected_action"), p.get("target_id")))
+                last_sel[a] = p.get("selected_action")
+                first_attempt_pending[a] = True
+                bootstrap_forced[a] = False
+            elif n == "startup_bootstrap_grounding_forced":
+                bootstrap_forced[a] = True
+            elif n == "executable_action_attempted":
+                if first_attempt_pending.get(a) and last_sel.get(a) and p.get("planner_action_type") and p["planner_action_type"] != last_sel[a]:
+                    (e2e_bootstrap if bootstrap_forced.get(a) else e2e)[f"{last_sel[a]}->{p['planner_action_type']}"] += 1
+                first_attempt_pending[a] = False
+            elif n == "communication_exchange":
+                if p.get("meaningful"):
+                    comm_t.append(t)
+            elif n == "mecha_strategic_substitution_rejected":
+                out["strategic_substitutions_rejected"] += 1
+            elif n == "inspect_completed":
+                out["inspect_total_completed"] += 1
+            elif n == "inspect_success_no_new_dik":
+                out["inspect_no_gain_count"] += 1
+                streak[a] += 1
+                out["inspect_no_gain_max_streak"] = max(out["inspect_no_gain_max_streak"], streak[a])
+            elif n == "inspect_success_dik_changed":
+                streak[a] = 0
+            if n in ("dik_acquired_from_inspect", "dik_acquired_from_artifact", "shared_source_dik_acquired_agent", "inspect_success_dik_changed"):
+                ids = [*p.get("new_information_ids", []), *p.get("new_data_ids", []), *p.get("new_rule_ids", [])]
+                if p.get("information_id"):
+                    ids.append(p["information_id"])
+                ids = [str(i).split(":", 1)[-1] for i in ids if "Inferred rule" not in str(i)]  # composite inferred-rule strings are recombinations, not new DIK
+                if any((a, i) not in seen_dik for i in ids):
+                    dik_t.append(t)
+                seen_dik.update((a, i) for i in ids)
+    out["e2e_rewrites_total"] = sum(e2e.values()) + sum(e2e_bootstrap.values())
+    out["e2e_rewrites_json"] = json.dumps(dict(e2e + e2e_bootstrap), sort_keys=True)
+    out["e2e_rewrites_nonbootstrap_total"] = sum(e2e.values())
+    out["e2e_rewrites_nonbootstrap_json"] = json.dumps(dict(e2e), sort_keys=True)
+    out["e2e_rewrites_bootstrap_total"] = sum(e2e_bootstrap.values())
+    import bisect
+
+    def any_in(ts, lo, hi):
+        ts.sort()
+        i = bisect.bisect_right(ts, lo)
+        return i < len(ts) and ts[i] <= hi
+
+    last_prog = 0.0
+    allp = sorted(progress_t + dik_t + comm_t)
+    prev = 0.0
+    for t in allp + [float(duration)]:
+        out["longest_no_progress_s"] = max(out["longest_no_progress_s"], t - prev)
+        prev = t
+    selections.sort()
+    stall_ends = []
+    t_end = STALL_FIRST_WINDOW_END_S
+    while t_end <= duration:
+        lo = t_end - STALL_WINDOW_S
+        quiet = not any_in(progress_t, lo, t_end) and not any_in(dik_t, lo, t_end) and not any_in(comm_t, lo, t_end)
+        if quiet:
+            win = [x for x in selections if lo < x[0] <= t_end]
+            if win:
+                c = collections.Counter(x[2] for x in win)  # repeated action; targets are reported separately (agents differ)
+                (pattern, cnt), = c.most_common(1)
+                if cnt / len(win) >= STALL_DOMINANCE:
+                    stall_ends.append(t_end)
+                    if not out["stall_dominant_pattern"]:
+                        tg = collections.Counter(x[3] for x in win if x[2] == pattern).most_common(2)
+                        out["stall_dominant_pattern"] = f"{pattern} share={cnt / len(win):.2f} targets={tg}"
+        t_end += STALL_STRIDE_S
+    if stall_ends:
+        out["flag_probable_stall"] = 1
+        out["first_stall_t"] = stall_ends[0] - STALL_WINDOW_S
+        covered = set()
+        for e in stall_ends:
+            covered.update(range(int(e - STALL_WINDOW_S), int(e)))
+        out["stall_seconds"] = len(covered)
+        out["stall_at_end"] = int(stall_ends[-1] >= duration - STALL_STRIDE_S)
+    return out
+
+
 def g(d, *path, default=0):
     for p in path:
         if not isinstance(d, dict) or p not in d:
@@ -142,11 +266,15 @@ def extract(r):
     row["flag_repair_starvation"] = int(row["projects_needs_repair"] > 0 and lr < 400)
     row["flag_stale_closure"] = int(row["stale_closure_owner_ticks"] >= 30)
     row["flag_exception"] = int(bool(row["error"]))
+    ev_csv = next(iter(sorted(Path(r.get("session_folder", "")).glob("logs/events.csv"))), None) if r.get("session_folder") else None
+    scan = scan_events(ev_csv, r.get("duration_s", 600)) if ev_csv else {}
+    for k, v in scan.items():
+        row[k] = v
     row["any_flag"] = int(any(row[k] for k in row if k.startswith("flag_")))
     return row
 
 
-FLAGS = ["flag_absorbing", "flag_excess_consult", "flag_repeated_validation", "flag_repeated_start", "flag_repair_starvation", "flag_stale_closure", "flag_exception"]
+FLAGS = ["flag_absorbing", "flag_probable_stall", "flag_excess_consult", "flag_repeated_validation", "flag_repeated_start", "flag_repair_starvation", "flag_stale_closure", "flag_exception"]
 
 
 def main(out):
