@@ -855,7 +855,7 @@ class Agent:
             "provision_solicited": len(solicited),
             "dik_gap_count": len(gaps),
             "externalize_gap": bool(self._workspace_externalization_gap_exists(environment)),
-            "team_plan_opportunity": not bool(active_plan),
+            "team_plan_opportunity": self._team_plan_opportunity(sim_state, active_plan),
         }
 
     def _emit_event(self, sim_state, event_type, payload):
@@ -865,6 +865,8 @@ class Agent:
         sim_state.logger.log_event(sim_state.time, event_type, enriched)
         if event_type in self.TALLIED_EVENTS:
             self.event_tallies[event_type] = int(self.event_tallies.get(event_type, 0)) + 1
+        if event_type == "executable_action_completed":
+            self._note_plan_assignment_completion(sim_state, enriched)
         if event_type in self.ACTION_FAILURE_EVENTS or event_type == "action_execution_succeeded":
             self._note_action_outcome(sim_state, event_type, enriched)
         if event_type in self.ACTION_FAILURE_EVENTS and event_type != "action_execution_succeeded":
@@ -4548,7 +4550,11 @@ class Agent:
         not hold, or the agent's blocker/goal context changed since the last read. Otherwise the consultation is
         redundant (same version, nothing to gain). Mutates nothing.
         """
-        artifacts = dict(getattr(getattr(sim_state, "team_knowledge_manager", None), "artifacts", {}) or {})
+        artifacts = {
+            aid: a
+            for aid, a in dict(getattr(getattr(sim_state, "team_knowledge_manager", None), "artifacts", {}) or {}).items()
+            if not (a.artifact_type == "team_plan" and isinstance(a.content, dict) and a.content.get("status") in {"expired", "superseded"})
+        }
         if self._planless_consult():
             # With no active plan only a team plan can be consulted (others are skipped at execution), so only those count.
             artifacts = {aid: a for aid, a in artifacts.items() if a.artifact_type == "team_plan" and not self._in_cooldown("planless_consult_artifact", aid, sim_state=sim_state)}
@@ -6089,6 +6095,9 @@ class Agent:
         plan_id = str(plan_summary.get("plan_id", "") or "")
         if not plan_id:
             return False
+        artifact = sim_state.team_knowledge_manager.artifacts.get(f"team_plan:{plan_id}")
+        if artifact is None or self._artifact_version_signature(artifact) not in self.artifact_consult_sig_memory:
+            return False  # epistemic integrity: recognition of a committed plan comes from reading it, not from the store
         current = str(self.team_plan_state.get("last_adopted_plan_id") or "")
         if current != plan_id:
             return True
@@ -6126,8 +6135,7 @@ class Agent:
                 },
             )
             return True
-        commit_until = float(self.team_plan_state.get("team_plan_commit_until", 0.0) or 0.0)
-        return float(getattr(sim_state, "time", 0.0)) > commit_until
+        return False
 
     def _extract_team_plan_target_project(self, plan_summary):
         assignment = self._get_my_team_plan_assignment(None, plan_summary)
@@ -6195,8 +6203,15 @@ class Agent:
             project_target = assignment.get("project_target") or assignment.get("target_project") or assignment.get("target")
         else:
             text = str(assignment or "").lower()
+        explicit_type = str(assignment.get("action_type") or "") if isinstance(assignment, dict) else ""
+        if explicit_type:
+            for semantic_name, types in self._ASSIGNMENT_ACTIONS.items():
+                if explicit_type in types:
+                    return semantic_name, project_target
         if any(token in text for token in {"validate", "verification", "check"}):
             return "validate", project_target
+        if "connect" in text:
+            return "connect", project_target
         if any(token in text for token in {"transport", "logistics", "deliver"}):
             return "transport", project_target
         if any(token in text for token in {"repair", "correct", "fix"}):
@@ -6208,32 +6223,34 @@ class Agent:
         return "support", project_target
 
     def _evaluate_team_plan_fit(self, sim_state, plan_summary):
+        """Explicit response to a PROPOSED plan, or ("", reason) when this agent gives none (silence is never support).
+
+        coordination_propensity (with goal_alignment) governs whether the agent engages with the plan at all. An engaged agent supports
+        only what it can itself ground in its own legal actions; a plan it cannot ground is answered with a clarification request or a
+        decline. No knowledge is granted and nothing is forced.
+        """
         assignment = self._get_my_team_plan_assignment(sim_state, plan_summary)
         plan_status = str((plan_summary or {}).get("status", "")).lower()
-        alignment_signal = (
-            self._trait_value("goal_alignment")
-            + self._hook_value("action_utility", "consult_team_artifact", "utility_weight", default=0.5)
-            + self._hook_value("action_utility", "reassess_plan", "utility_weight", default=0.5)
-        ) / 3.0
-        help_signal = (
-            self._trait_value("help_tendency")
-            + self._hook_value("action_utility", "request_assistance", "utility_weight", default=0.5)
-            + self._hook_value("decision_bias", "assist_stalled_teammate", "priority_weight", default=0.5)
-        ) / 3.0
+        policy = getattr(sim_state, "team_plan_policy", {}) or {}
+        engagement = (self._trait_value("coordination_propensity") + self._trait_value("goal_alignment")) / 2.0
         if not plan_status:
             return "request_clarification", "missing_plan_status"
-        if assignment is None and alignment_signal < 0.35:
-            return "request_clarification", "no_role_assignment"
+        if str((plan_summary or {}).get("proposed_by") or "") == self.name:
+            return "", "own_proposal"
+        if engagement < float(policy.get("response_engagement_min", 0.25)):
+            self._emit_event(sim_state, "team_plan_response_withheld", {"plan_id": (plan_summary or {}).get("plan_id"), "agent_role": self.role, "reason": "below_engagement_threshold", "engagement": round(engagement, 3)})
+            return "", "below_engagement_threshold"
         if assignment is None:
             return "agree", "plan_aligns_without_direct_assignment"
-        semantic, _project_target = self._normalize_team_plan_assignment(assignment)
+        semantic, project_target = self._normalize_team_plan_assignment(assignment)
         if semantic == "support":
             return "request_clarification", "assignment_underspecified"
-        if plan_status == "committed" and alignment_signal >= 0.55:
-            return "assignment_accept", "committed_plan_alignment"
-        if help_signal >= 0.35:
-            return "assignment_accept", "assignment_executable_for_role"
-        return "assignment_decline", "low_help_tendency"
+        grounded, reason = self._assignment_grounding(assignment, project_target)
+        if grounded:
+            return "assignment_accept", reason
+        if reason == "repair_not_groundable_by_my_knowledge":
+            return "request_clarification", reason
+        return "assignment_decline", reason
 
     def _team_plan_response_signature(self, sim_state, plan_summary, response_type):
         summary = dict(plan_summary or {})
@@ -6252,6 +6269,8 @@ class Agent:
             return str(payload)
 
     def _should_emit_team_plan_response(self, sim_state, plan_summary, response_type):
+        if not response_type:
+            return False  # no explicit response (silence is not agreement and is not recorded as a response)
         plan_id = str((plan_summary or {}).get("plan_id", "") or "")
         if not plan_id:
             return True
@@ -6308,6 +6327,13 @@ class Agent:
         artifact_id = f"team_plan:{plan_id}"
         sim_state.team_knowledge_manager.adopt_artifact(artifact_id, self.name, sim_state.time)
         self.memory_seen_packets.add(artifact_id)
+        previous_adopted = str(self.team_plan_state.get("last_adopted_plan_id") or "")
+        if previous_adopted and previous_adopted != plan_id:
+            self._retire_assignment(sim_state, "superseded", "newer_plan_adopted", event="team_plan_assignment_blocked")
+        self.team_plan_state["adopted_plan_summary"] = dict(plan_summary)
+        self.team_plan_state["adopted_plan_closed"] = False
+        self.team_plan_state["next_review_at"] = plan_summary.get("review_at")
+        self.team_plan_state["revision_due"] = None
         self.team_plan_state["last_adopted_plan_id"] = plan_id
         self.team_plan_state["last_adopted_plan_event_time"] = plan_event_time
         self.team_plan_state["last_adopted_at"] = float(sim_state.time)
@@ -6349,63 +6375,190 @@ class Agent:
 
         assignment = self._get_my_team_plan_assignment(sim_state, plan_summary)
         if assignment is None:
+            self._emit_event(sim_state, "team_plan_assignment_applied", {"plan_id": plan_id, "agent_role": self.role, "assignment": None, "grounded": False, "reason": "no_assignment_for_my_role"})
             return
         semantic, explicit_project_target = self._normalize_team_plan_assignment(assignment)
         project_targets = list(plan_summary.get("project_targets", []) or [])
-        preferred_target_id = explicit_project_target or (project_targets[0] if project_targets else None)
-        if isinstance(preferred_target_id, str):
-            preferred_pos = sim_state.environment.get_interaction_target_position(preferred_target_id, from_position=self.position)
-            if preferred_pos is not None:
-                self.target = preferred_pos
+        preferred_target_id = explicit_project_target or None
+        grounded, ground_reason = self._assignment_grounding(assignment, preferred_target_id)
+        existing_state = self.team_plan_state.get("assignment_state") or {}
+        if existing_state.get("plan_id") == plan_id and existing_state.get("signature") == assignment_signature:
+            return  # already adopted this exact assignment; a re-read must not revive a finished or retired one
         self.team_plan_state["assignment"] = assignment
         self.team_plan_state["assignment_target"] = preferred_target_id
-        self.active_intent["category"] = f"team_plan:{semantic}"
-        self.active_intent["min_commit_until"] = max(float(self.active_intent.get("min_commit_until", 0.0) or 0.0), float(self.team_plan_state["team_plan_assignment_commit_until"]))
+        self.team_plan_state["assignment_state"] = {
+            "plan_id": plan_id, "signature": assignment_signature, "action_types": list(self._assignment_action_types(assignment)), "target": preferred_target_id,
+            "status": "applied" if grounded else "ungrounded", "applied_at": float(sim_state.time), "deviations": 0, "absent_streak": 0, "last_deviation_key": None,
+        }
+        # No movement target, intent category or commitment window is set here: the assignment reaches the Pilot as a preference on the
+        # matching legal affordance (see plan_assignment_annotation); the Pilot may follow, defer or deviate.
         self._emit_event(
             sim_state,
             "team_plan_assignment_applied",
-            {"plan_id": plan_id, "agent_role": self.role, "assignment": assignment, "assignment_semantic": semantic, "project_targets": project_targets, "target_project": preferred_target_id, "reason": reason},
+            {"plan_id": plan_id, "agent_role": self.role, "assignment": assignment, "assignment_semantic": semantic, "project_targets": project_targets, "target_project": preferred_target_id, "grounded": bool(grounded), "reason": ground_reason},
         )
-        self._emit_event(
-            sim_state,
-            "team_plan_assignment_reapplied",
-            {
-                "plan_id": plan_id,
-                "agent": self.name,
-                "agent_role": self.role,
-                "plan_event_time": plan_event_time,
-                "assignment": assignment,
-                "target_project": preferred_target_id,
-                "reason": reason,
-            },
-        )
+        if not grounded:
+            self._emit_event(sim_state, "team_plan_assignment_blocked", {"plan_id": plan_id, "agent_role": self.role, "stage": "adoption", "reason": ground_reason, "retired": True})
         if hasattr(sim_state.team_knowledge_manager, "record_team_plan_response"):
-            ack_reason = "assignment_executable_for_role" if semantic != "support" else "assignment_underspecified"
-            ack_type = "assignment_accept" if semantic != "support" else "assignment_decline"
+            ack_type = "assignment_accept" if grounded else "assignment_decline"
             ack_signature = f"{assignment_signature}:{ack_type}"
             if self.team_plan_state.get("last_assignment_ack_signature") != ack_signature:
-                sim_state.team_knowledge_manager.record_team_plan_response(
-                    plan_id=plan_id,
-                    responder=self.name,
-                    response_type=ack_type,
-                    sim_time=sim_state.time,
-                    role=self.role,
-                    reason=ack_reason,
-                )
+                sim_state.team_knowledge_manager.record_team_plan_response(plan_id=plan_id, responder=self.name, response_type=ack_type, sim_time=sim_state.time, role=self.role, reason=ground_reason)
                 self.team_plan_state["last_assignment_ack_signature"] = ack_signature
-                self._emit_event(
-                    sim_state,
-                    "team_plan_assignment_acknowledged",
-                    {
-                        "plan_id": plan_id,
-                        "agent": self.name,
-                        "agent_role": self.role,
-                        "plan_event_time": plan_event_time,
-                        "assignment": assignment,
-                        "target_project": preferred_target_id,
-                        "reason": ack_reason,
-                    },
-                )
+                self._emit_event(sim_state, "team_plan_assignment_acknowledged", {"plan_id": plan_id, "agent": self.name, "agent_role": self.role, "plan_event_time": plan_event_time, "assignment": assignment, "target_project": preferred_target_id, "grounded": bool(grounded), "reason": ground_reason})
+
+    # ------------------------------------------------------------------ team-plan lifecycle (agent side)
+    # PROPOSE -> CONSULT/RESPOND -> (store commits on explicit support) -> LOCAL ADOPTION -> Pilot PREFERENCE -> EXECUTE -> REASSESS.
+    # Assignments are built only from this agent's own legal affordances; adoption grounds the assignment against the adopter's own
+    # affordances; a grounded assignment becomes a Pilot-visible preference (never a forced action); every outcome is reported.
+    _ASSIGNMENT_ACTIONS = {
+        "repair": ("repair_or_correct_construction",),
+        "validate": ("validate_construction",),
+        "connect": ("connect_structures",),
+        "build": ("start_construction", "continue_construction"),
+        "transport": ("transport_resources",),
+        "epistemic_refresh": ("inspect_information_source", "consult_team_artifact"),
+    }
+    _ASSIGNMENT_PRIORITY = ("repair_or_correct_construction", "validate_construction", "connect_structures", "continue_construction", "start_construction", "transport_resources")
+    _ASSIGNMENT_TASK_WORD = {
+        "repair_or_correct_construction": "repair", "validate_construction": "validate", "connect_structures": "connect",
+        "continue_construction": "build", "start_construction": "build", "transport_resources": "transport",
+    }
+
+    def _team_plan_opportunity(self, sim_state, active_plan):
+        if not active_plan:
+            return True
+        if not self.team_plan_state.get("revision_due"):
+            return False
+        manager = getattr(sim_state, "team_knowledge_manager", None)
+        return not any(p.get("status") == "proposed" for p in (manager.list_team_plans() if manager is not None else []))
+
+    def _assignment_action_types(self, assignment):
+        if isinstance(assignment, dict) and assignment.get("action_type"):
+            explicit = str(assignment["action_type"])
+            for types in self._ASSIGNMENT_ACTIONS.values():
+                if explicit in types:
+                    return tuple(types)
+            return (explicit,)
+        semantic, _target = self._normalize_team_plan_assignment(assignment)
+        return tuple(self._ASSIGNMENT_ACTIONS.get(semantic, ()))
+
+    def _assignment_grounding(self, assignment, project_target):
+        """Can THIS agent execute the assignment now? Judged only against its own legal affordances (no hidden truth, no role gate)."""
+        types = set(self._assignment_action_types(assignment))
+        if not types:
+            return False, "assignment_underspecified"
+        affordances = list(getattr(self, "_last_pilot_affordances", None) or [])
+        same_type = [a for a in affordances if a.get("action_type") in types]
+        if not same_type:
+            return False, "no_matching_legal_action_for_me"
+        if project_target and str(project_target) != "active_construction":
+            same_type = [a for a in same_type if str(a.get("target_id") or "") == str(project_target)]
+            if not same_type:
+                return False, "assigned_target_not_available_for_that_action"
+        if all(a.get("repair_ready") is False for a in same_type):
+            return False, "repair_not_groundable_by_my_knowledge"
+        if all(a.get("reachable") is False for a in same_type):
+            return False, "assigned_target_unreachable"
+        return True, "grounded_in_my_legal_actions"
+
+    def _build_plan_assignments(self, sim_state):
+        """Concrete role assignments from the PROPOSER's own legal affordances (the roster is common knowledge; teammate legality is not)."""
+        affordances = list(getattr(self, "_last_pilot_affordances", None) or [])
+        candidates, seen = [], set()
+        for action_type in self._ASSIGNMENT_PRIORITY:
+            for a in affordances:
+                target = str(a.get("target_id") or "")
+                if a.get("action_type") != action_type or not target or a.get("repair_ready") is False or a.get("reachable") is False:
+                    continue
+                key = (self._ASSIGNMENT_TASK_WORD[action_type] == "build" and "build" or action_type, target)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append({"task": self._ASSIGNMENT_TASK_WORD[action_type], "action_type": action_type, "project_target": target, "basis": "proposer_legal_affordance"})
+        roles = [self.role] + sorted({str(x.role) for x in getattr(sim_state, "agents", []) if str(x.role) != self.role})
+        assignments = {role: candidate for role, candidate in zip(roles, candidates)}
+        return assignments or {self.role: "lead_next_action"}
+
+    def plan_assignment_annotation(self, action_type, target_id):
+        """Read-only: does this affordance match the committed assignment this agent adopted and can still ground?"""
+        state = self.team_plan_state.get("assignment_state")
+        if not state or state.get("status") not in {"applied", "started"}:
+            return None
+        if str(action_type) not in set(state.get("action_types") or ()):
+            return None
+        if state.get("target") and str(target_id or "") != str(state["target"]):
+            return None
+        return {"plan_id": state.get("plan_id")}
+
+    def _retire_assignment(self, sim_state, status, reason, *, event=None, revision=None, **extra):
+        state = self.team_plan_state.get("assignment_state")
+        if not state or state.get("status") not in {"applied", "started"}:
+            return
+        state["status"] = status
+        if event:
+            self._emit_event(sim_state, event, {"plan_id": state.get("plan_id"), "agent_role": self.role, "assignment_actions": list(state.get("action_types") or ()), "target_project": state.get("target"), "reason": reason, "retired": True, **extra})
+        if revision:
+            self.team_plan_state["revision_due"] = revision
+
+    def _note_plan_assignment_selection(self, sim_state, decision, context):
+        state = self.team_plan_state.get("assignment_state")
+        if not state or state.get("status") not in {"applied", "started"}:
+            return
+        matched = (decision.selected_action.value in set(state.get("action_types") or ())) and (not state.get("target") or str(decision.target_id or "") == str(state["target"]))
+        if matched:
+            state["absent_streak"] = 0
+            if state["status"] == "applied":
+                state["status"] = "started"
+                self._emit_event(sim_state, "team_plan_assignment_started", {"plan_id": state["plan_id"], "agent_role": self.role, "action": decision.selected_action.value, "target_project": decision.target_id, "reason": "pilot_selected_assigned_action"})
+            return
+        offered = any(a.get("plan_assignment_plan_id") for a in (context.action_affordances or []))
+        if offered:
+            state["absent_streak"] = 0
+            key = (decision.selected_action.value, str(decision.target_id or ""))
+            if state.get("last_deviation_key") != key:
+                state["last_deviation_key"] = key
+                state["deviations"] = int(state.get("deviations", 0)) + 1
+                self._emit_event(sim_state, "team_plan_assignment_deviated", {"plan_id": state["plan_id"], "agent_role": self.role, "action": decision.selected_action.value, "target_project": decision.target_id, "assigned_actions": list(state.get("action_types") or ()), "assigned_target": state.get("target"), "reason": "pilot_chose_other_legal_action", "retired": False})
+            return
+        state["absent_streak"] = int(state.get("absent_streak", 0)) + 1
+        if state["absent_streak"] >= 2:
+            self._retire_assignment(sim_state, "blocked", "assigned_action_no_longer_legal_for_me", event="team_plan_assignment_blocked", revision="assignment_blocked")
+            self._emit_event(sim_state, "team_plan_reassessed", {"plan_id": state["plan_id"], "agent_role": self.role, "trigger": "assignment_blocked", "outcome": "revision_due"})
+
+    def _note_plan_assignment_completion(self, sim_state, payload):
+        state = self.team_plan_state.get("assignment_state")
+        if not state or state.get("status") not in {"applied", "started"}:
+            return
+        done = str(getattr(payload.get("decision_action"), "value", payload.get("decision_action")) or "")
+        if done not in set(state.get("action_types") or ()):
+            return
+        if state.get("target") and str(payload.get("project_id") or "") not in {"", str(state["target"])}:
+            return
+        self._retire_assignment(sim_state, "completed", "assigned_action_completed", event="team_plan_assignment_completed", action=done, target_project_completed=payload.get("project_id"))
+        self._emit_event(sim_state, "team_plan_reassessed", {"plan_id": state["plan_id"], "agent_role": self.role, "trigger": "assignment_completed", "outcome": "continue_plan_open_until_review"})
+
+    def _team_plan_lifecycle_tick(self, sim_state):
+        """Time-driven reassessment of the plan this agent adopted, from its own adopted copy (no read of the live store)."""
+        summary = self.team_plan_state.get("adopted_plan_summary")
+        if not summary or self.team_plan_state.get("adopted_plan_closed"):
+            return
+        now = float(sim_state.time)
+        plan_id = str(summary.get("plan_id"))
+        if summary.get("expires_at") is not None and now >= float(summary["expires_at"]):
+            self.team_plan_state["adopted_plan_closed"] = True
+            self._retire_assignment(sim_state, "expired", "plan_expiry_reached", event="team_plan_assignment_blocked", revision="plan_expired")
+            self._emit_event(sim_state, "team_plan_reassessed", {"plan_id": plan_id, "agent_role": self.role, "trigger": "expiry_reached", "outcome": "plan_expired_revision_due"})
+            self.team_plan_state["revision_due"] = "plan_expired"
+            return
+        review_at = self.team_plan_state.get("next_review_at")
+        if review_at is not None and now >= float(review_at):
+            state = self.team_plan_state.get("assignment_state") or {}
+            open_assignment = state.get("status") in {"applied", "started"}
+            self.team_plan_state["next_review_at"] = now + float((getattr(sim_state, "team_plan_policy", {}) or {}).get("review_after_s", 20.0))
+            self._emit_event(sim_state, "team_plan_reassessed", {"plan_id": plan_id, "agent_role": self.role, "trigger": "review_time_reached", "outcome": "continue" if open_assignment else "revision_due", "assignment_status": state.get("status")})
+            if not open_assignment:
+                self.team_plan_state["revision_due"] = "review_time_reached_no_open_assignment"
 
     def _seed_task_defined_goals(self, sim_state=None):
         if not self.task_model:
@@ -7397,6 +7550,8 @@ class Agent:
         if response.controller_state:
             context.individual_cognitive_state["control_state"] = dict(response.controller_state)
         self._pilot_decision_anchor = decision  # a fresh Pilot decision (e.g. a re-query) is Pilot-authored
+        self._last_pilot_affordances = list(context.action_affordances or [])  # the agent's own legal view, reused for plan grounding (no extra build)
+        self._note_plan_assignment_selection(sim_state, decision, context)
         self._track_pilot_selection(sim_state, decision)
         self._emit_support_reasoning_events(sim_state, context, decision)
         self._emit_event(
@@ -11063,6 +11218,7 @@ class Agent:
         self._update_memory(sim_state)
         self.sim_step_count += 1
         self._record_team_plan_commitment_tick(sim_state)
+        self._team_plan_lifecycle_tick(sim_state)
         if self._team_plan_requires_uptake(sim_state):
             active_team_plan = self._get_active_team_plan(sim_state)
             if isinstance(active_team_plan, dict):
@@ -11366,10 +11522,13 @@ class Agent:
                 ) / 3.0
                 if rules and fidelity < 0.5:
                     rules = rules[:-1]
-                plan_targets = [str(action.get('project_id') or "active_construction")]
+                plan_assignments = self._build_plan_assignments(sim_state)
+                plan_targets = sorted({str(a["project_target"]) for a in plan_assignments.values() if isinstance(a, dict) and a.get("project_target")}) or [str(action.get('project_id') or "active_construction")]
+                plan_supersedes = (self.team_plan_state.get("adopted_plan_summary") or {}).get("plan_id") if self.team_plan_state.get("revision_due") else None
                 plan_signature = (
                     tuple([str(self.goal)] if self.goal else []),
                     tuple(plan_targets),
+                    json.dumps(plan_assignments, sort_keys=True, default=str),
                     tuple(sorted(str(r) for r in rules)),
                     self.role,
                 )
@@ -11398,8 +11557,9 @@ class Agent:
                         goal_ids=[str(self.goal)] if self.goal else [],
                         goal_summary=f"{self.name} proposes next logistics/build objective",
                         trigger_reason="no_active_plan",
-                        project_targets=[str(action.get('project_id') or "active_construction")],
-                        assignments_by_role={self.role: "lead_next_action"},
+                        project_targets=plan_targets,
+                        assignments_by_role=plan_assignments,
+                        supersedes_plan_id=plan_supersedes,
                         evidence_refs=rules,
                         blocked_reasons=["no_active_plan"],
                         success_criteria=["establish coordinated project direction", "resume concrete execution"],
@@ -11414,7 +11574,8 @@ class Agent:
                         "expires_at": sim_state.time + max(45.0, 50.0 + (60.0 * ext_signal)),
                     }
                     self.experimental_metrics["team_plan_proposals"] += 1
-                    self._emit_event(sim_state, "team_plan_proposed", {"plan_id": plan_id})
+                    self.team_plan_state["revision_due"] = None
+                    self._emit_event(sim_state, "team_plan_proposed", {"plan_id": plan_id, "agent_role": self.role, "assignments_by_role": plan_assignments, "project_targets": plan_targets, "supersedes_plan_id": plan_supersedes, "review_at": sim_state.time + 20.0})
                 else:
                     sim_state.team_knowledge_manager.externalize_artifact(
                         artifact_id=artifact_id,
@@ -11565,9 +11726,10 @@ class Agent:
                         continue
                     if preferred.artifact_type == "team_plan" and isinstance(preferred.content, dict):
                         plan_summary = sim_state.team_knowledge_manager._team_plan_summary(dict(preferred.content))
+                        self._emit_event(sim_state, "team_plan_consulted", {"plan_id": plan_summary.get("plan_id"), "agent_role": self.role, "plan_status": plan_summary.get("status"), "proposed_by": plan_summary.get("proposed_by")})
                         if str(plan_summary.get("status", "")).lower() == "committed":
                             self._adopt_committed_team_plan(sim_state, plan_summary, reason="consult_team_artifact")
-                        else:
+                        elif str(plan_summary.get("status", "")).lower() == "proposed":
                             response_type, response_reason = self._evaluate_team_plan_fit(sim_state, plan_summary)
                             if self._should_emit_team_plan_response(sim_state, plan_summary, response_type):
                                 if hasattr(sim_state.team_knowledge_manager, "record_team_plan_response"):

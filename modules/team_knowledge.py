@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from modules.team_plan_lifecycle import commitment_met, effective_supporters, load_team_plan_policy, plan_content_signature
+
 
 @dataclass
 class TeamArtifact:
@@ -34,6 +36,8 @@ class TeamKnowledgeManager:
     validated_knowledge: Dict[str, str] = field(default_factory=dict)
     artifacts: Dict[str, TeamArtifact] = field(default_factory=dict)
     recent_updates: List[Dict[str, Any]] = field(default_factory=list)
+    commit_policy: Dict[str, Any] = field(default_factory=lambda: load_team_plan_policy(None))  # set from the task package manifest
+    lifecycle_events: List[Dict[str, Any]] = field(default_factory=list)  # drained into the event log by the simulation
 
     def add_validated_knowledge(self, key: str, summary: str, author: str, sim_time: float) -> None:
         self.validated_knowledge[key] = summary
@@ -290,6 +294,15 @@ class TeamKnowledgeManager:
             "opposers": list(content.get("opposers", [])),
             "review_at": content.get("review_at"),
             "expires_at": content.get("expires_at"),
+            "proposed_by": content.get("proposed_by"),
+            "proposed_at": content.get("proposed_at"),
+            "committed_at": content.get("committed_at"),
+            "supersedes_plan_id": content.get("supersedes_plan_id"),
+            "superseded_by": content.get("superseded_by"),
+            "success_criteria": list(content.get("success_criteria", [])),
+            "evidence_refs": list(content.get("evidence_refs", [])),
+            "clarification_requests": list(content.get("clarification_requests", [])),
+            "content_signature": content.get("content_signature"),
             "last_plan_event": content.get("last_plan_event"),
             "plan_event_time": content.get("plan_event_time"),
         }
@@ -372,6 +385,22 @@ class TeamKnowledgeManager:
             "consulted_by": list(consulted_by if consulted_by is not None else previous.get("consulted_by", [])),
             "supersedes_plan_id": supersedes_plan_id if supersedes_plan_id is not None else previous.get("supersedes_plan_id"),
         }
+        content["content_signature"] = plan_content_signature(content)
+        prev_sig = previous.get("content_signature")
+        if existing is not None and prev_sig == content["content_signature"] and previous.get("status") in {"committed", "superseded", "expired"}:
+            return existing  # unchanged content of a plan that already left 'proposed': a re-externalisation is not a new proposal
+        carried = dict(previous.get("supporter_signatures", {}) or {}) if prev_sig == content["content_signature"] else {}
+        if carried:  # unchanged content: earlier explicit support still refers to it
+            content["supporters"] = sorted(set(content["supporters"]) | {s for s in (previous.get("supporters") or []) if carried.get(s) == content["content_signature"]})
+        content["supporter_signatures"] = {s: content["content_signature"] for s in content["supporters"] if s == proposed_by or carried.get(s) == content["content_signature"]}
+        if existing is not None and prev_sig != content["content_signature"]:
+            # Material revision: earlier responses referred to different content and do not carry over.
+            content["supporters"] = [s for s in content["supporters"] if s in content["supporter_signatures"]]
+            content["opposers"] = []
+            content["clarification_requests"] = []
+            content["assignment_acknowledged_by"] = {}
+            content["assignment_declined_by"] = {}
+            self._log("team_plan_revised", plan_id=plan_id, agent=proposed_by, time=sim_time, previous_status=previous.get("status"), reason="material_change_requires_new_support")
         summary = f"team_plan {plan_id} proposed: {content['goal_summary']}".strip()
         if existing is None:
             artifact = self.externalize_artifact(
@@ -398,11 +427,33 @@ class TeamKnowledgeManager:
             self.recent_updates.append({"event": "team_plan_proposed", "artifact_id": artifact_id, "plan_id": plan_id, "author": proposed_by, "time": sim_time})
         return artifact
 
+    def _log(self, event_type: str, **payload: Any) -> None:
+        self.lifecycle_events.append({"event_type": event_type, "payload": payload})
+
+    def drain_lifecycle_events(self) -> List[Dict[str, Any]]:
+        events, self.lifecycle_events = self.lifecycle_events, []
+        return events
+
     def commit_team_plan(self, *, plan_id: str, committed_by: str, sim_time: float) -> Optional[TeamArtifact]:
+        """Commit a proposed plan. Refused (None) unless the configured commitment rule is met by explicit support of the current content."""
         artifact_id = self._team_plan_artifact_id(plan_id)
         artifact = self.artifacts.get(artifact_id)
-        if artifact is None:
+        if artifact is None or not isinstance(artifact.content, dict) or artifact.content.get("status") != "proposed":
             return None
+        if not commitment_met(artifact.content, self.commit_policy)[0]:
+            return None
+        return self._commit(artifact, committed_by, sim_time)
+
+    def _maybe_commit(self, artifact: TeamArtifact, trigger_agent: str, sim_time: float) -> Optional[TeamArtifact]:
+        content = artifact.content if isinstance(artifact.content, dict) else {}
+        if content.get("status") != "proposed":
+            return None
+        ok, _reason = commitment_met(content, self.commit_policy)
+        return self._commit(artifact, trigger_agent, sim_time) if ok else None
+
+    def _commit(self, artifact: TeamArtifact, committed_by: str, sim_time: float) -> TeamArtifact:
+        plan_id = str(artifact.content.get("plan_id"))
+        artifact_id = artifact.artifact_id
         content = dict(artifact.content or {})
         content["status"] = "committed"
         content["committed_by"] = committed_by
@@ -414,8 +465,42 @@ class TeamKnowledgeManager:
         artifact.validation_state = "validated"
         if committed_by and committed_by not in artifact.contributors:
             artifact.contributors.append(committed_by)
+        content["review_at"] = sim_time + float(self.commit_policy.get("review_after_s", 20.0))
+        content["expires_at"] = max(float(content.get("expires_at") or 0.0), sim_time + float(self.commit_policy.get("committed_plan_ttl_s", 90.0)))
+        artifact.content = content
         self.recent_updates.append({"event": "team_plan_committed", "artifact_id": artifact_id, "plan_id": plan_id, "author": committed_by, "time": sim_time})
+        self._log("team_plan_committed", plan_id=plan_id, agent=committed_by, time=sim_time, proposed_by=content.get("proposed_by"), supporters=effective_supporters(content, self.commit_policy),
+                  time_to_commit_s=round(sim_time - float(content.get("proposed_at", sim_time)), 2), supersedes_plan_id=content.get("supersedes_plan_id"))
+        for other_id, other in list(self.artifacts.items()):
+            oc = other.content if isinstance(other.content, dict) else {}
+            if other.artifact_type == "team_plan" and other_id != artifact_id and oc.get("status") == "committed":
+                self.supersede_team_plan(plan_id=str(oc.get("plan_id")), by_plan_id=plan_id, sim_time=sim_time, reason="newer_plan_committed")
         return artifact
+
+    def supersede_team_plan(self, *, plan_id: str, by_plan_id: str, sim_time: float, reason: str = "") -> Optional[TeamArtifact]:
+        artifact = self.artifacts.get(self._team_plan_artifact_id(plan_id))
+        if artifact is None or not isinstance(artifact.content, dict) or artifact.content.get("status") not in {"proposed", "committed"}:
+            return None
+        content = dict(artifact.content)
+        content.update({"status": "superseded", "superseded_by": by_plan_id, "plan_event_time": sim_time, "last_plan_event": "team_plan_superseded"})
+        artifact.content = content
+        artifact.validation_state = "tentative"
+        self._log("team_plan_superseded", plan_id=plan_id, time=sim_time, superseded_by=by_plan_id, reason=reason)
+        return artifact
+
+    def expire_due_plans(self, sim_time: float) -> List[str]:
+        expired = []
+        for artifact in self.artifacts.values():
+            c = artifact.content if isinstance(artifact.content, dict) else {}
+            if artifact.artifact_type != "team_plan" or c.get("status") not in {"proposed", "committed"}:
+                continue
+            if c.get("expires_at") is not None and sim_time >= float(c["expires_at"]):
+                prior = c.get("status")
+                artifact.content = {**c, "status": "expired", "plan_event_time": sim_time, "last_plan_event": "team_plan_expired"}
+                artifact.validation_state = "tentative"
+                expired.append(str(c.get("plan_id")))
+                self._log("team_plan_expired", plan_id=str(c.get("plan_id")), time=sim_time, previous_status=prior, reason="expiry_reached")
+        return expired
 
     def record_team_plan_response(
         self,
@@ -440,13 +525,17 @@ class TeamKnowledgeManager:
         assignment_declined = dict(content.get("assignment_declined_by", {}) or {})
 
         event_name = "team_plan_updated"
+        support_types = set(self.commit_policy.get("support_response_types", ["agree"]))
+        sig_map = dict(content.get("supporter_signatures", {}) or {})
         if normalized == "agree":
             supporters.add(responder)
             opposers.discard(responder)
+            sig_map[responder] = content.get("content_signature")
             event_name = "team_plan_agreed"
         elif normalized == "disagree":
             opposers.add(responder)
             supporters.discard(responder)
+            sig_map.pop(responder, None)
             event_name = "team_plan_disagreed"
         elif normalized == "request_clarification":
             clarification_requests.append({"agent": responder, "role": role, "reason": reason, "time": sim_time})
@@ -454,11 +543,18 @@ class TeamKnowledgeManager:
         elif normalized == "assignment_accept":
             assignment_ack[str(role or responder)] = {"agent": responder, "reason": reason, "time": sim_time}
             event_name = "team_plan_assignment_accepted"
+            if "assignment_accept" in support_types:  # accepting a concrete assignment is explicit support of the content
+                supporters.add(responder)
+                opposers.discard(responder)
+                sig_map[responder] = content.get("content_signature")
         elif normalized == "assignment_decline":
             assignment_declined[str(role or responder)] = {"agent": responder, "reason": reason, "time": sim_time}
+            supporters.discard(responder)
+            sig_map.pop(responder, None)
             event_name = "team_plan_assignment_declined"
 
         content["supporters"] = sorted(supporters)
+        content["supporter_signatures"] = sig_map
         content["opposers"] = sorted(opposers)
         content["clarification_requests"] = clarification_requests[-10:]
         content["assignment_acknowledged_by"] = assignment_ack
@@ -475,6 +571,8 @@ class TeamKnowledgeManager:
         self.recent_updates.append(
             {"event": "team_plan_updated", "artifact_id": artifact_id, "plan_id": plan_id, "agent": responder, "response_type": normalized, "time": sim_time}
         )
+        if normalized in support_types and responder in supporters:
+            self._maybe_commit(artifact, responder, sim_time)
         return artifact
 
     def update_team_plan_assignments(

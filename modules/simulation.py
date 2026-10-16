@@ -18,6 +18,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from modules.agent import Agent
+from modules.team_plan_lifecycle import PlanProcessTracker, load_team_plan_policy
 from modules.action_gate import AgentActionGate
 from modules.brain_context import BrainContextBuilder
 from modules.brain_provider import BrainBackendConfig, create_brain_provider, resolve_pilot_display_name, resolve_pilot_id
@@ -186,7 +187,10 @@ class SimulationState:
         self.flash_mode = flash_mode
         self.time = 0.0
         self.logger = SimulationLogger(experiment_name=experiment_name or "experiment", project_root=project_root)
-        self.team_knowledge_manager = TeamKnowledgeManager()
+        self.team_knowledge_manager = TeamKnowledgeManager(commit_policy=load_team_plan_policy(self.task_model.manifest))
+        self.team_plan_policy = self.team_knowledge_manager.commit_policy
+        self.plan_process = PlanProcessTracker()
+        self.logger.register_event_listener(self.plan_process.on_event)
         self.brain_context_builder = BrainContextBuilder()
         self.planner_defaults = dict(self.task_model.manifest.get("planner_defaults", {}))
         if planner_config:
@@ -1430,6 +1434,7 @@ class SimulationState:
             self.logger.log_agent_state(self.time, agent)
 
         self._reconcile_uncommitted_closure_owners()
+        self._flush_team_plan_lifecycle()
         self.metrics.on_step(dt)
 
         self.time += dt
@@ -1504,6 +1509,13 @@ class SimulationState:
             "connections": {"total": len(links), "cross_site": sum(1 for l in links if l.get("cross_site_connection"))},
         }
 
+    def _flush_team_plan_lifecycle(self):
+        """Time-driven plan lifecycle (expiry) plus logging of store-level lifecycle events (commit, supersede, expire, revise)."""
+        manager = self.team_knowledge_manager
+        manager.expire_due_plans(self.time)
+        for event in manager.drain_lifecycle_events():
+            self.logger.log_event(self.time, event["event_type"], dict(event["payload"]))
+
     def _final_measures(self):
         """Authoritative end-of-run state read from the simulator (construction / environment)."""
         construction = self.environment.construction
@@ -1557,6 +1569,7 @@ class SimulationState:
                 "bridges": bridges,
                 "site_capacity": construction.get_site_capacity_summary(),
             },
+            "team_plan_process": self.plan_process.summary(self.time, len(self.agents)),
             "experimental": self._experimental_process_measures(),
             "action_feedback": {
                 "repeated_action_failure_events": int(events_by_type.get("repeated_action_failure", 0)),

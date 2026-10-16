@@ -897,6 +897,12 @@ class BrainContextBuilder:
             "unresolved_contradictions": [e for e in history_events if "mismatch with construction" in e.lower()],
         }
 
+        if hasattr(agent, "plan_assignment_annotation"):
+            for _aff in action_affordances:
+                _match = agent.plan_assignment_annotation(_aff.get("action_type"), _aff.get("target_id"))
+                if _match:
+                    # A committed team-plan assignment this agent adopted and can ground: stated as a fact on the matching legal action.
+                    _aff["plan_assignment_plan_id"] = _match["plan_id"]
         return BrainContextPacket(
             static_task_context=static_task_context,
             world_snapshot=world_snapshot,

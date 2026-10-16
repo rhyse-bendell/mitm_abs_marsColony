@@ -432,8 +432,10 @@ class RuleBrain(BrainProvider):
         "coordination_plan": 2.0,
         "coordination_consult": 1.2,
         "backup": 2.2,
+        "plan_assignment": 3.0,  # follow-through on an adopted committed-plan assignment, scaled by coordination_propensity (0 = no pull)
     }
     STARTUP_GROUNDING_BONUS = 20.0  # BOOTSTRAP only; see _score_actions_for_mode
+    PLAN_ASSIGNMENT_MODE_GAIN = 1.5  # hypothesized default (half the action-level weight); 0 coordination_propensity = no pull
     # Outstanding-obligation protection (hypothesized defaults, not calibrated). An observed failed project whose repair this agent's own
     # held DIK can ground (REPAIR affordance repair_ready) is an outstanding task obligation of a CLASS: it is not out-voted by how many
     # unrelated validation candidates exist, and the longer it has stood unserved the harder it is to ignore. It forces nothing: a blocked
@@ -762,7 +764,16 @@ class RuleBrain(BrainProvider):
         repair_obligation_age = max(
             [min(1.0, float(a.get("observed_failure_age_s", 0.0) or 0.0) / self.REPAIR_OBLIGATION_AGING_HORIZON_S) for a in repair_affordances if a.get("repair_ready")] or [0.0]
         )
+        assigned_types = {
+            str(a.get("action_type"))
+            for a in (context_packet.allowed_actions if is_request else context_packet.action_affordances)
+            if a.get("plan_assignment_plan_id")
+        }
         return {
+            "plan_pull_transport": 1.0 if ExecutableActionType.TRANSPORT_RESOURCES.value in assigned_types else 0.0,
+            "plan_pull_construct": 1.0 if assigned_types & {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.CONTINUE_CONSTRUCTION.value} else 0.0,
+            "plan_pull_validate": 1.0 if ExecutableActionType.VALIDATE_CONSTRUCTION.value in assigned_types else 0.0,
+            "plan_pull_repair": 1.0 if ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value in assigned_types else 0.0,
             "repair_obligation_age": repair_obligation_age,
             "observed_repair_need": observed_repair_need,
             "repair_executable": repair_executable,
@@ -940,6 +951,11 @@ class RuleBrain(BrainProvider):
         # REPAIR affordance's own repair_ready check, so it grants no knowledge; independent of mechanism/teamwork settings.
         mode_scores["REPAIR"] += 3.5 * features.get("repair_executable", 0.0)
         mode_scores["REPAIR"] += self.REPAIR_OBLIGATION_AGING_MODE_GAIN * features.get("repair_obligation_age", 0.0)  # starvation protection
+        # An adopted, grounded committed-plan assignment pulls the mode that owns its action, scaled by coordination_propensity (a
+        # preference among modes, never a selection: every other term still competes).
+        plan_follow = self.PLAN_ASSIGNMENT_MODE_GAIN * float(mechanism_profile.get("coordination_propensity", 0.5))
+        for _mode, _key in (("LOGISTICS", "plan_pull_transport"), ("CONSTRUCT", "plan_pull_construct"), ("VALIDATE", "plan_pull_validate"), ("REPAIR", "plan_pull_repair")):
+            mode_scores[_mode] += plan_follow * features.get(_key, 0.0)
         # Repair is needed but the agent cannot ground it yet: acquiring the missing knowledge is the rational next move.
         mode_scores["ACQUIRE_DIK"] += 1.0 * features.get("repair_knowledge_gap", 0.0)
         mode_scores["RECOVERY"] = 0.2 + 1.8 * features["loop_pressure"] + self.policy_config.recovery_bonus * features["contradiction_pressure"]
@@ -1389,6 +1405,9 @@ class RuleBrain(BrainProvider):
                 score += weights["coordination_consult"] * centered("coordination_propensity")
             if affordance.get("backup_need"):
                 score += weights["backup"] * centered("backup_propensity")
+            if affordance.get("plan_assignment_plan_id"):
+                # A preference, not a command: it competes with every other term and the Pilot may follow, defer or deviate.
+                score += weights["plan_assignment"] * float(mechanism_profile.get("coordination_propensity", 0.5))
             if action_type == ExecutableActionType.REQUEST_ASSISTANCE.value:
                 pass
             if action_type in {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.REQUEST_ASSISTANCE.value}:

@@ -299,23 +299,20 @@ class TestConstructMapping(unittest.TestCase):
                 agent_module.random.random = original_random
             self.assertEqual(changed.selected_action, ExecutableActionType.REASSESS_PLAN)
 
-    def test_committed_team_plan_fit_accepts_on_alignment_even_when_help_low(self):
+    def test_committed_team_plan_fit_accepts_only_what_the_agent_can_ground(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = SimulationState(phases=[], project_root=tmpdir)
             agent = sim.agents[0]
             agent.goal_alignment = 0.95
             agent.help_tendency = 0.05
             agent.hook_effects[("action_utility", "consult_team_artifact", "utility_weight")] = 0.95
-            response, reason = agent._evaluate_team_plan_fit(
-                sim,
-                {
-                    "plan_id": "p1",
-                    "status": "committed",
-                    "assignments_by_role": {agent.role: {"task": "repair", "project_target": "greenhouse_build"}},
-                },
-            )
-            self.assertEqual(response, "assignment_accept")
-            self.assertEqual(reason, "committed_plan_alignment")
+            agent.coordination_propensity = 0.9
+            plan = {"plan_id": "p1", "status": "committed", "proposed_by": "Other", "assignments_by_role": {agent.role: {"task": "repair", "project_target": "greenhouse_build"}}}
+            # Acceptance no longer depends on help_tendency (backup's mechanism); it depends on whether the agent can ground the assignment.
+            agent._last_pilot_affordances = [{"action_type": "repair_or_correct_construction", "target_id": "greenhouse_build", "repair_ready": True}]
+            self.assertEqual(agent._evaluate_team_plan_fit(sim, plan), ("assignment_accept", "grounded_in_my_legal_actions"))
+            agent._last_pilot_affordances = []
+            self.assertEqual(agent._evaluate_team_plan_fit(sim, plan)[0], "assignment_decline")
 
 
 if __name__ == "__main__":

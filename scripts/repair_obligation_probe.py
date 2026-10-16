@@ -117,7 +117,7 @@ def run_one(job):
         "validation_selections": sel[VALIDATE], "repair_selections": sel[REPAIR], "repair_successes": team.get("repair_successes"), "revalidations": team.get("revalidations"),
         "validation_attempts": team.get("validation_attempts"), "late_share": {k: round(late_exec[k] / late_tot, 3) for k in ("wait", "inspect_information_source", "consult_team_artifact")},
         "startup_substitutions": ev["startup_substitutions"], "rewrites_total": sum(rewrites.values()), "rewrites": dict(rewrites), "strategic_rejections": ev["mecha_strategic_substitution_rejected"],
-        "mode_ticks": dict(mode_ticks), "taskwork": team.get("taskwork_actions"), "session_folder": str(st.logger.output_session.session_folder),
+        "mode_ticks": dict(mode_ticks), "taskwork": team.get("taskwork_actions"), "team_plan_process": measures.get("team_plan_process"), "team_measures": team, "session_folder": str(st.logger.output_session.session_folder),
     }
     (Path(out) / "summaries").mkdir(parents=True, exist_ok=True)
     (Path(out) / "summaries" / ("%s__seed%s.json" % (name, seed))).write_text(json.dumps(rec, default=str), encoding="utf-8")

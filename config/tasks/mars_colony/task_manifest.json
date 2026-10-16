@@ -4,6 +4,14 @@
   "version": "2.0",
   "description": "MITM Mars Colony task package containing DIK + environment/action/task context.",
   "default": true,
+  "team_plan_policy": {
+    "_note": "Hypothesized defaults for a 3-person team, not calibrated. A plan commits on EXPLICIT support only (silence, clarification and decline never count).",
+    "commit_rule": {"proposer_must_support": true, "min_total_supporters": 2, "min_non_proposer_supporters": 1},
+    "support_response_types": ["agree", "assignment_accept"],
+    "review_after_s": 20.0,
+    "committed_plan_ttl_s": 90.0,
+    "response_engagement_min": 0.25
+  },
   "terminal_policy": {
     "end_on_resources_exhausted": false
   },

@@ -245,7 +245,21 @@ Unresolved scientific ambiguities carried forward (do not resolve silently): con
 - Seed results before the exhaustion change (r0-r5, default task): every seed ended with 20 structures validated, `bridge_bc` complete, both piles at 0, site_c_house_011 unfinished; none had a defined success.
 
 
-## NEXT BLOCK (not started): team-coordination lifecycle (audit finding, 2026-10-15)
+## DONE: minimal team-plan lifecycle (coordination_propensity now reaches adoption)
+States proposed -> committed -> superseded | expired (store: `TeamKnowledgeManager`; policy/measures: `modules/team_plan_lifecycle.py`). Commit rule is task config
+(`task_manifest.json` -> `team_plan_policy`, hypothesized defaults): proposer supports own plan AND >=1 non-proposer gives EXPLICIT support (`agree` / `assignment_accept`);
+silence, clarification and decline never count; support is bound to the plan's content signature, so a materially revised plan needs new support (unchanged content keeps it).
+Assignments are concrete legal task actions (`{task, action_type, project_target, basis}`) built only from the proposer's own last legal affordances (no role gate, no hidden truth;
+none known -> the old `lead_next_action`). Responses: `_evaluate_team_plan_fit` -- below `response_engagement_min` (mean of coordination_propensity and goal_alignment) the agent stays silent;
+engaged agents accept only what they can ground in their own legal actions, else clarify (repair knowledge missing) or decline. help_tendency (backup) no longer gates plan acceptance.
+Recognition of a committed plan comes from reading (consulting) it; the per-tick store-read adoption was removed. Adoption no longer sets a movement target or intent window: a grounded
+assignment is stated as `plan_assignment_plan_id` on the matching affordance and the Pilot adds `plan_assignment` (3.0 x coordination_propensity) at action level and
+`PLAN_ASSIGNMENT_MODE_GAIN` (1.5 x coordination) at mode level -- a preference only. Reassessment: assignment completed/blocked (2 consecutive decisions without the legal action),
+review time, expiry -> `team_plan_reassessed`; a blocked/expired/no-open-assignment plan sets `revision_due`, which re-opens the proposal opportunity (successor carries `supersedes_plan_id`).
+Telemetry reuses existing `team_plan_*` names plus `team_plan_consulted`, `_assignment_started/_completed/_blocked/_deviated`, `_reassessed`, `_superseded`, `_expired`, `_revised`, `_response_withheld`;
+measures in `final_measures.json -> team_plan_process`. Tests: `tests/test_team_plan_lifecycle.py`. Limitations: one completion retires an assignment; follow-through is weak (starts ~40% of grounded assignments).
+
+## (superseded by the block above) audit finding, 2026-10-15
 Audit of the existing team-plan machinery shows the lifecycle is unreachable end-to-end, so coordination_propensity currently only
 drives proposal/consultation, never adoption:
 - `TeamKnowledgeManager.commit_team_plan` (modules/team_knowledge.py) has no caller; plans stay `proposed`.
