@@ -176,7 +176,11 @@ def test_not_ready_validate_is_still_pivoted_and_blockable(sim):
     decision = _validate_decision(project_id)
 
     result = agent._apply_policy_pivots(decision, sim.environment, sim_state=sim, pivot_origin="unit_test")
-    assert result.selected_action != ExecutableActionType.VALIDATE_CONSTRUCTION  # existing pivot still applies
+    # Pilot authority: an illegal substantive Pilot action is NOT turned into another action by a pivot; the pivot's proposal is
+    # reported (with the legality verdict) and the gate below blocks the Pilot's own action with its reasons.
+    assert result.selected_action == ExecutableActionType.VALIDATE_CONSTRUCTION
+    rejected = [p for name, p in sim.captured_events if name == "mecha_strategic_substitution_rejected" and p.get("pilot_action") == "validate_construction"]
+    assert rejected and rejected[-1]["pilot_action_legal"] is False and rejected[-1]["proposed_action"] != "validate_construction"
 
     gate = sim.action_gate.evaluate(agent=agent, decision=decision, sim_state=sim)
     assert gate.legal is False

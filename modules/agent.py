@@ -779,6 +779,11 @@ class Agent:
                 if isinstance(mem, dict):
                     mem["exhausted"] = False
                     mem["exhausted_for_acquisition"] = False
+                exhaustion = self.source_exhaustion_state.get(packet)  # the refresh re-derives the flags above from this record
+                if isinstance(exhaustion, dict):
+                    exhaustion["exhausted"] = False
+                    exhaustion["exhausted_for_acquisition"] = False
+                    exhaustion["exhausted_content_signature"] = None
 
     def experimental_metrics_snapshot(self):
         retained = [e for e in self.dik_ledger.values() if e["forgotten_at"] is None]
@@ -1197,6 +1202,26 @@ class Agent:
             ExecutableActionType.EXTERNALIZE_PLAN,
             ExecutableActionType.COMMUNICATE,
             ExecutableActionType.REQUEST_ASSISTANCE,
+        }
+    )
+
+    # Substantive Pilot actions: the middleware may translate, gate (block/reject with a reported reason) and execute them, but it
+    # may not silently replace one with a different action. Only non-substantive choices (REASSESS_PLAN, OBSERVE_ENVIRONMENT,
+    # WAIT, ...) remain open to scaffold regulation.
+    _SUBSTANTIVE_PILOT_ACTIONS = frozenset(
+        {
+            ExecutableActionType.INSPECT_INFORMATION_SOURCE,
+            ExecutableActionType.CONSULT_TEAM_ARTIFACT,
+            ExecutableActionType.COMMUNICATE,
+            ExecutableActionType.REQUEST_ASSISTANCE,
+            ExecutableActionType.EXTERNALIZE_PLAN,
+            ExecutableActionType.MEETING,
+            ExecutableActionType.TRANSPORT_RESOURCES,
+            ExecutableActionType.START_CONSTRUCTION,
+            ExecutableActionType.CONTINUE_CONSTRUCTION,
+            ExecutableActionType.VALIDATE_CONSTRUCTION,
+            ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
+            ExecutableActionType.CONNECT_STRUCTURES,
         }
     )
 
@@ -2590,9 +2615,20 @@ class Agent:
             )
         return tuple(projects)
 
+    def _source_content_signature(self, environment, sim_state=None):
+        """What a re-inspection could change: the DIK this agent holds, the construction state it reasons about, and the phase.
+
+        Deliberately excludes the readiness blockers (which themselves depend on source-memory confidence), so it can be
+        used while refreshing that confidence without recursion or feedback.
+        """
+        data_ids, info_ids, knowledge_ids = self._held_dik_ids()
+        phase_idx = int(getattr(getattr(sim_state, "environment", None), "current_phase_index", 0) or 0)
+        return (phase_idx, hash(frozenset(data_ids)), hash(frozenset(info_ids)), hash(frozenset(knowledge_ids)), self._construction_state_signature(environment))
+
     def _refresh_source_memory_state(self, environment, sim_state=None):
         self._ensure_source_state(environment)
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
+        content_signature = self._source_content_signature(environment, sim_state=sim_state)
         role_source = f"{self.role}_Info"
         project_changed = False
         current_signature = self._construction_state_signature(environment)
@@ -2627,14 +2663,25 @@ class Agent:
                 decay += min(0.33, ((elapsed - 90.0) / 90.0) * 0.22)
             if elapsed > 150.0:
                 decay += min(0.2, ((elapsed - 150.0) / 180.0) * 0.15)
-            if no_progress_streak >= 3:
-                decay += min(0.16, 0.03 * (no_progress_streak - 2))
-            if contradiction_recent:
-                decay += 0.16
-            if repeated_replans >= 2:
-                decay += min(0.12, 0.04 * repeated_replans)
-            if project_changed and elapsed >= 45.0 and source_id in {"Team_Info", role_source}:
-                decay += 0.12
+            # Team-level lack of progress is a reason to doubt held content only if re-reading could change it. A source whose
+            # last inspection yielded nothing new, with the held DIK / construction state / phase unchanged since, has been
+            # verified: further doubt from stalled progress would pin its confidence at the floor and make no-gain
+            # re-inspection permanently attractive (an absorbing loop). Any change to the signature (a new gap, forgotten or
+            # newly acquired DIK, construction change) reopens the doubt; plain elapsed-time staleness above always applies.
+            verified_static = bool(
+                exhaustion.get("exhausted_for_acquisition", exhaustion.get("exhausted"))
+                and exhaustion.get("exhausted_content_signature") is not None
+                and exhaustion.get("exhausted_content_signature") == content_signature
+            )
+            if not verified_static:
+                if no_progress_streak >= 3:
+                    decay += min(0.16, 0.03 * (no_progress_streak - 2))
+                if contradiction_recent:
+                    decay += 0.16
+                if repeated_replans >= 2:
+                    decay += min(0.12, 0.04 * repeated_replans)
+                if project_changed and elapsed >= 45.0 and source_id in {"Team_Info", role_source}:
+                    decay += 0.12
             memory["memory_confidence"] = max(0.08, float(memory.get("memory_confidence", 0.8)) - min(0.62, decay))
 
     def _epistemic_sufficiency(self, environment, sim_state=None):
@@ -3866,6 +3913,7 @@ class Agent:
         source_state["exhausted"] = exhausted_for_acquisition
         source_state["exhausted_for_acquisition"] = exhausted_for_acquisition
         source_state["exhausted_dependency_signature"] = dependency_signature if exhausted_for_acquisition else None
+        source_state["exhausted_content_signature"] = self._source_content_signature(environment, sim_state=sim_state) if exhausted_for_acquisition else None
         source_state["revisitable_for_verification"] = True
         memory = self.source_memory_state.setdefault(source_id, {})
         memory["ever_inspected"] = True
@@ -8760,7 +8808,46 @@ class Agent:
         """
         self._pilot_decision_anchor = decision
         result = self._apply_policy_pivots_unguarded(decision, environment, sim_state=sim_state, context=context, pivot_origin=pivot_origin)
-        return self._enforce_pilot_project_authority(result, sim_state=sim_state, pivot_origin=pivot_origin)
+        result = self._enforce_pilot_project_authority(result, sim_state=sim_state, pivot_origin=pivot_origin)
+        return self._enforce_pilot_substantive_authority(result, sim_state=sim_state, pivot_origin=pivot_origin)
+
+    def _enforce_pilot_substantive_authority(self, result, *, sim_state=None, pivot_origin="runtime"):
+        """The Pilot's substantive action is never silently replaced by a different action.
+
+        A rewrite of a substantive Pilot action into another action (recovery/forced pivots, post-inspect follow-ups,
+        epistemic-refresh guards, redundant-artifact escape hatches, closure/commitment scaffolds, material-satisfaction
+        successors) is rejected and reported with the proposed alternative as information; the Pilot's own decision stands and
+        the ActionGate then executes or blocks it with a reported reason (an illegal action is blocked, not turned into another
+        strategy). A fresh Pilot decision (a re-query) re-anchors, so it is not a rewrite. Same-action retargeting is
+        translation, not substitution, and non-substantive Pilot choices (reassess/observe/wait) stay open to regulation.
+        """
+        anchor = getattr(self, "_pilot_decision_anchor", None)
+        if anchor is None or result is anchor or result.selected_action == anchor.selected_action:
+            return result
+        if anchor.selected_action not in self._SUBSTANTIVE_PILOT_ACTIONS:
+            return result
+        legal = None
+        gate = getattr(sim_state, "action_gate", None)
+        if gate is not None:
+            try:
+                legal = bool(getattr(gate.evaluate(agent=self, decision=anchor, sim_state=sim_state), "legal", False))
+            except Exception:
+                legal = None
+        self._emit_event(
+            sim_state,
+            "mecha_strategic_substitution_rejected",
+            {
+                "origin": pivot_origin,
+                "pilot_action": anchor.selected_action.value,
+                "pilot_target_id": anchor.target_id,
+                "pilot_action_legal": legal,
+                "proposed_action": result.selected_action.value,
+                "proposed_target_id": result.target_id,
+                "proposed_reason": str(result.reason_summary or "")[:140],
+                "applied": False,
+            },
+        )
+        return anchor
 
     @staticmethod
     def _same_pilot_choice(a, b):
@@ -9788,6 +9875,7 @@ class Agent:
                 environment,
                 sim_state=sim_state,
             )
+            decision = self._enforce_pilot_substantive_authority(decision, sim_state=sim_state, pivot_origin="local_refresh_successor")
         updated_control_state = context.individual_cognitive_state.get("control_state", {})
         if isinstance(updated_control_state, dict) and updated_control_state:
             self.control_state.update(updated_control_state)
