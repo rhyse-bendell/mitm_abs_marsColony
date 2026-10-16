@@ -510,4 +510,13 @@ def test_a_substantive_plan_revision_still_produces_a_new_plan(make_sim, monkeyp
     target.mental_model["knowledge"].add_rule("a genuinely new rule the plan can cite", [])
     for _ in range(40):
         sim.update(1.0)
-    assert target.experimental_metrics["team_plan_proposals"] > before  # new evidence -> a distinguishable new plan version
+    # single-active-plan rule: new evidence alone does not post a competing plan beside a live one ...
+    assert target.experimental_metrics["team_plan_proposals"] == before
+    live = next(p for p in sim.team_knowledge_manager.list_team_plans() if p["status"] in {"proposed", "committed"})
+    # ... a revision that names the live plan as the one it supersedes does: a distinguishable new plan version
+    target.team_plan_state["adopted_plan_summary"] = {"plan_id": live["plan_id"]}
+    target.team_plan_state["revision_due"] = "assignment_blocked"
+    target.mental_model["knowledge"].add_rule("and one more genuinely new rule", [])
+    for _ in range(40):
+        sim.update(1.0)
+    assert target.experimental_metrics["team_plan_proposals"] > before

@@ -653,7 +653,16 @@ class BrainContextBuilder:
                 "adopted_by_agent": aid in inspected_artifact_ids,
             }
             if artifact.artifact_type == "team_plan" and isinstance(getattr(artifact, "content", None), dict):
-                content = dict(artifact.content)
+                # Epistemic boundary: a plan's content (and even its status) reaches the Pilot only if THIS agent consulted, received or authored it,
+                # and then as it read it (status_when_read), never the live store.
+                known_entry = (agent.team_plan_state.get("known_plans") or {}).get(str(artifact.content.get("plan_id")))
+                if known_entry is None:
+                    payload["summary"] = "team plan artifact (not read by this agent)"
+                    payload["adopted_by_agent"] = False
+                    artifact_summaries.append(payload)
+                    continue
+                content = dict(known_entry["summary"])
+                payload["summary"] = f"team_plan {content.get('plan_id')} {content.get('status')} (as read): {content.get('goal_summary', '')}".strip()
                 payload["team_plan"] = {
                     "plan_id": content.get("plan_id"),
                     "status": content.get("status"),
@@ -669,37 +678,41 @@ class BrainContextBuilder:
                     "expires_at": content.get("expires_at"),
                     "last_plan_event": content.get("last_plan_event"),
                     "plan_event_time": content.get("plan_event_time"),
+                    "read_at": known_entry["read_at"],
                 }
                 team_plan_summaries.append({"artifact_id": aid, **payload["team_plan"]})
             artifact_summaries.append(payload)
 
-        team_knowledge_summary = sim_state.team_knowledge_manager.summarize()
-        active_team_plan = dict(team_knowledge_summary.get("active_team_plan") or {})
-        team_plan_recent_updates = list(team_knowledge_summary.get("team_plan_recent_updates", []))
-        if not team_plan_summaries:
-            team_plan_summaries = list(team_knowledge_summary.get("team_plan_summaries", []))
+        team_plan_context = agent.team_plan_context(sim_state) if hasattr(agent, "team_plan_context") else {"schema": "team_plan_context/1", "known_plan": None, "unread_live_plan_artifact": False, "adopted": False, "my_assignment": None, "review": {}}
+        raw_summary = sim_state.team_knowledge_manager.summarize()
+        known_plan = team_plan_context.get("known_plan") or {}
+        known_status = "expired" if known_plan.get("expired") else known_plan.get("status_when_read")
+        active_team_plan = {**{k: v for k, v in known_plan.items() if k not in {"status_when_read", "expired"}}, "status": known_status} if known_plan else {}
+        team_plan_recent_updates = []  # lifecycle chatter of the shared store is not something an agent perceives; plans are learned by reading them
+        _plan_events = lambda u: str(u.get("event", "")).startswith("team_plan_")  # noqa: E731
+        team_knowledge_summary = {
+            **raw_summary,
+            "artifact_summaries": {
+                aid: ({**v, "summary": "team plan artifact (not read by this agent)", "validation_state": "unknown"}
+                      if v.get("type") == "team_plan" and str(aid) not in {f"team_plan:{k}" for k in (agent.team_plan_state.get("known_plans") or {})} else v)
+                for aid, v in (raw_summary.get("artifact_summaries") or {}).items()
+            },
+            "active_team_plan": active_team_plan or None,
+            "team_plan_summaries": [],  # filled below from the agent's own acquired copies
+            "team_plan_recent_updates": [],
+            "recent_updates": [u for u in (raw_summary.get("recent_updates") or []) if not _plan_events(u)],
+        }
         team_plan_summaries = sorted(
             team_plan_summaries,
             key=lambda item: float(item.get("plan_event_time") or 0.0),
             reverse=True,
         )[:6]
+        team_knowledge_summary["team_plan_summaries"] = list(team_plan_summaries)
         my_role_assignment = None
         if active_team_plan:
             my_role_assignment = dict(active_team_plan.get("assignments_by_role", {})).get(agent.role)
-        validated_plan_exists = any(
-            a.artifact_type in {"plan", "team_plan"}
-            and (
-                a.artifact_type == "plan"
-                or (isinstance(getattr(a, "content", None), dict) and str(a.content.get("status", "")).lower() in {"proposed", "committed"})
-            )
-            for a in sim_state.team_knowledge_manager.artifacts.values()
-        )
-        committed_team_plan_exists = any(
-            a.artifact_type == "team_plan"
-            and isinstance(getattr(a, "content", None), dict)
-            and str(a.content.get("status", "")).lower() == "committed"
-            for a in sim_state.team_knowledge_manager.artifacts.values()
-        )
+        validated_plan_exists = any(a.artifact_type == "plan" for a in sim_state.team_knowledge_manager.artifacts.values()) or known_status in {"proposed", "committed"}
+        committed_team_plan_exists = known_status == "committed"
         teammate_help_signals = {
             other.name: (
                 bool(other.known_gaps)
@@ -711,7 +724,7 @@ class BrainContextBuilder:
         }
 
         task_model = getattr(sim_state, "task_model", None)
-        recent_updates = list(sim_state.team_knowledge_manager.recent_updates[-24:])
+        recent_updates = [u for u in sim_state.team_knowledge_manager.recent_updates[-24:] if not str(u.get("event", "")).startswith("team_plan_")]
         recent_construction_updates = [
             update
             for update in recent_updates
@@ -748,6 +761,7 @@ class BrainContextBuilder:
             "recent_construction_updates": recent_construction_updates,
             "plan_readiness": "validated_shared_plan" if committed_team_plan_exists else ("proposed_shared_plan" if validated_plan_exists else "partial_or_fragmentary_plan"),
             "externalized_artifacts": artifact_summaries,
+            "team_plan_context": team_plan_context,
             "active_team_plan": active_team_plan,
             "team_plan_summaries": team_plan_summaries,
             "my_role_assignment": my_role_assignment,
@@ -903,6 +917,10 @@ class BrainContextBuilder:
                 if _match:
                     # A committed team-plan assignment this agent adopted and can ground: stated as a fact on the matching legal action.
                     _aff["plan_assignment_plan_id"] = _match["plan_id"]
+                    _aff["plan_assignment"] = dict(_match)
+                    _mine = team_plan_context.get("my_assignment")
+                    if isinstance(_mine, dict):
+                        _mine.setdefault("matching_affordances", []).append({"action_type": _aff.get("action_type"), "target_id": _aff.get("target_id")})
         return BrainContextPacket(
             static_task_context=static_task_context,
             world_snapshot=world_snapshot,

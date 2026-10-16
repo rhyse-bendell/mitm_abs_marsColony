@@ -356,9 +356,19 @@ class TeamKnowledgeManager:
         opposers: Optional[List[str]] = None,
         consulted_by: Optional[List[str]] = None,
         supersedes_plan_id: Optional[str] = None,
-    ) -> TeamArtifact:
+    ) -> Optional[TeamArtifact]:
+        """Create or revise a plan. Returns None when the single-active-plan rule refuses a new plan (logged as team_plan_proposal_refused)."""
         artifact_id = self._team_plan_artifact_id(plan_id)
         existing = self.artifacts.get(artifact_id)
+        if existing is None and bool(self.commit_policy.get("single_active_plan", True)):
+            live = [p for p in self.list_team_plans() if p.get("status") in {"proposed", "committed"}]
+            if live:
+                if supersedes_plan_id and any(str(p.get("plan_id")) == str(supersedes_plan_id) for p in live):
+                    for incumbent in live:  # explicit supersession named by the proposer: the only way to enter beside a live plan
+                        self.supersede_team_plan(plan_id=str(incumbent.get("plan_id")), by_plan_id=plan_id, sim_time=sim_time, reason="explicit_supersession_by_proposal")
+                else:
+                    self._log("team_plan_proposal_refused", plan_id=plan_id, agent=proposed_by, time=sim_time, active_plan_id=live[0].get("plan_id"), reason="active_plan_exists_without_explicit_supersession")
+                    return None
         previous = dict(existing.content) if existing and isinstance(existing.content, dict) else {}
         event_name = "team_plan_updated" if existing is not None else "team_plan_proposed"
         content = {
@@ -387,7 +397,7 @@ class TeamKnowledgeManager:
         }
         content["content_signature"] = plan_content_signature(content)
         prev_sig = previous.get("content_signature")
-        if existing is not None and prev_sig == content["content_signature"] and previous.get("status") in {"committed", "superseded", "expired"}:
+        if existing is not None and prev_sig == content["content_signature"] and previous.get("status") in {"committed", "superseded", "expired", "completed", "blocked"}:
             return existing  # unchanged content of a plan that already left 'proposed': a re-externalisation is not a new proposal
         carried = dict(previous.get("supporter_signatures", {}) or {}) if prev_sig == content["content_signature"] else {}
         if carried:  # unchanged content: earlier explicit support still refers to it
@@ -487,6 +497,28 @@ class TeamKnowledgeManager:
         artifact.validation_state = "tentative"
         self._log("team_plan_superseded", plan_id=plan_id, time=sim_time, superseded_by=by_plan_id, reason=reason)
         return artifact
+
+    def record_assignment_outcome(self, *, plan_id: str, role: str, outcome: str, sim_time: float, agent: str = "", reason: str = "") -> Optional[str]:
+        """An assigned role reports how its assignment ended (completed | blocked | invalidated). When every concretely assigned role has
+        reported, the plan leaves the live states: 'completed' if any assignment was completed, else 'blocked'. Returns the new status."""
+        artifact = self.artifacts.get(self._team_plan_artifact_id(plan_id))
+        if artifact is None or not isinstance(artifact.content, dict) or artifact.content.get("status") not in {"proposed", "committed"}:
+            return None
+        content = dict(artifact.content)
+        outcomes = dict(content.get("assignment_outcomes") or {})
+        outcomes[str(role)] = {"outcome": str(outcome), "agent": agent, "time": sim_time, "reason": reason}
+        content["assignment_outcomes"] = outcomes
+        artifact.content = content
+        if content.get("status") != "committed":
+            return None
+        assigned = sorted(r for r, a in (content.get("assignments_by_role") or {}).items() if isinstance(a, dict) and a.get("action_type"))
+        if not assigned or any(r not in outcomes for r in assigned):
+            return None
+        status = "completed" if any(outcomes[r]["outcome"] == "completed" for r in assigned) else "blocked"
+        artifact.content = {**content, "status": status, "plan_event_time": sim_time, "last_plan_event": f"team_plan_{status}"}
+        artifact.validation_state = "tentative"
+        self._log(f"team_plan_{status}", plan_id=plan_id, time=sim_time, outcomes={r: outcomes[r]["outcome"] for r in assigned})
+        return status
 
     def expire_due_plans(self, sim_time: float) -> List[str]:
         expired = []

@@ -357,6 +357,7 @@ def _request_from_context_packet(context_packet) -> AgentBrainRequest:
             "build_readiness": dict(cognitive.get("build_readiness", {})),
             "built_state": list(world.get("built_state", [])),
             "team_shared_knowledge": dict(context_packet.team_state.get("team_shared_knowledge", {})),
+            "team_plan_context": dict(context_packet.team_state.get("team_plan_context") or {}),
             "active_team_plan": dict(context_packet.team_state.get("team_shared_knowledge", {}).get("active_team_plan") or {}),
             "team_plan_summaries": list(context_packet.team_state.get("team_shared_knowledge", {}).get("team_plan_summaries", [])),
             "loop_counters": dict(cognitive.get("loop_counters", {})),
@@ -512,7 +513,7 @@ class RuleBrain(BrainProvider):
             raise ValueError(f"RuleBrain action vocabulary drift detected: {drift}")
 
     @staticmethod
-    def _detect_team_plan_state(team_shared_knowledge: dict[str, Any], artifacts: list[dict[str, Any]]) -> dict[str, float]:
+    def _detect_team_plan_state(team_shared_knowledge: dict[str, Any], artifacts: list[dict[str, Any]], plan_context: dict[str, Any] | None = None) -> dict[str, float]:
         summaries = list(team_shared_knowledge.get("team_plan_summaries", [])) if isinstance(team_shared_knowledge, dict) else []
         active_plan = dict(team_shared_knowledge.get("active_team_plan") or {}) if isinstance(team_shared_knowledge, dict) else {}
         if not summaries:
@@ -525,7 +526,7 @@ class RuleBrain(BrainProvider):
         active_status = str(active_plan.get("status", ""))
         committed = ("committed" in statuses) or active_status == "committed"
         proposed = ("proposed" in statuses) or active_status == "proposed"
-        available = committed or proposed or bool(summaries) or bool(active_plan)
+        available = committed or proposed or bool(summaries) or bool(active_plan) or bool((plan_context or {}).get("unread_live_plan_artifact"))
         return {
             "team_plan_available": 1.0 if available else 0.0,
             "team_plan_committed": 1.0 if committed else 0.0,
@@ -650,7 +651,8 @@ class RuleBrain(BrainProvider):
         epistemic_suff = cognitive.get("epistemic_sufficiency", {}) if not is_request else dict(request_ctx.get("epistemic_sufficiency", {}))
         refresh_pressure = float(epistemic_suff.get("refresh_pressure", 0.0) or 0.0)
         stale_grounding_pressure = max(0.0, min(1.0, (1.0 - ((team_freshness + role_freshness) / 2.0)) + refresh_pressure))
-        plan_state = self._detect_team_plan_state(team_shared_knowledge, externalized)
+        plan_context = context_packet.team_state.get("team_plan_context") if not is_request else (request_ctx or {}).get("team_plan_context")
+        plan_state = self._detect_team_plan_state(team_shared_knowledge, externalized, plan_context)
         ready_for_validation = any(bool(p.get("ready_for_validation")) for p in built_state)
         validation_pending_projects = [p for p in built_state if self._project_validation_pending(p)]
         site_capacity_rows = list(world.get("site_capacity_summary", []) or []) if isinstance(world, dict) else []

@@ -257,7 +257,7 @@ assignment is stated as `plan_assignment_plan_id` on the matching affordance and
 `PLAN_ASSIGNMENT_MODE_GAIN` (1.5 x coordination) at mode level -- a preference only. Reassessment: assignment completed/blocked (2 consecutive decisions without the legal action),
 review time, expiry -> `team_plan_reassessed`; a blocked/expired/no-open-assignment plan sets `revision_due`, which re-opens the proposal opportunity (successor carries `supersedes_plan_id`).
 Telemetry reuses existing `team_plan_*` names plus `team_plan_consulted`, `_assignment_started/_completed/_blocked/_deviated`, `_reassessed`, `_superseded`, `_expired`, `_revised`, `_response_withheld`;
-measures in `final_measures.json -> team_plan_process`. Tests: `tests/test_team_plan_lifecycle.py`. Limitations: one completion retires an assignment; follow-through is weak (starts ~40% of grounded assignments).
+measures in `final_measures.json -> team_plan_process`. Tests: `tests/test_team_plan_lifecycle.py`. Limitations at that point (one completion retired an assignment; ~40% start rate; store exposed to the Pilot) are addressed by the coordination hardening block below.
 
 ## (superseded by the block above) audit finding, 2026-10-15
 Audit of the existing team-plan machinery shows the lifecycle is unreachable end-to-end, so coordination_propensity currently only
@@ -307,3 +307,19 @@ Branch wip/validation-repair-checkpoint (merged to main; see git log). What is n
    (B 0.40 vs C 0.37). Needs an operationalization built on an observably stalled/needy teammate.
 3. Coordination lifecycle (commit/adoption) is unreachable: see NEXT BLOCK above. Not started.
 4. DIK requests are rare outside high teamwork; "solicited" provisions are only observable there.
+
+
+## DONE: coordination hardening block (2026-10-16) - SUMMARY FOR RESUMING
+Details, numbers and limitations: `Documentation/checkpoints/2026-10-16_coordination_hardening.md`. Contract: `Documentation/generic_brain_contract.md` ("Team-plan context").
+- Controller-neutral plan context `team_plan_context/1` (`Agent.team_plan_context`; `team_state["team_plan_context"]`, `task_context["team_plan_context"]`): known plan AS READ, adopted state, own assignment
+  (status, grounded/reason, success criterion, progress, recognized gap tokens, matching affordances), review/expiry/revision_due. Affordance markers `plan_assignment_plan_id` + `plan_assignment`.
+  The live `TeamKnowledgeManager` is no longer exposed to Pilots: an unread plan is only `unread_live_plan_artifact`; shared-store `team_plan_*` chatter is removed; plans are passed on by message only from the sender's own copy.
+- Assignments end on their task-level criterion (transport material met / repair failure resolved / validation attempted after taking the assignment or validated / physically complete), not on one action;
+  matching completed taskwork (not movement) is partial progress (`team_plan_aligned_action_completed`); distinct `_superseded/_expired/_invalidated` events; ungrounded assignments stay open with recognized gaps and may ground later.
+- One active plan (`team_plan_policy.single_active_plan`): competing proposals are refused (`team_plan_proposal_refused`) unless they name the live plan in `supersedes_plan_id`; plans end `completed`/`blocked`
+  when all concretely assigned roles reported (`record_assignment_outcome`) or `expired`; a review alone never replaces a plan. A refused externalisation still attaches the author's plan-relevant DIK to the existing plan artifact.
+- Characterization vs f2ba5ae (coordination 0.1/0.5/0.9, seeds 0-7, 600 s): proposals 8.1 -> 3.5 and supersession rate 0.44 -> 0.11 at 0.9 (0.51 -> 0.04 at 0.5); assignment start rate 0.41 -> 0.59, completion rate 0.19 -> 0.38;
+  no stalls, no middleware rewrites; ordering across 0.1/0.5/0.9 preserved. Validated structures unchanged within noise (not a criterion).
+- Regression (non-GUI files, 11 parallel chunks): f2ba5ae 112 failing tests, this block 114; the differences are one intended test update (`test_experimental_panel::test_a_substantive_plan_revision...`, now requires explicit supersession) and load-flaky tests that pass in isolation on both trees.
+- NEXT (not started, do not start without the user): backup operationalization; request/push ecology; per-agent controller assignment / Ollama.
+

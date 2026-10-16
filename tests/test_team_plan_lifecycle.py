@@ -178,6 +178,11 @@ def test_F_committed_plan_is_visible_and_adoptable_by_a_teammate(sim):
     summary = _commit_for(sim, {"Botanist": {"task": "transport", "action_type": "transport_resources", "project_target": "proj_a"}})
     assert sim.team_knowledge_manager.get_active_team_plan()["status"] == "committed"
     ctx = sim.brain_context_builder.build(sim, bot)
+    # epistemic boundary: a plan the agent has not read is only an existence flag, never content
+    assert not ctx.team_state["team_shared_knowledge"]["active_team_plan"] and ctx.team_state["team_plan_context"]["known_plan"] is None
+    assert ctx.team_state["team_plan_context"]["unread_live_plan_artifact"] is True
+    bot._note_known_plan(sim, summary, via="consulted")
+    ctx = sim.brain_context_builder.build(sim, bot)
     assert ctx.team_state["team_shared_knowledge"]["active_team_plan"]["plan_id"] == "px"
     bot._adopt_committed_team_plan(sim, summary, reason="test")
     assert bot.team_plan_state["assignment_state"]["status"] == "applied"
@@ -200,7 +205,7 @@ def test_G_assignment_is_a_preference_not_a_command(sim):
     bot._last_pilot_affordances = [_afford("transport_resources", "proj_a")]
     bot._adopt_committed_team_plan(sim, _commit_for(sim, {"Botanist": {"task": "transport", "action_type": "transport_resources", "project_target": "proj_a"}}), reason="test")
     ann = bot.plan_assignment_annotation("transport_resources", "proj_a")
-    assert ann == {"plan_id": "px"} and bot.plan_assignment_annotation("transport_resources", "other") is None and bot.plan_assignment_annotation("validate_construction", "proj_a") is None
+    assert ann["plan_id"] == "px" and bot.plan_assignment_annotation("transport_resources", "other") is None and bot.plan_assignment_annotation("validate_construction", "proj_a") is None
     brain = RuleBrain()
     feats = brain._extract_features(sim.brain_context_builder.build(sim, bot))
     base = {"action_type": "transport_resources", "target_id": "proj_a", "utility": 0.9}
@@ -262,7 +267,9 @@ def test_I2_review_time_and_expiry_reassess_the_adopted_plan(sim):
     bot.team_plan_state["assignment_state"]["status"] = "completed"
     sim.time = bot.team_plan_state["next_review_at"] + 0.1
     bot._team_plan_lifecycle_tick(sim)
-    assert _names(sim, "team_plan_reassessed")[-1]["trigger"] == "review_time_reached" and bot.team_plan_state["revision_due"]
+    review = _names(sim, "team_plan_reassessed")[-1]
+    # a finished assignment leaves the plan standing for the roles still working; only blockage/expiry asks for a revision
+    assert review["trigger"] == "review_time_reached" and review["outcome"].startswith("own_assignment_completed") and not bot.team_plan_state["revision_due"]
     sim.time = bot.team_plan_state["adopted_plan_summary"]["expires_at"] + 1
     bot._team_plan_lifecycle_tick(sim)
     assert _names(sim, "team_plan_reassessed")[-1]["trigger"] == "expiry_reached" and bot.team_plan_state["revision_due"] == "plan_expired"
@@ -274,6 +281,8 @@ def test_revision_opportunity_is_open_only_when_a_reassessment_asked_for_it(sim)
     active = sim.team_knowledge_manager.get_active_team_plan()
     assert bot._team_plan_opportunity(sim, active) is False  # a live committed plan: no new proposal opportunity
     bot.team_plan_state["revision_due"] = "assignment_blocked"
+    assert bot._team_plan_opportunity(sim, active) is False  # a revision may only replace the plan it adopted (explicit supersession)
+    bot.team_plan_state["adopted_plan_summary"] = dict(active)
     assert bot._team_plan_opportunity(sim, active) is True
 
 
@@ -349,8 +358,9 @@ def test_process_tracker_counts_distinct_agent_plan_pairs_and_alignment():
     ev(5, "team_plan_assignment_applied", plan_id="p", agent="A", grounded=True)
     ev(5, "team_plan_assignment_applied", plan_id="p", agent="B", grounded=True)
     ev(6, "team_plan_assignment_started", plan_id="p", agent="A")
-    ev(8, "team_plan_assignment_completed", plan_id="p", agent="A")
-    ev(9, "executable_action_completed", action_type="validate_construction")
+    ev(7, "team_plan_aligned_action_completed", plan_id="p", agent="A")
+    ev(8, "team_plan_assignment_completed", plan_id="p", agent="A", aligned_actions=1)
+    ev(9, "executable_action_completed", action_type="construct", decision_action="validate_construction")
     s = t.summary(10.0, 3)
     assert s["mean_time_proposal_to_commitment_s"] == 4.0 and s["commitment_rate"] == 1.0
     assert s["distinct_plan_agent_adoptions"] == 2 and s["local_adoption_rate"] == pytest.approx(2 / 3, abs=1e-3)

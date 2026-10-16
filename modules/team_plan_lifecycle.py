@@ -1,6 +1,6 @@
 """Team-plan lifecycle policy and process measures (generic engine layer; task content comes from the task manifest).
 
-Lifecycle: proposed -> committed -> (superseded | expired). A plan commits only on EXPLICIT support under a configurable rule
+Lifecycle: proposed -> committed -> (completed | blocked | superseded | expired). A plan commits only on EXPLICIT support under a configurable rule
 (task_manifest.json -> "team_plan_policy"); silence, clarification requests and declines never count as support, and support given
 to one version of a plan's content does not carry over to a materially different version.
 """
@@ -16,6 +16,9 @@ DEFAULT_TEAM_PLAN_POLICY: Dict[str, Any] = {
     "support_response_types": ["agree", "assignment_accept"],
     "review_after_s": 20.0,
     "response_engagement_min": 0.25,
+    # At most one proposed-or-committed plan exists at a time. A new plan may enter only when the incumbent has left the live states
+    # (expired / completed / blocked / superseded) or the proposal explicitly names the incumbent as the plan it supersedes.
+    "single_active_plan": True,
 }
 
 PLAN_TASKWORK_ACTIONS = frozenset({"transport_resources", "start_construction", "continue_construction", "repair_or_correct_construction", "validate_construction", "connect_structures"})
@@ -85,6 +88,14 @@ class PlanProcessTracker:
         "team_plan_reassessed": "reassessments",
         "team_plan_superseded": "plans_superseded",
         "team_plan_expired": "plans_expired",
+        "team_plan_completed": "plans_completed",
+        "team_plan_blocked": "plans_blocked",
+        "team_plan_proposal_refused": "proposals_refused_active_plan",
+        "team_plan_assignment_invalidated": "assignments_invalidated",
+        "team_plan_assignment_superseded": "assignments_superseded",
+        "team_plan_assignment_expired": "assignments_expired",
+        "team_plan_assignment_grounded_later": "assignments_grounded_later",
+        "team_plan_aligned_action_completed": "aligned_actions_completed",
     }
 
     def __init__(self) -> None:
@@ -93,7 +104,11 @@ class PlanProcessTracker:
         self.commit_latencies: List[float] = []
         self.plans_with_response: set = set()
         self.taskwork_completed = 0
-        self.aligned_taskwork_completed = 0
+        self.aligned_taskwork_completed = 0  # taskwork actions completed toward an open assignment (partial progress counts)
+        self.assignments_credited = 0  # assignments whose success criterion was met after at least one aligned action
+        self.plan_live_since: Dict[str, float] = {}
+        self.committed_seconds = 0.0
+        self.plan_exit: Dict[str, str] = {}  # plan_id -> terminal status
         self.active: Dict[str, set] = {}  # plan_id -> agents currently holding an unretired, grounded assignment
         self.peak_aligned_agents = 0
         self.peak_plan = None
@@ -116,8 +131,11 @@ class PlanProcessTracker:
         name = event.get("event_type")
         payload = event.get("payload_data") or {}
         t = float(event.get("time") or 0.0)
-        if name == "executable_action_completed" and payload.get("action_type") in PLAN_TASKWORK_ACTIONS:
-            self.taskwork_completed += 1
+        if name == "executable_action_completed":
+            # taskwork = a completed Pilot-chosen taskwork action (movement sub-actions that merely carry its decision_action are not)
+            done = getattr(payload.get("decision_action"), "value", payload.get("decision_action"))
+            if payload.get("action_type") != "move_to" and done in PLAN_TASKWORK_ACTIONS:
+                self.taskwork_completed += 1
             return
         if name not in self.COUNTED:
             return
@@ -127,8 +145,10 @@ class PlanProcessTracker:
         agent = str(payload.get("agent") or payload.get("agent_role") or "")
         if name == "team_plan_proposed" and plan_id:
             self.proposed_at.setdefault(plan_id, t)
-        elif name == "team_plan_committed" and plan_id in self.proposed_at:
-            self.commit_latencies.append(t - self.proposed_at[plan_id])
+        elif name == "team_plan_committed":
+            self.plan_live_since[plan_id] = t
+            if plan_id in self.proposed_at:
+                self.commit_latencies.append(t - self.proposed_at[plan_id])
         elif name == "team_plan_adopted_locally":
             self.adopting_agents.add(agent)
             self.pairs["adopted"].add((plan_id, agent))
@@ -143,18 +163,27 @@ class PlanProcessTracker:
             self.pairs["started"].add((plan_id, agent))
         elif name == "team_plan_assignment_deviated":
             self.pairs["deviated"].add((plan_id, agent))
+        elif name == "team_plan_aligned_action_completed":
+            self.aligned_taskwork_completed += 1
         elif name == "team_plan_assignment_completed":
             self.pairs["completed"].add((plan_id, agent))
-            self.aligned_taskwork_completed += 1
+            if payload.get("aligned_actions"):
+                self.assignments_credited += 1
+            self.active.get(plan_id, set()).discard(agent)
+        elif name in {"team_plan_assignment_invalidated", "team_plan_assignment_superseded", "team_plan_assignment_expired"}:
             self.active.get(plan_id, set()).discard(agent)
         elif name == "team_plan_assignment_blocked":
             self.pairs["blocked"].add((plan_id, agent))
             self.active.get(plan_id, set()).discard(agent)
-        elif name in {"team_plan_superseded", "team_plan_expired"}:
+        elif name in {"team_plan_superseded", "team_plan_expired", "team_plan_completed", "team_plan_blocked"}:
             self.active.pop(plan_id, None)
+            if plan_id in self.plan_live_since:
+                self.committed_seconds += max(0.0, t - self.plan_live_since.pop(plan_id))
+            self.plan_exit.setdefault(plan_id, name.replace("team_plan_", ""))
 
     def summary(self, now: float, n_agents: int) -> Dict[str, Any]:
         self._integrate(now)
+        committed_seconds = self.committed_seconds + sum(max(0.0, now - t0) for t0 in self.plan_live_since.values())
         c = self.counts
         rate = lambda a, b: round(a / b, 4) if b else None  # noqa: E731
         return {
@@ -172,6 +201,10 @@ class PlanProcessTracker:
             "taskwork_completed": self.taskwork_completed,
             "taskwork_aligned_with_committed_plan": self.aligned_taskwork_completed,
             "taskwork_aligned_proportion": rate(self.aligned_taskwork_completed, self.taskwork_completed),
+            "assignments_completed_with_aligned_work": self.assignments_credited,
+            "committed_plan_seconds": round(committed_seconds, 1),
+            "agent_seconds_aligned_to_committed_plan": round(self._aligned_agent_seconds, 1),
+            "plan_exits": {k: sum(1 for v in self.plan_exit.values() if v == k) for k in ("completed", "blocked", "superseded", "expired")},
             "peak_agents_aligned_to_one_plan": self.peak_aligned_agents,
             "mean_agents_aligned_while_any_plan_active": round(self._aligned_agent_seconds / self._occupied_seconds, 3) if self._occupied_seconds else 0.0,
             "agents_that_adopted": len(self.adopting_agents - {""}),

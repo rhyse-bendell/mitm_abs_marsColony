@@ -10,7 +10,8 @@
     "support_response_types": ["agree", "assignment_accept"],
     "review_after_s": 20.0,
     "committed_plan_ttl_s": 90.0,
-    "response_engagement_min": 0.25
+    "response_engagement_min": 0.25,
+    "single_active_plan": true
   },
   "terminal_policy": {
     "end_on_resources_exhausted": false
