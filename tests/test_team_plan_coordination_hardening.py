@@ -392,3 +392,79 @@ def test_a_refused_competing_plan_still_externalises_the_authors_knowledge_witho
     assert dict(art.content) == before and set(m.artifacts) == {"team_plan:px"}  # the plan itself is unchanged and no second plan exists
     assert author._contribute_to_live_plan_artifact(sim) == []  # nothing new the second time
     assert "carries_unheld_dik" in other._artifact_consult_reasons("team_plan:px", art, set(), None, None)[0]  # a teammate can now acquire it by reading
+
+
+# ------------------------------------------------------------------ adoption through either legitimate acquisition channel
+
+
+def _committed_summary(sim, assignments):
+    m = sim.team_knowledge_manager
+    m.artifacts.clear()
+    _plan(m, "px", proposer="Architect", t=sim.time, assignments=assignments, expires_at=sim.time + 200.0)
+    _commit(m, "px", t=sim.time)
+    return m._team_plan_summary(dict(m.artifacts["team_plan:px"].content))
+
+
+def _tick_uptake(sim, bot):
+    summary, source = bot._plan_uptake_candidate(sim)
+    if summary is not None:
+        bot._adopt_committed_team_plan(sim, summary, reason="active_team_plan_requires_uptake", source=source)
+    return source
+
+
+def test_artifact_acquisition_permits_adoption_and_is_recorded_as_artifact(sim):
+    bot = _agent(sim, "Botanist")
+    pid, _p = _project(sim)
+    bot._last_pilot_affordances = [_afford("transport_resources", pid)]
+    summary = _committed_summary(sim, {"Botanist": {"task": "transport", "action_type": "transport_resources", "project_target": pid}})
+    assert _tick_uptake(sim, bot) is None  # nothing read, nothing received
+    bot._note_known_plan(sim, summary, via="consulted")
+    art = sim.team_knowledge_manager.artifacts["team_plan:px"]
+    bot.artifact_consult_sig_memory[bot._artifact_version_signature(art)] = {}
+    assert _tick_uptake(sim, bot) == "artifact"
+    assert bot.team_plan_state["assignment_state"]["status"] == "applied"
+    assert _names(sim, "team_plan_adopted_locally")[-1]["acquisition_source"] == "artifact"
+
+
+def test_full_message_acquisition_permits_adoption_without_an_artifact_read(sim):
+    bot = _agent(sim, "Botanist")
+    pid, _p = _project(sim)
+    bot._last_pilot_affordances = [_afford("transport_resources", pid)]
+    summary = _committed_summary(sim, {"Botanist": {"task": "transport", "action_type": "transport_resources", "project_target": pid}})
+    art = sim.team_knowledge_manager.artifacts["team_plan:px"]
+    assert bot._artifact_version_signature(art) not in bot.artifact_consult_sig_memory  # the artifact was never consulted
+    bot._note_known_plan(sim, summary, via="message")
+    assert _tick_uptake(sim, bot) == "message"
+    assert bot.team_plan_state["assignment_state"]["status"] == "applied" and bot.team_plan_state["known_plans"]["px"]["source"] == "message"
+    assert _names(sim, "team_plan_adopted_locally")[-1]["acquisition_source"] == "message"
+    ctx = sim.brain_context_builder.build(sim, bot).team_state["team_plan_context"]
+    assert ctx["adopted"] and ctx["known_plan"]["read_via"] == "message" and ctx["my_assignment"]["grounded"]
+    assert _tick_uptake(sim, bot) is None  # taken up once; a re-read does not re-adopt the same version
+
+
+def test_partial_or_summary_only_message_does_not_permit_adoption(sim):
+    bot = _agent(sim, "Botanist")
+    _committed_summary(sim, {"Botanist": {"task": "transport", "action_type": "transport_resources", "project_target": "x"}})
+    bot._note_known_plan(sim, {"plan_id": "px", "status": "committed", "goal_summary": "do things"}, via="message")  # no assignments
+    assert _tick_uptake(sim, bot) is None
+    bot._note_known_plan(sim, {"plan_id": "px", "status": "proposed", "goal_summary": "g", "assignments_by_role": {"Botanist": {"task": "t", "action_type": "transport_resources"}}}, via="message")
+    assert _tick_uptake(sim, bot) is None  # not committed as far as the sender knew
+    assert not bot.team_plan_state.get("assignment_state")
+
+
+def test_no_plan_knowledge_appears_without_legitimate_acquisition(sim):
+    bot = _agent(sim, "Botanist")
+    _commit_summary = _committed_summary(sim, {"Botanist": {"task": "transport", "action_type": "transport_resources", "project_target": "SECRET"}})
+    assert _commit_summary["status"] == "committed"
+    assert _tick_uptake(sim, bot) is None
+    ctx = sim.brain_context_builder.build(sim, bot)
+    assert "SECRET" not in repr(ctx.team_state) + repr(ctx.action_affordances)
+    assert ctx.team_state["team_plan_context"]["known_plan"] is None and ctx.team_state["team_plan_context"]["adopted"] is False
+
+
+def test_an_older_relayed_copy_never_replaces_a_newer_one(sim):
+    bot = _agent(sim, "Botanist")
+    newer = {"plan_id": "px", "status": "committed", "plan_event_time": 50.0, "assignments_by_role": {"Botanist": {"task": "t", "action_type": "transport_resources"}}}
+    bot._note_known_plan(sim, newer, via="consulted")
+    bot._note_known_plan(sim, {**newer, "status": "proposed", "plan_event_time": 10.0}, via="message")
+    assert bot.team_plan_state["known_plans"]["px"]["summary"]["status"] == "committed"

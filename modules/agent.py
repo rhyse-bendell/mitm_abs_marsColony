@@ -6108,7 +6108,47 @@ class Agent:
             return assignment
         return None
 
+    @staticmethod
+    def _plan_copy_is_complete(summary):
+        """A transferred plan can be taken up only if it carries what an assignment needs: id, committed status, assignments, and is unexpired."""
+        s_ = summary or {}
+        return bool(s_.get("plan_id")) and str(s_.get("status", "")).lower() == "committed" and isinstance(s_.get("assignments_by_role"), dict) and bool(s_.get("assignments_by_role"))
+
+    def _message_uptake_candidate(self, sim_state):
+        """A committed plan this agent received WITH its contents by communication (never a bare 'a plan exists')."""
+        now = float(sim_state.time)
+        best = None
+        for pid, entry in (self.team_plan_state.get("known_plans") or {}).items():
+            summary = entry.get("summary") or {}
+            if entry.get("source") != "message" or not self._plan_copy_is_complete(summary):
+                continue
+            if summary.get("expires_at") is not None and now >= float(summary["expires_at"]):
+                continue
+            if str(self.team_plan_state.get("last_adopted_plan_id") or "") == pid and float(summary.get("plan_event_time") or 0.0) <= float(self.team_plan_state.get("last_adopted_plan_event_time", 0.0) or 0.0):
+                continue  # this exact version is already taken up
+            if best is None or float(summary.get("plan_event_time") or 0.0) > float(best.get("plan_event_time") or 0.0):
+                best = summary
+        return best
+
+    def _plan_uptake_candidate(self, sim_state):
+        """(summary, source) of a committed plan this agent has legitimately acquired and not yet taken up, else (None, None).
+
+        source 'artifact': the agent consulted the current version on the shared workspace. source 'message': it received the plan contents
+        by communication. Either suffices; no redundant artifact read is required after a complete message transfer.
+        """
+        if self._team_plan_requires_uptake_via_artifact(sim_state):
+            active = self._get_active_team_plan(sim_state)
+            if isinstance(active, dict):
+                return active, "artifact"
+        msg = self._message_uptake_candidate(sim_state)
+        if msg is not None:
+            return msg, "message"
+        return None, None
+
     def _team_plan_requires_uptake(self, sim_state):
+        return self._plan_uptake_candidate(sim_state)[0] is not None
+
+    def _team_plan_requires_uptake_via_artifact(self, sim_state):
         plan_summary = self._get_active_team_plan(sim_state)
         if not plan_summary:
             return False
@@ -6323,7 +6363,7 @@ class Agent:
                 {"plan_id": self.team_plan_state.get("last_adopted_plan_id"), "agent_role": self.role, "reason": "commitment_window_elapsed"},
             )
 
-    def _adopt_committed_team_plan(self, sim_state, plan_summary, reason="consulted_committed_team_plan"):
+    def _adopt_committed_team_plan(self, sim_state, plan_summary, reason="consulted_committed_team_plan", source="artifact"):
         if sim_state is None or not isinstance(plan_summary, dict):
             return
         plan_id = str(plan_summary.get("plan_id", "") or "")
@@ -6347,8 +6387,9 @@ class Agent:
                 },
             )
         artifact_id = f"team_plan:{plan_id}"
-        sim_state.team_knowledge_manager.adopt_artifact(artifact_id, self.name, sim_state.time)
-        self.memory_seen_packets.add(artifact_id)
+        if source != "message":
+            sim_state.team_knowledge_manager.adopt_artifact(artifact_id, self.name, sim_state.time)
+            self.memory_seen_packets.add(artifact_id)
         if plan_id not in (self.team_plan_state.get("known_plans") or {}):
             self._note_known_plan(sim_state, plan_summary, via="consulted")
         previous_adopted = str(self.team_plan_state.get("last_adopted_plan_id") or "")
@@ -6371,7 +6412,7 @@ class Agent:
         self._emit_event(
             sim_state,
             "team_plan_adopted_locally",
-            {"plan_id": plan_id, "agent_role": self.role, "project_targets": list(plan_summary.get("project_targets", []) or []), "reason": reason},
+            {"plan_id": plan_id, "agent_role": self.role, "project_targets": list(plan_summary.get("project_targets", []) or []), "reason": reason, "acquisition_source": source},
         )
         self._emit_event(
             sim_state,
@@ -6538,7 +6579,11 @@ class Agent:
             return
         known = self.team_plan_state.setdefault("known_plans", {})
         copy = json.loads(json.dumps({k: (summary or {}).get(k) for k in self._KNOWN_PLAN_FIELDS}, default=str))
-        known[plan_id] = {"summary": copy, "read_at": float(sim_state.time), "via": str(via)}
+        previous = (known.get(plan_id) or {}).get("summary") or {}
+        if previous and previous.get("plan_event_time") is not None and copy.get("plan_event_time") is not None and float(copy["plan_event_time"]) < float(previous["plan_event_time"]):
+            return  # an older version relayed by a teammate never replaces a newer copy this agent already holds
+        # acquisition source: the shared artifact (read or authored) or communication
+        known[plan_id] = {"summary": copy, "read_at": float(sim_state.time), "via": str(via), "source": "message" if str(via) == "message" else "artifact"}
         for stale in sorted(known, key=lambda k: known[k]["read_at"])[:-6]:
             known.pop(stale, None)
 
@@ -11440,10 +11485,9 @@ class Agent:
         self.sim_step_count += 1
         self._record_team_plan_commitment_tick(sim_state)
         self._team_plan_lifecycle_tick(sim_state)
-        if self._team_plan_requires_uptake(sim_state):
-            active_team_plan = self._get_active_team_plan(sim_state)
-            if isinstance(active_team_plan, dict):
-                self._adopt_committed_team_plan(sim_state, active_team_plan, reason="active_team_plan_requires_uptake")
+        uptake_summary, uptake_source = self._plan_uptake_candidate(sim_state)
+        if uptake_summary is not None:
+            self._adopt_committed_team_plan(sim_state, uptake_summary, reason="active_team_plan_requires_uptake", source=uptake_source)
         rule_brain_runtime = self._is_rule_brain_runtime(sim_state)
         if not planner_lifecycle_already_polled:
             self._check_inflight_timeout(sim_state)
@@ -11964,7 +12008,7 @@ class Agent:
                         self._note_known_plan(sim_state, plan_summary, via="consulted")
                         self._emit_event(sim_state, "team_plan_consulted", {"plan_id": plan_summary.get("plan_id"), "agent_role": self.role, "plan_status": plan_summary.get("status"), "proposed_by": plan_summary.get("proposed_by")})
                         if str(plan_summary.get("status", "")).lower() == "committed":
-                            self._adopt_committed_team_plan(sim_state, plan_summary, reason="consult_team_artifact")
+                            self._adopt_committed_team_plan(sim_state, plan_summary, reason="consult_team_artifact", source="artifact")
                         elif str(plan_summary.get("status", "")).lower() == "proposed":
                             response_type, response_reason = self._evaluate_team_plan_fit(sim_state, plan_summary)
                             if self._should_emit_team_plan_response(sim_state, plan_summary, response_type):
