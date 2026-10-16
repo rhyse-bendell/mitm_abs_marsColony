@@ -31,6 +31,7 @@ from modules.task_model import load_task_model, normalize_rule_token
 from modules.interaction_graph import CANONICAL_NODES
 from modules.headless_runner import run_batch_experiment
 from modules.brain_provider import RuleBrain
+from modules import data_browser
 
 
 class MarsColonyInterface:
@@ -203,6 +204,7 @@ class MarsColonyInterface:
         self.create_agents_tab()
         self.create_event_monitor_tab()
         self.create_interaction_tab()
+        self.create_data_tab()
         self.create_brain_tab()
         self.create_dik_derivations_tab()
         self.create_rule_derivations_tab()
@@ -1680,6 +1682,200 @@ class MarsColonyInterface:
                 self._draw_chip_flow(canvas, card_x + 16, section_y + 16, card_w - 32, knowledge_chips, draw=True)
             y += card_h + 12
         canvas.configure(scrollregion=(0, 0, width + 24, max(500, y + 20)))
+
+    # ------------------------------------------------------------------ Data tab (read-only)
+    def create_data_tab(self):
+        """Read-only view of the current run's output folders/files. Refresh is manual; nothing runs per tick."""
+        self.tab_data = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_data, text="Data")
+        self._data_session = None  # last known OutputSessionManager (survives stop so final files stay reachable)
+        self._data_files = {}
+        self._data_paths = None
+        self.data_summary_vars = {k: StringVar(value="-") for k in ("name", "folder", "state", "time")}
+
+        top = ttk.LabelFrame(self.tab_data, text="Current run", padding=6)
+        top.pack(fill="x", padx=6, pady=4)
+        top.columnconfigure(1, weight=1)
+        for i, (key, label) in enumerate((("name", "Run/session"), ("folder", "Output directory"), ("state", "Simulation state"), ("time", "Sim time"))):
+            ttk.Label(top, text=label + ":").grid(row=i, column=0, sticky="w")
+            ttk.Label(top, textvariable=self.data_summary_vars[key]).grid(row=i, column=1, sticky="w", padx=6)
+
+        bar = ttk.Frame(self.tab_data)
+        bar.pack(fill="x", padx=6)
+        self.data_buttons = {}
+        for key, label, cmd in (
+            ("refresh", "Refresh", self.refresh_data_tab),
+            ("session", "Open Session Folder", lambda: self._data_open("session")),
+            ("logs", "Open Logs Folder", lambda: self._data_open("logs")),
+            ("measures", "Open Measures Folder", lambda: self._data_open("measures")),
+            ("outputs_root", "Open Outputs Root", lambda: self._data_open("outputs_root")),
+            ("file", "Open Selected File", self._data_open_selected),
+            ("copy", "Copy Path", self._data_copy_path),
+        ):
+            btn = ttk.Button(bar, text=label, command=cmd)
+            btn.pack(side="left", padx=2, pady=2)
+            self.data_buttons[key] = btn
+        self.data_status_var = StringVar(value="No session yet. Press Start, then Refresh.")
+        ttk.Label(self.tab_data, textvariable=self.data_status_var).pack(fill="x", padx=6)
+
+        panes = ttk.PanedWindow(self.tab_data, orient="horizontal")
+        panes.pack(fill="both", expand=True, padx=6, pady=4)
+        left = ttk.Frame(panes)
+        self.data_file_tree = ttk.Treeview(left, show="tree", selectmode="browse", height=18)
+        lscroll = ttk.Scrollbar(left, orient="vertical", command=self.data_file_tree.yview)
+        self.data_file_tree.configure(yscrollcommand=lscroll.set)
+        self.data_file_tree.pack(side="left", fill="both", expand=True)
+        lscroll.pack(side="right", fill="y")
+        self.data_file_tree.bind("<<TreeviewSelect>>", lambda _e: self._data_show_preview())
+        panes.add(left, weight=1)
+
+        right = ttk.Frame(panes)
+        self.data_preview_note = StringVar(value="")
+        ttk.Label(right, textvariable=self.data_preview_note, justify="left").pack(fill="x")
+        self.data_preview_host = ttk.Frame(right)
+        self.data_preview_host.pack(fill="both", expand=True)
+        panes.add(right, weight=4)
+        self._data_preview_widget = None
+        self._data_set_text_preview("Select a file on the left.")
+        self.refresh_data_tab()
+
+    def _data_current_session(self):
+        session = getattr(getattr(getattr(self, "sim", None), "logger", None), "output_session", None)
+        if session is not None and getattr(session, "session_folder", None):
+            self._data_session = session
+        return self._data_session
+
+    def refresh_data_tab(self):
+        """Re-detect the active session, rebuild the file list, and reload the selected preview."""
+        try:
+            session = self._data_current_session()
+            paths = data_browser.session_paths(session) if session is not None else None
+            self._data_paths = paths
+            sim = getattr(self, "sim", None)
+            self.data_summary_vars["state"].set(str(self.run_state))
+            sim_time = getattr(sim, "time", None)
+            self.data_summary_vars["time"].set(f"{float(sim_time):.1f} s" if sim_time is not None else "-")
+            if paths is None:
+                self.data_summary_vars["name"].set("-")
+                self.data_summary_vars["folder"].set("-")
+                files = []
+                self.data_status_var.set("No session yet. Press Start, then Refresh.")
+            else:
+                self.data_summary_vars["name"].set(paths["session"].name)
+                self.data_summary_vars["folder"].set(str(paths["session"]))
+                files = data_browser.discover_session_files(paths["session"])
+                self.data_status_var.set(f"{len(files)} file(s) found. Previews are read-only and truncated for large files.")
+            selected = self._data_selected_label()
+            self.data_file_tree.delete(*self.data_file_tree.get_children())
+            self._data_files = {}
+            for label, path, is_key in files:
+                self._data_files[label] = path
+                self.data_file_tree.insert("", "end", iid=label, text=("* " if is_key else "  ") + label)
+            if selected in self._data_files:
+                self.data_file_tree.selection_set(selected)
+            self._data_update_button_states()
+            self._data_show_preview()
+        except Exception as exc:  # informational tab: never break the GUI
+            self.data_status_var.set(f"Refresh failed: {exc}")
+
+    def _data_selected_label(self):
+        sel = self.data_file_tree.selection()
+        return sel[0] if sel else None
+
+    def _data_update_button_states(self):
+        paths = self._data_paths or {}
+        for key in ("session", "logs", "measures", "outputs_root"):
+            p = paths.get(key)
+            self.data_buttons[key].state(["!disabled"] if p and Path(p).exists() else ["disabled"])
+        has_file = self._data_selected_label() in self._data_files
+        self.data_buttons["file"].state(["!disabled"] if has_file else ["disabled"])
+        self.data_buttons["copy"].state(["!disabled"] if (has_file or paths) else ["disabled"])
+
+    def _data_open(self, key):
+        p = (self._data_paths or {}).get(key)
+        if not p or not Path(p).exists():
+            self.data_status_var.set(f"{key} folder not available yet.")
+            return
+        self._data_shell_open(p)
+
+    def _data_open_selected(self):
+        path = self._data_files.get(self._data_selected_label())
+        if not path or not Path(path).exists():
+            self.data_status_var.set("Selected file not available yet.")
+            return
+        self._data_shell_open(path)
+
+    def _data_shell_open(self, path):
+        try:
+            import os
+            os.startfile(str(path))  # Windows file association / Explorer
+        except Exception as exc:
+            self.data_status_var.set(f"Could not open {path}: {exc}")
+
+    def _data_copy_path(self):
+        path = self._data_files.get(self._data_selected_label())
+        if path is None and self._data_paths:
+            path = self._data_paths["session"]
+        if path is None:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(str(path))
+        self.data_status_var.set(f"Copied: {path}")
+
+    def _data_clear_preview(self):
+        if self._data_preview_widget is not None:
+            self._data_preview_widget.destroy()
+            self._data_preview_widget = None
+
+    def _data_set_text_preview(self, text):
+        self._data_clear_preview()
+        frame = ttk.Frame(self.data_preview_host)
+        frame.pack(fill="both", expand=True)
+        widget = tk.Text(frame, wrap="none")
+        ys = ttk.Scrollbar(frame, orient="vertical", command=widget.yview)
+        xs = ttk.Scrollbar(frame, orient="horizontal", command=widget.xview)
+        widget.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+        ys.pack(side="right", fill="y")
+        xs.pack(side="bottom", fill="x")
+        widget.pack(fill="both", expand=True)
+        widget.insert("1.0", text)
+        widget.configure(state="disabled")  # read-only
+        self._data_preview_widget = frame
+
+    def _data_set_table_preview(self, columns, rows):
+        self._data_clear_preview()
+        frame = ttk.Frame(self.data_preview_host)
+        frame.pack(fill="both", expand=True)
+        cols = [f"c{i}" for i in range(len(columns))] or ["c0"]
+        tree = ttk.Treeview(frame, columns=cols, show="headings")
+        ys = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        xs = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+        for cid, name in zip(cols, columns or [""]):
+            tree.heading(cid, text=name)
+            tree.column(cid, width=120, stretch=False)
+        for row in rows:
+            row = list(row)[:len(cols)]
+            tree.insert("", "end", values=row + [""] * (len(cols) - len(row)))
+        ys.pack(side="right", fill="y")
+        xs.pack(side="bottom", fill="x")
+        tree.pack(fill="both", expand=True)
+        self._data_preview_widget = frame
+
+    def _data_show_preview(self):
+        self._data_update_button_states()
+        path = self._data_files.get(self._data_selected_label())
+        if path is None:
+            return
+        pv = data_browser.preview_file(path)
+        note = pv.get("meta", "")
+        if pv.get("truncated"):
+            note += "\n[TRUNCATED preview - open the file for the full contents]"
+        self.data_preview_note.set(note)
+        if pv["kind"] == "csv":
+            self._data_set_table_preview(pv["columns"], pv["rows"])
+        else:
+            self._data_set_text_preview(pv.get("text", ""))
 
     def create_event_monitor_tab(self):
         self.tab_event = ttk.Frame(self.notebook)
