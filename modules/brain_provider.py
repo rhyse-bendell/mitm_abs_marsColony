@@ -433,6 +433,15 @@ class RuleBrain(BrainProvider):
         "coordination_consult": 1.2,
         "backup": 2.2,
     }
+    STARTUP_GROUNDING_BONUS = 20.0  # BOOTSTRAP only; see _score_actions_for_mode
+    # Outstanding-obligation protection (hypothesized defaults, not calibrated). An observed failed project whose repair this agent's own
+    # held DIK can ground (REPAIR affordance repair_ready) is an outstanding task obligation of a CLASS: it is not out-voted by how many
+    # unrelated validation candidates exist, and the longer it has stood unserved the harder it is to ignore. It forces nothing: a blocked
+    # or failing repair is penalised by the ordinary blocked-streak feedback, and no knowledge is granted.
+    NONPRODUCTIVE_REINSPECT_PENALTY = 3.0  # same magnitude as a redundant consult: re-reading an unchanged, already-exhausted brief
+    REPAIR_OBLIGATION_AGING_HORIZON_S = 45.0
+    REPAIR_OBLIGATION_AGING_MODE_GAIN = 3.0
+    REPAIR_OBLIGATION_ACTION_PRESSURE = 3.0
     MODE_ACTION_PREFERENCES = {
         "BOOTSTRAP": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value: 1.3, ExecutableActionType.OBSERVE_ENVIRONMENT.value: 0.5},
         "ACQUIRE_DIK": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value: 1.6, ExecutableActionType.CONSULT_TEAM_ARTIFACT.value: 0.4, ExecutableActionType.REQUEST_ASSISTANCE.value: 0.4},
@@ -633,6 +642,7 @@ class RuleBrain(BrainProvider):
         role_mem = dict(source_memory.get(role_source_id, {}) or {})
         team_mem = dict(source_memory.get("Team_Info", {}) or {})
         role_inspected = 1.0 if bool(role_mem.get("ever_inspected")) else 0.0
+        team_inspected = 1.0 if bool(team_mem.get("ever_inspected")) else 0.0
         team_freshness = max(0.0, min(1.0, float(team_mem.get("memory_confidence", 0.0) or 0.0)))
         role_freshness = max(0.0, min(1.0, float(role_mem.get("memory_confidence", 0.0) or 0.0)))
         epistemic_suff = cognitive.get("epistemic_sufficiency", {}) if not is_request else dict(request_ctx.get("epistemic_sufficiency", {}))
@@ -749,7 +759,11 @@ class RuleBrain(BrainProvider):
         observed_repair_need = 1.0 if (repair_affordances or any(p.get("validation_failed") for p in built_state)) else 0.0
         repair_executable = 1.0 if any(bool(a.get("repair_ready")) for a in repair_affordances) else 0.0
         repair_knowledge_gap = 1.0 if (observed_repair_need > 0.0 and repair_executable <= 0.0) else 0.0
+        repair_obligation_age = max(
+            [min(1.0, float(a.get("observed_failure_age_s", 0.0) or 0.0) / self.REPAIR_OBLIGATION_AGING_HORIZON_S) for a in repair_affordances if a.get("repair_ready")] or [0.0]
+        )
         return {
+            "repair_obligation_age": repair_obligation_age,
             "observed_repair_need": observed_repair_need,
             "repair_executable": repair_executable,
             "repair_knowledge_gap": repair_knowledge_gap,
@@ -792,6 +806,7 @@ class RuleBrain(BrainProvider):
             "shared_source_exhausted": 1.0 if exhausted_shared else 0.0,
             "role_source_exhausted": 1.0 if exhausted_role else 0.0,
             "role_packet_inspected": role_inspected,
+            "team_packet_inspected": team_inspected,
             "team_packet_freshness": team_freshness,
             "role_packet_freshness": role_freshness,
             "epistemic_sufficiency": float(epistemic_suff.get("score", 0.0) or 0.0),
@@ -918,12 +933,13 @@ class RuleBrain(BrainProvider):
         build_pull = 0.0 if closure_only else features["build_opportunity"]
         mode_scores["LOGISTICS"] = 0.35 + 1.5 * build_pull + 0.9 * features["active_incomplete_projects"]
         mode_scores["CONSTRUCT"] = 0.35 + 1.7 * build_pull + 0.9 * features["active_incomplete_projects"]
-        mode_scores["VALIDATE"] = 0.2 + 1.4 * features["artifact_validation_available"] + 0.5 * features["goal_pressure"] + 1.5 * features.get("validation_work_pending", 0.0) + 0.9 * features.get("validation_pending_projects", 0.0)
+        mode_scores["VALIDATE"] = 0.2 + 1.4 * features["artifact_validation_available"] + 0.5 * features["goal_pressure"] + 1.5 * features.get("validation_work_pending", 0.0)  # class presence, not a count of candidate projects
         mode_scores["REPAIR"] = 0.2 + 1.8 * features["repair_pressure"]
         # An observed failed validation the agent's own knowledge can already ground is unfinished work that must not be
         # outvoted by unrelated validation candidates (VALIDATE reaches ~4.2-5.4 from pending-work terms plus incumbency hysteresis). Gated on the
         # REPAIR affordance's own repair_ready check, so it grants no knowledge; independent of mechanism/teamwork settings.
         mode_scores["REPAIR"] += 3.5 * features.get("repair_executable", 0.0)
+        mode_scores["REPAIR"] += self.REPAIR_OBLIGATION_AGING_MODE_GAIN * features.get("repair_obligation_age", 0.0)  # starvation protection
         # Repair is needed but the agent cannot ground it yet: acquiring the missing knowledge is the rational next move.
         mode_scores["ACQUIRE_DIK"] += 1.0 * features.get("repair_knowledge_gap", 0.0)
         mode_scores["RECOVERY"] = 0.2 + 1.8 * features["loop_pressure"] + self.policy_config.recovery_bonus * features["contradiction_pressure"]
@@ -1277,6 +1293,8 @@ class RuleBrain(BrainProvider):
             action_type = str(affordance.get("action_type") or ExecutableActionType.WAIT.value)
             if allowed and action_type not in allowed and not affordance.get("addresses_support_subgoals") and not affordance.get("serves_task_methods"):
                 continue  # a knowledge-grounded support subgoal is not confined to the current method step's action family
+            if action_type == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value and affordance.get("reinspect_informative") is False:
+                continue  # re-reading an exhausted, unchanged source cannot serve an "acquire grounding" step: it earns no step credit
             score = 1.0 + float(affordance.get("utility", 0.0))
             if action_type == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value:
                 target_id = str(affordance.get("target_id") or "")
@@ -1303,6 +1321,7 @@ class RuleBrain(BrainProvider):
         selected_mode: str,
         features: dict[str, float],
         mechanism_profile: dict[str, float],
+        startup_required_pending: frozenset = frozenset(),
     ) -> dict[str, float]:
         action_scores: dict[str, float] = {}
         concrete_actions = {
@@ -1325,6 +1344,8 @@ class RuleBrain(BrainProvider):
             utility = float(affordance.get("utility", 0.0))
             score = utility + self.MODE_ACTION_PREFERENCES.get(selected_mode, {}).get(action_type, 0.0)
             score += 0.6 * features["goal_pressure"] + 0.4 * features["build_opportunity"]
+            if action_type == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value and affordance.get("reinspect_informative") is False:
+                score -= self.NONPRODUCTIVE_REINSPECT_PENALTY
             if action_type == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value:
                 if affordance.get("consult_redundant"):
                     score -= 3.0  # same artifact version, no new context or knowledge: tendency cannot make this repeatable
@@ -1474,12 +1495,24 @@ class RuleBrain(BrainProvider):
                 score -= 1.4 * features.get("stale_grounding_pressure", 0.0)
             if action_type == ExecutableActionType.TRANSPORT_RESOURCES.value and features.get("readiness_blocked", 0.0) > 0.0:
                 score += 1.25
+            if action_type == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value and affordance.get("repair_ready") is True:
+                age_fraction = min(1.0, float(affordance.get("observed_failure_age_s", 0.0) or 0.0) / self.REPAIR_OBLIGATION_AGING_HORIZON_S)
+                score += self.REPAIR_OBLIGATION_ACTION_PRESSURE * (0.5 + 0.5 * age_fraction)  # an executable observed failure is an outstanding obligation
             if action_type == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value and affordance.get("repair_ready") is False:
                 score -= 3.0  # the agent's own knowledge cannot ground this repair yet: it would fail at execution
             if action_type == ExecutableActionType.VALIDATE_CONSTRUCTION.value and affordance.get("validation_failed"):
                 score -= 2.5  # already failed with nothing changed since: re-validating is not the next step
             if action_type == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value and affordance.get("consult_useful"):
                 score += 0.6 * features.get("repair_knowledge_gap", 0.0)
+            if (
+                action_type == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value
+                and selected_mode == "BOOTSTRAP"
+                and str(affordance.get("target_id") or "") in startup_required_pending
+            ):
+                # Start-up grounding is the Pilot's own behaviour: while its BOOTSTRAP mode still has an uninspected required
+                # source (shared brief / own role brief), inspecting it outranks everything else. (This replaces the middleware
+                # override that used to rewrite other Pilot choices into this INSPECT.)
+                score += self.STARTUP_GROUNDING_BONUS
             if action_type == ExecutableActionType.INSPECT_INFORMATION_SOURCE.value:
                 score += 1.0 * features.get("repair_knowledge_gap", 0.0)
                 score += 1.45 * features.get("need_to_refresh_assumptions", 0.0)
@@ -1766,11 +1799,19 @@ class RuleBrain(BrainProvider):
             chosen_affordances=sorted_affordances,
             features=features,
         )
+        startup_pending = set()
+        if selected_mode == "BOOTSTRAP":
+            if not features.get("team_packet_inspected", 0.0):
+                startup_pending.add("Team_Info")
+            role_source_for_startup = str(method_state.get("role_source_id") or "")
+            if role_source_for_startup and not features.get("role_packet_inspected", 0.0):
+                startup_pending.add(role_source_for_startup)
         action_scores = self._score_actions_for_mode(
             sorted_affordances=sorted_affordances,
             selected_mode=selected_mode,
             features=features,
             mechanism_profile=mechanism_profile,
+            startup_required_pending=frozenset(startup_pending),
         )
         preferred_for_mode = set(self.MODE_ACTION_PREFERENCES.get(selected_mode, {}).keys())
         legal_non_preferred = sorted(

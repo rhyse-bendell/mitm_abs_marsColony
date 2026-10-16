@@ -237,13 +237,14 @@ def test_forgotten_relevant_dik_reopens_the_source_and_can_be_reacquired(sim):
     assert actor.dik_ledger[forgotten[0]]["forgotten_at"] is None and actor.experimental_metrics["dik_reacquired"] >= 1
 
 
-def test_a_new_knowledge_gap_or_construction_change_reopens_inspection(sim):
+def test_a_new_knowledge_gap_reopens_inspection_but_a_construction_change_alone_does_not(sim):
     actor = _actor(sim)
     sig = _verify_static(sim, actor, confidence=0.6)
     _stall_pressure(actor)
+    sim.environment.construction.create_project("site_b", "house")  # the world changed: a static brief is no more informative for it
     actor._refresh_source_memory_state(sim.environment, sim_state=sim)
-    assert _confidence(actor) == pytest.approx(0.6)
-    sim.environment.construction.create_project("site_b", "house")  # the world the agent reasons about changed
+    assert actor._source_content_signature(sim.environment, sim) == sig and _confidence(actor) == pytest.approx(0.6)
+    actor.known_gaps.add("information:I_ENG_CONNECTOR_RULES")  # a newly recognised gap the source might fill
     assert actor._source_content_signature(sim.environment, sim) != sig
     actor._refresh_source_memory_state(sim.environment, sim_state=sim)
     assert _confidence(actor) < 0.6
@@ -268,8 +269,6 @@ def _run(seed, constituent_overrides, seconds, probe_times=()):
                 last_sel[p["agent"]] = p["selected_action"]
                 first_attempt[p["agent"]] = True
                 selected += 1
-            elif n == "startup_bootstrap_grounding_forced":
-                first_attempt[p["agent"]] = False  # the documented start-up grounding scaffold (BOOTSTRAP mode) is a separate, explicit fallback
             elif n == "executable_action_attempted" and first_attempt.get(p.get("agent")):
                 first_attempt[p["agent"]] = False
                 if last_sel.get(p["agent"]) and p.get("planner_action_type") != last_sel[p["agent"]]:
@@ -299,3 +298,184 @@ def test_extern_low_seed4_does_not_enter_the_self_inspection_absorbing_loop():
     """Characterization batch case: from t~100 all agents re-inspected their own role source and taskwork froze at 7 for the rest of the run."""
     _, _, taskwork = _run(seed=4, constituent_overrides={"externalization_propensity": 0.1}, seconds=420, probe_times=(100, 420))
     assert taskwork[420] > taskwork[100] + 10
+
+
+# ------------------------------------------------------------------ start-up grounding is the Pilot's own behaviour
+
+
+def test_pilot_itself_selects_the_required_bootstrap_inspections(sim):
+    actor = next(x for x in sim.agents if x.name == "Architect")
+    assert actor.control_state["mode"] == "BOOTSTRAP"
+    decide = lambda: actor._select_decision_through_pilot_adapter(sim, sim.brain_context_builder.build(sim, actor), "test")  # noqa: E731
+    first = decide()
+    assert first.selected_action == A.INSPECT_INFORMATION_SOURCE and first.target_id == "Team_Info"  # shared brief first
+    assert not [e for n, e in sim.captured_events if n == "startup_bootstrap_grounding_forced"]  # nothing was substituted to get here
+
+
+def test_bootstrap_inspection_bonus_is_scoped_to_pending_required_sources(sim):
+    from modules.brain_provider import RuleBrain
+
+    brain = RuleBrain()
+    actor = next(x for x in sim.agents if x.name == "Architect")
+    features = brain._extract_features(sim.brain_context_builder.build(sim, actor))
+    affs = [{"action_type": "inspect_information_source", "target_id": t, "utility": 0.95} for t in ("Team_Info", "Architect_Info", "Engineer_Info")]
+    kw = dict(sorted_affordances=affs, features=features, mechanism_profile={})
+    pending = brain._score_actions_for_mode(selected_mode="BOOTSTRAP", startup_required_pending=frozenset({"Team_Info"}), **kw)
+    none = brain._score_actions_for_mode(selected_mode="BOOTSTRAP", startup_required_pending=frozenset(), **kw)
+    other_mode = brain._score_actions_for_mode(selected_mode="ACQUIRE_DIK", startup_required_pending=frozenset({"Team_Info"}), **kw)
+    assert pending["0:inspect_information_source"] == pytest.approx(none["0:inspect_information_source"] + brain.STARTUP_GROUNDING_BONUS)
+    assert pending["1:inspect_information_source"] == pytest.approx(none["1:inspect_information_source"])  # not required: no bonus
+    assert other_mode["0:inspect_information_source"] < pending["0:inspect_information_source"] - 10  # only the Pilot's BOOTSTRAP mode
+
+
+def test_startup_grounding_completes_without_any_rewrite_or_extra_dik():
+    random.seed(0)
+    with tempfile.TemporaryDirectory() as tmp:
+        st = SimulationState(phases=None, project_root=tmp, flash_mode=True, experiment_name="boot", seed=0, brain_backend="rule_brain",
+                             experimental_settings={"constructs": {"teamwork_potential": 0.5, "taskwork_potential": 0.5}, "constituent_overrides": {}, "profile_mode": "compact_panel"})
+        names = []
+        st.logger.register_event_listener(lambda e: names.append(e["event_type"]))
+        import contextlib
+        import io
+
+        prefix = {"Architect": ("D_ARCH_", "I_ARCH_"), "Engineer": ("D_ENG_", "I_ENG_"), "Botanist": ("D_BOT_", "I_BOT_")}
+        with contextlib.redirect_stdout(io.StringIO()):
+            for _ in range(12):  # before any teammate could have communicated: only the agent's own inspections can have supplied DIK
+                st.update(1.0)
+            for agent in st.agents:
+                held = {d.id for d in agent.mental_model["data"]} | {i.id for i in agent.mental_model["information"]}
+                assert not [h for role, pre in prefix.items() if role != agent.role for h in held if h.startswith(pre)]  # no role-private DIK of another role
+            for _ in range(48):
+                st.update(1.0)
+        assert "startup_bootstrap_grounding_forced" not in names and "fallback_bootstrap_action_forced" not in names
+        for agent in st.agents:  # grounding still completes, by the Pilot's own inspections
+            assert agent.source_memory_state["Team_Info"]["ever_inspected"] and agent.source_memory_state[f"{agent.role}_Info"]["ever_inspected"]
+        st.stop()
+
+
+# ------------------------------------------------------------------ repair obligations: class pressure + aging, not candidate counts
+
+
+def _failed_house(sim, age_s):
+    cm = sim.environment.construction
+    pid = _ready_house(cm)
+    p = cm.projects[pid]
+    p.update({"correct": False, "validated_complete": False, "validation_attempted": True, "closure_status": "failed", "status": "needs_repair", "last_validation_attempt_time": sim.time - age_s})
+    return pid
+
+
+def test_repair_affordance_states_how_long_the_observed_failure_has_stood(sim):
+    actor = next(x for x in sim.agents if x.name == "Engineer")
+    sim.time = 100.0
+    pid = _failed_house(sim, age_s=30.0)
+    repair = [a for a in sim.brain_context_builder.build(sim, actor).action_affordances if a["action_type"] == "repair_or_correct_construction" and a["target_id"] == pid]
+    assert repair and repair[0]["observed_failure_age_s"] == pytest.approx(30.0)
+
+
+def _real_features(sim, **override):
+    from modules.brain_provider import RuleBrain
+
+    brain = RuleBrain()
+    actor = next(x for x in sim.agents if x.name == "Engineer")
+    f = brain._extract_features(sim.brain_context_builder.build(sim, actor))
+    f.update(override)
+    return brain, f
+
+
+def test_validate_mode_does_not_grow_with_the_number_of_validation_candidates(sim):
+    brain, f = _real_features(sim, validation_work_pending=1.0, validation_pending_projects=0.33)
+    few = brain._compute_mode_scores(f, {"validate_construction"}, {"mode": "LOGISTICS"}, {})[0]["VALIDATE"]
+    f["validation_pending_projects"] = 1.0
+    many = brain._compute_mode_scores(f, {"validate_construction"}, {"mode": "LOGISTICS"}, {})[0]["VALIDATE"]
+    assert few == pytest.approx(many)
+
+
+@pytest.mark.parametrize("many_candidates", [0.33, 1.0])
+def test_an_aged_executable_repair_obligation_outranks_an_incumbent_validate_mode(sim, many_candidates):
+    brain, f = _real_features(sim, validation_work_pending=1.0, validation_pending_projects=many_candidates, artifact_validation_available=1.0,
+                              observed_repair_need=1.0, repair_executable=1.0, repair_pressure=1.0, repair_obligation_age=1.0)
+    scores = brain._compute_mode_scores(f, {"validate_construction", "repair_or_correct_construction"}, {"mode": "VALIDATE", "mode_dwell_steps": 6}, {})[0]
+    assert scores["REPAIR"] > scores["VALIDATE"]
+
+
+def test_repair_mode_pressure_increases_with_the_age_of_the_obligation(sim):
+    brain, f = _real_features(sim, observed_repair_need=1.0, repair_executable=1.0, repair_pressure=1.0)
+    score = lambda age: brain._compute_mode_scores({**f, "repair_obligation_age": age}, {"repair_or_correct_construction"}, {"mode": "LOGISTICS"}, {})[0]["REPAIR"]  # noqa: E731
+    assert score(0.0) < score(0.5) < score(1.0)
+
+
+def test_no_obligation_pressure_without_the_knowledge_to_repair(sim):
+    brain, f = _real_features(sim)
+    base = {"action_type": "repair_or_correct_construction", "target_id": "p", "utility": 0.9, "observed_failure_age_s": 90.0}
+    kw = dict(features=f, mechanism_profile={}, selected_mode="REPAIR")
+    ready = brain._score_actions_for_mode(sorted_affordances=[{**base, "repair_ready": True}], **kw)["0:repair_or_correct_construction"]
+    young = brain._score_actions_for_mode(sorted_affordances=[{**base, "repair_ready": True, "observed_failure_age_s": 0.0}], **kw)["0:repair_or_correct_construction"]
+    unready = brain._score_actions_for_mode(sorted_affordances=[{**base, "repair_ready": False}], **kw)["0:repair_or_correct_construction"]
+    assert ready > young > unready + 3.0  # aged > fresh; a repair the agent cannot ground gets no pressure (and keeps its existing penalty)
+    # the feature only counts affordances the agent can actually ground
+    actor = next(x for x in sim.agents if x.name == "Engineer")
+    sim.time = 100.0
+    _failed_house(sim, age_s=60.0)
+    actor.mental_model["knowledge"].rules.clear()  # holds nothing that could ground the repair
+    feats = brain._extract_features(sim.brain_context_builder.build(sim, actor))
+    assert feats["repair_executable"] == 0.0 and feats["repair_obligation_age"] == 0.0 and feats["repair_knowledge_gap"] == 1.0
+
+
+# ------------------------------------------------------------------ the Pilot is told when re-reading a source cannot inform it
+
+
+def _inspect_aff(sim, actor, source):
+    packet = sim.brain_context_builder.build(sim, actor)
+    return next((a for a in packet.action_affordances if a["action_type"] == "inspect_information_source" and a["target_id"] == source), None)
+
+
+def test_reinspection_is_flagged_uninformative_only_for_an_exhausted_unchanged_source(sim):
+    actor = _actor(sim)
+    assert _inspect_aff(sim, actor, "Architect_Info")["reinspect_informative"] is True  # never inspected: first inspection is informative
+    _verify_static(sim, actor, confidence=0.3)
+    aff = _inspect_aff(sim, actor, "Architect_Info")
+    assert aff is not None and aff["reinspect_informative"] is False  # exhausted, nothing changed: still legal, but not informative
+    actor.known_gaps.add("information:I_ENG_CONNECTOR_RULES")
+    assert _inspect_aff(sim, actor, "Architect_Info")["reinspect_informative"] is True  # a new gap reopens it
+    actor.known_gaps.discard("information:I_ENG_CONNECTOR_RULES")
+    assert _inspect_aff(sim, actor, "Architect_Info")["reinspect_informative"] is False
+    actor.source_exhaustion_state["Architect_Info"]["exhausted_for_acquisition"] = False  # the last inspection DID gain something
+    assert _inspect_aff(sim, actor, "Architect_Info")["reinspect_informative"] is True
+
+
+def test_forgotten_dik_makes_reinspection_informative_again(sim):
+    actor = _actor(sim)
+    _held(sim, actor, *IDS)
+    actor._sync_dik_ledger(sim)
+    _verify_static(sim, actor, confidence=0.3)
+    assert _inspect_aff(sim, actor, "Architect_Info")["reinspect_informative"] is False
+    actor.memory_reliability = 0.0
+    _age(sim, actor, 900)
+    assert _inspect_aff(sim, actor, "Architect_Info")["reinspect_informative"] is True  # what could be recovered is real: inspecting stays useful
+
+
+def test_pilot_penalises_uninformative_reinspection_but_not_the_first_inspection(sim):
+    from modules.brain_provider import RuleBrain
+
+    brain = RuleBrain()
+    actor = _actor(sim)
+    features = brain._extract_features(sim.brain_context_builder.build(sim, actor))
+    kw = dict(features=features, mechanism_profile={}, selected_mode="ACQUIRE_DIK")
+    base = {"action_type": "inspect_information_source", "target_id": "Architect_Info", "utility": 0.95}
+    new = brain._score_actions_for_mode(sorted_affordances=[{**base, "reinspect_informative": True}], **kw)["0:inspect_information_source"]
+    old = brain._score_actions_for_mode(sorted_affordances=[{**base, "reinspect_informative": False}], **kw)["0:inspect_information_source"]
+    absent = brain._score_actions_for_mode(sorted_affordances=[dict(base)], **kw)["0:inspect_information_source"]
+    assert new - old == pytest.approx(brain.NONPRODUCTIVE_REINSPECT_PENALTY) and absent == pytest.approx(new)  # a generic affordance without the fact is unaffected
+
+
+def test_an_uninformative_reinspection_earns_no_method_step_credit():
+    from modules.brain_provider import RuleBrain
+
+    brain = RuleBrain()
+    affs = [
+        {"action_type": "inspect_information_source", "target_id": "Architect_Info", "utility": 0.95, "reinspect_informative": False},
+        {"action_type": "inspect_information_source", "target_id": "Team_Info", "utility": 0.95, "reinspect_informative": True},
+        {"action_type": "inspect_information_source", "target_id": "Engineer_Info", "utility": 0.95},  # an affordance without the fact (generic Pilot input)
+    ]
+    scores = brain._score_actions_for_method_step(sorted_affordances=affs, step_id="inspect_role_source", method_state={"role_source_id": "Architect_Info"})
+    assert "0:inspect_information_source" not in scores and "1:inspect_information_source" in scores and "2:inspect_information_source" in scores

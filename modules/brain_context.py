@@ -177,7 +177,7 @@ class BrainContextBuilder:
             "epistemic_refresh_pressure": float(epistemic.get("refresh_pressure", 0.0) or 0.0),
         }
 
-    def _affordances(self, agent, environment, build_readiness: Dict[str, Any] | None = None, phase_profile: Dict[str, Any] | None = None, team_state: Dict[str, Any] | None = None, support_subgoals: List[Dict[str, Any]] | None = None, task_methods: List[Dict[str, Any]] | None = None) -> List[Dict[str, Any]]:
+    def _affordances(self, agent, environment, build_readiness: Dict[str, Any] | None = None, phase_profile: Dict[str, Any] | None = None, team_state: Dict[str, Any] | None = None, support_subgoals: List[Dict[str, Any]] | None = None, task_methods: List[Dict[str, Any]] | None = None, sim_time: float | None = None) -> List[Dict[str, Any]]:
         if phase_profile is None:
             phase_profile = self._phase_profile(environment)
         if build_readiness is None:
@@ -303,6 +303,7 @@ class BrainContextBuilder:
         list_starts = getattr(environment.construction, "list_start_options", None)
         for option in (list_starts() if callable(list_starts) else []):
             start_options_by_target.setdefault(option["target_id"], []).append(option)
+        source_signature = None
         for target_name, target in environment.interaction_targets.items():
             # Only information sources (inspect) and build sites (start construction) are action targets here;
             # artifacts such as the whiteboard are reached through externalize / consult.
@@ -321,8 +322,13 @@ class BrainContextBuilder:
                 else ExecutableActionType.START_CONSTRUCTION
             )
             source_state = None
+            reinspect_informative = None
             if target.get("kind") == "information":
                 source_state = getattr(agent, "source_inspection_state", {}).get(target_name, "unseen")
+                if hasattr(agent, "source_reinspection_informative"):
+                    if source_signature is None:
+                        source_signature = agent._source_content_signature(environment)
+                    reinspect_informative = bool(agent.source_reinspection_informative(target_name, environment, content_signature=source_signature))
                 source_memory = dict((getattr(agent, "source_memory_state", {}) or {}).get(target_name, {}) or {})
                 if source_state == "inspected":
                     refresh_pressure = float((build_readiness or {}).get("epistemic_refresh_pressure", 0.0) or 0.0)
@@ -338,6 +344,9 @@ class BrainContextBuilder:
                 "reachable": reachable,
                 "straight_line_clear": straight_line_clear,
                 "source_state": source_state,
+                # False: the last inspection of this source gained nothing and nothing it could inform (held DIK, recognised gaps,
+                # phase) has changed since. A fact about the source/agent state; whether to inspect anyway is the Pilot's choice.
+                "reinspect_informative": reinspect_informative,
                 "utility": utility_for(action_type, target_kind=target.get("kind")),
             }
             if target.get("kind") != "build":
@@ -409,8 +418,11 @@ class BrainContextBuilder:
                 # knowledge can ground the repair is stated up front (the same check that gates execution) so the Pilot can
                 # choose to acquire grounding instead of picking a repair that predictably fails.
                 repair_blockers = agent._repair_epistemic_blockers(environment, project_id=project_id) if hasattr(agent, "_repair_epistemic_blockers") else []
+                failed_at = project.get("last_validation_attempt_time")
                 legal.append({**base, "action_type": ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value, "utility": utility_for(ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, target_kind="build"),
-                              "observed_repair_need": True, "repair_ready": not repair_blockers, "repair_blockers": list(repair_blockers)})
+                              "observed_repair_need": True, "repair_ready": not repair_blockers, "repair_blockers": list(repair_blockers),
+                              # how long this observed failure has stood (a world fact read off the project record; a query, not a tracker)
+                              "observed_failure_age_s": round(max(0.0, float(sim_time) - float(failed_at)), 1) if (sim_time is not None and failed_at is not None) else 0.0})
 
         has_productive_target = any(
             item.get("action_type")
@@ -753,7 +765,7 @@ class BrainContextBuilder:
         team_state["experimental_opportunities"] = agent._experimental_opportunities(sim_state, environment)
         support_reasoning = self._support_reasoning(agent, sim_state, environment)
         task_methods = agent._task_method_status(current_phase.get("name", "default"))
-        action_affordances = self._affordances(agent, environment, build_readiness=build_readiness, phase_profile=phase_profile, team_state=team_state, support_subgoals=support_reasoning["subgoals"], task_methods=task_methods)
+        action_affordances = self._affordances(agent, environment, build_readiness=build_readiness, phase_profile=phase_profile, team_state=team_state, support_subgoals=support_reasoning["subgoals"], task_methods=task_methods, sim_time=float(sim_state.time))
 
         static_task_context = {
             "mission": self.scenario_name,

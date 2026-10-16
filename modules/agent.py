@@ -2616,14 +2616,30 @@ class Agent:
         return tuple(projects)
 
     def _source_content_signature(self, environment, sim_state=None):
-        """What a re-inspection could change: the DIK this agent holds, the construction state it reasons about, and the phase.
+        """What a re-inspection could change: the DIK this agent holds, the knowledge gaps it has recognised, and the phase.
 
-        Deliberately excludes the readiness blockers (which themselves depend on source-memory confidence), so it can be
-        used while refreshing that confidence without recursion or feedback.
+        A source is a static brief, so construction-state changes alone do not make re-reading it informative (they matter
+        only through the gaps they expose). Deliberately excludes the readiness blockers (which themselves depend on
+        source-memory confidence), so it can be used while refreshing that confidence without recursion or feedback.
         """
         data_ids, info_ids, knowledge_ids = self._held_dik_ids()
-        phase_idx = int(getattr(getattr(sim_state, "environment", None), "current_phase_index", 0) or 0)
-        return (phase_idx, hash(frozenset(data_ids)), hash(frozenset(info_ids)), hash(frozenset(knowledge_ids)), self._construction_state_signature(environment))
+        phase_idx = int(getattr(environment, "current_phase_index", None) or getattr(getattr(sim_state, "environment", None), "current_phase_index", 0) or 0)
+        gaps = frozenset(str(g) for g in (getattr(self, "known_gaps", None) or ()))
+        return (phase_idx, hash(frozenset(data_ids)), hash(frozenset(info_ids)), hash(frozenset(knowledge_ids)), hash(gaps))
+
+    def source_reinspection_informative(self, source_id, environment, sim_state=None, content_signature=None):
+        """Read-only: could re-inspecting this source tell the agent anything new?
+
+        False only for a source whose last inspection gained nothing (exhausted for acquisition) while the held DIK, recognised gaps
+        and phase are unchanged since. Never-inspected sources, forgotten content and new gaps are informative.
+        """
+        exhaustion = self.source_exhaustion_state.get(source_id) or {}
+        stored = exhaustion.get("exhausted_content_signature")
+        if not (exhaustion.get("exhausted_for_acquisition", exhaustion.get("exhausted")) and stored is not None):
+            return True
+        if content_signature is None:
+            content_signature = self._source_content_signature(environment, sim_state=sim_state)
+        return stored != content_signature
 
     def _refresh_source_memory_state(self, environment, sim_state=None):
         self._ensure_source_state(environment)
@@ -9849,20 +9865,22 @@ class Agent:
                 reason="local_refresh_no_active_plan",
             )
         if self._startup_bootstrap_guard(decision=decision, sim_state=sim_state):
-            self.activate_fallback_bootstrap(sim_state=sim_state, reason="startup_bootstrap_grounding_guard")
-            override = self._bootstrap_override_decision(environment, sim_state=sim_state)
-            if override is not None:
-                self._emit_event(
-                    sim_state,
-                    "startup_bootstrap_grounding_forced",
-                    {
-                        "planner_reason": planner_reason,
-                        "from_action": decision.selected_action.value,
-                        "to_action": override.selected_action.value,
-                        "target_id": override.target_id,
-                    },
-                )
-                decision = override
+            # Start-up grounding is the Pilot's own behaviour (its BOOTSTRAP mode prefers inspecting the required sources). The
+            # Mecha no longer rewrites a different Pilot choice into INSPECT; it only reports what the Pilot chose, and the
+            # ActionGate/translation block an action that start-up grounding genuinely makes illegal, with the reason.
+            pending = [s for s in self._fallback_bootstrap_required_sources() if not self._is_source_bootstrap_satisfied(s)]
+            self._emit_event(
+                sim_state,
+                "startup_grounding_pilot_choice",
+                {
+                    "planner_reason": planner_reason,
+                    "pilot_action": decision.selected_action.value,
+                    "target_id": decision.target_id,
+                    "required_sources_pending": pending,
+                    "grounding_inspect": bool(decision.selected_action == ExecutableActionType.INSPECT_INFORMATION_SOURCE and decision.target_id in pending),
+                    "substituted": False,
+                },
+            )
         decision = self._apply_policy_pivots(decision, environment, sim_state=sim_state, context=context, pivot_origin="local_refresh")
         if planner_reason == "no_active_plan":
             decision = self._no_active_plan_successor_for_materially_satisfied_project(
