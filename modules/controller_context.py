@@ -28,9 +28,15 @@ def affordance_blockers(aff: Dict[str, Any]) -> list[str]:
     """Blocker tokens the affordance builder itself states for an offered action (existing affordance truth; no legality is computed here).
 
     An action is advertised-but-not-selectable when the builder marks it not ready: REPAIR carries `repair_ready` + `repair_blockers`
-    (the same check that gates its execution). Returns [] for an action that is currently selectable."""
+    (the same check that gates its execution), VALIDATE carries `validation_ready` + `validation_blockers` (the gate's readiness read), and
+    INSPECT of another role's private source carries `source_accessible: False`. Returns [] for an action that is currently selectable."""
     if aff.get("action_type") == "repair_or_correct_construction" and aff.get("repair_ready") is False:
         return [str(b) for b in (aff.get("repair_blockers") or [])] or ["repair_not_ready"]
+    if aff.get("action_type") == "validate_construction" and aff.get("validation_ready") is False:
+        # same readiness the ActionGate applies at commit (carried on the affordance by the builder)
+        return [str(b) for b in (aff.get("validation_blockers") or [])] or ["validation_not_ready"]
+    if aff.get("action_type") == "inspect_information_source" and aff.get("source_accessible") is False:
+        return [str(aff.get("source_blocker") or "private_source_inaccessible")]
     return []
 
 

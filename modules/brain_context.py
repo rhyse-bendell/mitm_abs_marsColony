@@ -349,6 +349,13 @@ class BrainContextBuilder:
                 "reinspect_informative": reinspect_informative,
                 "utility": utility_for(action_type, target_kind=target.get("kind")),
             }
+            if target.get("kind") == "information" and hasattr(agent, "source_access_blocker"):
+                # Read-only access fact (the same legality the Mecha applies at commit): another role's private source cannot be inspected
+                # directly. Stated here so a generative Pilot sees it as blocked rather than being silently redirected to a different source.
+                access_blocker = agent.source_access_blocker(target_name, environment)
+                if access_blocker:
+                    base["source_accessible"] = False
+                    base["source_blocker"] = access_blocker
             if target.get("kind") != "build":
                 legal.append(base)
                 continue
@@ -411,8 +418,13 @@ class BrainContextBuilder:
                     legal.append({**base, "action_type": ExecutableActionType.START_CONSTRUCTION.value, "start_mode": "existing_project", "utility": utility_for(ExecutableActionType.START_CONSTRUCTION)})
             else:
                 failed_here = bool(environment.construction.observed_validation_failure(project))
+                # Whether VALIDATE is executable right now is stated up front from the SAME readiness read the ActionGate uses at commit
+                # (a query; no legality is computed here), so a generative Pilot is not offered a validation the gate already refuses.
+                readiness = environment.construction.evaluate_project_validation_readiness(project_id) if hasattr(environment.construction, "evaluate_project_validation_readiness") else {"validation_ready": True}
+                validation_ready = bool(readiness.get("validation_ready", False))
                 legal.append({**base, "action_type": ExecutableActionType.VALIDATE_CONSTRUCTION.value, "utility": utility_for(ExecutableActionType.VALIDATE_CONSTRUCTION, target_kind="build"),
-                              "validation_failed": failed_here, "validation_candidate": not failed_here})
+                              "validation_failed": failed_here, "validation_candidate": not failed_here,
+                              "validation_ready": validation_ready, "validation_blockers": [] if validation_ready else [str(b) for b in (readiness.get("blockers") or ["validation_not_ready"])]})
             if progressed and environment.construction.observed_validation_failure(project):
                 # REPAIR is advertised only where an error has been OBSERVED (a failed validation). Whether the agent's own
                 # knowledge can ground the repair is stated up front (the same check that gates execution) so the Pilot can

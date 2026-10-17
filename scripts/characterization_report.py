@@ -233,7 +233,13 @@ def extract(r):
     row["projects_complete"] = status.get("complete", 0)
     row["projects_needs_repair"] = status.get("needs_repair", 0)
     row["projects_in_progress"] = status.get("in_progress", 0)
-    row["structures_validated"] = cons.get("structures_validated", 0)
+    row["structures_validated"] = cons.get("structures_validated", 0)  # legacy all-types count; connectors included (not a performance readout)
+    ob = cons.get("outcome_breakdown") or {}
+    for key in ("validated_core_structures", "validated_houses", "validated_greenhouses", "validated_generators", "validated_connectors", "connector_projects_started", "site_slots_used", "site_slots_total"):
+        row[key] = ob.get(key)
+    row["site_slots_exhausted"] = int(bool(ob.get("site_slots_exhausted")))
+    row["supported_housing_max"] = g(ob, "structurally_supported_housing", "max")
+    row["supported_greenhouses_max"] = g(ob, "structurally_supported_greenhouses", "max")
     row["connections_total"] = g(team, "connections", "total", default=g(m, "experimental", "connections", "total"))
     row["connections_cross_site"] = g(m, "experimental", "connections", "cross_site")
     row["bricks_delivered_to_projects"] = cons.get("bricks_delivered_to_projects", 0)
@@ -382,7 +388,7 @@ def main(out):
 
     # Fig 2 outcomes
     fig, axes = plt.subplots(2, 2, figsize=(16, 9))
-    strip(axes[0, 0], conds, "structures_validated", "Validated structures at 600 s")
+    strip(axes[0, 0], conds, "validated_core_structures", "Validated CORE structures (house/greenhouse/generator) at 600 s")
     strip(axes[0, 1], conds, "ss_fully_supported_cap_max", "Fully supported civilian capacity (max bound)")
     strip(axes[1, 0], conds, "ss_housing_validated", "Validated housing structures")
     strip(axes[1, 1], conds, "projects_needs_repair", "Projects still needing repair at 600 s")

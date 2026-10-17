@@ -183,7 +183,7 @@ def _job(job):
     rec["attempts"], rec["wall_s"] = attempt, round(time.time() - t0, 1)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(rec, default=str), encoding="utf-8")
-    return name, seed, rec["error"] is None, attempt, rec["wall_s"], (rec.get("measures") or {}).get("construction", {}).get("structures_validated")
+    return name, seed, rec["error"] is None, attempt, rec["wall_s"], ((rec.get("measures") or {}).get("construction", {}).get("outcome_breakdown") or {}).get("validated_core_structures")
 
 
 def main(argv=None):
@@ -225,7 +225,7 @@ def main(argv=None):
             failures += 0 if ok else 1
             el = time.time() - t0
             eta = el / done * (total - done)
-            line = ("%d/%d done | elapsed %5.0fs | workers %d | failures %d | latest %s seed%s (%s, attempts %d, wall %ss, validated %s) | ETA %5.0fs"
+            line = ("%d/%d done | elapsed %5.0fs | workers %d | failures %d | latest %s seed%s (%s, attempts %d, wall %ss, core-validated %s) | ETA %5.0fs"
                     % (done, total, el, min(args.workers, total - done), failures, name, seed, "ok" if ok else "FAILED", attempts, wall, validated, eta))
             print(line, flush=True)
             log.write(line + "\n")

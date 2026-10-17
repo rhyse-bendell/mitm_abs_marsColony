@@ -1780,6 +1780,21 @@ class Agent:
             return source.replace("_Info", "")
         return None
 
+    def is_generative_pilot(self):
+        """True when a non-baseline controller (e.g. Local Ollama) drives this agent; the Procedural Baseline keeps its documented scaffold behavior."""
+        spec = getattr(self, "controller_spec", None)
+        return spec is not None and str(getattr(spec, "controller_type", "")) != "procedural_baseline"
+
+    def source_access_blocker(self, source_id, environment):
+        """Read-only: None if this agent may directly inspect `source_id`, else a blocker token. Another role's private source is
+        `private_source_inaccessible` (no substitute source is ever inspected in its place)."""
+        allowed, reason = self._agent_can_target_information_source(source_id, environment)
+        if allowed:
+            return None
+        if reason in {"unknown_source", "missing_source_id"}:
+            return reason
+        return "private_source_inaccessible" if self._private_role_for_packet(self._normalize_packet_name(source_id)) is not None else str(reason)
+
     def _agent_can_target_information_source(self, source_id, environment, allow_cross_role: bool = False):
         source_id = self._normalize_packet_name(source_id)
         if not source_id:

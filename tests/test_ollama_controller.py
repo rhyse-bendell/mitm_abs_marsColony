@@ -379,8 +379,11 @@ def request_obj():
 
 def test_valid_affordance_choice_becomes_the_exact_offered_action(monkeypatch, request_obj):
     st, req, ctx = request_obj
-    typed = next(a for a in ctx.action_affordances if a.get("action_args"))
-    idx = ctx.action_affordances.index(typed)
+    from modules.controller_context import partition_affordances
+
+    executable = partition_affordances(ctx.action_affordances)[0]  # affordance ids index the EXECUTABLE list (blocked actions get none)
+    typed = next(a for a in executable if a.get("action_args"))
+    idx = executable.index(typed)
     ad = _adapter(None)
     monkeypatch.setattr(ad, "client", FakeOllama(reply=lambda m, o, mod: json.dumps({"affordance_id": f"a{idx}", "arguments": dict(typed["action_args"]), "decision_note": "typed start"})))
     resp = ad.choose_action(req)

@@ -170,6 +170,7 @@ class SimulationState:
         # is pending, so simulated time never includes inference wall time. Off (default) = the original synchronous call.
         self.async_inference = False
         self.inference_closed = False
+        self.token_estimators = {}  # model tag -> TokenEstimator (session-adaptive prompt token estimate)
         self._inference_governor = None  # created lazily on the first Ollama submission: Procedural-only runs never instantiate it
         self.resource_monitor = None
         self.inference_paused = False
@@ -1078,7 +1079,10 @@ class SimulationState:
         from modules.ollama_pilot import OllamaControllerProvider, OllamaPilotAdapter
 
         settings = spec.full_settings()
-        adapter = OllamaPilotAdapter(settings, agent_id=agent.agent_id, role=agent.role)
+        from modules.token_estimator import TokenEstimator
+
+        estimator = self.token_estimators.setdefault(str(settings["model"]), TokenEstimator(str(settings["model"])))  # one learner per model tag per session
+        adapter = OllamaPilotAdapter(settings, agent_id=agent.agent_id, role=agent.role, estimator=estimator)
         provider = OllamaControllerProvider(adapter)
         cfg = BrainBackendConfig(backend="local_ollama_controller", local_base_url=settings["base_url"], local_model=str(settings["model"]), timeout_s=float(settings["timeout_s"]),
                                  max_retries=int(settings["max_retries"]), fallback_backend="none")
@@ -1706,6 +1710,15 @@ class SimulationState:
         for event in manager.drain_lifecycle_events():
             self.logger.log_event(self.time, event["event_type"], dict(event["payload"]))
 
+    def _outcome_breakdown(self):
+        """Core structures vs connectors vs support (modules.support_accounting); never raises into the final-measures path."""
+        try:
+            from modules.support_accounting import validated_structure_breakdown
+
+            return validated_structure_breakdown(self.environment.construction, self.metrics._structural_support_report())
+        except Exception as exc:  # reporting must not break shutdown
+            return {"schema": "outcome_breakdown/1", "error": repr(exc)}
+
     def _final_measures(self):
         """Authoritative end-of-run state read from the simulator (construction / environment)."""
         construction = self.environment.construction
@@ -1752,7 +1765,8 @@ class SimulationState:
             "construction": {
                 "projects": projects,
                 "projects_by_status": by_status,
-                "structures_validated": sum(1 for r in projects if r["validated_complete"]),
+                "structures_validated": sum(1 for r in projects if r["validated_complete"]),  # legacy all-types count: NOT a performance readout (see outcome_breakdown)
+                "outcome_breakdown": self._outcome_breakdown(),
                 "bricks_delivered_to_projects": sum(r["delivered_bricks"] for r in projects),
                 "bricks_delivered_to_bridges": sum(b["delivered"] for b in bridges.values()),
                 "resource_piles": piles,
@@ -1854,6 +1868,7 @@ class SimulationState:
                 **self.execution_metadata,
                 "resource_settings": dict(self.resource_settings),
                 "inference_governor": self.inference_governor_stats(),
+                "token_estimators": {m: e.state() for m, e in self.token_estimators.items()},
             }
         )
         self.logger.save_csv()

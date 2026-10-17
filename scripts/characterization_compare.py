@@ -103,7 +103,10 @@ def main():
         row("stale closure-owner runs", lambda R: int(total(R, "flag_stale_closure"))),
         row("exceptions", lambda R: int(total(R, "flag_exception"))),
         row("taskwork actions per run, mean", lambda R: f"{np.mean([num(r, 'taskwork_actions') or 0 for r in R]):.0f}"),
-        row("validated structures per run, mean (descriptive only)", lambda R: f"{np.mean([num(r, 'structures_validated') or 0 for r in R]):.2f}"),
+        row("validated CORE structures per run, mean (descriptive only)", lambda R: f"{np.mean([num(r, 'validated_core_structures') or 0 for r in R]):.2f}"),
+        row("validated connectors per run, mean (auxiliary; kept separate)", lambda R: f"{np.mean([num(r, 'validated_connectors') or 0 for r in R]):.2f}"),
+        row("runs with all site slots exhausted", lambda R: int(total(R, "site_slots_exhausted"))),
+        row("validated structures, all types incl. connectors (legacy; NOT a performance readout)", lambda R: f"{np.mean([num(r, 'structures_validated') or 0 for r in R]):.2f}"),
     ]
     lines += ["\n## Rewrites by type OUTSIDE start-up grounding (end-to-end, count of Pilot selections whose first attempted action differed)\n", "| type | old | new |", "|---|---|---|"]
     co, cn = rewrite_types(old, "e2e_rewrites_nonbootstrap_json"), rewrite_types(new, "e2e_rewrites_nonbootstrap_json")

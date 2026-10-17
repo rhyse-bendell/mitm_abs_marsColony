@@ -95,8 +95,15 @@ def _plan_section(team_plan_context: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def build_prompt(canonical: Dict[str, Any], *, budget_tokens: int, prompt_version: str = PROMPT_VERSION) -> Dict[str, Any]:
-    """-> {system, user, affordance_map, schema, metadata}. Pure function of (canonical, budget, version)."""
+def build_prompt(canonical: Dict[str, Any], *, budget_tokens: int, prompt_version: str = PROMPT_VERSION, estimator=None) -> Dict[str, Any]:
+    """-> {system, user, affordance_map, schema, metadata}. Pure function of (canonical, budget, version, estimator state).
+    `estimator` (modules.token_estimator.TokenEstimator) supplies the characters-per-token used for budget decisions; default = fixed 2.8."""
+    est = estimator.estimate if estimator is not None else estimate_tokens
+    cpt_used = estimator.chars_per_token() if estimator is not None else 2.8
+
+    def _cost(value: Any) -> int:  # noqa: F811 - local, estimator-aware cost
+        return est(_dumps(value))
+
     if prompt_version not in SYSTEM_PROMPTS:
         raise ValueError(f"unknown prompt version {prompt_version!r}")
     system = SYSTEM_PROMPTS[prompt_version]
@@ -142,7 +149,7 @@ def build_prompt(canonical: Dict[str, Any], *, budget_tokens: int, prompt_versio
     def tier1_cost() -> int:
         return _cost(render_tier1())
 
-    fixed = estimate_tokens(system) + 64  # instruction line + framing
+    fixed = est(system) + 64  # instruction line + framing
     avail = max(0, int(budget_tokens) - fixed)
     # fixed, ordered shrink steps for tier 1 (legal affordance ids/essentials are never removed)
     while tier1_cost() > avail and keep_projects > 3:
@@ -206,9 +213,10 @@ def build_prompt(canonical: Dict[str, Any], *, budget_tokens: int, prompt_versio
     omitted = {n: m["omitted_items"] for n, m in meta_sections.items() if m["omitted_items"]}
     metadata = {
         "prompt_version": prompt_version, "budget_tokens": int(budget_tokens), "available_for_context_tokens": avail,
-        "estimated_prompt_tokens": estimate_tokens(system) + estimate_tokens(user), "tier1_over_budget": bool(tier1_over), "tier1_shrink_steps": shrink_log,
+        "estimated_prompt_tokens": est(system) + est(user), "prompt_chars": len(system) + len(user), "tier1_over_budget": bool(tier1_over), "tier1_shrink_steps": shrink_log,
         "omitted_item_counts": omitted, "sections": meta_sections, "affordance_count": len(legal),
-        "estimator": "chars/2.8 (deterministic, tokenizer-free, conservative)",
+        "estimator": f"chars/{cpt_used:.3f} ({'session-adaptive' if estimator is not None else 'fixed'}, tokenizer-free, conservative)",
+        "estimator_state": estimator.state() if estimator is not None else {"chars_per_token_in_use": 2.8, "adapted": False},
     }
     return {"system": system, "user": user, "affordance_map": amap, "schema": schema, "metadata": metadata,
             "prompt_hash": hashlib.sha256((system + "\n" + user).encode("utf-8")).hexdigest()[:16]}

@@ -45,6 +45,59 @@ def _range(low: int, high: int) -> Dict[str, int]:
     return {"min": low, "max": high}
 
 
+def validated_structure_breakdown(construction, support_report: Optional[Dict[str, Any]] = None, model: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Outcome readout that keeps CORE structures and auxiliary CONNECTORS separate (read-only; no new support semantics).
+
+    `total_validated_structures` is the legacy all-types count and must not be read as colony performance: a connector counts one like a
+    house and every project, connector or not, occupies a site slot. Support figures are taken from `evaluate_structural_support`
+    (the authoritative evaluator) as its min/max bounds; nothing is allocated or scored here."""
+    model = model or load_support_model()
+    projects = [p for p in (getattr(construction, "projects", {}) or {}).values() if isinstance(p, dict)]
+    kind_of_type = {t: kind for kind, types in model["structure_types"].items() for t in types}
+    connector_kind = {ctype: support for support, ctype in model["connector_project_types"].items()}
+    counts: Counter = Counter()
+    for project in projects:
+        ptype = str(project.get("type") or "").strip().lower()
+        if not _is_validated(project):
+            continue
+        if ptype in kind_of_type:
+            counts[kind_of_type[ptype]] += 1
+        elif ptype in connector_kind:
+            counts["connector_" + connector_kind[ptype]] += 1
+        else:
+            counts["other"] += 1
+    ss = support_report if support_report is not None else evaluate_structural_support(construction, model)
+    housing, food, water = ss.get("housing", {}), ss.get("food", {}), ss.get("water", {})
+    cap = getattr(construction, "get_site_capacity_summary", None)
+    sites = list(cap()) if callable(cap) else []
+    slots_used = sum(int(s.get("used", 0) or 0) for s in sites)
+    slots_total = sum(int(s.get("capacity", 0) or 0) for s in sites)
+    connector_projects = sum(1 for p in projects if str(p.get("type") or "").strip().lower() in connector_kind)
+    return {
+        "schema": "outcome_breakdown/1",
+        "total_validated_structures": sum(counts.values()),
+        "validated_core_structures": counts["housing"] + counts["greenhouse"] + counts["water_generator"],
+        "validated_houses": counts["housing"],
+        "validated_greenhouses": counts["greenhouse"],
+        "validated_generators": counts["water_generator"],
+        "validated_connectors": counts["connector_food"] + counts["connector_water"],
+        "validated_food_connectors": counts["connector_food"],
+        "validated_water_connectors": counts["connector_water"],
+        "validated_other": counts["other"],
+        "structurally_supported_housing": dict(housing.get("fully_supported_structures") or {"min": 0, "max": 0}),
+        "structurally_supported_greenhouses": dict(food.get("watered_greenhouses") or {"min": 0, "max": 0}),
+        "supported_civilian_capacity": dict(housing.get("fully_supported_civilian_capacity") or {"min": 0, "max": 0}),
+        "supported_vip_capacity_if_vip_compatible": dict(housing.get("fully_supported_vip_capacity_if_vip_compatible") or {"min": 0, "max": 0}),
+        "vip_property_modeled": bool(housing.get("vip_property_modeled", False)),
+        "projects_started": len(projects),
+        "connector_projects_started": connector_projects,
+        "connector_share_of_projects_started": round(connector_projects / len(projects), 4) if projects else 0.0,
+        "site_slots_used": slots_used,
+        "site_slots_total": slots_total,
+        "site_slots_exhausted": bool(slots_total and slots_used >= slots_total),
+    }
+
+
 def evaluate_structural_support(construction, model: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Return the structural support report for ``construction`` (anything exposing ``.projects``)."""
     model = model or load_support_model()

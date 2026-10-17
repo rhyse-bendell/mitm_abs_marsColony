@@ -111,6 +111,13 @@ class AgentActionGate:
         return ActionGateResult(legal=True, normalized_decision=decision, target_id=decision.target_id)
 
     def _evaluate_inspect(self, *, agent, decision, sim_state):
+        # A generative Pilot's INSPECT of a source it may not access is refused explicitly; the Mecha never inspects a different
+        # source in its place and never turns it into COMMUNICATE / REQUEST_ASSISTANCE (those stay separate choices for the Pilot).
+        # The Procedural Baseline keeps its documented scaffold retargeting (its selections must not change).
+        if hasattr(agent, "is_generative_pilot") and agent.is_generative_pilot() and decision.target_id:
+            blocker = agent.source_access_blocker(decision.target_id, getattr(sim_state, "environment", None))
+            if blocker:
+                return ActionGateResult(False, decision, blockers=[blocker], target_id=decision.target_id, metadata={"requested_source": str(decision.target_id)})
         return self._pass(decision)
 
     def _evaluate_communication(self, *, agent, decision, sim_state):

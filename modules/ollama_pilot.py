@@ -89,8 +89,9 @@ class OllamaPilotAdapter:
     synchronous_llm_pilot = True  # decisions are taken synchronously in the Pilot path; no async planner, DIK-integration or bootstrap fallback
     consumes_canonical_context_only = True
 
-    def __init__(self, settings: Dict[str, Any], *, agent_id: str, role: str):
+    def __init__(self, settings: Dict[str, Any], *, agent_id: str, role: str, estimator=None):
         self.settings = dict(settings)
+        self.estimator = estimator  # session-adaptive TokenEstimator shared per model tag (None = fixed conservative 2.8 chars/token)
         self.agent_id = agent_id
         self.role = role
         self.model = str(settings["model"])
@@ -132,7 +133,7 @@ class OllamaPilotAdapter:
         canonical = assert_canonical_context_clean(dict((request.task_context or {}).get("canonical_context") or {}))
         if not canonical:
             raise ControllerFailure("no canonical context in request", {"error": "missing_canonical_context"})
-        built = build_prompt(canonical, budget_tokens=self._budget_tokens(), prompt_version=str(self.settings.get("prompt_version") or "canonical_choice_v2"))
+        built = build_prompt(canonical, budget_tokens=self._budget_tokens(), prompt_version=str(self.settings.get("prompt_version") or "canonical_choice_v2"), estimator=self.estimator)
         amap, schema = built["affordance_map"], built["schema"]
         trace: Dict[str, Any] = {
             "kind": "ollama_decision", "request_id": request.request_id, "agent_id": self.agent_id, "role": self.role, "sim_time": float(request.sim_time),
@@ -163,6 +164,10 @@ class OllamaPilotAdapter:
             else:
                 record.update(raw_response=reply["content"], latency_s=reply["latency_s"], token_metadata=reply["token_metadata"], done_reason=reply.get("done_reason"))
                 used = (reply["token_metadata"] or {}).get("prompt_eval_count")
+                if attempt == 0 and used is not None:  # first attempt only: later attempts carry extra correction messages
+                    obs = self.estimator.observe(built["metadata"]["prompt_chars"], int(used), built["metadata"]["estimated_prompt_tokens"]) if self.estimator is not None else None
+                    trace["token_estimation"] = obs or {"chars": built["metadata"]["prompt_chars"], "actual_prompt_tokens": int(used), "estimated_prompt_tokens": built["metadata"]["estimated_prompt_tokens"],
+                                                        "estimate_over_actual": round(built["metadata"]["estimated_prompt_tokens"] / max(1, int(used)), 4)}
                 ctx_limit = int(self.settings.get("max_context_tokens") or 8192)
                 if used is not None and int(used) >= int(0.97 * ctx_limit):
                     record["context_window_nearly_full"] = True  # Ollama may truncate beyond num_ctx; raise max_context_tokens or lower the prompt budget
