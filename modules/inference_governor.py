@@ -92,7 +92,8 @@ class GovernedJob:
 
 
 class InferenceGovernor:
-    def __init__(self, max_concurrent=1, memory_floor_mb=DEFAULT_MEMORY_FLOOR_MB, monitor=None, on_event=None):
+    def __init__(self, max_concurrent=1, memory_floor_mb=DEFAULT_MEMORY_FLOOR_MB, monitor=None, on_event=None, guard=None):
+        self.guard = guard  # shared ResourceGuard (RAM + GPU); None = the original RAM-floor check
         self.max_concurrent = max(1, int(max_concurrent))
         self.memory_floor_mb = float(memory_floor_mb)
         self.monitor = monitor
@@ -134,6 +135,12 @@ class InferenceGovernor:
 
     def _resource_block(self):
         snap = self.monitor.snapshot() if self.monitor is not None else {}
+        if self.guard is not None:
+            reason, detail = self.guard.evaluate(snap, util_check=False)  # cached sample: never probes on the GUI thread
+            if reason:
+                self.guard.last_reason = reason
+                return self.guard.describe(reason, detail)
+            return None
         avail = snap.get("ram_available_mb")
         if avail is not None and avail < self.memory_floor_mb:
             return f"low memory: {avail / 1024:.1f} GB available < floor {self.memory_floor_mb / 1024:.1f} GB - inference waiting (Stop to abandon)"

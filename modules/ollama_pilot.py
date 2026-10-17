@@ -20,6 +20,7 @@ from modules.brain_contract import AgentBrainRequest, AgentBrainResponse
 from modules.controller_context import assert_canonical_context_clean
 from modules.ollama_client import OllamaClient, OllamaError, OllamaModelMissingError, OllamaUnavailableError
 from modules.ollama_prompt import build_prompt, estimate_tokens
+from modules.resource_guard import GuardCancelled, MAX_RESOURCE_TIMEOUT_RETRIES
 
 IMPLEMENTATION_VERSION = "1"
 
@@ -89,8 +90,9 @@ class OllamaPilotAdapter:
     synchronous_llm_pilot = True  # decisions are taken synchronously in the Pilot path; no async planner, DIK-integration or bootstrap fallback
     consumes_canonical_context_only = True
 
-    def __init__(self, settings: Dict[str, Any], *, agent_id: str, role: str, estimator=None):
+    def __init__(self, settings: Dict[str, Any], *, agent_id: str, role: str, estimator=None, guard_provider=None):
         self.settings = dict(settings)
+        self.guard_provider = guard_provider  # callable -> ResourceGuard for the synchronous (headless) path, or None (the GUI governor guards the async path)
         self.estimator = estimator  # session-adaptive TokenEstimator shared per model tag (None = fixed conservative 2.8 chars/token)
         self.agent_id = agent_id
         self.role = role
@@ -147,13 +149,25 @@ class OllamaPilotAdapter:
             raise ControllerFailure("no legal affordances were offered", trace)
         messages: List[Dict[str, str]] = [{"role": "system", "content": built["system"]}, {"role": "user", "content": built["user"]}]
         max_retries = int(self.settings.get("max_retries", 2))
-        for attempt in range(max_retries + 1):
+        guard = self.guard_provider() if self.guard_provider is not None else None
+        trace["resource_wait_s"] = 0.0
+        attempt = -1
+        resource_retries = 0
+        while attempt < max_retries:
+            attempt += 1
             if self.cancelled:
                 trace["validation_outcome"] = "cancelled"
                 raise ControllerFailure("run stopped while inference was pending", trace)
             record: Dict[str, Any] = {"attempt": attempt, "raw_response": None, "error": None, "latency_s": None, "token_metadata": {}, "done_reason": None}
             trace["attempts"].append(record)
             trace["retry_count"] = attempt
+            if guard is not None:  # headless/synchronous: wait (never advancing simulated time) until it is safe to start the call
+                try:
+                    trace["resource_wait_s"] = round(trace["resource_wait_s"] + guard.before_call(cancel=lambda: self.cancelled), 3)
+                except GuardCancelled:
+                    trace["validation_outcome"] = "cancelled"
+                    trace["failure_class"] = "cancelled"
+                    raise ControllerFailure("run stopped while waiting for resources", trace)
             try:
                 reply = self.client.chat(model=self.model, messages=messages, options=self._options(), response_format=schema, think=bool(self.settings.get("think", False)),
                                          timeout_s=float(self.settings.get("timeout_s") or 120.0), **({"keep_alive": str(self.settings["keep_alive"])} if self.settings.get("keep_alive") else {}))
@@ -161,8 +175,26 @@ class OllamaPilotAdapter:
                 record["error"] = f"{type(exc).__name__}: {exc}"
                 trace["validation_outcome"] = "inference_error"
                 correction = None
+                is_timeout = "timeout" in str(exc).lower()
+                record["error_class"] = "transport_timeout" if is_timeout else "transport_error"
+                if guard is not None and is_timeout and resource_retries < MAX_RESOURCE_TIMEOUT_RETRIES:
+                    why, _why_detail = guard.contention_suspected()
+                    if why:  # a timeout the resource state explains is infrastructure contention, not a model failure: wait, then ask again
+                        record["error_class"] = "transport_timeout_resource_contention"
+                        record["resource_reason"] = why
+                        resource_retries += 1
+                        trace["resource_timeout_retries"] = resource_retries
+                        guard.note_timeout_retry()
+                        attempt -= 1  # does not consume the model-retry budget
+                        continue
             else:
                 record.update(raw_response=reply["content"], latency_s=reply["latency_s"], token_metadata=reply["token_metadata"], done_reason=reply.get("done_reason"))
+                tm_ = reply["token_metadata"] or {}
+                if tm_.get("total_duration"):  # model inference vs transport/infrastructure overhead, kept apart
+                    record["model_inference_s"] = round(tm_["total_duration"] / 1e9, 3)
+                    record["transport_overhead_s"] = round(max(0.0, float(reply["latency_s"]) - tm_["total_duration"] / 1e9), 3)
+                if guard is not None:
+                    guard.note_call_finished(reply["latency_s"])
                 used = (reply["token_metadata"] or {}).get("prompt_eval_count")
                 if attempt == 0 and used is not None:  # first attempt only: later attempts carry extra correction messages
                     obs = self.estimator.observe(built["metadata"]["prompt_chars"], int(used), built["metadata"]["estimated_prompt_tokens"]) if self.estimator is not None else None
@@ -187,9 +219,21 @@ class OllamaPilotAdapter:
                     messages = messages + [{"role": "assistant", "content": record["raw_response"]}, {"role": "user", "content": correction}]
                 time.sleep(0)  # no backoff: a local service; the bound is the retry count
         trace["validation_outcome"] = trace["validation_outcome"] or "exhausted"
+        trace["failure_class"] = self._failure_class(trace)
         raise ControllerFailure(f"Ollama controller for {self.role} produced no valid choice after {max_retries + 1} attempt(s): {trace['attempts'][-1].get('error')}", trace)
 
     # ------------------------------------------------------------------ helpers
+    @staticmethod
+    def _failure_class(trace: Dict[str, Any]) -> str:
+        """Why the controller failed, kept distinct: transport (timeout / resource-contention timeout / other), illegal action, malformed output."""
+        last = (trace.get("attempts") or [{}])[-1] or {}
+        if last.get("error_class"):
+            return str(last["error_class"])
+        err = str(last.get("error") or "")
+        if err.startswith(("unknown_affordance", "arguments_not_permitted")):
+            return "illegal_action"
+        return "malformed_output"
+
     @staticmethod
     def _validate(raw: str, amap: Dict[str, Dict[str, Any]]):
         """-> ((affordance_id, arguments, note), None) or (None, error). The model can only pick an offered affordance and cannot add arguments."""

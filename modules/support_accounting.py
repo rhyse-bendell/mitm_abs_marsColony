@@ -72,7 +72,13 @@ def validated_structure_breakdown(construction, support_report: Optional[Dict[st
     sites = list(cap()) if callable(cap) else []
     slots_used = sum(int(s.get("used", 0) or 0) for s in sites)
     slots_total = sum(int(s.get("capacity", 0) or 0) for s in sites)
-    connector_projects = sum(1 for p in projects if str(p.get("type") or "").strip().lower() in connector_kind)
+    connector_list = [p for p in projects if str(p.get("type") or "").strip().lower() in connector_kind]
+    connector_projects = len(connector_list)
+
+    def _links(project):  # only link entries with BOTH endpoints are edges (same rule as the evaluator)
+        return [c for c in (project.get("connections") or []) if isinstance(c, dict) and c.get("from_project_id") and c.get("to_project_id")]
+
+    with_links = [p for p in connector_list if _links(p)]
     return {
         "schema": "outcome_breakdown/1",
         "total_validated_structures": sum(counts.values()),
@@ -92,6 +98,13 @@ def validated_structure_breakdown(construction, support_report: Optional[Dict[st
         "projects_started": len(projects),
         "connector_projects_started": connector_projects,
         "connector_share_of_projects_started": round(connector_projects / len(projects), 4) if projects else 0.0,
+        # A (speculative physical construction) vs B (a connector that actually links a provider and a consumer): a validated connector
+        # PROJECT with no endpoint link provides nothing; the evaluator ignores it.
+        "connector_projects_with_links": len(with_links),
+        "speculative_connector_projects": connector_projects - len(with_links),
+        "connector_links_total": sum(len(_links(p)) for p in connector_list),
+        "validated_connectors_with_links": sum(1 for p in with_links if _is_validated(p)),
+        "validated_connectors_without_links": sum(1 for p in connector_list if not _links(p) and _is_validated(p)),
         "site_slots_used": slots_used,
         "site_slots_total": slots_total,
         "site_slots_exhausted": bool(slots_total and slots_used >= slots_total),

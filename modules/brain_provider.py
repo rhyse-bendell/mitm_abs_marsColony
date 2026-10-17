@@ -1764,6 +1764,7 @@ class RuleBrain(BrainProvider):
         # 4) select/advance method step, 5) choose legal action for that step,
         # 6) emit policy snapshot, 7) hand action to executor bridge (Agent).
         affordances = list(context_packet.action_affordances if not is_request else context_packet.allowed_actions)
+        affordances = [a for a in affordances if a.get("source_accessible") is not False]  # a blocked (inaccessible private source) INSPECT is not a candidate for any Pilot
         sorted_affordances = sorted(affordances, key=lambda a: float(a.get("utility", 0.0)), reverse=True)
         legal_types = {a.get("action_type") for a in affordances if a.get("action_type")}
         mechanism_profile = (
