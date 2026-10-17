@@ -17,7 +17,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional
 
 DEFAULT_BASE_URL = "http://127.0.0.1:11434"
-ALLOWED_PATHS = ("/api/version", "/api/tags", "/api/chat")
+ALLOWED_PATHS = ("/api/version", "/api/tags", "/api/chat", "/api/ps")
 
 
 class OllamaError(RuntimeError):
@@ -117,6 +117,11 @@ class OllamaClient:
 
     def installed_model_names(self) -> List[str]:
         return [str(m["name"]) for m in self.list_models()]
+
+    def loaded_models(self) -> List[Dict[str, Any]]:
+        """Models currently resident in memory (GET /api/ps, read-only). Used only for diagnostics."""
+        reply = self._request("GET", "/api/ps", timeout_s=min(3.0, self.timeout_s))
+        return [{"name": m.get("name") or m.get("model"), "size_bytes": m.get("size"), "size_vram_bytes": m.get("size_vram")} for m in reply.get("models") or []]
 
     @staticmethod
     def model_matches(requested: str, installed: List[str]) -> Optional[str]:

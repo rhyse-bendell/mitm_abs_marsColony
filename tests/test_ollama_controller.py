@@ -188,7 +188,7 @@ def test_unreachable_service_reports_unavailable_without_starting_anything():
 # ------------------------------------------------------------------ preflight (fail before the simulation starts)
 def test_unavailable_ollama_fails_before_the_simulation_starts(monkeypatch):
     monkeypatch.setattr(ollama_pilot, "client_factory", lambda b, t: FakeOllama(b, t, available=False))
-    with tempfile.TemporaryDirectory() as tmp, pytest.raises(ollama_pilot.ControllerUnavailableError, match="not available"):
+    with tempfile.TemporaryDirectory() as tmp, pytest.raises(ollama_pilot.ControllerUnavailableError, match="not running"):
         _sim({"Engineer": OLLAMA_A}, tmp=tmp)
 
 
@@ -502,7 +502,7 @@ def test_gui_per_agent_ollama_controls_are_independent_and_default_is_all_proced
     assert {app.agent_controller_vars[r].get() for r in roles} == {"Procedural Baseline"}
     _set(app, roles[1], "Local Ollama", model="model-a", temperature="0.3", controller_generation_seed="7")
     assert "installed" in app.agent_ollama_vars[roles[1]] and app.agent_ollama_vars[roles[1]]["installed"] == ["model-a", "model-b", "model-c"]
-    assert "available" in app.agent_ollama_vars[roles[1]]["status"].get()
+    assert "connected" in app.agent_ollama_vars[roles[1]]["status"].get()
     a = app.controller_assignments()
     assert a[roles[0]] == {"controller_type": "procedural_baseline", "settings": {}} and a[roles[2]] == {"controller_type": "procedural_baseline", "settings": {}}
     assert a[roles[1]]["controller_type"] == "local_ollama" and a[roles[1]]["settings"]["model"] == "model-a" and a[roles[1]]["settings"]["controller_generation_seed"] == 7
@@ -537,11 +537,12 @@ def test_gui_start_is_blocked_when_ollama_or_the_model_is_unusable(app, monkeypa
     assert "not installed" in app._controller_preflight_error()
     monkeypatch.setattr(ollama_pilot, "client_factory", lambda b, t: FakeOllama(b, t, available=False))
     _set(app, roles[2], "Local Ollama", model="model-a")
-    assert "not available" in app._controller_preflight_error()
+    assert "not running" in app._controller_preflight_error()
     shown = []
-    from tkinter import messagebox
+    import interface
 
-    monkeypatch.setattr(messagebox, "showerror", lambda *a, **k: shown.append(a))
+    # patch the module object the GUI actually calls (another test may have re-imported interface, leaving tkinter.messagebox a different object)
+    monkeypatch.setattr(interface.messagebox, "showerror", lambda *a, **k: shown.append(a))
     app.start_experiment()
     assert shown and app.sim is None and app.run_state != app.STATE_STARTING
     _set(app, roles[2], "Procedural Baseline")

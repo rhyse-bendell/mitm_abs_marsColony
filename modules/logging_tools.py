@@ -10,14 +10,30 @@ from pathlib import Path
 from modules.interaction_graph import InteractionTraceWriter
 
 
+OUTPUTS_ROOT_ENV = "MITM_OUTPUTS_ROOT"
+
+
+def resolve_outputs_root(project_root, override=None):
+    """(path, source). Explicit override > MITM_OUTPUTS_ROOT environment variable > <project_root>/Outputs (the historical default).
+    Never migrates or deletes anything; it only decides where NEW sessions are written."""
+    import os
+
+    if override:
+        return Path(override).expanduser(), "explicit"
+    env = os.environ.get(OUTPUTS_ROOT_ENV, "").strip()
+    if env:
+        return Path(env).expanduser(), f"env:{OUTPUTS_ROOT_ENV}"
+    return Path(project_root) / "Outputs", "default"
+
+
 class OutputSessionManager:
-    def __init__(self, experiment_name="experiment", timestamp=None, project_root=None):
+    def __init__(self, experiment_name="experiment", timestamp=None, project_root=None, outputs_root=None):
         self.experiment_name = experiment_name or "experiment"
         self.sanitized_prefix = self._sanitize_prefix(self.experiment_name)
         self.timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
 
         self.project_root = Path(project_root) if project_root else Path(__file__).resolve().parents[1]
-        self.outputs_root = self.project_root / "Outputs"
+        self.outputs_root, self.outputs_root_source = resolve_outputs_root(self.project_root, outputs_root)
         self.session_folder = self.outputs_root / f"{self.sanitized_prefix}_{self.timestamp}"
 
         self.logs_dir = self.session_folder / "logs"
@@ -47,6 +63,8 @@ class OutputSessionManager:
             "sanitized_prefix": self.sanitized_prefix,
             "timestamp": self.timestamp,
             "session_folder": str(self.session_folder),
+            "outputs_root": str(self.outputs_root),
+            "outputs_root_source": self.outputs_root_source,
             "speed": speed,
             "flash_mode": flash_mode,
             "active_agents": active_agents or []
@@ -160,8 +178,8 @@ class PlannerTraceWriter:
 
 
 class SimulationLogger:
-    def __init__(self, filename=None, interval=5.0, experiment_name="experiment", project_root=None):
-        self.output_session = OutputSessionManager(experiment_name=experiment_name, project_root=project_root)
+    def __init__(self, filename=None, interval=5.0, experiment_name="experiment", project_root=None, outputs_root=None):
+        self.output_session = OutputSessionManager(experiment_name=experiment_name, project_root=project_root, outputs_root=outputs_root)
         self.output_session.setup_session_dirs()
         timestamp = self.output_session.timestamp
         safe_name = self.output_session.sanitized_prefix

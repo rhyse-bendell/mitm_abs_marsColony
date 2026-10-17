@@ -1788,7 +1788,11 @@ class MarsColonyInterface:
                 self.data_summary_vars["name"].set(paths["session"].name)
                 self.data_summary_vars["folder"].set(str(paths["session"]))
                 files = data_browser.discover_session_files(paths["session"])
-                self.data_status_var.set(f"{len(files)} file(s) found. Previews are read-only and truncated for large files.")
+                from modules.disk_usage import human_bytes, outputs_report
+
+                rep_ = outputs_report(getattr(session, "outputs_root", paths["session"].parent), paths["session"])
+                self.data_status_var.set(f"{len(files)} file(s) found. Previews are read-only and truncated for large files.  "
+                                         f"This session: {human_bytes(rep_['session_bytes'])}; Outputs root {rep_['outputs_root']}: {human_bytes(rep_['total_bytes'])} in {rep_['session_count']} session folder(s).")
             selected = self._data_selected_label()
             self.data_file_tree.delete(*self.data_file_tree.get_children())
             self._data_files = {}
@@ -2180,12 +2184,14 @@ class MarsColonyInterface:
             client = ollama_pilot.client_factory(base, 5.0)
             status = client.status()
             if not status.get("available"):
-                v["status"].set(f"Ollama NOT available at {base}: {status.get('error')}")
+                from modules.inference_governor import OLLAMA_NOT_RUNNING_MESSAGE
+
+                v["status"].set(OLLAMA_NOT_RUNNING_MESSAGE)
                 v["installed"] = []
             else:
                 names = client.installed_model_names()
                 v["installed"] = names
-                v["status"].set(f"Ollama {status.get('version')} available - {len(names)} local model(s)")
+                v["status"].set(f"Local Ollama connected - version {status.get('version')} - installed model(s): {', '.join(names) if names else 'none'}")
         except (OllamaError, ValueError) as exc:
             v["installed"] = []
             v["status"].set(f"Ollama check failed: {exc}")
@@ -2193,6 +2199,7 @@ class MarsColonyInterface:
         if combo is not None:
             combo.configure(values=list(v["installed"]))
         self._refresh_test_drive_summary()
+        self._refresh_resource_warning()
 
     def _on_controller_changed(self, role):
         frame = self.agent_controller_settings_frames.get(role)
@@ -2204,6 +2211,7 @@ class MarsColonyInterface:
         else:
             frame.grid_remove()
         self._refresh_test_drive_summary()
+        self._refresh_resource_warning()
 
     def _controller_preflight_error(self):
         """Message if any agent is set to Local Ollama but its service/model is unusable (Start must not proceed), else None."""
@@ -2448,6 +2456,11 @@ class MarsColonyInterface:
     def _finalize_simulation_install(self, sim):
         self.sim = sim
         sim.async_inference = True  # model calls run on a worker thread; the Tk thread never waits for Ollama
+        if hasattr(self, "resource_mode_var"):
+            rs = self._resource_settings_from_gui()
+            sim.configure_resources(rs["resource_mode"], rs["max_concurrent_inference"], rs["memory_floor_mb"])
+            if getattr(self, "host_monitor", None) is not None:
+                sim.resource_monitor = self.host_monitor  # shared diagnostic sampler (the run does not own or stop it)
         self.run_state = self.STATE_IDLE
         self._cancel_run_loop()
         self._reset_persistent_startup_views()
@@ -2726,18 +2739,35 @@ class MarsColonyInterface:
             if problem:
                 messagebox.showerror("Controller not ready", f"Start was not attempted.\n\n{problem}")
                 return
+            try:
+                if hasattr(self, "resource_mode_var"):
+                    self._resource_settings_from_gui()
+            except ValueError as exc:
+                messagebox.showerror("Resource settings", str(exc))
+                return
+            from modules.inference_governor import distinct_local_models, multi_model_warning
+
+            warning = multi_model_warning(self.controller_assignments())
+            if warning:
+                shown = ", ".join(f"{m} @ {b}" for b, m in distinct_local_models(self.controller_assignments()))
+                if not messagebox.askokcancel("Multiple local models", f"Selected models: {shown}\n\n{warning}\n\nStart anyway?"):
+                    return
 
         if self.run_state in {self.STATE_IDLE, self.STATE_STOPPED} or self.sim is None:
             self._begin_async_startup()
             return
 
         self.run_state = self.STATE_RUNNING
+        if self.sim is not None and hasattr(self.sim, "set_inference_paused"):
+            self.sim.set_inference_paused(False)
         self._update_control_states()
         self._schedule_next_tick()
 
     def pause_experiment(self):
         if self.run_state != self.STATE_RUNNING:
             return
+        if self.sim is not None and hasattr(self.sim, "set_inference_paused"):
+            self.sim.set_inference_paused(True)  # no NEW model call starts while paused
         self.run_state = self.STATE_PAUSED
         self._cancel_run_loop()
         self._update_control_states()
@@ -4196,6 +4226,141 @@ class MarsColonyInterface:
         ttk.Label(frame, textvariable=self.test_drive_summary_var, justify="left", wraplength=860).grid(row=1, column=0, columnspan=5, sticky="w", pady=(6, 0))
         for var in (self.seed_var, self.stop_at_sim_time_var, self.speed_multiplier):
             var.trace_add("write", self._refresh_test_drive_summary)
+        self._create_resource_panel(frame)
+
+    # ---- Local Ollama resource protection (read-only status + resource mode)
+    RESOURCE_MODE_LABELS = ("Conservative", "Balanced", "Custom")
+
+    def _create_resource_panel(self, parent):
+        self.resource_mode_var = StringVar(value="Conservative")
+        self.resource_max_conc_var = StringVar(value="1")
+        self.resource_floor_gb_var = StringVar(value="2.0")
+        self.resource_vars = {k: StringVar(value="-") for k in ("ollama", "loaded", "jobs", "ram", "gpu", "cpu", "process", "outputs")}
+        self.resource_warning_var = StringVar(value="")
+        self.resource_throttle_var = StringVar(value="")
+        self.host_monitor = None
+        self._outputs_size_cache = (0.0, "")
+        frame = ttk.LabelFrame(parent, text="Local Ollama resources (status is read-only)", padding=(8, 4))
+        frame.grid(row=3, column=0, columnspan=5, sticky="ew", pady=(8, 0))
+        frame.columnconfigure(3, weight=1)
+        ttk.Label(frame, text="Resource mode").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(frame, textvariable=self.resource_mode_var, values=list(self.RESOURCE_MODE_LABELS), state="readonly", width=14).grid(row=0, column=1, sticky="w", padx=(4, 12))
+        ttk.Label(frame, text="Max concurrent inference").grid(row=0, column=2, sticky="w")
+        self.resource_max_conc_entry = ttk.Entry(frame, textvariable=self.resource_max_conc_var, width=5)
+        self.resource_max_conc_entry.grid(row=0, column=3, sticky="w", padx=4)
+        ttk.Label(frame, text="Memory floor (GB)").grid(row=0, column=4, sticky="w")
+        self.resource_floor_entry = ttk.Entry(frame, textvariable=self.resource_floor_gb_var, width=5)
+        self.resource_floor_entry.grid(row=0, column=5, sticky="w", padx=4)
+        ttk.Label(frame, text="Conservative = 1 call at a time (default). Balanced = 2 at a time (not hardware-tuned). Custom = your values. Extra agents queue; queueing never advances simulated time.",
+                  foreground="#3f556e", wraplength=860, justify="left").grid(row=1, column=0, columnspan=6, sticky="w")
+        ttk.Label(frame, textvariable=self.resource_warning_var, foreground="#9a5b00", wraplength=860, justify="left").grid(row=2, column=0, columnspan=6, sticky="w")
+        ttk.Label(frame, textvariable=self.resource_throttle_var, foreground="#b00020", font=("TkDefaultFont", 9, "bold"), wraplength=860, justify="left").grid(row=3, column=0, columnspan=6, sticky="w")
+        labels = (("ollama", "Ollama"), ("loaded", "Loaded model(s)"), ("jobs", "Inference jobs"), ("ram", "System RAM"), ("gpu", "GPU VRAM"), ("cpu", "CPU"), ("process", "This app memory"), ("outputs", "Session output"))
+        for i, (key, text) in enumerate(labels):
+            ttk.Label(frame, text=text + ":").grid(row=4 + i // 2, column=(i % 2) * 3, sticky="w")
+            ttk.Label(frame, textvariable=self.resource_vars[key]).grid(row=4 + i // 2, column=(i % 2) * 3 + 1, columnspan=2, sticky="w", padx=(4, 12))
+        self.resource_mode_var.trace_add("write", lambda *_: self._on_resource_mode_changed())
+        self._on_resource_mode_changed()
+        self.root.after(2000, self._resource_panel_tick)
+
+    def _on_resource_mode_changed(self):
+        custom = self.resource_mode_var.get() == "Custom"
+        for w in (self.resource_max_conc_entry, self.resource_floor_entry):
+            w.configure(state="normal" if custom else "disabled")
+        fixed = {"Conservative": "1", "Balanced": "2"}.get(self.resource_mode_var.get())
+        if fixed:
+            self.resource_max_conc_var.set(fixed)
+            self.resource_floor_gb_var.set("2.0")
+        self._refresh_resource_warning()
+
+    def _resource_settings_from_gui(self):
+        """{resource_mode, max_concurrent_inference, memory_floor_mb} from the panel (ValueError on bad Custom values)."""
+        from modules.inference_governor import resolve_resource_settings
+
+        mode = self.resource_mode_var.get().strip().lower()
+        if mode == "custom":
+            try:
+                return resolve_resource_settings("custom", int(self.resource_max_conc_var.get()), float(self.resource_floor_gb_var.get()) * 1024.0)
+            except ValueError as exc:
+                raise ValueError(f"Custom resource settings are invalid: {exc}") from None
+        return resolve_resource_settings(mode)
+
+    def _refresh_resource_warning(self):
+        from modules.inference_governor import multi_model_warning
+
+        if not hasattr(self, "resource_warning_var"):
+            return
+        try:
+            text = multi_model_warning(self.controller_assignments())
+        except Exception:  # noqa: BLE001 - informational only
+            text = None
+        self.resource_warning_var.set(("WARNING: " + text.replace("\n", " ")) if text else "")
+
+    def _ensure_host_monitor(self):
+        if self.host_monitor is None:
+            from modules.host_resources import HostResourceMonitor
+
+            self.host_monitor = HostResourceMonitor(interval_s=3.0, ollama_ps=self._monitor_loaded_models)
+            self.host_monitor.start()
+        return self.host_monitor
+
+    def _monitor_loaded_models(self):
+        """Runs on the monitor thread: uses the base URL cached by the Tk thread (never reads Tk variables here)."""
+        from modules import ollama_pilot
+
+        base = getattr(self, "_monitor_ollama_base", None)
+        return None if not base else [m["name"] for m in ollama_pilot.client_factory(base, 3.0).loaded_models()]
+
+    def _any_ollama_agent_selected(self):
+        return any(v.get() == "Local Ollama" for v in getattr(self, "agent_controller_vars", {}).values())
+
+    def _resource_panel_tick(self):
+        try:
+            self._update_resource_panel()
+        except Exception:  # noqa: BLE001 - diagnostic panel must never break the GUI
+            pass
+        self.root.after(2000, self._resource_panel_tick)
+
+    def _update_resource_panel(self):
+        from modules.host_resources import format_snapshot
+
+        sim = getattr(self, "sim", None)
+        active_run = sim is not None and self.run_state in {self.STATE_RUNNING, self.STATE_PAUSED}
+        if not self._any_ollama_agent_selected() and not (active_run and sim.inference_governor_stats()):
+            for var in self.resource_vars.values():
+                var.set("-")
+            self.resource_vars["ollama"].set("no agent is set to Local Ollama")
+            self.resource_throttle_var.set("")
+            return
+        for role, v in getattr(self, "agent_ollama_vars", {}).items():
+            if self.agent_controller_vars[role].get() == "Local Ollama":
+                self._monitor_ollama_base = (v["base_url"].get() or "http://127.0.0.1:11434").strip()
+                break
+        mon = self._ensure_host_monitor()
+        if sim is not None:
+            sim.resource_monitor = sim.resource_monitor or mon
+        if active_run and sim.inference_governor_stats() is not None:
+            fields = sim.resource_status()
+        else:
+            gov_mode = self.resource_mode_var.get()
+            fields = format_snapshot(mon.snapshot(), mode=gov_mode)
+        connected = fields["loaded_models"] != "unknown"
+        self.resource_vars["ollama"].set("Local Ollama connected" if connected else "Local Ollama not reachable / not checked yet")
+        self.resource_vars["loaded"].set(fields["loaded_models"])
+        self.resource_vars["jobs"].set(fields["jobs"])
+        self.resource_vars["ram"].set(fields["ram"])
+        self.resource_vars["gpu"].set(fields["gpu"])
+        self.resource_vars["cpu"].set(fields["cpu"])
+        self.resource_vars["process"].set(fields["process"])
+        self.resource_throttle_var.set(("THROTTLED: " + fields["throttle"]) if fields["throttle"] else "")
+        session = getattr(getattr(getattr(sim, "logger", None), "output_session", None), "session_folder", None) if sim is not None else None
+        if session is not None:
+            now = time.time()
+            if now - self._outputs_size_cache[0] >= 10.0:
+                from modules.disk_usage import folder_size_bytes, human_bytes
+
+                self._outputs_size_cache = (now, human_bytes(folder_size_bytes(session)))
+            self.resource_vars["outputs"].set(self._outputs_size_cache[1])
 
     def _pilot_display_name(self):
         backend = (self.brain_backend_var.get() or "").strip()
@@ -4587,6 +4752,8 @@ class MarsColonyInterface:
             widget.grid(row=2 + i, column=1, sticky="w", padx=6, pady=1)
             if key != "model":
                 ovars[key].trace_add("write", lambda *_: self._refresh_test_drive_summary())
+            else:
+                ovars[key].trace_add("write", lambda *_: self._refresh_resource_warning())
         self.agent_controller_vars[role].trace_add("write", lambda *_a, r=role: self._on_controller_changed(r))
 
         profile_frame = ttk.LabelFrame(card, text="Experimental Profile", padding=(8, 6))

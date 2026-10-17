@@ -7862,6 +7862,7 @@ class Agent:
                 "controller_type": self.controller_type_id(), "model": trace.get("model"), "request_id": trace.get("request_id"), "prompt_hash": trace.get("prompt_hash"),
                 "validation_outcome": trace.get("validation_outcome"), "retry_count": trace.get("retry_count"), "parsed_affordance_id": trace.get("parsed_affordance_id"),
                 "parsed_action": trace.get("parsed_action"), "wall_clock_inference_s": round(float(trace.get("wall_clock_inference_s") or 0.0), 3),
+                "queue_wait_s": trace.get("queue_wait_s"), "queue_depth_at_enqueue": trace.get("queue_depth_at_enqueue"),
                 "estimated_prompt_tokens": (trace.get("budget") or {}).get("estimated_prompt_tokens"), "omitted_item_counts": (trace.get("budget") or {}).get("omitted_item_counts"),
                 "tier1_over_budget": (trace.get("budget") or {}).get("tier1_over_budget"),
                 "token_metadata": ((trace.get("attempts") or [{}])[-1] or {}).get("token_metadata")})
@@ -7873,9 +7874,10 @@ class Agent:
         import time as _time
 
         request.task_context = copy.deepcopy(request.task_context)
-        adapter.runtime_status = "thinking"
+        adapter.runtime_status = "queued"  # becomes "thinking" only when the governor actually starts this call
 
         def work():
+            adapter.runtime_status = "thinking"
             try:
                 reply = adapter.choose_action(request)
             except BaseException:
@@ -7884,13 +7886,20 @@ class Agent:
             adapter.runtime_status = "ready"
             return reply
 
-        self._llm_job = {"future": sim_state.inference_executor().submit(work), "adapter": adapter, "request": request, "context": context, "runtime": runtime,
+        self._llm_job = {"future": sim_state.inference_governor().submit(work, label=self.role), "adapter": adapter, "request": request, "context": context, "runtime": runtime,
                          "trigger_reason": trigger_reason, "submitted_wall": _time.perf_counter(), "submitted_sim_time": float(sim_state.time)}
 
     def _complete_inference_job(self, sim_state):
         """Main-thread consumption of a finished job: same trace recording, grounding, gate and translation as the synchronous path."""
         job, self._llm_job = self._llm_job, None
         adapter, request = job["adapter"], job["request"]
+        gov = job["future"]
+        trace = getattr(adapter, "last_trace", None)
+        if trace is not None and trace.get("request_id") == request.request_id:
+            # Wall-clock governor timing, kept apart from simulated time and from the model's own latency.
+            trace["queue_wait_s"] = round(float(gov.queue_wait_s or 0.0), 3)
+            trace["governor_inference_s"] = round(float(gov.inference_s or 0.0), 3)
+            trace["queue_depth_at_enqueue"] = gov.queue_depth_at_enqueue
         try:
             response = job["future"].result()
         finally:

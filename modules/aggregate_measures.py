@@ -66,6 +66,8 @@ def aggregate_run_summaries(outputs_root, output_basename="aggregate_run_summari
 
 if __name__ == "__main__":
     project_root = Path(__file__).resolve().parents[1]
-    outputs_root = project_root / "Outputs"
+    from modules.logging_tools import resolve_outputs_root
+
+    outputs_root, _source = resolve_outputs_root(project_root)
     result = aggregate_run_summaries(outputs_root)
     print(f"✅ Aggregate metrics files written: {result}")

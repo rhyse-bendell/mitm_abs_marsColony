@@ -18,6 +18,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from modules.agent import Agent
+from modules.inference_governor import resolve_resource_settings
 from modules.team_plan_lifecycle import PlanProcessTracker, load_team_plan_policy
 from modules.action_gate import AgentActionGate
 from modules.brain_context import BrainContextBuilder
@@ -152,6 +153,7 @@ class SimulationState:
         seed=None,
         experimental_settings=None,
         controller_assignments=None,
+        outputs_root=None,
     ):
         # Legacy Ollama backend aliases are not a controller-selection path: remember them so each agent is ROUTED through a local_ollama
         # ControllerSpec (see _resolve_agent_controller_spec), and keep the run-level provider container procedural.
@@ -168,7 +170,10 @@ class SimulationState:
         # is pending, so simulated time never includes inference wall time. Off (default) = the original synchronous call.
         self.async_inference = False
         self.inference_closed = False
-        self._inference_executor = None
+        self._inference_governor = None  # created lazily on the first Ollama submission: Procedural-only runs never instantiate it
+        self.resource_monitor = None
+        self.inference_paused = False
+        self.resource_settings = resolve_resource_settings("conservative")
         # Deterministic run seed: seeds the global RNG and gives every agent its own RNG stream.
         self.terminal_state = None  # set once by _check_terminal_state()
         self.terminal_time = None
@@ -206,7 +211,7 @@ class SimulationState:
         self.num_runs = num_runs
         self.flash_mode = flash_mode
         self.time = 0.0
-        self.logger = SimulationLogger(experiment_name=experiment_name or "experiment", project_root=project_root)
+        self.logger = SimulationLogger(experiment_name=experiment_name or "experiment", project_root=project_root, outputs_root=outputs_root)
         self.team_knowledge_manager = TeamKnowledgeManager(commit_policy=load_team_plan_policy(self.task_model.manifest))
         self.team_plan_policy = self.team_knowledge_manager.commit_policy
         self.plan_process = PlanProcessTracker()
@@ -1565,8 +1570,10 @@ class SimulationState:
             return  # explicit controller-error terminal state: nothing advances and no other controller takes over
         if self.inference_closed:
             return  # stopped run: nothing advances
+        if self._inference_governor is not None:
+            self._inference_governor.pump()  # start queued model calls (FIFO) as capacity / pause / memory floor allow; never blocks
         if self.async_inference and self.inference_pending():
-            return  # inference barrier: no simulated time passes while a model call is pending
+            return  # inference barrier: no simulated time passes while a model call is queued or running
         dt = base_dt * self.speed_multiplier
         rule_brain_runtime = str(self.effective_brain_backend or self.configured_brain_backend).lower() == "rule_brain"
         for agent in self.agents:
@@ -1760,12 +1767,57 @@ class SimulationState:
             },
         }
 
-    def inference_executor(self):
-        if self._inference_executor is None:
-            from concurrent.futures import ThreadPoolExecutor
+    def configure_resources(self, mode="conservative", max_concurrent=None, memory_floor_mb=None):
+        """Resource mode for local-model runs (set before Start). Only 'custom' honours explicit values; no hardware capacity is inferred."""
+        self.resource_settings = resolve_resource_settings(mode, max_concurrent, memory_floor_mb)
+        if self._inference_governor is not None:
+            self._inference_governor.max_concurrent = self.resource_settings["max_concurrent_inference"]
+            self._inference_governor.memory_floor_mb = self.resource_settings["memory_floor_mb"]
+        return dict(self.resource_settings)
 
-            self._inference_executor = ThreadPoolExecutor(max_workers=max(1, len(self.agents)), thread_name_prefix="ollama-infer")
-        return self._inference_executor
+    def _ollama_loaded_models_probe(self):
+        """Names of models currently loaded in the local Ollama (/api/ps), or None if unreachable. Runs on the monitor thread only."""
+        from modules import ollama_pilot
+
+        for agent in self.agents:
+            spec = getattr(agent, "controller_spec", None)
+            if spec is not None and getattr(spec, "controller_type", None) == "local_ollama":
+                base = spec.full_settings().get("base_url") or "http://127.0.0.1:11434"
+                return [m["name"] for m in ollama_pilot.client_factory(base, 3.0).loaded_models()]
+        return None
+
+    def inference_governor(self):
+        if self._inference_governor is None:
+            from modules.host_resources import HostResourceMonitor
+            from modules.inference_governor import InferenceGovernor
+
+            if self.resource_monitor is None:  # the GUI may share its own monitor; otherwise this run owns one
+                self.resource_monitor = HostResourceMonitor(interval_s=3.0, ollama_ps=self._ollama_loaded_models_probe)
+                self.resource_monitor.start()
+                self._owns_resource_monitor = True
+            rs = self.resource_settings
+            self._inference_governor = InferenceGovernor(rs["max_concurrent_inference"], rs["memory_floor_mb"], monitor=self.resource_monitor,
+                                                         on_event=lambda name, payload: self.logger.log_event(self.time, name, dict(payload)))
+            self._inference_governor.paused = bool(self.inference_paused)
+        return self._inference_governor
+
+    def set_inference_paused(self, paused):
+        """GUI Pause: no NEW model call is started while paused (calls already running finish; their results are consumed on resume)."""
+        self.inference_paused = bool(paused)
+        if self._inference_governor is not None:
+            self._inference_governor.paused = self.inference_paused
+
+    def resource_status(self):
+        """Read-only text fields for the GUI resource panel (cached telemetry; never probes)."""
+        from modules.host_resources import format_snapshot
+
+        gov = self._inference_governor
+        snap = self.resource_monitor.snapshot() if self.resource_monitor is not None else {}
+        return format_snapshot(snap, queued=gov.queue_depth if gov else 0, active=gov.active_count if gov else 0, mode=self.resource_settings["resource_mode"],
+                               throttled_reason=gov.throttled_reason if gov else None)
+
+    def inference_governor_stats(self):
+        return None if self._inference_governor is None else self._inference_governor.stats()
 
     def inference_pending(self):
         """True while any agent has a model call that has not returned."""
@@ -1779,8 +1831,12 @@ class SimulationState:
             if hasattr(adapter, "cancel"):
                 adapter.cancel()
             a._llm_job = None
-        if self._inference_executor is not None:
-            self._inference_executor.shutdown(wait=False, cancel_futures=True)
+        if self._inference_governor is not None:
+            discarded = self._inference_governor.close()  # queued (never-started) jobs are dropped; running ones finish unconsumed
+            if discarded:
+                self.logger.log_event(self.time, "inference_queue_discarded", {"discarded_jobs": discarded})
+        if self.resource_monitor is not None and getattr(self, "_owns_resource_monitor", False):
+            self.resource_monitor.stop()
 
     def stop(self):
         self._close_inference()
@@ -1796,6 +1852,8 @@ class SimulationState:
             extra_metadata={
                 **self._backend_settings_for_manifest(),
                 **self.execution_metadata,
+                "resource_settings": dict(self.resource_settings),
+                "inference_governor": self.inference_governor_stats(),
             }
         )
         self.logger.save_csv()

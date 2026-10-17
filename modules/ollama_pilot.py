@@ -47,7 +47,7 @@ def preflight(settings: Dict[str, Any]) -> Dict[str, Any]:
     client = client_factory(settings.get("base_url"), float(settings.get("timeout_s") or 120.0))
     status = client.status()
     if not status.get("available"):
-        raise ControllerUnavailableError(f"Local Ollama is not available at {status.get('base_url')}: {status.get('error')} (start Ollama yourself; nothing is started or downloaded automatically)")
+        raise ControllerUnavailableError(f"Local Ollama is not running (no response at {status.get('base_url')}).\nOpen the Ollama app, wait for it to start, then click \"Check Ollama / refresh models\".\n(Nothing is started or downloaded automatically.) Detail: {status.get('error')}")
     try:
         installed = client.installed_model_names()
     except OllamaError as exc:
