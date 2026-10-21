@@ -47,6 +47,8 @@ class AgentActionGate:
             return target_blocked
         if action == ExecutableActionType.INSPECT_INFORMATION_SOURCE:
             return self._evaluate_inspect(agent=agent, decision=decision, sim_state=sim_state)
+        if action == ExecutableActionType.MOVE_TO_TARGET:
+            return self._evaluate_move(agent=agent, decision=decision, sim_state=sim_state)
         if action in {ExecutableActionType.COMMUNICATE, ExecutableActionType.REQUEST_ASSISTANCE}:
             return self._evaluate_communication(agent=agent, decision=decision, sim_state=sim_state)
         if action in {ExecutableActionType.EXTERNALIZE_PLAN, ExecutableActionType.CONSULT_TEAM_ARTIFACT}:
@@ -120,7 +122,44 @@ class AgentActionGate:
                 return ActionGateResult(False, decision, blockers=[blocker], target_id=decision.target_id, metadata={"requested_source": str(decision.target_id)})
         return self._pass(decision)
 
+    def _evaluate_move(self, *, agent, decision, sim_state):
+        """Read-only legality of a movement request: a named interaction target / project, or an explicit (x, y). The Environment owns
+        navigability and reachability; nothing is moved here and no other destination is ever substituted."""
+        environment = getattr(sim_state, "environment", None)
+        args = decision_action_args(decision)
+        has_xy = "x" in args and "y" in args
+        if (("x" in args) != ("y" in args)) or (has_xy and decision.target_id):
+            return ActionGateResult(False, decision, blockers=["move_destination_ambiguous"], target_id=decision.target_id)
+        if environment is None:
+            return self._pass(decision)
+        if has_xy:
+            point = (float(args["x"]), float(args["y"]))
+            if not environment.is_point_navigable(point):
+                return ActionGateResult(False, decision, blockers=["destination_not_navigable"], target_id=None, metadata={"destination": point})
+            if not environment.path_reachable(tuple(agent.position), point):
+                return ActionGateResult(False, decision, blockers=["destination_unreachable"], target_id=None, metadata={"destination": point})
+            return ActionGateResult(True, decision, target_id=None, metadata={"destination": point})
+        target = str(decision.target_id or "").strip()
+        if not target:
+            return ActionGateResult(False, decision, blockers=["move_destination_required"], target_id=decision.target_id)
+        point = environment.get_interaction_target_position(target, from_position=tuple(agent.position))
+        if point is None:
+            known = target in environment.interaction_targets or target in getattr(getattr(environment, "construction", None), "projects", {})
+            blocker = "target_locked_until_bridge_access" if known and not environment.is_interaction_target_unlocked(target) else "unknown_move_target"
+            return ActionGateResult(False, decision, blockers=[blocker], target_id=decision.target_id)
+        if not environment.path_reachable(tuple(agent.position), tuple(point)):
+            return ActionGateResult(False, decision, blockers=["destination_unreachable"], target_id=decision.target_id, metadata={"destination": tuple(point)})
+        return ActionGateResult(True, decision, target_id=decision.target_id, metadata={"destination": tuple(point)})
+
     def _evaluate_communication(self, *, agent, decision, sim_state):
+        args = decision_action_args(decision)
+        if decision.selected_action == ExecutableActionType.COMMUNICATE and "text" in args:
+            # A typed message: its recipient scope must be the team or an existing teammate (never the sender).
+            scope = str(args.get("scope") or "team")
+            if scope.lower() != "team":
+                names = {str(getattr(a, "name", "")).lower() for a in getattr(sim_state, "agents", []) if a is not agent} | {str(getattr(a, "role", "")).lower() for a in getattr(sim_state, "agents", []) if a is not agent}
+                if scope.lower() not in names:
+                    return ActionGateResult(False, decision, blockers=["unknown_recipient"], target_id=decision.target_id, metadata={"scope": scope})
         return self._pass(decision)
 
     def _evaluate_artifact(self, *, agent, decision, sim_state):

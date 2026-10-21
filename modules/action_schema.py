@@ -118,10 +118,21 @@ _STRUCTURE_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 # Allowed argument keys per action. Actions absent here take no arguments.
 #   start_construction: structure_type is optional at the schema level (a START without it continues an existing
 #   unfinished project at the target site); creating a NEW project requires it (enforced by the action gate).
+#   move_to_target: optional numeric destination `x`,`y` (world coordinates). With no `x`/`y` the destination is `target_id` (an interaction
+#     target or project id). Exactly one of the two must be given; the gate checks navigability/reachability read-only.
+#   communicate: optional typed message body `text` (+ `scope`: "team" or one teammate's name/role). Without `text` the existing Mecha-generated
+#     exchange applies unchanged. A typed body is delivered and logged as written; it is never parsed for DIK.
 ACTION_ARG_SPECS: Dict[ExecutableActionType, Dict[str, Any]] = {
     ExecutableActionType.START_CONSTRUCTION: {"required": (), "allowed": ("structure_type",)},
     ExecutableActionType.CONNECT_STRUCTURES: {"required": CONNECT_STRUCTURES_ARG_KEYS, "allowed": CONNECT_STRUCTURES_ARG_KEYS},
+    ExecutableActionType.MOVE_TO_TARGET: {"required": (), "allowed": ("x", "y")},
+    ExecutableActionType.COMMUNICATE: {"required": (), "allowed": ("text", "scope")},
 }
+
+_NUMERIC_ARG_KEYS = frozenset({"x", "y"})
+_FREE_TEXT_ARG_KEYS = frozenset({"text"})
+MAX_FREE_TEXT_CHARS = 500
+_COORDINATE_LIMIT = 1000.0
 
 
 def decision_action_args(decision: Any) -> Dict[str, Any]:
@@ -160,8 +171,17 @@ def validate_action_args(action: ExecutableActionType, args: Any, *, allowed_str
         if key not in args or args.get(key) in (None, ""):
             continue
         value = args[key]
+        if key in _NUMERIC_ARG_KEYS:
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or abs(float(value)) > _COORDINATE_LIMIT:
+                errors.append(f"action_arg_not_a_number:{key}")
+            continue
         if not isinstance(value, str):
             errors.append(f"action_arg_not_a_string:{key}")
+        elif key in _FREE_TEXT_ARG_KEYS:
+            if not value.strip():
+                errors.append(f"empty_action_arg:{key}")
+            elif len(value) > MAX_FREE_TEXT_CHARS:
+                errors.append(f"action_arg_too_long:{key}")
         elif key == "structure_type":
             if not _STRUCTURE_TYPE_PATTERN.match(value):
                 errors.append("malformed_structure_type")

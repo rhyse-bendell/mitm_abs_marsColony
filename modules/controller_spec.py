@@ -23,6 +23,13 @@ from typing import Any, Dict, Iterable, Mapping, Optional
 SCHEMA = "controller_assignment/1"
 PROCEDURAL_BASELINE = "procedural_baseline"
 LOCAL_OLLAMA = "local_ollama"
+HUMAN_PARTICIPANT = "human_participant"
+
+# Execution modes. `simulation` (default) is the original headless/GUI stepping: simulated time advances only when the driver steps it.
+# `realtime_testbed` paces simulated time against the wall clock; it is REQUIRED when any agent is a human participant.
+EXECUTION_MODE_SIMULATION = "simulation"
+EXECUTION_MODE_REALTIME = "realtime_testbed"
+EXECUTION_MODES = (EXECUTION_MODE_SIMULATION, EXECUTION_MODE_REALTIME)
 
 # Legacy brain_backend aliases that used to construct an Ollama provider on their own. They are no longer a controller-selection path.
 LEGACY_OLLAMA_BACKENDS = ("local_http", "openai_compatible_local", "ollama_local", "ollama")
@@ -44,6 +51,9 @@ GENERATIVE_SETTING_FIELDS = (
     "keep_alive",  # how long Ollama keeps the model resident between calls (default "30m")
     "inference_parameters",  # additional SAFE Ollama options only (see SAFE_INFERENCE_PARAMETERS)
 )
+
+# A human participant has no inference settings. `participant_id` is an optional pseudonymous label recorded in traces/manifests.
+HUMAN_SETTING_FIELDS = ("participant_id",)
 
 LOCAL_OLLAMA_DEFAULTS: Dict[str, Any] = {
     "model": None, "base_url": "http://127.0.0.1:11434", "temperature": 0.2, "controller_generation_seed": None, "max_context_tokens": 8192,
@@ -76,7 +86,21 @@ class ControllerType:
 CONTROLLER_TYPES: Dict[str, ControllerType] = {
     PROCEDURAL_BASELINE: ControllerType(PROCEDURAL_BASELINE, "Procedural Baseline", True, "rule_brain", "modules.procedural_baseline_pilot.ProceduralBaselinePilotAdapter", "1", ()),
     LOCAL_OLLAMA: ControllerType(LOCAL_OLLAMA, "Local Ollama", True, "local_ollama_controller", "modules.ollama_pilot.OllamaPilotAdapter", "1", GENERATIVE_SETTING_FIELDS),
+    HUMAN_PARTICIPANT: ControllerType(HUMAN_PARTICIPANT, "Human Participant", True, "human_participant_controller", "modules.human_participant.HumanParticipantPilotAdapter", "1", HUMAN_SETTING_FIELDS),
 }
+
+
+def resolve_execution_mode(requested: Optional[str], specs: Mapping[str, "ControllerSpec"]) -> str:
+    """The execution mode for a controller composition. A human participant requires `realtime_testbed` (the mission clock cannot wait for a
+    person); asking for `simulation` with a human present is a configuration error, never a silent switch. No human: default `simulation`."""
+    has_human = any(getattr(s, "controller_type", None) == HUMAN_PARTICIPANT for s in specs.values())
+    if requested is not None and requested not in EXECUTION_MODES:
+        raise ControllerConfigError(f"unknown execution_mode {requested!r}; known {list(EXECUTION_MODES)}")
+    if has_human:
+        if requested == EXECUTION_MODE_SIMULATION:
+            raise ControllerConfigError("a human_participant controller requires execution_mode='realtime_testbed' (the simulated clock cannot be stepped while a person decides)")
+        return EXECUTION_MODE_REALTIME
+    return requested or EXECUTION_MODE_SIMULATION
 
 
 def enabled_controller_types() -> list[str]:

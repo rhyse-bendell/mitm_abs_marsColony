@@ -1145,6 +1145,41 @@ class Environment:
 
         return {"accessible": False, "reason": "unsupported_target_kind"}
 
+    def interaction_proximity(self, position, target_name):
+        """Read-only geometric reach test for an interaction target: {near, distance, radius}.
+
+        Purely spatial: it applies NO role, lock or legality rule (those stay with get_interaction_access / the ActionGate), so a client can say
+        "move closer" separately from "you may not do that". Used by the participant view; never mutates anything."""
+        canonical_target = self._canonical_build_target(target_name)
+        target = self.interaction_targets.get(canonical_target)
+        if not target:
+            return {"near": False, "distance": None, "radius": None}
+        x, y = float(position[0]), float(position[1])
+        kind = target.get("kind")
+        obj = self.objects.get(target.get("object") or canonical_target) or {}
+        if kind == "build":
+            radius = TABLE_INTERACTION_RADIUS
+            zone = self.zones.get(f"Zone_{target.get('object')}", {}).get("corners")
+            if zone and self._point_in_zone((x, y), zone):
+                return {"near": True, "distance": 0.0, "radius": radius}
+        else:
+            radius = float(obj.get("access_radius", DEFAULT_INFO_ACCESS_RADIUS))
+        zone_name = target.get("zone")
+        candidates = []
+        if zone_name and zone_name in self.zones and self.zones[zone_name].get("corners"):
+            candidates.append(self._nearest_distance_to_zone((x, y), zone_name))
+        if obj.get("type") == "rect":
+            ox, oy = obj["position"]
+            w, h = obj["size"]
+            candidates.append(math.hypot(x - max(ox, min(x, ox + w)), y - max(oy, min(y, oy + h))))
+        elif obj.get("type") == "circle":
+            ox, oy = obj["position"]
+            candidates.append(max(0.0, math.hypot(x - ox, y - oy) - obj["radius"]))
+        if not candidates:
+            return {"near": False, "distance": None, "radius": radius}
+        distance = min(candidates)
+        return {"near": distance <= radius, "distance": round(distance, 3), "radius": radius}
+
     def get_visible_resources(self, agent_pos, radius=1.0):
         visible = []
         for r in self.resources:

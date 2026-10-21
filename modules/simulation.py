@@ -154,7 +154,13 @@ class SimulationState:
         experimental_settings=None,
         controller_assignments=None,
         outputs_root=None,
+        execution_mode=None,
     ):
+        # `simulation` (default) = the original stepping semantics, untouched. `realtime_testbed` = wall-clock paced (see modules/realtime_testbed.py);
+        # it is resolved after the agents (and their controllers) exist, and is mandatory when a human participant is present.
+        self.requested_execution_mode = execution_mode
+        self.execution_mode = "simulation"
+        self.chat_log = []  # typed/received team messages (human testbed); empty and unused in all-artificial runs
         # Legacy Ollama backend aliases are not a controller-selection path: remember them so each agent is ROUTED through a local_ollama
         # ControllerSpec (see _resolve_agent_controller_spec), and keep the run-level provider container procedural.
         from modules.controller_spec import LEGACY_OLLAMA_BACKENDS
@@ -607,6 +613,7 @@ class SimulationState:
 
         self.environment.agents = self.agents
         self._validate_controller_assignment_keys()
+        self._resolve_execution_mode()
         self.runtime_witness_audit = RuntimeWitnessAudit(self)
         self.metrics = MetricsCollector(self)
         self.logger.register_event_listener(self.runtime_witness_audit.on_event)
@@ -1002,6 +1009,18 @@ class SimulationState:
         except Exception as exc:  # observability must not break the run
             self.logger.log_event(self.time, "controller_trace_write_failed", {"error": repr(exc)})
 
+    def _resolve_execution_mode(self):
+        from modules.controller_spec import EXECUTION_MODE_REALTIME, LOCAL_OLLAMA, resolve_execution_mode
+
+        specs = {a.name: a.controller_spec for a in self.agents if getattr(a, "controller_spec", None) is not None}
+        self.execution_mode = resolve_execution_mode(self.requested_execution_mode, specs)
+        if self.execution_mode == EXECUTION_MODE_REALTIME and any(s.controller_type == LOCAL_OLLAMA for s in specs.values()):
+            self.async_inference = True  # a model call must never block a person's clock: it runs on a worker and only its own agent waits
+
+    def human_controllers(self):
+        """{agent name: HumanParticipantController} for every human-driven agent (empty in all-artificial runs)."""
+        return {a.name: a.human_controller(self) for a in self.agents if a.is_human_participant()}
+
     def _validate_controller_assignment_keys(self):
         from modules.controller_spec import ControllerConfigError
 
@@ -1093,8 +1112,24 @@ class SimulationState:
             "bootstrap": {"status": "not_run", "latency_ms": None, "validated_response": None, "summary_text": None, "summary_structured": None, "included_count": 0},
         }
 
+    def _register_human_runtime(self, agent, spec):
+        """Runtime for a human_participant controller: an intent queue behind a PilotAdapter-shaped object. No provider, no fallback backend."""
+        from modules.human_participant import HumanParticipantController, HumanParticipantPilotAdapter, HumanParticipantProvider
+
+        controller = HumanParticipantController(agent.agent_id, agent.role, agent.name, participant_id=spec.settings.get("participant_id"))
+        adapter = HumanParticipantPilotAdapter(controller)
+        cfg = BrainBackendConfig(backend="human_participant_controller", local_base_url="", local_model="", fallback_backend="none")
+        self.agent_brain_runtime[agent.agent_id] = {
+            "config": cfg, "provider": HumanParticipantProvider(adapter), "adapter": adapter, "pilot_id": adapter.pilot_id, "configured_pilot_id": adapter.pilot_id,
+            "pilot_display_name": adapter.display_name, "configured_backend": cfg.backend, "effective_backend": cfg.backend, "hard_demoted": False,
+            "hard_demoted_reason": None, "fallback_count": 0, "last_outcome_signature": None,
+            "bootstrap": {"status": "not_run", "latency_ms": None, "validated_response": None, "summary_text": None, "summary_structured": None, "included_count": 0},
+        }
+
     def _register_agent_brain_runtime(self, agent):
         spec = getattr(agent, "controller_spec", None)
+        if spec is not None and spec.controller_type == "human_participant":
+            return self._register_human_runtime(agent, spec)
         if spec is not None and spec.controller_type == "local_ollama":
             return self._register_ollama_runtime(agent, spec)
         cfg = BrainBackendConfig(
@@ -1308,6 +1343,7 @@ class SimulationState:
         return {
             "experimental_panel": self._experimental_manifest() if getattr(self, "agents", None) else {"run_level_settings": dict(self.experimental_settings)},
             "controller_assignments": self.controller_manifest() if getattr(self, "agents", None) else {},
+            "execution_mode": getattr(self, "execution_mode", "simulation"),
             "configured_brain_backend": self.configured_brain_backend,
             "effective_brain_backend": self.effective_brain_backend,
             "brain_backend": self.configured_brain_backend,
@@ -1576,7 +1612,7 @@ class SimulationState:
             return  # stopped run: nothing advances
         if self._inference_governor is not None:
             self._inference_governor.pump()  # start queued model calls (FIFO) as capacity / pause / memory floor allow; never blocks
-        if self.async_inference and self.inference_pending():
+        if self.async_inference and self.inference_pending() and self.execution_mode != "realtime_testbed":
             return  # inference barrier: no simulated time passes while a model call is queued or running
         dt = base_dt * self.speed_multiplier
         rule_brain_runtime = str(self.effective_brain_backend or self.configured_brain_backend).lower() == "rule_brain"
@@ -1623,7 +1659,8 @@ class SimulationState:
                 self.logger.log_agent_state(self.time, agent)
                 continue
             agent.update(dt, self.environment, sim_state=self, planner_lifecycle_already_polled=True)
-            agent.compare_and_repair_construction(self.environment.construction, sim_state=self)
+            if not agent.is_human_participant():  # ambient mismatch detection simulates the agent's own cognition; a person does their own
+                agent.compare_and_repair_construction(self.environment.construction, sim_state=self)
             self.refresh_agent_backend_effective_state(agent, reason="planner_call")
             self.logger.log_agent_state(self.time, agent)
 
@@ -1853,6 +1890,13 @@ class SimulationState:
             self.resource_monitor.stop()
 
     def stop(self):
+        for agent in self.agents:
+            telemetry = getattr(agent, "_human_telemetry", None)
+            if telemetry is not None:
+                telemetry.flush(self, "session_end")
+            controller = agent.human_controller(self)
+            if controller is not None:
+                controller.close()
         self._close_inference()
         if self.run_stopped_wallclock_at is None:
             self.run_stopped_wallclock_at = time.perf_counter()

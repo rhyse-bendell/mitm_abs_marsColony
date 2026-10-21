@@ -735,6 +735,8 @@ class Agent:
         No false memories, corruption, interference or confidence. World truth and externalized artifacts are untouched,
         and a forgotten element can be legitimately reacquired (re-inspection, communication, artifact consult).
         """
+        if self.is_human_participant():
+            return  # no simulated forgetting for a person: the simulator does not model, or claim to know, what a human remembers
         from modules.experimental_profile import load_experimental_profile_config
 
         cfg = load_experimental_profile_config()["memory"]
@@ -1781,9 +1783,21 @@ class Agent:
         return None
 
     def is_generative_pilot(self):
-        """True when a non-baseline controller (e.g. Local Ollama) drives this agent; the Procedural Baseline keeps its documented scaffold behavior."""
+        """True when a non-baseline controller (e.g. Local Ollama, a human participant) drives this agent; the Procedural Baseline keeps its documented scaffold behavior."""
         spec = getattr(self, "controller_spec", None)
         return spec is not None and str(getattr(spec, "controller_type", "")) != "procedural_baseline"
+
+    def is_human_participant(self):
+        """True when a person drives this agent (controller_type == human_participant). Every simulated-cognition shortcut that would act ON BEHALF of
+        the agent (probabilistic uptake, forgetting, plan auto-adoption, ambient mismatch detection) is switched off for a human."""
+        spec = getattr(self, "controller_spec", None)
+        return spec is not None and str(getattr(spec, "controller_type", "")) == "human_participant"
+
+    def human_controller(self, sim_state):
+        """The HumanParticipantController behind this agent's adapter (None unless a human drives it)."""
+        if not self.is_human_participant() or sim_state is None or not hasattr(sim_state, "get_agent_brain_runtime"):
+            return None
+        return getattr((sim_state.get_agent_brain_runtime(self) or {}).get("adapter"), "controller", None)
 
     def source_access_blocker(self, source_id, environment):
         """Read-only: None if this agent may directly inspect `source_id`, else a blocker token. Another role's private source is
@@ -2511,6 +2525,14 @@ class Agent:
         context_modifier=0.0,
         retry_bonus=0.0,
     ):
+        if self.is_human_participant():
+            # A person who opens a source reads it: exposure is recorded deterministically (no simulated uptake draw, no RNG consumed). What the
+            # person understood or retained is not modelled here.
+            payload = dict(event_payload or {})
+            payload.update({"hook_target": hook_target, "success_probability": 1.0, "human_participant_exposure": True})
+            if sim_state is not None:
+                self._emit_event(sim_state, attempt_event, payload)
+            return True, payload
         probability = self._epistemic_success_probability(
             hook_target,
             context_modifier=context_modifier,
@@ -3275,6 +3297,12 @@ class Agent:
         self._ensure_source_state(environment)
         explicit_target = decision.target_id
         requested_target_id = explicit_target
+        if self.is_human_participant():
+            # A person's inspect is taken exactly as named (the ActionGate already refused any source they may not use): no re-ranking, no
+            # revisit suppression, no retargeting toward another source.
+            allowed, _reason = self._agent_can_target_information_source(explicit_target, environment)
+            selection = self._select_source_access_target(environment, explicit_target, sim_state=sim_state) if allowed else None
+            return (explicit_target, selection.get("position")) if selection is not None and selection.get("position") is not None else (explicit_target, None)
         now_ts = float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)))
         closure_pointer = None
         closure_project_id = self.project_closure_state.get("project_id") if self.project_closure_state.get("active") else None
@@ -10495,6 +10523,145 @@ class Agent:
         else:
             sim_state.halt_for_controller_error(self, failure)
 
+    # ---- Human participant: intents -> canonical decision -> ActionGate -> translation (the same boundary every controller uses)
+    _HUMAN_REDIRECTABLE = {ExecutableActionType.MOVE_TO_TARGET.value}
+
+    def _human_committed_action(self):
+        """The substantive action a person is committed to right now (None = free to redirect). Plain movement is always interruptible."""
+        for action in list(self.active_actions) + [a for a in (self.current_action or []) if isinstance(a, dict)]:
+            decision = action.get("decision_action")
+            if decision and decision not in self._HUMAN_REDIRECTABLE:
+                return action
+        return None
+
+    def _run_human_pilot_controller(self, sim_state, environment):
+        from modules.human_participant import HumanTelemetry
+
+        controller = self.human_controller(sim_state)
+        if controller is None:
+            return
+        telemetry = getattr(self, "_human_telemetry", None)
+        if telemetry is None:
+            telemetry = self._human_telemetry = HumanTelemetry(self, controller)
+        for intent in controller.drain():
+            self._process_human_intent(sim_state, environment, controller, telemetry, intent)
+
+    def _human_reject(self, sim_state, controller, telemetry, intent, blockers, *, gate_result=None):
+        from modules.human_participant import ACTION_CATEGORY, participant_message_for
+
+        message = participant_message_for(blockers)
+        controller.push_feedback("blocked", message, intent_id=intent.intent_id, sim_time=sim_state.time)
+        telemetry.record(
+            sim_state, "action_blocked",
+            intended={"action": intent.action, "target_id": intent.target_id, "action_args": dict(intent.action_args or {}), "source": intent.source, "ui_object": intent.ui_object, "category": ACTION_CATEGORY.get(intent.action)},
+            grounded=None, outcome="blocked", blockers=list(blockers), public_message=message, intent_id=intent.intent_id,
+        )
+        self._emit_event(sim_state, "blocked_action_observed", {"selected_action": intent.action, "target_id": intent.target_id, "blockers": list(blockers), "source": "human_participant"})
+
+    def _process_human_intent(self, sim_state, environment, controller, telemetry, intent):
+        from modules.human_participant import ACTION_CATEGORY, HUMAN_SUBMITTABLE_ACTIONS, intent_to_decision
+
+        if intent.action not in HUMAN_SUBMITTABLE_ACTIONS:
+            return self._human_reject(sim_state, controller, telemetry, intent, ["not_a_participant_action"])
+        committed = self._human_committed_action()
+        if committed is not None:
+            left = max(0.0, float(committed.get("duration", 0.0) or 0.0) - float(committed.get("progress", 0.0) or 0.0))
+            return self._human_reject(sim_state, controller, telemetry, intent, [f"busy_committed:{committed.get('decision_action')}:{left:.0f}s"])
+        decision = intent_to_decision(intent)
+        gate_result = sim_state.action_gate.evaluate(agent=self, decision=decision, sim_state=sim_state)
+        if not getattr(gate_result, "legal", False):
+            self._log_action_gate_blocked(sim_state, "mecha_action_blocked", decision, gate_result, {"source": "human_participant"})
+            return self._human_reject(sim_state, controller, telemetry, intent, list(gate_result.blockers or ["blocked"]), gate_result=gate_result)
+        decision = gate_result.normalized_decision
+        setattr(decision, "_action_gate_checked", True)
+        if intent.action == ExecutableActionType.MOVE_TO_TARGET.value:
+            self.active_actions = [a for a in self.active_actions if a.get("decision_action") not in self._HUMAN_REDIRECTABLE]
+            self.target = None
+            self.navigation["active_path"] = []
+            self.navigation["path_target"] = None
+            self.navigation["path_index"] = 0
+        translated = self._translate_brain_decision_to_legacy_action(decision, environment, sim_state=sim_state)
+        first = (translated[0] if isinstance(translated, list) and translated else translated) or {}
+        if isinstance(first, dict) and (first.get("blocked_action") or first.get("translation_outcome")):
+            blockers = list(first.get("blockers") or [first.get("translation_outcome") or "translation_blocked"])
+            self.current_action = []  # the translation's placeholder idle is NOT executed: nothing happens in place of the request
+            return self._human_reject(sim_state, controller, telemetry, intent, blockers)
+        self.current_action = translated
+        grounded = {"type": first.get("type"), "decision_action": first.get("decision_action"), "target": first.get("target"), "project_id": first.get("project_id"), "source_target_id": first.get("source_target_id")}
+        controller.push_feedback("accepted", "", intent_id=intent.intent_id, sim_time=sim_state.time, kind="accepted")
+        telemetry.record(
+            sim_state, "action_intent",
+            intended={"action": intent.action, "target_id": intent.target_id, "action_args": {k: v for k, v in dict(intent.action_args or {}).items() if k != "text"}, "source": intent.source, "ui_object": intent.ui_object, "category": ACTION_CATEGORY.get(intent.action)},
+            grounded=grounded, outcome="accepted", intent_id=intent.intent_id,
+        )
+        if intent.clicked_at is not None:
+            telemetry.record_input(sim_state, "pointer_click", at=list(intent.clicked_at), source=intent.source, intent_id=intent.intent_id)
+
+    def _human_note_completion(self, sim_state, action):
+        telemetry = getattr(self, "_human_telemetry", None)
+        if telemetry is None or action.get("decision_action") in (None, ExecutableActionType.WAIT.value):
+            return
+        from modules.human_participant import ACTION_CATEGORY
+
+        telemetry.record(sim_state, "action_completed", grounded={"type": action.get("type"), "decision_action": action.get("decision_action"), "project_id": action.get("project_id"), "source_target_id": action.get("source_target_id")},
+                         outcome="completed", intended={"category": ACTION_CATEGORY.get(action.get("decision_action"))})
+
+    def _deliver_human_chat(self, sim_state, action):
+        """Deliver a typed team message. It is recorded and shown as written; it is never parsed for DIK, so it transfers none and exposes none."""
+        args = dict(action.get("action_args") or {})
+        text, scope = str(args.get("text") or "").strip(), str(args.get("scope") or "team")
+        others = [a for a in sim_state.agents if a is not self]
+        recipients = others if scope.lower() == "team" else [a for a in others if scope.lower() in {str(a.name).lower(), str(a.role).lower()}]
+        delivery = []
+        for other in recipients:
+            inbox = other.__dict__.setdefault("chat_inbox", [])
+            inbox.append({"time": float(sim_state.time), "from": self.name, "role": self.role, "text": text})
+            delivery.append({"recipient": other.name, "outcome": "delivered", "readable_by_recipient": bool(other.is_human_participant())})
+        record = {"id": f"chat{len(sim_state.chat_log) + 1}", "time": round(float(sim_state.time), 2), "kind": "human_chat", "sender": self.name, "sender_role": self.role, "scope": scope,
+                  "recipients": [a.name for a in recipients], "text": text, "delivery": delivery}
+        sim_state.chat_log.append(record)
+        self._emit_event(sim_state, "chat_message_sent", {k: v for k, v in record.items() if k != "id"})
+        sim_state.logger.log_interaction({"time": record["time"], "type": "human_chat", "sender": self.name, "receivers": record["recipients"], "scope": scope, "text": text, "delivery": delivery})
+        telemetry = getattr(self, "_human_telemetry", None)
+        if telemetry is not None:
+            telemetry.record(sim_state, "chat_sent", intended={"action": "communicate", "category": "chat", "scope": scope, "text_length": len(text)}, grounded={"type": "communicate", "recipients": record["recipients"]},
+                             outcome="delivered" if delivery else "no_recipient", message_id=record["id"], text=text, delivery=delivery)
+
+    def _receive_message_as_human(self, message, from_agent, sim_state):
+        """A message arriving at a human. It is shown to the person as a readable line; nothing is answered on their behalf. Data/information it
+        carries counts as EXPOSURE (the person was shown it); derived rules are not computed from it."""
+        sender = message.get("sender") or from_agent
+        mtype = LEGACY_COMMUNICATION_TYPE_MAP.get(message.get("type"), message.get("type"))
+        content = message.get("content", [])
+        changed = False
+        line = None
+        if mtype in {"TDP", "TIP"}:
+            bucket = "data" if mtype == "TDP" else "information"
+            texts = []
+            for item in list(content or []):
+                texts.append(str(getattr(item, "content", item)))
+                if item not in self.mental_model[bucket]:
+                    self.mental_model[bucket].add(item)
+                    changed = True
+                    self.known_gaps.discard(f"{bucket}:{item.id}")
+                    item.acquired_by.setdefault(self.name, {"mode": "shared", "from": sender})
+            line = f"shared {'data' if mtype == 'TDP' else 'information'}: " + "; ".join(texts) if texts else None
+        elif mtype == "TKP":
+            line = "shared: " + "; ".join(str(r) for r in list(content or [])) if content else None
+        elif mtype == "TKRQ":
+            line = "asked whether anyone can supply missing information."
+        elif mtype == "TPP" and isinstance(content, dict):
+            line = f"proposed a team plan: {content.get('goal_summary') or content.get('plan_id')}"
+        if sim_state is not None and line:
+            sim_state.chat_log.append({"id": f"chat{len(sim_state.chat_log) + 1}", "time": round(float(sim_state.time), 2), "kind": "agent_message", "sender": sender, "sender_role": None, "scope": self.name,
+                                       "recipients": [self.name], "text": line, "delivery": [{"recipient": self.name, "outcome": "delivered", "readable_by_recipient": True}], "message_type": mtype})
+            telemetry = getattr(self, "_human_telemetry", None)
+            if telemetry is not None:
+                telemetry.record(sim_state, "message_received", outcome="shown", message_type=mtype, sender=sender, dik_exposure=bool(changed))
+        if changed:
+            self.last_dik_change_time = getattr(self, "current_time", 0.0)
+        return {"dik_changed": changed, "known_gaps_reduced": False, "derivation_triggered": False, "response_category": None}
+
     def _attempt_local_rule_brain_refresh(self, sim_state, environment, planner_reason):
         """Backward-compatible alias for deterministic RuleBrain controller path."""
         return self._run_rule_brain_controller(sim_state, environment, planner_reason)
@@ -10693,6 +10860,8 @@ class Agent:
         action["decision_action"] = decision.selected_action.value
         if decision_action_args(decision):
             action["action_args"] = decision_action_args(decision)
+        if decision.selected_action == ExecutableActionType.MOVE_TO_TARGET and {"x", "y"} <= set(decision_action_args(decision)):
+            action["target"] = (float(decision_action_args(decision)["x"]), float(decision_action_args(decision)["y"]))
         if self.task_model is not None:
             params = self.task_model.action_parameters.get(decision.selected_action.value)
             if params is not None:
@@ -11389,6 +11558,8 @@ class Agent:
             self._emit_event(sim_state, stage, payload)
 
         def _apply_stale_inspect_recovery(target_point, arrival_count):
+            if self.is_human_participant():
+                return  # anti-loop recovery for artificial agents; a person may deliberately return to the same spot
             source_id = self.current_inspect_target_id
             if not source_id:
                 return
@@ -11652,13 +11823,19 @@ class Agent:
         self._update_recognized_gaps(sim_state)
         self._update_memory(sim_state)
         self.sim_step_count += 1
-        self._record_team_plan_commitment_tick(sim_state)
-        self._team_plan_lifecycle_tick(sim_state)
-        uptake_summary, uptake_source = self._plan_uptake_candidate(sim_state)
-        if uptake_summary is not None:
-            self._adopt_committed_team_plan(sim_state, uptake_summary, reason="active_team_plan_requires_uptake", source=uptake_source)
+        human_participant = self.is_human_participant()
+        if not human_participant:  # plan responses/adoption are strategy taken on the agent's behalf; a person decides those themselves
+            self._record_team_plan_commitment_tick(sim_state)
+            self._team_plan_lifecycle_tick(sim_state)
+            uptake_summary, uptake_source = self._plan_uptake_candidate(sim_state)
+            if uptake_summary is not None:
+                self._adopt_committed_team_plan(sim_state, uptake_summary, reason="active_team_plan_requires_uptake", source=uptake_source)
         rule_brain_runtime = self._is_rule_brain_runtime(sim_state)
         sync_llm_pilot = self._is_sync_llm_pilot(sim_state)
+        if human_participant:
+            # Participant intents are drained every tick (a redirect must not wait for the current movement action to end). The agent takes no
+            # decision of its own: with no intent it simply continues whatever it is doing, or stays put.
+            self._run_human_pilot_controller(sim_state, environment)
         if not planner_lifecycle_already_polled:
             self._check_inflight_timeout(sim_state)
             if not rule_brain_runtime and not sync_llm_pilot:
@@ -11667,7 +11844,9 @@ class Agent:
         if self.pilot_episode and self.pilot_episode["status"] != "closed":
             self.pilot_episode["ticks"] += 1
             self.pilot_episode_stats["ticks"] += 1
-        if self.active_actions:
+        if self.active_actions or human_participant:
+            # A human never enters the Pilot decision branch below (no planner, no Procedural Baseline, no bootstrap fallback): a queued translated
+            # action starts here, and nothing is chosen when the queue was empty.
             self._advance_active_actions(dt, sim_state=sim_state)
         else:
             trigger_reason = self._plan_trigger_reason(sim_state, environment)
@@ -13082,7 +13261,10 @@ class Agent:
         }
 
         for action in self.active_actions:
-            if action.get("type") == "communicate" and not action.get("communication_attempted"):
+            if action.get("type") == "communicate" and not action.get("communication_attempted") and "text" in (action.get("action_args") or {}):
+                action["communication_attempted"] = True
+                self._deliver_human_chat(sim_state, action)
+            elif action.get("type") == "communicate" and not action.get("communication_attempted"):
                 action["communication_attempted"] = True
                 nearby = []
                 if sim_state is not None:
@@ -13189,6 +13371,8 @@ class Agent:
             }:
                 self.progress_tracker["observe_no_effect"] = 0
             self._emit_event(sim_state, "executable_action_completed", {"action_type": action.get("type"), "decision_action": action.get("decision_action"), "project_id": action.get("project_id")})
+            if sim_state is not None and self.is_human_participant():
+                self._human_note_completion(sim_state, action)
             self.active_actions.remove(action)
 
         if not self.active_actions and not self.current_action and completed:
@@ -14003,6 +14187,8 @@ class Agent:
         return self.communication_state["last_exchange_effects"]
 
     def receive_message(self, message, from_agent=None, sim_state=None):
+        if self.is_human_participant():
+            return self._receive_message_as_human(message, from_agent, sim_state)
         sender = message.get("sender")
         if not sender:
             sender = from_agent
