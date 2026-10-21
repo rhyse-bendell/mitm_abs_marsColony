@@ -151,13 +151,14 @@ def build_static_layout(sim) -> Dict[str, Any]:
 # ------------------------------------------------------------------------------------------------------------------------------------
 # Menus derived from the Middleware's affordances
 # ------------------------------------------------------------------------------------------------------------------------------------
-def _intent_key(action: str, target_id: Optional[str], args: Dict[str, Any]) -> str:
-    raw = f"{action}|{target_id or ''}|{sorted((args or {}).items())}"
+def _intent_key(action: str, target_id: Optional[str], args: Dict[str, Any], ui_object: str = "") -> str:
+    """Stable opaque id of a menu option. The object it was offered from is part of the identity (the same carry action is offered at the pile and at the project)."""
+    raw = f"{ui_object}|{action}|{target_id or ''}|{sorted((args or {}).items())}"
     return "m" + hashlib.sha1(raw.encode()).hexdigest()[:10]
 
 
 def _item(label: str, action: str, target_id: Optional[str], args: Dict[str, Any], *, enabled: bool = True, reason: Optional[str] = None, ui_object: str = "", detail: str = "") -> Dict[str, Any]:
-    key = _intent_key(action, target_id, args)
+    key = _intent_key(action, target_id, args, ui_object)
     return {"public": {"id": key, "label": label, "enabled": bool(enabled), "reason": reason, "detail": detail},
             "intent": {"action": action, "target_id": target_id, "action_args": dict(args or {}), "ui_object": ui_object, "label": label}}
 

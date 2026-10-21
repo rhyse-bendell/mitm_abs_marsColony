@@ -1,6 +1,6 @@
 "use strict";
 // Participant client. Pure view + input: it holds NO game state of its own. Everything drawn comes from the latest `state` message; everything it
-// can do is send move / chosen-menu-item / chat / interface events. All server text is rendered with textContent (never innerHTML).
+// can do is send move / chosen-menu-item / chat / interface events. All server text is rendered as text nodes (never parsed as markup).
 (function () {
   const params = new URLSearchParams(location.search);
   const role = params.get("role") || "", token = params.get("token") || "";

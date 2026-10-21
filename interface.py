@@ -2455,6 +2455,7 @@ class MarsColonyInterface:
 
     def _finalize_simulation_install(self, sim):
         self.sim = sim
+        self._install_human_session(sim)
         sim.async_inference = True  # model calls run on a worker thread; the Tk thread never waits for Ollama
         if hasattr(self, "resource_mode_var"):
             rs = self._resource_settings_from_gui()
@@ -2479,6 +2480,45 @@ class MarsColonyInterface:
         self.update_brain_tab()
         self.update_dik_derivations_tab()
         self.update_rule_derivations_tab()
+
+    def _install_human_session(self, sim):
+        """realtime_testbed with human participants: host the (loopback) participant server and the wall-clock scheduler. The simulation is still
+        owned and ticked by THIS thread; the participant server only touches queues and published snapshots."""
+        self._close_human_session()
+        self.human_session = None
+        if getattr(sim, "execution_mode", "simulation") != "realtime_testbed" or not sim.human_controllers():
+            return
+        from modules.realtime_testbed import HumanTestbedSession
+
+        self.human_session = HumanTestbedSession(sim).start()
+        self.human_session.pause()  # the mission clock starts when the experimenter presses Start
+        urls = self.human_session.urls()
+        text = "\n".join(f"{role}: {url}" for role, url in urls.items())
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(next(iter(urls.values())))
+        except Exception:  # noqa: BLE001 - clipboard is a convenience only
+            pass
+        print("Participant URL(s):\n" + text)
+        if hasattr(self, "lifecycle_label"):
+            self.lifecycle_label.config(text=f"State: {self.run_state}  |  realtime_testbed  |  participant URL copied to clipboard")
+        try:
+            import webbrowser
+
+            for url in urls.values():
+                webbrowser.open(url)
+        except Exception:  # noqa: BLE001
+            pass
+        messagebox.showinfo("Human participant session", "Participant window(s) opened (URL also copied to the clipboard):\n\n" + text + "\n\nThe mission clock starts when you click OK.")
+
+    def _close_human_session(self):
+        session = getattr(self, "human_session", None)
+        if session is not None:
+            try:
+                session.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self.human_session = None
 
     def _reset_persistent_startup_views(self):
         if hasattr(self, "agent_state_panels"):
@@ -2644,6 +2684,8 @@ class MarsColonyInterface:
         self._startup_worker = None
         self._finalize_simulation_install(sim)
         self.run_state = self.STATE_RUNNING
+        if getattr(self, "human_session", None) is not None:
+            self.human_session.resume()  # the mission clock starts now (after the participant-URL dialog was dismissed)
         self._update_control_states()
         self._schedule_next_tick()
 
@@ -2673,7 +2715,10 @@ class MarsColonyInterface:
         if self.run_state != self.STATE_RUNNING or not self.sim:
             return
 
-        self.sim.update(self.base_dt)
+        if getattr(self, "human_session", None) is not None:
+            self.human_session.tick()  # wall-clock paced; participants' intents are drained inside the simulation tick
+        else:
+            self.sim.update(self.base_dt)
         self._update_ollama_runtime_status()
         if getattr(self.sim, "inference_pending", lambda: False)() and not getattr(self.sim, "controller_error", None):
             self._schedule_next_tick()  # waiting on a local model: simulated time is held, the GUI stays live (Pause/Stop work), no heavy redraw
@@ -2760,6 +2805,8 @@ class MarsColonyInterface:
         self.run_state = self.STATE_RUNNING
         if self.sim is not None and hasattr(self.sim, "set_inference_paused"):
             self.sim.set_inference_paused(False)
+        if getattr(self, "human_session", None) is not None:
+            self.human_session.resume()
         self._update_control_states()
         self._schedule_next_tick()
 
@@ -2769,6 +2816,8 @@ class MarsColonyInterface:
         if self.sim is not None and hasattr(self.sim, "set_inference_paused"):
             self.sim.set_inference_paused(True)  # no NEW model call starts while paused
         self.run_state = self.STATE_PAUSED
+        if getattr(self, "human_session", None) is not None:
+            self.human_session.pause()  # pauses the complete experiment, participants included
         self._cancel_run_loop()
         self._update_control_states()
 
@@ -4012,6 +4061,7 @@ class MarsColonyInterface:
         inspect_pursuit = dict(snapshot.get("inspect_pursuit") or {})
         transport = dict(snapshot.get("transport_state") or {})
         payload = {
+            "controller": snapshot.get("controller_label"),
             "mode": control.get("mode"),
             "previous_mode": control.get("previous_mode"),
             "transition_reason": control.get("last_transition_reason"),
@@ -4111,7 +4161,8 @@ class MarsColonyInterface:
         signature = self._agent_snapshot_signature(snapshot)
         signature_changed = force or signature != panel_state.get("signature")
         if panel is not None:
-            panel.configure(text=f"{snapshot.get('display_name')} ({snapshot.get('role')})")
+            label = snapshot.get("controller_label")
+            panel.configure(text=f"{snapshot.get('display_name')} ({snapshot.get('role')})" + (f"  [{label}]" if label else ""))
         panel_state["snapshot"] = snapshot
         if not signature_changed and not force:
             return
@@ -5126,7 +5177,9 @@ class MarsColonyInterface:
         if self.run_state == self.STATE_STARTING:
             return
         self._cancel_run_loop()
-        if self.sim:
+        if getattr(self, "human_session", None) is not None:
+            self._close_human_session()  # stops the scheduler -> sim.stop() exactly once, then closes the participant server
+        elif self.sim:
             self.sim.stop()
         if self.sim is not None:
             self.run_state = self.STATE_STOPPED

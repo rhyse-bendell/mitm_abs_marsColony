@@ -10,6 +10,10 @@ def run_batch_experiment(settings, progress_callback=None, run_name_builder=None
     timesteps_per_run = max(1, int(resolved_settings.get("timesteps_per_run", 300) or 300))
     base_dt = float(resolved_settings.get("base_dt", 1.0) or 1.0)
     agent_configs = deepcopy(resolved_settings.get("agent_configs") or [])
+    humans = [str(c.get("name") or c.get("role")) for c in agent_configs if isinstance(c.get("controller"), dict) and c["controller"].get("controller_type") == "human_participant"]
+    humans += [str(k) for k, v in dict(resolved_settings.get("controller_assignments") or {}).items() if (v.get("controller_type") if isinstance(v, dict) else v) == "human_participant"]
+    if humans:
+        raise ValueError(f"batch runs cannot include a human_participant ({sorted(set(humans))}): a person needs a live realtime_testbed session, not a stepped batch")
     experiment_name = resolved_settings.get("experiment_name")
     base_seed = resolved_settings.get("seed")
 

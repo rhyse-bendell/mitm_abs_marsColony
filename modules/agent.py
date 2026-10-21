@@ -2261,7 +2261,16 @@ class Agent:
             "current_target": self.target,
             "last_status": self.status_last_action or (self.activity_log[-1] if self.activity_log else ""),
             "last_action": planner_last_result.get("next_action", {}),
+            "controller_type": self.controller_type_id(),
+            "controller_label": self.controller_label(),
         }
+
+    def controller_label(self):
+        """Observer-facing controller name: 'Human Participant' | 'Procedural Baseline' | 'Local Ollama' (legacy backends keep their id)."""
+        from modules.controller_spec import CONTROLLER_TYPES
+
+        ctype = self.controller_type_id()
+        return CONTROLLER_TYPES[ctype].label if ctype in CONTROLLER_TYPES else str(ctype)
 
     def get_agent_state_summary(self):
         snapshot = self.get_runtime_state_snapshot()
@@ -10548,6 +10557,17 @@ class Agent:
         for intent in controller.drain():
             self._process_human_intent(sim_state, environment, controller, telemetry, intent)
         self._human_poll_sources(sim_state, environment, telemetry)
+        self._human_track_movement(sim_state, telemetry)
+
+    def _human_track_movement(self, sim_state, telemetry):
+        pending = getattr(self, "_human_pending_move", None)
+        if pending is not None and self.target is not None:
+            pending["walking"] = True  # the destination becomes the agent's target only once the move action starts (same tick, after this check)
+        if pending is not None and self.target is None and pending.get("walking"):
+            self._human_pending_move = None
+            dest = pending["dest"]
+            telemetry.record(sim_state, "movement_arrived", outcome="arrived", grounded={"destination": dest, "position": [round(self.position[0], 3), round(self.position[1], 3)]},
+                             distance_to_destination=round(math.hypot(self.position[0] - dest[0], self.position[1] - dest[1]), 3), travel_sim_s=round(float(sim_state.time) - pending["t0"], 2), intent_id=pending["intent_id"])
 
     def _process_human_ui_event(self, sim_state, telemetry, event):
         kind = event.get("kind")
@@ -10596,7 +10616,8 @@ class Agent:
                 return self._human_reject(sim_state, controller, telemetry, intent, ["unknown_move_target"])
             intent.target_id = dest.get("target_id")
             intent.action_args = {k: dest[k] for k in ("x", "y") if k in dest}
-        committed = self._human_committed_action()
+        is_chat = intent.action == ExecutableActionType.COMMUNICATE.value and "text" in dict(intent.action_args or {})
+        committed = None if is_chat else self._human_committed_action()  # typing to the team never occupies the avatar
         if committed is not None:
             left = max(0.0, float(committed.get("duration", 0.0) or 0.0) - float(committed.get("progress", 0.0) or 0.0))
             return self._human_reject(sim_state, controller, telemetry, intent, [f"busy_committed:{committed.get('decision_action')}:{left:.0f}s"])
@@ -10612,6 +10633,10 @@ class Agent:
             return self._human_reject(sim_state, controller, telemetry, intent, list(gate_result.blockers or ["blocked"]), gate_result=gate_result)
         decision = gate_result.normalized_decision
         setattr(decision, "_action_gate_checked", True)
+        if is_chat:
+            self._deliver_human_chat(sim_state, {"action_args": dict(intent.action_args)})  # same canonical communicate action, delivered at once
+            controller.push_feedback("accepted", "", intent_id=intent.intent_id, sim_time=sim_state.time, kind="accepted")
+            return
         if intent.action == ExecutableActionType.MOVE_TO_TARGET.value:
             self.active_actions = [a for a in self.active_actions if a.get("decision_action") not in self._HUMAN_REDIRECTABLE]
             self.target = None
@@ -10625,6 +10650,11 @@ class Agent:
             self.current_action = []  # the translation's placeholder idle is NOT executed: nothing happens in place of the request
             return self._human_reject(sim_state, controller, telemetry, intent, blockers)
         self.current_action = translated
+        if intent.action == ExecutableActionType.MOVE_TO_TARGET.value and isinstance(first, dict) and first.get("target") is not None:
+            prior = getattr(self, "_human_pending_move", None)
+            if prior is not None:
+                telemetry.record(sim_state, "movement_redirected", outcome="redirected", intent_id=prior["intent_id"])
+            self._human_pending_move = {"dest": [round(float(first["target"][0]), 3), round(float(first["target"][1]), 3)], "t0": float(sim_state.time), "intent_id": intent.intent_id}
         grounded = {"type": first.get("type"), "decision_action": first.get("decision_action"), "target": first.get("target"), "project_id": first.get("project_id"), "source_target_id": first.get("source_target_id")}
         controller.push_feedback("accepted", "", intent_id=intent.intent_id, sim_time=sim_state.time, kind="accepted")
         telemetry.record(
@@ -10637,8 +10667,8 @@ class Agent:
 
     def _human_note_completion(self, sim_state, action):
         telemetry = getattr(self, "_human_telemetry", None)
-        if telemetry is None or action.get("decision_action") in (None, ExecutableActionType.WAIT.value):
-            return
+        if telemetry is None or action.get("decision_action") in (None, ExecutableActionType.WAIT.value, ExecutableActionType.MOVE_TO_TARGET.value):
+            return  # a move's action slot ends after ~1 s while the agent keeps walking: arrival is recorded separately (_human_track_movement)
         from modules.human_participant import ACTION_CATEGORY
 
         telemetry.record(sim_state, "action_completed", grounded={"type": action.get("type"), "decision_action": action.get("decision_action"), "project_id": action.get("project_id"), "source_target_id": action.get("source_target_id")},
@@ -10659,7 +10689,12 @@ class Agent:
                   "recipients": [a.name for a in recipients], "text": text, "delivery": delivery}
         sim_state.chat_log.append(record)
         self._emit_event(sim_state, "chat_message_sent", {k: v for k, v in record.items() if k != "id"})
-        sim_state.logger.log_interaction({"time": record["time"], "type": "human_chat", "sender": self.name, "receivers": record["recipients"], "scope": scope, "text": text, "delivery": delivery})
+        from modules.interaction_graph import canonical_agent_node, make_interaction_event
+
+        for other in recipients:  # observer Interactions tab: one team-communication edge per recipient (the text is shown in the summary)
+            sim_state.logger.log_interaction(make_interaction_event(
+                time=sim_state.time, interaction_id=f"chat-{record['id']}-{other.name}", source_node=canonical_agent_node(self.role), target_node=canonical_agent_node(other.role),
+                interaction_type="team_chat", status="delivered", agent_id=self.agent_id, payload_summary=f"{self.name} (human): {text[:120]}"))
         telemetry = getattr(self, "_human_telemetry", None)
         if telemetry is not None:
             telemetry.record(sim_state, "chat_sent", intended={"action": "communicate", "category": "chat", "scope": scope, "text_length": len(text)}, grounded={"type": "communicate", "recipients": record["recipients"]},
