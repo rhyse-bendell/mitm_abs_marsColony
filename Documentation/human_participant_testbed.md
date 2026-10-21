@@ -177,3 +177,38 @@ Events: `action_intent` (accepted: movement, information source, artifact, chat,
 `action_blocked`, `action_completed`, `movement_arrived` / `movement_redirected`, `interaction_target_selected` (menu opened), `source_opened` / `source_closed`
 (simulated and wall dwell) / `source_reopened`, `chat_sent` (plus a `chat_message_sent` event and an Interactions edge per recipient), `message_received`.
 Pointer clicks go to a separate low-level `logs/human_input_trace.jsonl`. Never recorded: keystrokes, unsent or empty chat drafts, hover.
+
+## 11. Compatibility evidence (H12)
+
+1. All-Procedural headless run unchanged: a seeded run (seed 3, 300 sim-s) produces a byte-identical fingerprint on `main` (deb41d7) and on this branch
+   (14,780 events, identical per-type counts, positions, projects, piles and Pilot-selection hash); `main` is itself deterministic across two runs.
+2. Ollama configuration resolves unchanged (`test_existing_ollama_configuration_still_resolves_normally`, `test_ollama_controller.py`).
+3-4. Human + Procedural coexist and serialize in the manifest (`test_manifest_records_human_controller_and_execution_mode`).
+5. Another role's packet text never reaches the view (`test_human_participant_privacy.py`).
+6-8. Gate spy, static import boundary, forged ids, blocked-not-substituted (`test_human_participant.py`).
+9. Disconnect/close fails safe; reconnect works; Stop closes the controller.
+10. Simulation mode timing: the barrier bypass and scheduler apply only when `execution_mode == realtime_testbed`; the all-Procedural fingerprint is identical.
+11. Observer stream: human events, normal agent events and controller labels reach the logger and the Tk panels (`test_observer_event_stream_*`, `test_human_participant_gui.py`).
+Whole non-GUI suite, `main` vs this branch (same ignore list, run concurrently): 107 failed / 1005 passed / 2 skipped / 1 xfailed on both, with the identical set
+of 107 pre-existing failures (the human tests were excluded from the branch run and pass separately: 32 tests).
+
+## 12. Known limitations and open scientific decisions
+
+* Build correctness, validation readiness and repair grounding in the engine read the actor's simulated DIK. For a human the simulator records exposure only, so
+  exposure is the proxy those rules use. Whether humans should be gated this way (or by the task's own rules independent of exposure) is for the researcher.
+* Typed chat is delivered and logged verbatim; artificial teammates do not interpret free text, so it transfers no DIK to them. Structured DIK-grounded sharing
+  (TIP/TDP) by a human is not offered yet. Plan externalization and whiteboard authoring are not human verbs yet; whiteboard reading is offered but its
+  adoption path still carries the artificial-agent probability draw.
+* Procedural agents may contribute to projects a human started (shared world); labels do not say who did what.
+* Pile and bridge reach radii (0.6 / 0.9) are interface constants, not task parameters.
+
+## 13. Remaining work
+
+* Full single-human gameplay: whiteboard authoring/externalization, DIK-grounded sharing choices, explicit load/unload stages (the engine has one composite carry), a
+  richer map (structure footprints), end-of-mission summary for the participant, participant-side pause display polish, per-role onboarding text.
+* Multiple humans: gateways/servers already key by role; needs per-human clients on one session, chat addressing, simultaneous-input fairness tests, observer
+  view of N participants.
+* Human + Ollama mixed teams: scheduling already bypasses the inference barrier in realtime mode; needs validation under real inference load and Ollama-side
+  awareness of human chat.
+* Formal human-subject use: consent/instruction flow, participant IDs and session control, LAN binding with authentication, clock-sync/latency telemetry, data
+  retention and anonymisation, a decision on the exposure-vs-understanding issue above, and formal piloting.
