@@ -10543,8 +10543,33 @@ class Agent:
         telemetry = getattr(self, "_human_telemetry", None)
         if telemetry is None:
             telemetry = self._human_telemetry = HumanTelemetry(self, controller)
+        for event in controller.drain_ui_events():
+            self._process_human_ui_event(sim_state, telemetry, event)
         for intent in controller.drain():
             self._process_human_intent(sim_state, environment, controller, telemetry, intent)
+        self._human_poll_sources(sim_state, environment, telemetry)
+
+    def _process_human_ui_event(self, sim_state, telemetry, event):
+        kind = event.get("kind")
+        if kind == "menu_opened":
+            from modules.participant_view import object_reach
+
+            reach = object_reach(sim_state, self.position, str(event.get("object") or ""))
+            telemetry.record(sim_state, "interaction_target_selected", outcome="menu_opened", object_id=event.get("object"), near=bool(reach.get("near")), distance=reach.get("distance"))
+        elif kind == "close_source":
+            telemetry.source_closed(sim_state, str(event.get("source") or ""))
+        elif kind == "reopen_source":
+            telemetry.record(sim_state, "source_reopened", outcome="reopened", source_id=event.get("source"))
+            telemetry.source_opened(sim_state, str(event.get("source") or ""), element_ids=[], first_time=False)
+
+    def _human_poll_sources(self, sim_state, environment, telemetry):
+        """A source counts as opened when the simulator's inspect interaction has delivered it (it entered memory_seen_packets)."""
+        for source_id in list(getattr(self, "memory_seen_packets", []) or []):
+            packet = environment.knowledge_packets.get(source_id) if isinstance(source_id, str) else None
+            if packet and source_id not in getattr(telemetry, "_announced_sources", set()):
+                telemetry.__dict__.setdefault("_announced_sources", set()).add(source_id)
+                ids = [getattr(i, "id", None) for i in list(packet.get("data", [])) + list(packet.get("information", [])) if self.name in (getattr(i, "acquired_by", {}) or {})]
+                telemetry.source_opened(sim_state, source_id, element_ids=ids, first_time=True)
 
     def _human_reject(self, sim_state, controller, telemetry, intent, blockers, *, gate_result=None):
         from modules.human_participant import ACTION_CATEGORY, participant_message_for
@@ -10563,10 +10588,23 @@ class Agent:
 
         if intent.action not in HUMAN_SUBMITTABLE_ACTIONS:
             return self._human_reject(sim_state, controller, telemetry, intent, ["not_a_participant_action"])
+        if intent.action == ExecutableActionType.MOVE_TO_TARGET.value and not intent.target_id and not intent.action_args and intent.ui_object:
+            from modules.participant_view import resolve_move_for_object
+
+            dest = resolve_move_for_object(sim_state, self.position, intent.ui_object)
+            if not dest:
+                return self._human_reject(sim_state, controller, telemetry, intent, ["unknown_move_target"])
+            intent.target_id = dest.get("target_id")
+            intent.action_args = {k: dest[k] for k in ("x", "y") if k in dest}
         committed = self._human_committed_action()
         if committed is not None:
             left = max(0.0, float(committed.get("duration", 0.0) or 0.0) - float(committed.get("progress", 0.0) or 0.0))
             return self._human_reject(sim_state, controller, telemetry, intent, [f"busy_committed:{committed.get('decision_action')}:{left:.0f}s"])
+        if intent.ui_object and intent.action not in {ExecutableActionType.MOVE_TO_TARGET.value, ExecutableActionType.COMMUNICATE.value}:
+            from modules.participant_view import object_reach
+
+            if not object_reach(sim_state, self.position, intent.ui_object).get("near"):
+                return self._human_reject(sim_state, controller, telemetry, intent, ["not_in_interaction_range"])
         decision = intent_to_decision(intent)
         gate_result = sim_state.action_gate.evaluate(agent=self, decision=decision, sim_state=sim_state)
         if not getattr(gate_result, "legal", False):

@@ -128,6 +128,7 @@ class HumanParticipantController:
         self._lock = threading.Lock()
         self._intents: Deque[HumanIntent] = deque()
         self._feedback: Deque[Dict[str, Any]] = deque(maxlen=MAX_FEEDBACK)
+        self._ui_events: Deque[Dict[str, Any]] = deque(maxlen=64)
         self._ids = itertools.count(1)
         self._feedback_ids = itertools.count(1)
         self.connected = False
@@ -162,6 +163,12 @@ class HumanParticipantController:
             self._intents.append(intent)
             return {"accepted": True, "intent_id": intent.intent_id, "reason": None}
 
+    def submit_ui_event(self, event: Dict[str, Any]) -> None:
+        """A non-action interface event worth a research record (menu opened on an object, source panel closed/reopened). Processed on the simulation thread."""
+        with self._lock:
+            if not self.closed:
+                self._ui_events.append(dict(event))
+
     def feedback_since(self, last_id: int) -> List[Dict[str, Any]]:
         with self._lock:
             return [dict(f) for f in self._feedback if f["id"] > last_id]
@@ -171,6 +178,12 @@ class HumanParticipantController:
         with self._lock:
             items = list(self._intents)
             self._intents.clear()
+            return items
+
+    def drain_ui_events(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            items = list(self._ui_events)
+            self._ui_events.clear()
             return items
 
     def push_feedback(self, level: str, message: str, *, intent_id: Optional[str] = None, sim_time: Optional[float] = None, kind: str = "action") -> Dict[str, Any]:

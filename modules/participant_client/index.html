@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mars Colony - Participant</title>
+<link rel="stylesheet" href="/static/client.css">
+</head>
+<body>
+<div id="overlay" class="overlay">Connecting to the experiment...</div>
+<header id="hud">
+  <div class="chip" id="hud-role"><span class="dot" id="hud-dot"></span><b id="hud-name">-</b></div>
+  <div class="chip">Phase <b id="hud-phase">-</b></div>
+  <div class="chip">Mission time <b id="hud-time">--:--</b> / <span id="hud-total">--:--</span></div>
+  <div class="chip">Phase remaining <b id="hud-remaining">--:--</b></div>
+  <div class="chip" id="hud-status">-</div>
+  <div class="chip">Carrying <b id="hud-carry">0</b></div>
+  <div class="chip" id="hud-busy">Idle</div>
+  <div class="chip" id="hud-dest">No destination</div>
+</header>
+<main>
+  <section id="map-col">
+    <canvas id="map" width="900" height="666" aria-label="Mars Colony top-down map"></canvas>
+    <div id="tooltip" class="tooltip" hidden></div>
+    <div id="toast" class="toast" hidden></div>
+    <p class="hint">Click the map to walk. Click an object: walk to it, then click it again when close to open its menu. Esc closes the menu. Enter jumps to chat.</p>
+  </section>
+  <aside>
+    <section id="menu-panel" class="panel" hidden>
+      <h2 id="menu-title">Interact</h2>
+      <p id="menu-sub" class="sub"></p>
+      <ul id="menu-items"></ul>
+      <button id="menu-close" class="ghost">Close (Esc)</button>
+    </section>
+    <section class="panel" id="info-panel">
+      <h2>Information</h2>
+      <p class="sub">Only what you have opened or been told appears here.</p>
+      <div id="info-list"><em>Nothing yet. Read your briefing and the team brief.</em></div>
+    </section>
+    <section class="panel" id="chat-panel">
+      <h2>Team chat</h2>
+      <div id="chat-log" aria-live="polite"></div>
+      <form id="chat-form" autocomplete="off"><input id="chat-input" maxlength="500" placeholder="Message your team (Enter to send)"><button type="submit">Send</button></form>
+    </section>
+  </aside>
+</main>
+<script src="/static/client.js"></script>
+</body>
+</html>
