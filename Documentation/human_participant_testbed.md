@@ -212,3 +212,54 @@ of 107 pre-existing failures (the human tests were excluded from the branch run 
   awareness of human chat.
 * Formal human-subject use: consent/instruction flow, participant IDs and session control, LAN binding with authentication, clock-sync/latency telemetry, data
   retention and anonymisation, a decision on the exposure-vs-understanding issue above, and formal piloting.
+
+---------------------------------------------------------------------------------------------------
+
+# Milestone 2: human cognition/action semantics
+
+## 14. H13 audit: how the engine decides build truth (before this milestone)
+
+Task truth used: the final Experimenter Script and the Team / Architect / Botanist / Engineer briefs (`Documentation/2..4c *.docx`), as already encoded in
+`config/tasks/mars_colony/dik_elements.csv`. Note for context: in the physical experiment there is **no real-time validation**. Participants build; the
+colony is photographed at phase end and scored afterwards ("whatever number of colonists your colony can currently support is final"). The simulator's
+VALIDATE action is therefore an abstraction of "check what you built"; the only feedback it can legitimately return to a person is pass/fail.
+Also in the task truth but not represented by the engine: resource carts must be built and used to move bricks, and structures must be >= 6 studs apart.
+
+### 14.1 Where truth lives
+* One hidden boolean per project: `project["correct"]` (`ConstructionManager.create_project` -> True). Nothing in the engine represents *what* was built
+  (colours, openings, stacks); a project is a brick count + `build_steps` + the flag. `expected_rules` (one `R_*` id per archetype) is a label, not a validator.
+* Only two things ever write `correct`:
+  1. `record_build_quality(correct=False)`: called from `Agent._apply_externalization_and_construction_effects` on each build action when
+     `self._rng.random() > fidelity`, `fidelity = (construction_fidelity hook + rule_accuracy mechanism) / 2` (an **agent mechanism draw**, not DIK) and again after a repair
+     (`repair_fidelity`). 
+  2. `repair_project` (sets True blindly: "clears a recorded build error") and `mark_validated` (sets False on a failed validation, True on a pass).
+* `observed_validation_failure` / `observable_status` hide `correct` from agents until a validation actually fails; `update()` derives the truth status `needs_repair`.
+
+### 14.2 Where actor DIK/rules enter (A-F of the brief)
+| | Procedural / Ollama | Human (milestone 1) |
+|---|---|---|
+| A Pilot decision generation | held DIK feeds the baseline policy features/terms and the Ollama canonical context | none (a person decides); exposure only logged |
+| B physical action legality | `_build_readiness_blockers` (>=2 info items, >=1 rule, role grounding, inspected source, prerequisite rules...) gates START/CONTINUE at translation and in `_commit_typed_start`; REPAIR gated on `_repair_epistemic_blockers` (project's `expected_rules` must be in held knowledge) plus an observed failure; VALIDATE gated on `evaluate_project_validation_readiness(agent_supported_rules=held rules)` at the gate, at translation and at execution; affordance flags `validation_ready`/`repair_ready` mirror them | **same epistemic gates applied to the person** via the exposure-derived mental model: a legal human action could be refused for "not knowing" a rule |
+| C artifact construction state | `execute_build_step` flips a step; provenance records `held_*_at_build`; a `design_note` workspace entry is auto-written per step | same |
+| D artifact correctness | hidden `correct`, introduced by the fidelity draw (agent mechanism) | the same draw (`rule_accuracy` of the human's agent object) - an invented probability for a person |
+| E validation | `is_valid = correct and physical_ready and support_ready and has_required_rules and epistemic_ready`, where `has_required_rules` = the actor's held knowledge (+ team/project evidence) covers `expected_rules`, and `epistemic_ready` = workspace has claim/evidence/design_note; `mark_validated` re-checks readiness before completing | same: a person's validation outcome depended on simulated rules/workspace entries |
+| F repair | needs observed failure + held expected rules; success = clear `correct`, then a second fidelity draw | same, silently choosing the "correct repair" |
+
+So milestone 1 coupled a human's legality, correctness, validation and repair to *exposure-derived simulated DIK* and to an *agent fidelity probability*.
+
+### 14.3 Other findings (not changed in this milestone)
+* `team_state.construction_artifacts[*].correct` (from `TeamKnowledgeManager.upsert_construction_artifact`) carries the hidden flag into the agent brain context
+  (Procedural/Ollama). It is not in the participant view, but it is a hidden-truth channel to artificial Pilots worth a separate decision.
+* Structural support accounting (`support_accounting`) assumes one floor unit per house and one soil unit per greenhouse (documented simulator abstractions);
+  per-structure footprint/capacity choices therefore do not change supported-colonist numbers yet.
+* Placement spacing (6 studs) and resource carts are not represented by the engine.
+
+## 15. The boundary this milestone establishes
+
+```
+AI Pilot DIK      -> may influence what the AI chooses (unchanged)
+Human exposure    -> logged only (sources opened, dwell, messages shown, information shared); never stands in for cognition
+ActionGate        -> physical / task legality only (materials, site, bridge, built state, observed failure for repair)
+Artifact state    -> authoritative correctness: a human-authored structure carries its design, and the task rules evaluate THAT design
+```
+Artificial-controller behaviour is unchanged (the all-Procedural fingerprint is the guard).
