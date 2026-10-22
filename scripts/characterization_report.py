@@ -235,8 +235,14 @@ def extract(r):
     row["projects_in_progress"] = status.get("in_progress", 0)
     row["structures_validated"] = cons.get("structures_validated", 0)  # legacy all-types count; connectors included (not a performance readout)
     ob = cons.get("outcome_breakdown") or {}
-    for key in ("validated_core_structures", "validated_houses", "validated_greenhouses", "validated_generators", "validated_connectors", "connector_projects_started", "site_slots_used", "site_slots_total"):
+    for key in ("validated_core_structures", "validated_houses", "validated_greenhouses", "validated_generators", "validated_connectors", "validated_food_connectors", "validated_water_connectors",
+                "connector_projects_started", "connector_projects_with_links", "speculative_connector_projects", "connector_links_total", "validated_connectors_with_links",
+                "validated_connectors_without_links", "connector_share_of_projects_started", "site_slots_used", "site_slots_total"):
         row[key] = ob.get(key)
+    row["supported_civilian_capacity_min"] = g(ob, "supported_civilian_capacity", "min")
+    row["supported_civilian_capacity_max"] = g(ob, "supported_civilian_capacity", "max")
+    row["supported_vip_capacity_if_compatible_max"] = g(ob, "supported_vip_capacity_if_vip_compatible", "max")
+    row["ss_bottleneck_reasons"] = json.dumps(g(ss, "bottleneck", "all_reasons", default={}), sort_keys=True)
     row["site_slots_exhausted"] = int(bool(ob.get("site_slots_exhausted")))
     row["supported_housing_max"] = g(ob, "structurally_supported_housing", "max")
     row["supported_greenhouses_max"] = g(ob, "structurally_supported_greenhouses", "max")
