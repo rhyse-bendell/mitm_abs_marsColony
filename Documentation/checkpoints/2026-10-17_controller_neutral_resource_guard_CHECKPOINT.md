@@ -1,5 +1,7 @@
 # CHECKPOINT 2026-10-17: controller-neutral private sources + headless resource guard (VALIDATION INCOMPLETE)
 
+> STATUS UPDATE 2026-10-22: RESUMED and completed - see the "RESUMED AND COMPLETED (2026-10-22)" block in `Documentation/DEVELOPMENT_STATE.md`. Everything below is the historical resume contract.
+
 Branch `checkpoint/controller-neutral-resource-guard-20261017`; starting `main` = `deb41d7` (main is NOT advanced by this checkpoint).
 The user paused the project mid-validation. Everything below is code-complete but NOT fully regression-validated, and the fresh 12-run diagnostic is INCOMPLETE.
 
