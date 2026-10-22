@@ -50,6 +50,8 @@
       if (seenFeedback.has(f.id)) continue; seenFeedback.add(f.id);
       if (f.kind !== "accepted" && f.message) toast(f.message, f.level === "ok");
     }
+    // Accessibility / test hook: what is drawn on the canvas (the same participant-visible objects), as plain data on the element.
+    canvas.dataset.objects = JSON.stringify(view.objects.map((o) => ({ id: o.id, kind: o.kind, x: o.x, y: o.y, near: o.near, status: o.status || null })));
     renderChat(); renderInfo(); renderShare(); renderWhiteboard();
     $("info-title").textContent = view.info.title || "Reviewed information"; $("info-note").textContent = view.info.note || "";
     if (menuObject) renderMenu();
@@ -146,7 +148,7 @@
   const checkedAttachments = (group) => Array.from(document.querySelectorAll(`input[data-group="${group}"]:checked`)).map((c) => c.value);
   function openForm(item) {
     formItem = item; const f = item.form, fields = $("form-fields"); fields.textContent = "";
-    $("form-title").textContent = f.title || "Choose"; $("form-share").hidden = true;
+    $("form-title").textContent = f.kind === "repair" ? "Repair / change the design" : (f.title || "Choose"); $("form-share").hidden = true;
     if (f.kind === "note") {
       $("form-sub").textContent = "Short note for your team (visible to everyone at the whiteboard).";
       const ta = document.createElement("textarea"); ta.id = "note-text"; ta.maxLength = f.max_chars || 280; fields.appendChild(ta);

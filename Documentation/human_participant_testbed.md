@@ -263,3 +263,109 @@ ActionGate        -> physical / task legality only (materials, site, bridge, bui
 Artifact state    -> authoritative correctness: a human-authored structure carries its design, and the task rules evaluate THAT design
 ```
 Artificial-controller behaviour is unchanged (the all-Procedural fingerprint is the guard).
+
+## 16. New human construction / correctness semantics
+
+* **Legality is physical/task only for a human.** For a human actor the gate and translation no longer use exposure-derived simulated DIK: `_build_readiness_blockers`
+  keeps only "is there a navigable build target", `_repair_epistemic_blockers` is empty, validation readiness is `physical_ready and support_ready` (functional support = the
+  food/water connections the task requires of a house; it is world state). Still required: materials/site/bridge, a physically complete structure to validate, and an
+  *observed* failed validation before a repair (a person cannot repair what nothing has indicated is wrong). Artificial controllers keep every epistemic gate.
+* **Correctness is the task rules evaluated on the participant's design.** A participant START carries `action_args.design` (`{property: option}`) and must choose every
+  property (no defaults are ever filled in). The ConstructionManager records `project["design"]` (+ `design_history`) and sets the hidden `project["correct"]` from
+  `DesignSchema.evaluate`. No fidelity draw, no `rule_accuracy`, no DIK enters. A contributor's `record_build_quality` is ignored for a designed structure and
+  `repair_project` (the old blind "clear the error") does nothing to it. New general artifact-state fields: `authoring`, `design`, `design_history`, `design_evaluation` (hidden).
+* **Task data, not code.** `config/tasks/mars_colony/construction_design.json` lists, per structure type, the participant-observable properties, their options, which
+  values satisfy the task rules (`valid`, hidden) and the role-brief facts that justify them (`sources`, hidden). `modules/construction_design.py` is the generic loader/evaluator.
+  Option order is deliberately not "valid first".
+
+## 17. Participant design choices now available
+
+* House: floor area (free), floor colour, walls/ceiling colour vs floor, headroom, opening, enclosure, spacing to other structures.
+* Greenhouse: soil, soil units (free), ceiling, walls, air gap.
+* Water generator: foundation, water bricks (colour/size/stack), top.
+* Food / water connector: colour.
+Judged properties are exactly the ones the Architect/Botanist/Engineer briefs name (cited in the config by DIK element id). Free properties (floor area, soil units) are recorded
+but not judged; they do NOT yet change supported-colonist accounting (`support_accounting` still assumes one floor unit per house / one soil unit per greenhouse, a documented
+abstraction). Not represented: exact placement/spacing geometry (spacing is a single choice), resource carts, structure footprint on the map.
+
+## 18. Validation and repair semantics (human)
+
+* Validate = the normal validation action; the outcome is the artifact truth (`correct` + physical + functional support). The participant is told only "Validation passed." or
+  "Validation did not pass. This structure needs repair." (the physical task has no richer real-time feedback). The authoritative hidden outcome (true correctness, the
+  design properties that violated which task rule, with DIK source ids) goes to `logs/human_hidden_outcomes.jsonl` and the experimenter event stream (`human_authoritative_*`),
+  never to the participant.
+* Validation of a structure another agent built also uses artifact truth, independent of the human's exposure.
+* Repair = an explicit design change: the repair form shows the participant's own current choices and the same option lists; they choose what to change; only those
+  properties change and the artifact is re-evaluated. An unchanged or irrelevant repair leaves the structure incorrect. A repair with no design is refused (`design_required`).
+  Gap: structures that were not designed by a participant (built by an artificial agent) offer no repair surface to a human (`design_not_applicable`).
+
+## 19. Structured information sharing
+
+Free-text chat is unchanged and transfers nothing. An optional `attachments` list (DIK element ids ticked in the "Share information" box) rides on the same `communicate`
+action. The gate refuses any id the sender has not **encountered** (`Agent.encountered_dik()`: opened sources, messages received, whiteboard items read; simulator-derived items
+excluded) with `attachment_not_encountered`. Delivery calls the existing `receive_message` with canonical TIP (information) / TDP (data) messages carrying the same grounded
+objects, so Human -> Procedural (and Ollama, same code path) and Human -> Human receive identical items; for artificial receivers the usual epistemic update pipeline runs.
+The visible message stays verbatim. Logged: text, attached ids, sender, recipients, per-recipient delivery and acquisition outcome (`acquired` / `already_held`), a
+`communication_exchange` event (`human_authored: true`) for the DIK/interaction traces. Nothing is parsed from free text; no LLM is involved; refused messages are not logged as sent.
+
+## 20. Information panel semantics
+
+The panel is titled **Reviewed information** with the note "A record of what has been shown or sent to you. It is not a record of what you know or remember." It lists
+exposure only: items of sources the person opened, items sent by teammates, items read on the whiteboard (grouped by where they were encountered). No simulator confidence,
+memory, belief or derived-rule variable exists in the view (tested). Developer rule: *exposure is a research trace, never a proxy for comprehension, memory, belief or correct application.*
+
+## 21. Whiteboard
+
+"Read the whiteboard" shows the current team notes and team plans as written (author, time, text, attached items); attached items count as exposure, there is no adoption
+draw. "Add a note..." writes a short text note (<= 280 chars) with optional encountered attachments as a `team_note` team artifact (existing artifact path: author, timestamp,
+`carried_information`). The Mecha authors nothing for a person (a human externalize without text is refused). Artificial agents can consult a note through the unchanged
+CONSULT path (`team_note` is accepted next to `team_plan` even with no active plan); attached Data are adopted as Data. Telemetry: `whiteboard_note_added`, `whiteboard_read`.
+
+## 22. Realtime cadence finding (pre-existing behaviour, handled only in realtime mode)
+
+Construct and validate effects (and whiteboard effects) run once per tick for the whole length of an action, i.e. one build step per tick. At the calibrated 1.0 simulated-second
+tick that is correct; at the 0.1 s realtime tick one action would build/validate ten times as much. In `realtime_testbed` these effects are held to the calibrated cadence
+(construct/validate every 1.0 simulated s, artifact effects once per action; `SimulationState.REALTIME_EFFECT_PERIOD_S`). Simulation mode is untouched (fingerprint-identical).
+Open question for the researcher: the engine's throughput is defined per tick, not per second; a future clean-up should make effects time-based for every mode.
+
+## 23. Browser playtest (milestone 2) - what it was and what it found
+
+**What it was, honestly.** No hands-on human played. Real Chrome (headless) was driven through the DevTools protocol with real mouse/keyboard events on the real participant page
+against a live `realtime_testbed` session (Architect = Human, Botanist/Engineer = Procedural, seed 7), about 3 wall-clock minutes (mission clock ~2:45). Dropdown values were set
+by script (a native select popup cannot be driven that way), and the avatar was steered by clicking canvas coordinates. It is a real-UI check, not a substitute for a person.
+Three runs were needed; runs 1-2 failed for driver reasons and exposed real UI defects (below). Screenshots: `human_participant_testbed_m2_repair_form.png`, `..._m2_chat_share.png`.
+
+Run 3 completed every step through the UI: walked to and read own packet and team brief; attempted the Botanist packet and got "You are not permitted to view another role's private
+briefing."; opened Site B, chose a deliberately flawed greenhouse design (brown dirt only, solid ceiling) and submitted; walked to the pile and carried bricks; sent free chat and a
+chat with a ticked attachment (delivered, recipients `acquired`); read the whiteboard and added a note with an attachment (note visible, author/time, the Botanist's committed plan also
+shown); validated the greenhouse ("Validation did not pass. This structure needs repair." - hidden log: `soil`, `ceiling` violated); opened the repair form pre-filled with the person's own
+choices, changed ceiling and soil, submitted; revalidated ("Validation passed."). All of it is in `human_participant_events.jsonl` / `human_hidden_outcomes.jsonl`.
+
+### Usability problems (kept separate from scientific/architecture issues)
+Fixed during the playtest:
+* Opening "Share information" (30+ checkboxes) scrolled the whole page and moved the map off-screen; the page now keeps the map fixed and the side panels scroll internally with bounded lists.
+* Repair form was titled with the structure name; now "Repair / change the design".
+Open:
+* Project markers and their labels stack into an unreadable cluster at a busy site (artificial teammates start many structures within seconds); needs fan-out/zoom or a list.
+* Feedback lag of roughly 0.4-0.5 s after a click (snapshot cadence 0.25 s + push 0.1 s); the destination marker should appear immediately on click.
+* While committed (reading ~6-10 s, carrying) map clicks are refused and the toast is brief; the HUD busy chip should say what is running and how long is left in a more prominent place.
+* "Carrying 1" persists after a carry action ends (the engine's carry is two-step: pick up, then bring to a project); nothing tells the person they still hold a brick.
+* Dropdown-based design forms are long; no summary of the current design is shown on the map marker (it is in the project menu data only).
+* The whole Information list shows every packet item; no search/grouping beyond source.
+
+### Scientific / architecture problems found (not UI)
+* Per-tick effect repetition (section 22) - handled for realtime mode only.
+* `team_state.construction_artifacts[*].correct` leaks hidden correctness to artificial Pilots (section 14.3) - unchanged, needs a decision.
+* Free design properties (floor area, soil units) do not yet change supported-colonist accounting.
+* A human cannot repair structures built by artificial agents (no design surface); artificial agents cannot repair participant-designed structures.
+* Procedural teammates immediately start many structures (five greenhouses in the first minute), which shapes the human's task; this is Procedural policy, not changed.
+* Houses cannot be validated until food and water connectors exist (world truth). A participant sees "This structure still needs its food and water connections."
+
+## 24. Remaining gaps
+
+* Full single-human task fidelity: resource carts, placement/spacing geometry and structure footprints, capacity-bearing design properties wired into support accounting, validation feedback
+  as it exists in the physical protocol (none in real time), end-of-mission summary, repair of structures made by others, marker fan-out, onboarding, drawing on the whiteboard.
+* Human + Ollama: untested end to end (code paths are shared: `receive_message`, `team_note` consult); needs a model-in-the-loop session and inference-latency telemetry in realtime.
+* Multiple humans: gateway/server are per role but unexercised with two live clients; needs chat addressing, simultaneous-input fairness and per-human telemetry joins.
+* Formal participant study: consent/instructions, participant IDs, LAN binding with authentication, clock sync and latency logging, retention/anonymisation, pilot with real people, a decision on
+  the `correct` leak and on tick-vs-time effect semantics, and an actual human playtest.
