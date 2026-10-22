@@ -308,7 +308,9 @@ class TestRuntimeWitnessAudit(unittest.TestCase):
             self.assertIn("post_inspect_productive_action_count", diagnostics)
             self.assertIn("post_inspect_blocker_distribution", diagnostics)
 
-    def test_exhausted_private_source_is_deprioritized_in_target_selection(self):
+    def test_exhausted_source_is_noted_but_the_pilot_selected_source_is_not_replaced(self):
+        # Migrated: this used to assert that an exhausted selected source was silently re-ranked to Team_Info. Pilot authority (see
+        # tests/test_source_target_authority.py): exhaustion is reported, never substituted.
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = SimulationState(phases=[], project_root=tmpdir, flash_mode=True)
             agent = sim.agents[0]
@@ -323,10 +325,9 @@ class TestRuntimeWitnessAudit(unittest.TestCase):
                 confidence=0.8,
             )
             source_id, _ = agent._resolve_inspect_target(decision, sim.environment, sim_state=sim)
-            self.assertEqual(source_id, "Team_Info")
+            self.assertEqual(source_id, "Architect_Info")
             event_types = [e["event_type"] for e in sim.logger.get_recent_events(200)]
-            self.assertIn("source_revisit_deferred", event_types)
-            self.assertIn("source_revisit_suppressed", event_types)
+            self.assertNotIn("source_revisit_suppressed", event_types)
             sim.stop()
 
     def test_source_exhausted_event_emitted_after_no_new_dik_reinspect(self):

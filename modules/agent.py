@@ -3337,37 +3337,23 @@ class Agent:
                         },
                     )
                     return explicit_target, None
+                # The Pilot chose a legal source. Revisit cooldown, exhaustion and "dependency unchanged" are stated as facts (events) but they do NOT
+                # replace the Pilot's target: the named source is the one executed. (They may shape which affordances are offered BEFORE the choice.)
                 if not cooldown_ready:
-                    rerank_explicit_target = True
-                    self._emit_event(
-                        sim_state,
-                        "source_revisit_deferred",
-                        {"current_source_target": explicit_target, "reason": "revisit_cooldown_active", "cooldown_until": float(source_mem.get("revisit_cooldown_until", 0.0) or 0.0)},
-                    )
+                    self._emit_event(sim_state, "source_revisit_noted", {"source_id": explicit_target, "reason": "revisit_cooldown_active", "cooldown_until": float(source_mem.get("revisit_cooldown_until", 0.0) or 0.0), "substituted": False})
                 elif self._source_exhausted_without_dependency_change(explicit_target, environment, sim_state=sim_state):
-                    rerank_explicit_target = True
-                    self._emit_event(
-                        sim_state,
-                        "source_revisit_deferred",
-                        {
-                            "current_source_target": explicit_target,
-                            "reason": "source_exhausted_dependency_unchanged",
-                        },
-                    )
-                    self._emit_event(
-                        sim_state,
-                        "exhausted_source_reinspect_suppressed",
-                        {"source_id": explicit_target, "reason": "dependency_unchanged"},
-                    )
-                else:
-                    selection = self._select_source_access_target(environment, explicit_target, sim_state=sim_state)
-                    if selection is not None and selection.get("position") is not None:
-                        if exhausted and not revisitable:
-                            self._emit_event(sim_state, "source_revisit_deferred", {"current_source_target": explicit_target, "reason": "source_exhausted_for_agent"})
-                        else:
-                            self._set_status(f"Inspect target selected: {explicit_target}")
-                            self._emit_event(sim_state, "target_resolved", {"target_type": "information_source", "target_id": explicit_target, "candidate_count": 1})
-                            return explicit_target, selection.get("position")
+                    self._emit_event(sim_state, "source_revisit_noted", {"source_id": explicit_target, "reason": "source_exhausted_dependency_unchanged", "substituted": False})
+                elif exhausted and not revisitable:
+                    self._emit_event(sim_state, "source_revisit_noted", {"source_id": explicit_target, "reason": "source_exhausted_for_agent", "substituted": False})
+                selection = self._select_source_access_target(environment, explicit_target, sim_state=sim_state)
+                if selection is not None and selection.get("position") is not None:
+                    self._set_status(f"Inspect target selected: {explicit_target}")
+                    self._emit_event(sim_state, "target_resolved", {"target_type": "information_source", "target_id": explicit_target, "candidate_count": 1})
+                    return explicit_target, selection.get("position")
+                # No usable access point for the named source right now: the action is reported as unresolved. No other source is inspected in its place.
+                self._set_status(f"Inspect target {explicit_target} has no usable access point right now; nothing was inspected in its place")
+                self._emit_event(sim_state, "target_resolution_failed", {"target_type": "information_source", "failure_category": "source_access_point_unavailable", "requested_target_id": explicit_target})
+                return None, None
 
         candidates = self._candidate_information_sources(environment, sim_state=sim_state)
         if closure_pointer and closure_pointer.get("source_id"):
@@ -10419,6 +10405,14 @@ class Agent:
         return True
 
     def _handle_controller_failure(self, sim_state, failure):
+        if (getattr(failure, "trace", None) or {}).get("failure_class") == "cancelled" or (getattr(sim_state, "inference_closed", False) and (getattr(failure, "trace", None) or {}).get("validation_outcome") == "cancelled"):
+            # The experimenter stopped the run while this decision was waiting (for the model or for host resources). That is a stop, not a controller
+            # failure: it is recorded as a cancelled decision and neither halts with a controller error nor consults any other controller.
+            trace = dict(getattr(failure, "trace", {}) or {})
+            trace.update(kind="ollama_decision", controller_failure=False, cancelled=True)
+            sim_state.record_controller_trace(trace)
+            self._emit_event(sim_state, "controller_decision_cancelled", {"controller_type": self.controller_type_id(), "validation_outcome": trace.get("validation_outcome"), "resource_wait_s": trace.get("resource_wait_s")})
+            return
         policy = str((getattr(self, "controller_spec", None).full_settings() if getattr(self, "controller_spec", None) else {}).get("failure_policy") or "stop_run")
         trace = dict(getattr(failure, "trace", {}) or {})
         trace.update(kind="ollama_decision", controller_failure=True, failure_policy=policy)
@@ -10641,7 +10635,9 @@ class Agent:
             if handoff.get("pending") and handoff.get("expires_at", 0.0) >= now_ts:
                 self.post_inspect_handoff["pending"] = False
             committed_source = self.inspect_pursuit.get("source_id")
-            if committed_source and self._inspect_pursuit_active_for(committed_source, now_ts):
+            pilot_target = str(decision.target_id or "").strip()
+            if committed_source and self._inspect_pursuit_active_for(committed_source, now_ts) and (not pilot_target or pilot_target == str(committed_source)):
+                # Reuse of a live pursuit is continuation of the SAME source. It never replaces a different source the Pilot has just chosen.
                 source_id = committed_source
                 interaction_target = self.inspect_pursuit.get("target_position")
                 self._emit_event(

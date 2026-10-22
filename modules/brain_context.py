@@ -356,6 +356,14 @@ class BrainContextBuilder:
                 if access_blocker:
                     base["source_accessible"] = False
                     base["source_blocker"] = access_blocker
+                elif sim_time is not None:
+                    # A revisit cooldown (set by the stall-recovery anti-loop after repeated no-effect arrivals) is stated BEFORE the choice: the source is
+                    # temporarily not selectable. It used to be applied AFTER the Pilot had chosen it, by silently executing a different source instead.
+                    cooldown_until = float((getattr(agent, "source_memory_state", {}).get(target_name) or {}).get("revisit_cooldown_until", 0.0) or 0.0)
+                    if cooldown_until > float(sim_time):
+                        base["source_accessible"] = False
+                        base["source_blocker"] = "source_revisit_cooldown"
+                        base["source_cooldown_until"] = round(cooldown_until, 1)
             if target.get("kind") != "build":
                 legal.append(base)
                 continue
