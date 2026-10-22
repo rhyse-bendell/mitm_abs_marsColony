@@ -6,8 +6,7 @@ manipulated, no other process is touched, no fallback controller is consulted, a
 
 What counts as unsafe (no hardware numbers are assumed):
   * low_memory                  available system RAM below the configured floor;
-  * gpu_vram_contention         non-model VRAM use grew by more than max(1 GB, 12% of total) over the lowest value seen this session
-                                (non-model VRAM = GPU used - VRAM held by the loaded Ollama model, so the model's own footprint is expected, not contention);
+  * (non-model VRAM is reported as `other_vram_mb` for diagnosis only; its growth is NOT a reason - see evaluate())
   * gpu_vram_headroom_lost      free VRAM fell below max(512 MB, 4% of total);
   * model_vram_residency_dropped the loaded model's VRAM share fell clearly below the best share seen after a clean load (partly pushed to CPU);
   * gpu_busy_other_process      GPU utilisation is high while WE are idle (probed at start, after a slow call, and while waiting).
@@ -43,6 +42,7 @@ class ResourceGuard:
         self._lock = threading.Lock()
         self.baseline_other_mb = None
         self.best_residency = None
+        self._residency_size_mb = None
         self.expected_model_mb = None
         self.gpu_available = None
         self._started = False
@@ -84,23 +84,28 @@ class ResourceGuard:
                 residency = model_vram / size
                 detail["model_residency"] = round(residency, 3)
                 self.expected_model_mb = max(self.expected_model_mb or 0.0, size)
+                if self._residency_size_mb is None or abs(size - self._residency_size_mb) > 0.02 * self._residency_size_mb:
+                    # A different loaded instance (e.g. the first real call reloaded the model at the run's larger context window): its share on the GPU is
+                    # that instance's steady state on this hardware, not a drop. The reference restarts for each instance size.
+                    self._residency_size_mb = size
+                    self.best_residency = None
         reason = None
         # 1. loss of headroom
         headroom = max(HEADROOM_FLOOR_MB, HEADROOM_FRACTION * total)
         if free < headroom:
             reason = "gpu_vram_headroom_lost"
             detail["headroom_required_mb"] = round(headroom, 1)
-        # 2. non-model VRAM growth over the session's lowest observation
-        if model_vram is not None:
+        # 2. non-model VRAM is REPORTED, never a trigger on its own. Growth over a baseline cannot tell another application from Ollama's own runtime buffers
+        #    (KV cache / compute graph: ~1 GB, allocated lazily after warm-up and growing with prompt size), and per-process VRAM attribution is not available
+        #    under the Windows driver model (nvidia-smi reports N/A). Real evidence of contention is the direct criteria: lost headroom (1), partial offload (3),
+        #    a busy GPU while we are idle (5) and low RAM. (The first real headless run was throttled forever by the earlier growth heuristic.)
+        if model_vram is not None and model_vram > 0:
             other = max(0.0, used - model_vram)
             detail["other_vram_mb"] = round(other, 1)
             if self.baseline_other_mb is None:
                 self.baseline_other_mb = other
-            elif reason is None and other - self.baseline_other_mb > max(GPU_DELTA_FLOOR_MB, GPU_DELTA_FRACTION * total):
-                reason = "gpu_vram_contention"
-                detail["baseline_other_vram_mb"] = round(self.baseline_other_mb, 1)
-            if reason is None:
-                self.baseline_other_mb = min(self.baseline_other_mb, other)  # the lowest non-model use seen is the reference; it never rises
+            else:
+                self.baseline_other_mb = min(self.baseline_other_mb, other)  # informational reference for the manifest
         # 3. the loaded model no longer fits where it did
         if reason is None and residency is not None:
             if self.best_residency is not None and residency < self.best_residency - RESIDENCY_DROP:

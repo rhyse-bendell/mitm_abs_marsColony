@@ -66,7 +66,12 @@ def warm_up(settings: Dict[str, Any]) -> Dict[str, Any]:
     if not hasattr(client, "warm"):
         return {"warmed": False, "error": "client has no warm-up support"}
     try:
-        info = client.warm(model=str(settings["model"]), keep_alive=str(settings.get("keep_alive") or "30m"), timeout_s=max(300.0, float(settings.get("timeout_s") or 120.0)))
+        kwargs = {"model": str(settings["model"]), "keep_alive": str(settings.get("keep_alive") or "30m"), "timeout_s": max(300.0, float(settings.get("timeout_s") or 120.0))}
+        import inspect
+
+        if "num_ctx" in inspect.signature(client.warm).parameters and settings.get("max_context_tokens"):
+            kwargs["num_ctx"] = int(settings["max_context_tokens"])  # load the instance the run will actually use (same context window as every decision)
+        info = client.warm(**kwargs)
     except OllamaError as exc:
         return {"warmed": False, "error": f"{type(exc).__name__}: {exc}"}
     return {"warmed": True, **info}

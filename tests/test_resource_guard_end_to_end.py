@@ -113,8 +113,9 @@ def test_stop_during_a_resource_wait_interrupts_cleanly_without_a_controller_err
     sim_time_while_waiting = st.time
     time.sleep(0.2)
     assert st.time == sim_time_while_waiting  # simulated time does not move while throttled
-    _stop(st)  # the experimenter presses Stop
+    st._close_inference()  # what Stop does first: no further attempts start, the adapter's cancel flag interrupts the wait (the full stop runs after the wait has ended)
     assert done.wait(15), "Stop must interrupt the wait"
+    _stop(st)
     assert "error" not in box and guard.waiting_reason is None
     assert st.controller_error is None and st.terminal_state != "controller_error"  # a Stop is not a controller failure
     rows = [r for r in _trace_rows(st) if r.get("kind") == "ollama_decision"]

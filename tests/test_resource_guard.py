@@ -9,7 +9,7 @@ import pytest
 from modules import ollama_pilot
 from modules.ollama_client import OllamaRequestError
 from modules.inference_governor import InferenceGovernor
-from modules.resource_guard import GuardCancelled, ResourceGuard
+from modules.resource_guard import MB, GuardCancelled, ResourceGuard
 from tests.test_ollama_controller import FakeOllama, OLLAMA_A, _run, _sim, _stop  # noqa: F401
 
 
@@ -79,13 +79,17 @@ def test_low_ram_is_unsafe_without_any_gpu():
     assert g2.manifest_state()["gpu_telemetry"] == "unavailable"
 
 
-def test_another_apps_vram_growth_is_contention_but_the_models_own_footprint_is_not():
+def test_non_model_vram_growth_alone_is_reported_not_a_reason_but_lost_headroom_is():
+    # growth of non-model VRAM (another app OR Ollama's own runtime buffers - indistinguishable) is information only
     g, _ = make_guard(ScriptedMonitor(snap(used=700.0 + 5252.0), snap(used=700.0 + 5252.0 + 1500.0)))
-    assert g.check()[0] is None  # model resident + idle desktop
+    assert g.check()[0] is None
     reason, detail = g.check()
-    assert reason == "gpu_vram_contention" and detail["other_vram_mb"] == pytest.approx(2200.0) and detail["baseline_other_vram_mb"] == pytest.approx(700.0)
-    g2, _ = make_guard(ScriptedMonitor(snap(used=700.0), snap(used=700.0 + 5252.0)))  # the model loading is NOT another application
-    assert g2.check()[0] is None
+    assert reason is None and detail["other_vram_mb"] == pytest.approx(2200.0)
+    # what is unsafe is a direct condition: a neighbour that takes the headroom
+    g2, _ = make_guard(ScriptedMonitor(snap(used=700.0 + 5252.0), snap(used=8100.0)))
+    assert g2.check()[0] is None and g2.check()[0] == "gpu_vram_headroom_lost"
+    g3, _ = make_guard(ScriptedMonitor(snap(used=700.0), snap(used=700.0 + 5252.0)))  # the model loading is not another application
+    assert g3.check()[0] is None
 
 
 def test_loss_of_vram_headroom_and_partial_offload_are_detected():
@@ -275,3 +279,52 @@ def test_governor_uses_the_same_guard_for_gpu_not_only_ram():
     assert gov2._resource_block() is None
     gov.close()
     gov2.close()
+
+
+# ------------------------------------------------------------------ real-hardware regression: the model's own runtime buffers are not "contention"
+REAL_MODEL = [{"name": "qwen3.5:9b", "size_bytes": 6302707216, "size_vram_bytes": 5523206306}]  # real /api/ps numbers for qwen3.5:9b at 8k context
+
+
+def test_the_models_own_runtime_buffers_are_never_mistaken_for_contention():
+    """Real headless run, qwen3.5:9b at 8k context: idle GPU 14 MB; model loaded 6,440 MB used vs /api/ps size_vram 5,267 MB; the ~1.1 GB difference (and its
+    later growth) is Ollama's own KV cache / compute buffers. Growth heuristics throttled the run forever; only direct unsafe conditions may throttle."""
+    g, _ = make_guard(None)
+    for used in (14.0, 5300.0, 6440.0, 6440.0 + 900.0):  # idle, warm-up weights only, after first inference, after larger prompts
+        reason, d = g.evaluate({"ram_available_mb": 16000.0, "gpu": gpu(used), "ollama_loaded_detail": REAL_MODEL if used > 5000 else []})
+        assert reason is None, (used, reason, d)
+    # a neighbour taking the headroom IS unsafe, and a busy GPU while we are idle IS unsafe
+    assert g.evaluate({"ram_available_mb": 16000.0, "gpu": gpu(8100.0), "ollama_loaded_detail": REAL_MODEL})[0] == "gpu_vram_headroom_lost"
+    assert g.evaluate({"ram_available_mb": 16000.0, "gpu": gpu(6440.0, util=97.0), "ollama_loaded_detail": REAL_MODEL}, util_check=True)[0] == "gpu_busy_other_process"
+
+
+def test_a_reloaded_instance_at_a_larger_context_is_not_a_residency_drop_but_a_real_drop_still_is():
+    """Warm-up loaded the model fully on the GPU (default context); the first real call reloaded it at 8k context: 87.6% on GPU, steady. Not a drop."""
+    g, _ = make_guard(None)
+    warm = [{"name": "m", "size_bytes": int(5251.7 * MB), "size_vram_bytes": int(5251.7 * MB)}]
+    big = [{"name": "m", "size_bytes": 6302707216, "size_vram_bytes": 5523206306}]
+    assert g.evaluate({"ram_available_mb": 16000.0, "gpu": gpu(6000.0), "ollama_loaded_detail": warm})[0] is None
+    assert g.evaluate({"ram_available_mb": 16000.0, "gpu": gpu(6431.0), "ollama_loaded_detail": big})[0] is None  # new instance size: reference restarts
+    assert g.evaluate({"ram_available_mb": 16000.0, "gpu": gpu(6431.0), "ollama_loaded_detail": big})[0] is None
+    shrunk = [{"name": "m", "size_bytes": 6302707216, "size_vram_bytes": int(4300 * MB)}]  # the SAME instance loses GPU share (pushed to CPU by a neighbour)
+    assert g.evaluate({"ram_available_mb": 16000.0, "gpu": gpu(5200.0), "ollama_loaded_detail": shrunk})[0] == "model_vram_residency_dropped"
+
+
+def test_warm_up_loads_the_instance_with_the_runs_context_window():
+    seen = {}
+
+    class W:
+        def __init__(self, *a, **k):
+            pass
+
+        def warm(self, *, model, keep_alive="30m", timeout_s=None, num_ctx=None):
+            seen.update(model=model, num_ctx=num_ctx)
+            return {"latency_s": 0.1, "load_duration_s": 0.1, "done_reason": "load"}
+
+    import modules.ollama_pilot as op
+    old = op.client_factory
+    op.client_factory = lambda b, t: W()
+    try:
+        out = op.warm_up({"model": "m", "base_url": "http://127.0.0.1:11434", "max_context_tokens": 8192, "timeout_s": 120.0})
+    finally:
+        op.client_factory = old
+    assert out["warmed"] and seen == {"model": "m", "num_ctx": 8192}
