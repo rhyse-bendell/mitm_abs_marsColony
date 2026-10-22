@@ -176,17 +176,76 @@ def test_shared_and_own_sources_stay_inspectable_for_the_generative_pilot(mixed_
         assert verdict.legal is True, src
 
 
-def test_procedural_pilot_keeps_its_documented_retargeting(mixed_sim):
+def test_private_source_access_is_controller_neutral(mixed_sim):
+    """The same inaccessible source is refused for the Procedural Baseline and for Ollama: no substitute source, no alternate action."""
+    st = mixed_sim
+    arch = _agent(st, "Architect")
+    assert not arch.is_generative_pilot()
+    events = []
+    st.logger.register_event_listener(lambda e: events.append((e["event_type"], e["payload_data"])))
+    decision = BrainDecision(ExecutableActionType.INSPECT_INFORMATION_SOURCE, target_id="Botanist_Info", confidence=0.9)
+    verdict = st.action_gate.evaluate(agent=arch, decision=decision, sim_state=st)
+    assert verdict.legal is False and verdict.blockers == ["private_source_inaccessible"]
+    actions = arch._translate_brain_decision_to_legacy_action(decision, st.environment, sim_state=st)
+    assert [a["type"] for a in actions] == ["idle"] and actions[0]["blockers"] == ["private_source_inaccessible"]
+    names = [e[0] for e in events]
+    assert "source_retargeted_due_to_role_private_mismatch" not in names and "mecha_action_blocked" in names
+    aff = next(a for a in st.brain_context_builder.build(st, arch).action_affordances if a["action_type"] == "inspect_information_source" and a["target_id"] == "Botanist_Info")
+    assert aff["source_accessible"] is False and aff["source_blocker"] == "private_source_inaccessible"
+    # the translation-level resolver itself never substitutes either (defensive: it is normally unreachable behind the gate)
+    got = arch._resolve_inspect_target(decision, st.environment, sim_state=st)
+    assert got == (None, None)
+    assert any(n == "target_resolution_failed" and p.get("failure_category") == "private_source_inaccessible" for n, p in events)
+
+
+def test_rulebrain_never_proposes_an_inaccessible_source():
+    with tempfile.TemporaryDirectory() as tmp:
+        st = SimulationState(phases=None, project_root=tmp, flash_mode=True, experiment_name="rb_private", seed=11,
+                             experimental_settings={"constructs": {"teamwork_potential": 0.5, "taskwork_potential": 0.5}, "profile_mode": "compact_panel"})
+        events = []
+        st.logger.register_event_listener(lambda e: events.append((e["event_type"], e["payload_data"])))
+        try:
+            for _ in range(200):
+                st.update(1.0)
+        finally:
+            st.stop()
+        names = {n for n, _ in events}
+        assert "source_retargeted_due_to_role_private_mismatch" not in names
+        assert not any(n == "mecha_action_blocked" and "private_source_inaccessible" in (p.get("blockers") or []) for n, p in events)  # RuleBrain reasons from the blocker state
+        sel = [p for n, p in events if n == "pilot_selection_via_adapter" and p.get("selected_action") == "inspect_information_source"]
+        assert sel and all(not str(p["target_id"]).endswith("_Info") or str(p["target_id"]) in {"Team_Info", f"{p['agent']}_Info"} for p in sel)
+
+
+def test_team_info_is_not_silently_regrounded_to_the_role_source(mixed_sim):
+    """A Pilot's INSPECT of the shared Team_Info stands even though the role source was never inspected."""
     st = mixed_sim
     arch = _agent(st, "Architect")
     events = []
     st.logger.register_event_listener(lambda e: events.append(e["event_type"]))
-    decision = BrainDecision(ExecutableActionType.INSPECT_INFORMATION_SOURCE, target_id="Botanist_Info", confidence=0.9)
-    assert st.action_gate.evaluate(agent=arch, decision=decision, sim_state=st).legal is True  # gate unchanged for the Procedural Baseline
-    arch._translate_brain_decision_to_legacy_action(decision, st.environment, sim_state=st)
-    assert "mecha_action_blocked" not in events
-    aff = next(a for a in st.brain_context_builder.build(st, arch).action_affordances if a["action_type"] == "inspect_information_source" and a["target_id"] == "Botanist_Info")
-    assert aff["source_accessible"] is False  # the fact is stated, the Procedural Pilot's list is otherwise unchanged
+    assert not arch.source_memory_state.get("Architect_Info", {}).get("ever_inspected")
+    decision = BrainDecision(ExecutableActionType.INSPECT_INFORMATION_SOURCE, target_id="Team_Info", confidence=0.9)
+    target, point = arch._resolve_inspect_target(decision, st.environment, sim_state=st)
+    assert target == "Team_Info" and point is not None
+    # shared source already exhausted for acquisition and role grounding still missing: this used to be rewritten to Architect_Info
+    arch.source_exhaustion_state["Team_Info"] = {"exhausted_for_acquisition": True, "exhausted": True}
+    arch.source_memory_state.setdefault("Team_Info", {})["revisitable_for_verification"] = True
+    arch._resolve_inspect_target(decision, st.environment, sim_state=st)
+    assert "source_retargeted_due_to_missing_role_grounding" not in events and "team_info_revisit_suppressed_post_baseline" not in events
+
+
+def test_closure_source_pointer_does_not_replace_the_pilots_inspect_target(mixed_sim):
+    st = mixed_sim
+    eng = _agent(st, "Engineer")
+    events = []
+    st.logger.register_event_listener(lambda e: events.append((e["event_type"], e["payload_data"])))
+    pid = "site_b_house_001"
+    eng.project_closure_state.update({"active": True, "project_id": pid, "repair_mode": True, "repair_blocker_signature": "sig"})
+    assert eng._set_closure_source_pointer(project_id=pid, blocker_signature="sig", source_id="Engineer_Info", missing_rule_ids=["rule:x"], sim_state=st)
+    decision = BrainDecision(ExecutableActionType.INSPECT_INFORMATION_SOURCE, target_id="Team_Info", confidence=0.9)
+    target, _ = eng._resolve_inspect_target(decision, st.environment, sim_state=st)
+    assert target == "Team_Info"  # the Pilot's target stands; the pointer is reported, not applied
+    assert any(n == "closure_source_pointer_not_applied" and p["pointed_source_id"] == "Engineer_Info" and p["pilot_target_id"] == "Team_Info" for n, p in events)
+    assert not any(n == "target_resolved" and p.get("resolution_mode") == "hard_pointed_obligation" for n, p in events)
 
 
 # ------------------------------------------------------------------ 3. token estimator

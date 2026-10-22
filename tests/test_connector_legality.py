@@ -26,13 +26,21 @@ def _attach(cm, connector, a, b):
 def test_water_generator_to_house_is_legal_in_either_argument_order(manager):
     gen, house, wc = _make(manager, "water_generator"), _make(manager, "house"), _make(manager, "water_connector")
     assert _attach(manager, wc, gen, house) == (True, "attached")
-    assert _attach(manager, wc, house, gen)[0] is True
+    assert _attach(manager, wc, house, gen) == (False, "already_connected")  # the same direct connection, either order, counts once
+    other = ConstructionManager()
+    other.sites["site_b"].capacity = 20
+    gen2, house2, wc2 = _make(other, "water_generator"), _make(other, "house"), _make(other, "water_connector")
+    assert _attach(other, wc2, house2, gen2) == (True, "attached")  # and the reverse argument order is legal on its own
 
 
 def test_water_generator_to_greenhouse_is_legal(manager):
     gen, gh, wc = _make(manager, "water_generator"), _make(manager, "greenhouse"), _make(manager, "water_connector")
     assert _attach(manager, wc, gen, gh) == (True, "attached")
-    assert _attach(manager, wc, gh, gen)[0] is True
+    assert _attach(manager, wc, gh, gen) == (False, "already_connected")
+    other = ConstructionManager()
+    other.sites["site_b"].capacity = 20
+    gen2, gh2, wc2 = _make(other, "water_generator"), _make(other, "greenhouse"), _make(other, "water_connector")
+    assert _attach(other, wc2, gh2, gen2) == (True, "attached")
 
 
 def test_inappropriate_endpoint_combinations_stay_illegal(manager):

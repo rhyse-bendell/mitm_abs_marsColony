@@ -1523,6 +1523,11 @@ class ConstructionManager:
         support_type = "water" if connector_type == "water_connector" else "food"
         if not self._connector_endpoints_legal(support_type, start_project.get("type"), end_project.get("type")):
             return False, "invalid_connector_endpoint_types"
+        if start_id == end_id:
+            return False, "self_connection"
+        pair = {start_id, end_id}
+        if any(c.get("connection_type") == support_type and {c.get("from_project_id"), c.get("to_project_id")} == pair for c in self.connectors):
+            return False, "already_connected"  # one physical direct connection counts once (it never inflates a house support count)
         links = connector.setdefault("connections", [])
         link_payload = {
             "connection_id": f"{connector_id}:link:{len(links)+1}",
@@ -1622,6 +1627,32 @@ class ConstructionManager:
                 blockers.append("already_connected")
                 break
         return not blockers, blockers
+
+    CONNECTOR_TYPES = ("food_connector", "water_connector")
+
+    def valid_connector_links(self, project):
+        """The connector project's link entries that are real direct connections: both endpoint structures exist and the endpoint kinds are legal for this
+        connector type (food: greenhouse -> housing; water: generator -> housing | greenhouse, per the task package). Build-step records have no endpoints
+        and are not links. Read-only."""
+        ptype = str((project or {}).get("type") or "").strip().lower()
+        if ptype not in self.CONNECTOR_TYPES:
+            return []
+        support_type = "water" if ptype == "water_connector" else "food"
+        out, seen = [], set()
+        for entry in (project.get("connections") or []):
+            if not isinstance(entry, dict) or not entry.get("from_project_id") or not entry.get("to_project_id"):
+                continue
+            a, b = self.projects.get(entry["from_project_id"]), self.projects.get(entry["to_project_id"])
+            if not isinstance(a, dict) or not isinstance(b, dict) or entry["from_project_id"] == entry["to_project_id"]:
+                continue
+            if not self._connector_endpoints_legal(support_type, a.get("type"), b.get("type")):
+                continue
+            key = frozenset((entry["from_project_id"], entry["to_project_id"]))
+            if key in seen:
+                continue  # a duplicate link is the same direct connection
+            seen.add(key)
+            out.append(entry)
+        return out
 
     def list_connection_options(self):
         """Read-only: every currently legal (connector, endpoint, endpoint) direct connection."""
@@ -1749,6 +1780,8 @@ class ConstructionManager:
         missing_rules = sorted(set(expected_rules) - supported_rules)
 
         physical_ready = bool(project.get("structurally_complete", False))
+        is_connector = str(project.get("type") or "").strip().lower() in self.CONNECTOR_TYPES
+        connector_link_ready = (not is_connector) or bool(self.valid_connector_links(project))
         support_missing = self.get_missing_support_requirements(project.get("id"))
         support_ready = bool(project.get("functional_support_complete", False)) or not bool(support_missing)
         rule_ready = not bool(missing_rules)
@@ -1790,11 +1823,13 @@ class ConstructionManager:
             missing_epistemic_functions.append("design_note")
 
         epistemic_ready = not bool(missing_epistemic_functions)
-        validation_ready = bool(physical_ready and support_ready and rule_ready and epistemic_ready)
+        validation_ready = bool(physical_ready and support_ready and rule_ready and epistemic_ready and connector_link_ready)
 
         blockers = []
         if not physical_ready:
             blockers.append("physical_incomplete")
+        if not connector_link_ready:
+            blockers.append("connector_has_no_valid_endpoint_link")  # a connector is a direct connection: with no endpoints it connects nothing, so it cannot be validated
         if not support_ready:
             blockers.append("missing_functional_support")
         blockers.extend([f"missing_expected_rule:{rid}" for rid in missing_rules])
@@ -1805,6 +1840,8 @@ class ConstructionManager:
         repair_options = []
         if not physical_ready:
             repair_options.append({"action": "continue_construction"})
+        if not connector_link_ready:
+            repair_options.append({"action": "connect_structures", "reason": "connector_has_no_valid_endpoint_link"})
         if not support_ready:
             for support_type, qty in sorted((support_missing or {}).items()):
                 repair_options.append({"action": "build_or_attach_connector", "support_type": support_type, "quantity": int(qty or 0)})
@@ -1831,6 +1868,7 @@ class ConstructionManager:
             "support_ready": support_ready,
             "rule_ready": rule_ready,
             "epistemic_ready": epistemic_ready,
+            "connector_link_ready": connector_link_ready,
             "validation_ready": validation_ready,
             "missing_rules": missing_rules,
             "missing_epistemic_functions": missing_epistemic_functions,

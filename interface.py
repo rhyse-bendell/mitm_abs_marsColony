@@ -4300,7 +4300,7 @@ class MarsColonyInterface:
         if self.host_monitor is None:
             from modules.host_resources import HostResourceMonitor
 
-            self.host_monitor = HostResourceMonitor(interval_s=3.0, ollama_ps=self._monitor_loaded_models)
+            self.host_monitor = HostResourceMonitor(interval_s=3.0, ollama_ps=self._monitor_loaded_models, ollama_detail=self._monitor_loaded_detail)
             self.host_monitor.start()
         return self.host_monitor
 
@@ -4310,6 +4310,13 @@ class MarsColonyInterface:
 
         base = getattr(self, "_monitor_ollama_base", None)
         return None if not base else [m["name"] for m in ollama_pilot.client_factory(base, 3.0).loaded_models()]
+
+    def _monitor_loaded_detail(self):
+        """Monitor thread: loaded-model sizes (/api/ps) for the shared resource guard; same cached base URL as above."""
+        from modules import ollama_pilot
+
+        base = getattr(self, "_monitor_ollama_base", None)
+        return None if not base else ollama_pilot.client_factory(base, 3.0).loaded_models()
 
     def _any_ollama_agent_selected(self):
         return any(v.get() == "Local Ollama" for v in getattr(self, "agent_controller_vars", {}).values())

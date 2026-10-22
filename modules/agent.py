@@ -3280,19 +3280,25 @@ class Agent:
         closure_project_id = self.project_closure_state.get("project_id") if self.project_closure_state.get("active") else None
         hard_pointed_obligation = False
         if closure_project_id and self.project_closure_state.get("repair_mode"):
-            closure_pointer = self._active_closure_source_pointer(project_id=closure_project_id, sim_state=sim_state)
-            if closure_pointer and closure_pointer.get("source_id"):
-                explicit_target = closure_pointer.get("source_id")
-                requested_target_id = explicit_target
-                hard_pointed_obligation = True
+            # A teammate-pointed closure source is information / an obligation the Pilot may act on. It no longer REPLACES the Pilot's own
+            # INSPECT target here (that changed which source the Pilot chose); it is reported, and the Pilot's target stands.
+            pointer = self._active_closure_source_pointer(project_id=closure_project_id, sim_state=sim_state)
+            if pointer and pointer.get("source_id") and str(pointer.get("source_id")) != str(explicit_target):
+                self._emit_event(sim_state, "closure_source_pointer_not_applied", {"project_id": closure_project_id, "pointed_source_id": pointer.get("source_id"), "pilot_target_id": explicit_target})
         self._emit_event(sim_state, "target_resolution_started", {"target_type": "information_source", "requested_target_id": explicit_target})
         rerank_explicit_target = False
         explicit_retarget_reason = None
         if explicit_target:
             explicit_allowed, explicit_reason = self._agent_can_target_information_source(explicit_target, environment)
-            if not explicit_allowed:
-                rerank_explicit_target = True
-                explicit_retarget_reason = explicit_reason
+            if not explicit_allowed and explicit_reason in {"packet_not_in_allowed_set", "role_private_mismatch"}:
+                # An inaccessible (private) source: no substitute source is inspected (legality is controller-neutral; the ActionGate normally
+                # refuses this before translation).
+                self._reject_illegal_source_target(explicit_target, environment, sim_state=sim_state, reason=explicit_reason)
+                self._set_status(f"Inspect target {explicit_target} is not accessible to this agent ({explicit_reason}); nothing was inspected in its place")
+                self._emit_event(sim_state, "target_resolution_failed", {"target_type": "information_source", "failure_category": "private_source_inaccessible", "requested_target_id": explicit_target, "reason": explicit_reason})
+                return None, None
+            elif not explicit_allowed:
+                # Not a real source id (unknown / missing): a malformed reference, normalised like a missing target (nothing was denied to the Pilot).
                 self._reject_illegal_source_target(explicit_target, environment, sim_state=sim_state, reason=explicit_reason, event_name=None)
                 explicit_target = None
             else:
@@ -3305,15 +3311,6 @@ class Agent:
                 )
                 revisitable = bool(source_mem.get("revisitable_for_verification", True))
                 cooldown_ready = float(source_mem.get("revisit_cooldown_until", 0.0) or 0.0) <= now_ts
-                role_source = f"{self.role}_Info"
-                role_missing = bool(self._epistemic_sufficiency(environment, sim_state=sim_state).get("role_missing"))
-                role_never_inspected = not bool(self.source_memory_state.get(role_source, {}).get("ever_inspected"))
-                explicit_team_exhausted_verification = (
-                    explicit_target == "Team_Info"
-                    and exhausted
-                    and revisitable
-                    and (role_missing or role_never_inspected)
-                )
                 if hard_pointed_obligation:
                     selection = self._select_source_access_target(environment, explicit_target, sim_state=sim_state)
                     if selection is not None and selection.get("position") is not None:
@@ -3340,59 +3337,23 @@ class Agent:
                         },
                     )
                     return explicit_target, None
-                if explicit_team_exhausted_verification:
-                    rerank_explicit_target = True
-                    self._emit_event(
-                        sim_state,
-                        "team_info_revisit_suppressed_post_baseline",
-                        {
-                            "source_id": explicit_target,
-                            "preferred_source_target": role_source,
-                            "reason": "shared_source_verification_only_while_role_grounding_missing",
-                            "role_missing": role_missing,
-                            "role_never_inspected": role_never_inspected,
-                        },
-                    )
-                    self._emit_event(
-                        sim_state,
-                        "source_retargeted_due_to_missing_role_grounding",
-                        {
-                            "current_source_target": explicit_target,
-                            "preferred_source_target": role_source,
-                            "reason": "shared_source_verification_only_while_role_grounding_missing",
-                        },
-                    )
-                elif not cooldown_ready:
-                    rerank_explicit_target = True
-                    self._emit_event(
-                        sim_state,
-                        "source_revisit_deferred",
-                        {"current_source_target": explicit_target, "reason": "revisit_cooldown_active", "cooldown_until": float(source_mem.get("revisit_cooldown_until", 0.0) or 0.0)},
-                    )
+                # The Pilot chose a legal source. Revisit cooldown, exhaustion and "dependency unchanged" are stated as facts (events) but they do NOT
+                # replace the Pilot's target: the named source is the one executed. (They may shape which affordances are offered BEFORE the choice.)
+                if not cooldown_ready:
+                    self._emit_event(sim_state, "source_revisit_noted", {"source_id": explicit_target, "reason": "revisit_cooldown_active", "cooldown_until": float(source_mem.get("revisit_cooldown_until", 0.0) or 0.0), "substituted": False})
                 elif self._source_exhausted_without_dependency_change(explicit_target, environment, sim_state=sim_state):
-                    rerank_explicit_target = True
-                    self._emit_event(
-                        sim_state,
-                        "source_revisit_deferred",
-                        {
-                            "current_source_target": explicit_target,
-                            "reason": "source_exhausted_dependency_unchanged",
-                        },
-                    )
-                    self._emit_event(
-                        sim_state,
-                        "exhausted_source_reinspect_suppressed",
-                        {"source_id": explicit_target, "reason": "dependency_unchanged"},
-                    )
-                else:
-                    selection = self._select_source_access_target(environment, explicit_target, sim_state=sim_state)
-                    if selection is not None and selection.get("position") is not None:
-                        if exhausted and not revisitable:
-                            self._emit_event(sim_state, "source_revisit_deferred", {"current_source_target": explicit_target, "reason": "source_exhausted_for_agent"})
-                        else:
-                            self._set_status(f"Inspect target selected: {explicit_target}")
-                            self._emit_event(sim_state, "target_resolved", {"target_type": "information_source", "target_id": explicit_target, "candidate_count": 1})
-                            return explicit_target, selection.get("position")
+                    self._emit_event(sim_state, "source_revisit_noted", {"source_id": explicit_target, "reason": "source_exhausted_dependency_unchanged", "substituted": False})
+                elif exhausted and not revisitable:
+                    self._emit_event(sim_state, "source_revisit_noted", {"source_id": explicit_target, "reason": "source_exhausted_for_agent", "substituted": False})
+                selection = self._select_source_access_target(environment, explicit_target, sim_state=sim_state)
+                if selection is not None and selection.get("position") is not None:
+                    self._set_status(f"Inspect target selected: {explicit_target}")
+                    self._emit_event(sim_state, "target_resolved", {"target_type": "information_source", "target_id": explicit_target, "candidate_count": 1})
+                    return explicit_target, selection.get("position")
+                # No usable access point for the named source right now: the action is reported as unresolved. No other source is inspected in its place.
+                self._set_status(f"Inspect target {explicit_target} has no usable access point right now; nothing was inspected in its place")
+                self._emit_event(sim_state, "target_resolution_failed", {"target_type": "information_source", "failure_category": "source_access_point_unavailable", "requested_target_id": explicit_target})
+                return None, None
 
         candidates = self._candidate_information_sources(environment, sim_state=sim_state)
         if closure_pointer and closure_pointer.get("source_id"):
@@ -3429,46 +3390,6 @@ class Agent:
         if not non_stalled:
             non_stalled = [c for c in candidates if c[4] < 3]
         chosen = non_stalled[0] if non_stalled else candidates[0]
-        if requested_target_id and explicit_retarget_reason:
-            role_source = f"{self.role}_Info"
-            preferred_order = [role_source, "Team_Info"]
-            for preferred_source in preferred_order:
-                pref_candidate = next((c for c in candidates if c[1] == preferred_source), None)
-                if pref_candidate is not None:
-                    chosen = pref_candidate
-                    break
-            self._emit_event(
-                sim_state,
-                "source_retargeted_due_to_role_private_mismatch",
-                {
-                    "agent": self.name,
-                    "agent_role": self.role,
-                    "requested_target_id": requested_target_id,
-                    "rerouted_to": chosen[1],
-                    "reason": explicit_retarget_reason,
-                    "cross_role_allowed": False,
-                },
-            )
-        role_source = f"{self.role}_Info"
-        role_missing = bool(self._epistemic_sufficiency(environment, sim_state=sim_state).get("role_missing"))
-        role_never_inspected = not bool(self.source_memory_state.get(role_source, {}).get("ever_inspected"))
-        if explicit_target == "Team_Info" and (role_missing or role_never_inspected):
-            role_candidate = next((c for c in candidates if c[1] == role_source), None)
-            if role_candidate is not None:
-                role_mem = self.source_memory_state.get(role_source, {})
-                role_cooldown_ready = float(role_mem.get("revisit_cooldown_until", 0.0) or 0.0) <= now_ts
-                if role_cooldown_ready:
-                    chosen = role_candidate
-                    rerank_explicit_target = True
-                    self._emit_event(
-                        sim_state,
-                        "source_retargeted_due_to_missing_role_grounding",
-                        {
-                            "current_source_target": explicit_target,
-                            "preferred_source_target": role_source,
-                            "reason": "role_grounding_prioritized_over_shared_verification",
-                        },
-                    )
         live_commitment, current_source, _ = self._has_live_epistemic_commitment(environment, sim_state=sim_state, now_ts=now_ts)
         if live_commitment and current_source and chosen[1] != current_source:
             candidate_source = chosen[1]
@@ -7878,6 +7799,7 @@ class Agent:
                 "validation_outcome": trace.get("validation_outcome"), "retry_count": trace.get("retry_count"), "parsed_affordance_id": trace.get("parsed_affordance_id"),
                 "parsed_action": trace.get("parsed_action"), "wall_clock_inference_s": round(float(trace.get("wall_clock_inference_s") or 0.0), 3),
                 "queue_wait_s": trace.get("queue_wait_s"), "queue_depth_at_enqueue": trace.get("queue_depth_at_enqueue"),
+                "resource_wait_s": trace.get("resource_wait_s"), "resource_timeout_retries": trace.get("resource_timeout_retries"), "failure_class": trace.get("failure_class"),
                 "estimated_prompt_tokens": (trace.get("budget") or {}).get("estimated_prompt_tokens"), "omitted_item_counts": (trace.get("budget") or {}).get("omitted_item_counts"),
                 "tier1_over_budget": (trace.get("budget") or {}).get("tier1_over_budget"),
                 "token_metadata": ((trace.get("attempts") or [{}])[-1] or {}).get("token_metadata")})
@@ -10483,6 +10405,14 @@ class Agent:
         return True
 
     def _handle_controller_failure(self, sim_state, failure):
+        if (getattr(failure, "trace", None) or {}).get("failure_class") == "cancelled" or (getattr(sim_state, "inference_closed", False) and (getattr(failure, "trace", None) or {}).get("validation_outcome") == "cancelled"):
+            # The experimenter stopped the run while this decision was waiting (for the model or for host resources). That is a stop, not a controller
+            # failure: it is recorded as a cancelled decision and neither halts with a controller error nor consults any other controller.
+            trace = dict(getattr(failure, "trace", {}) or {})
+            trace.update(kind="ollama_decision", controller_failure=False, cancelled=True)
+            sim_state.record_controller_trace(trace)
+            self._emit_event(sim_state, "controller_decision_cancelled", {"controller_type": self.controller_type_id(), "validation_outcome": trace.get("validation_outcome"), "resource_wait_s": trace.get("resource_wait_s")})
+            return
         policy = str((getattr(self, "controller_spec", None).full_settings() if getattr(self, "controller_spec", None) else {}).get("failure_policy") or "stop_run")
         trace = dict(getattr(failure, "trace", {}) or {})
         trace.update(kind="ollama_decision", controller_failure=True, failure_policy=policy)
@@ -10705,7 +10635,9 @@ class Agent:
             if handoff.get("pending") and handoff.get("expires_at", 0.0) >= now_ts:
                 self.post_inspect_handoff["pending"] = False
             committed_source = self.inspect_pursuit.get("source_id")
-            if committed_source and self._inspect_pursuit_active_for(committed_source, now_ts):
+            pilot_target = str(decision.target_id or "").strip()
+            if committed_source and self._inspect_pursuit_active_for(committed_source, now_ts) and (not pilot_target or pilot_target == str(committed_source)):
+                # Reuse of a live pursuit is continuation of the SAME source. It never replaces a different source the Pilot has just chosen.
                 source_id = committed_source
                 interaction_target = self.inspect_pursuit.get("target_position")
                 self._emit_event(

@@ -170,6 +170,7 @@ class SimulationState:
         # is pending, so simulated time never includes inference wall time. Off (default) = the original synchronous call.
         self.async_inference = False
         self.inference_closed = False
+        self._resource_guard = None  # shared RAM/GPU guard, created lazily on the first Ollama inference (GUI governor and headless sync path)
         self.token_estimators = {}  # model tag -> TokenEstimator (session-adaptive prompt token estimate)
         self._inference_governor = None  # created lazily on the first Ollama submission: Procedural-only runs never instantiate it
         self.resource_monitor = None
@@ -983,7 +984,9 @@ class SimulationState:
         """failure_policy=stop_run: record an explicit controller-error terminal state; no fallback controller is ever consulted."""
         if self.controller_error is not None:
             return
-        self.controller_error = {"agent": agent.name, "agent_id": agent.agent_id, "role": agent.role, "controller_type": agent.controller_type_id(), "sim_time": float(self.time), "message": str(failure)}
+        trace = getattr(failure, "trace", None) or {}
+        self.controller_error = {"agent": agent.name, "agent_id": agent.agent_id, "role": agent.role, "controller_type": agent.controller_type_id(), "sim_time": float(self.time), "message": str(failure),
+                                 "failure_class": trace.get("failure_class")}
         self.terminal_state = "controller_error"
         self.terminal_time = float(self.time)
         self.logger.log_event(self.time, "controller_error_run_halted", dict(self.controller_error))
@@ -1082,7 +1085,7 @@ class SimulationState:
         from modules.token_estimator import TokenEstimator
 
         estimator = self.token_estimators.setdefault(str(settings["model"]), TokenEstimator(str(settings["model"])))  # one learner per model tag per session
-        adapter = OllamaPilotAdapter(settings, agent_id=agent.agent_id, role=agent.role, estimator=estimator)
+        adapter = OllamaPilotAdapter(settings, agent_id=agent.agent_id, role=agent.role, estimator=estimator, guard_provider=self._guard_for_adapter)
         provider = OllamaControllerProvider(adapter)
         cfg = BrainBackendConfig(backend="local_ollama_controller", local_base_url=settings["base_url"], local_model=str(settings["model"]), timeout_s=float(settings["timeout_s"]),
                                  max_retries=int(settings["max_retries"]), fallback_backend="none")
@@ -1787,6 +1790,9 @@ class SimulationState:
         if self._inference_governor is not None:
             self._inference_governor.max_concurrent = self.resource_settings["max_concurrent_inference"]
             self._inference_governor.memory_floor_mb = self.resource_settings["memory_floor_mb"]
+        if self._resource_guard is not None:
+            self._resource_guard.memory_floor_mb = self.resource_settings["memory_floor_mb"]
+            self._resource_guard.mode = self.resource_settings["resource_mode"]
         return dict(self.resource_settings)
 
     def _ollama_loaded_models_probe(self):
@@ -1800,17 +1806,43 @@ class SimulationState:
                 return [m["name"] for m in ollama_pilot.client_factory(base, 3.0).loaded_models()]
         return None
 
-    def inference_governor(self):
-        if self._inference_governor is None:
+    def _ollama_loaded_detail_probe(self):
+        """[{name, size_bytes, size_vram_bytes}] for models loaded in the local Ollama (/api/ps), or None if unreachable (read-only)."""
+        from modules import ollama_pilot
+
+        for agent in self.agents:
+            spec = getattr(agent, "controller_spec", None)
+            if spec is not None and getattr(spec, "controller_type", None) == "local_ollama":
+                base = spec.full_settings().get("base_url") or "http://127.0.0.1:11434"
+                return ollama_pilot.client_factory(base, 3.0).loaded_models()
+        return None
+
+    def resource_guard(self):
+        """The ONE protective core (RAM floor + optional NVIDIA GPU checks) used by the GUI governor and by headless synchronous inference."""
+        if self._resource_guard is None:
             from modules.host_resources import HostResourceMonitor
-            from modules.inference_governor import InferenceGovernor
+            from modules.resource_guard import ResourceGuard
 
             if self.resource_monitor is None:  # the GUI may share its own monitor; otherwise this run owns one
-                self.resource_monitor = HostResourceMonitor(interval_s=3.0, ollama_ps=self._ollama_loaded_models_probe)
-                self.resource_monitor.start()
+                self.resource_monitor = HostResourceMonitor(interval_s=3.0, ollama_ps=self._ollama_loaded_models_probe, ollama_detail=self._ollama_loaded_detail_probe)
                 self._owns_resource_monitor = True
+            self._resource_guard = ResourceGuard(self.resource_monitor, self.resource_settings["memory_floor_mb"], mode=self.resource_settings["resource_mode"],
+                                                 on_event=lambda name, payload: self.logger.log_event(self.time, name, dict(payload)))
+        return self._resource_guard
+
+    def _guard_for_adapter(self):
+        """Headless/synchronous inference is guarded inside the adapter; the async (GUI) path is guarded by the governor, so no double wait."""
+        return None if self.async_inference else self.resource_guard()
+
+    def inference_governor(self):
+        if self._inference_governor is None:
+            from modules.inference_governor import InferenceGovernor
+
+            guard = self.resource_guard()
+            if getattr(self, "_owns_resource_monitor", False) and getattr(self.resource_monitor, "_thread", None) is None:
+                self.resource_monitor.start()
             rs = self.resource_settings
-            self._inference_governor = InferenceGovernor(rs["max_concurrent_inference"], rs["memory_floor_mb"], monitor=self.resource_monitor,
+            self._inference_governor = InferenceGovernor(rs["max_concurrent_inference"], rs["memory_floor_mb"], monitor=self.resource_monitor, guard=guard,
                                                          on_event=lambda name, payload: self.logger.log_event(self.time, name, dict(payload)))
             self._inference_governor.paused = bool(self.inference_paused)
         return self._inference_governor
@@ -1868,6 +1900,9 @@ class SimulationState:
                 **self.execution_metadata,
                 "resource_settings": dict(self.resource_settings),
                 "inference_governor": self.inference_governor_stats(),
+                "resource_guard": self._resource_guard.manifest_state() if self._resource_guard is not None else None,
+                "resource_protection": {"inference_path": ("async_gui_governor" if self.async_inference else "synchronous_headless"), "guard_active": self._resource_guard is not None,
+                                        "max_concurrent_inference": self.resource_settings["max_concurrent_inference"], "resource_mode": self.resource_settings["resource_mode"]},
                 "token_estimators": {m: e.state() for m, e in self.token_estimators.items()},
             }
         )

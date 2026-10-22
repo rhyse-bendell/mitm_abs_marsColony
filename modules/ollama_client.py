@@ -133,11 +133,15 @@ class OllamaClient:
         return None
 
     # ------------------------------------------------------------------ inference
-    def warm(self, *, model: str, keep_alive: str = "30m", timeout_s: Optional[float] = None) -> Dict[str, Any]:
+    def warm(self, *, model: str, keep_alive: str = "30m", timeout_s: Optional[float] = None, num_ctx: Optional[int] = None) -> Dict[str, Any]:
         """Load an ALREADY-INSTALLED model into memory (POST /api/chat with an empty message list; Ollama's documented load-only call) and keep it
-        resident for `keep_alive`. Generates nothing. A missing model is an error here, never a download."""
+        resident for `keep_alive`. Generates nothing. A missing model is an error here, never a download.
+        `num_ctx` loads the instance with the context the run will really use: otherwise the first real call reloads a different (larger) instance."""
         started = time.perf_counter()
-        reply = self._request("POST", "/api/chat", {"model": model, "messages": [], "stream": False, "keep_alive": keep_alive}, timeout_s=timeout_s)
+        payload: Dict[str, Any] = {"model": model, "messages": [], "stream": False, "keep_alive": keep_alive}
+        if num_ctx:
+            payload["options"] = {"num_ctx": int(num_ctx)}
+        reply = self._request("POST", "/api/chat", payload, timeout_s=timeout_s)
         return {"latency_s": time.perf_counter() - started, "load_duration_s": (reply.get("load_duration") or 0) / 1e9, "done_reason": reply.get("done_reason")}
 
     def chat(self, *, model: str, messages: List[Dict[str, str]], options: Dict[str, Any], response_format: Any = None, think: Optional[bool] = False,

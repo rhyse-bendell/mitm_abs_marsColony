@@ -14,6 +14,17 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_host_probes(monkeypatch):
+    """No test depends on (or is delayed/blocked by) the real machine: host RAM/GPU probes return fixed, plentiful values. Tests of the resource
+    guard inject their own monitors/readers explicitly."""
+    import modules.host_resources as hr
+
+    monkeypatch.setattr(hr, "read_gpu", lambda *a, **k: None)
+    monkeypatch.setattr(hr, "read_memory", lambda: (65536.0, 32768.0))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _legacy_async_planner_vehicle(request):
     """Test-only vehicle for the legacy async-planner infrastructure tests.
 

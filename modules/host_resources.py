@@ -94,10 +94,14 @@ def read_gpu(timeout_s=3.0):
     if not exe:
         return None
     try:
-        out = subprocess.run([exe, "--query-gpu=name,memory.total,memory.used,memory.free", "--format=csv,noheader,nounits"],
+        out = subprocess.run([exe, "--query-gpu=name,memory.total,memory.used,memory.free,utilization.gpu", "--format=csv,noheader,nounits"],
                              capture_output=True, text=True, timeout=timeout_s, check=True).stdout.strip().splitlines()[0]
-        name, total, used, free = [p.strip() for p in out.split(",")]
-        return {"name": name, "total_mb": float(total), "used_mb": float(used), "free_mb": float(free)}
+        name, total, used, free, util = [p.strip() for p in out.split(",")]
+        try:
+            util_percent = float(util)
+        except ValueError:  # "[N/A]" on some drivers
+            util_percent = None
+        return {"name": name, "total_mb": float(total), "used_mb": float(used), "free_mb": float(free), "util_percent": util_percent}
     except Exception:  # noqa: BLE001
         return None
 
@@ -106,10 +110,14 @@ class HostResourceMonitor:
     """Low-frequency sampler. snapshot() returns the cached sample (never probes); refresh() probes once. start() refreshes on a daemon
     thread every interval_s seconds, so neither the Tk thread nor the simulation tick ever waits on a probe."""
 
-    def __init__(self, interval_s=3.0, ollama_ps=None, gpu_reader=read_gpu, memory_reader=read_memory, process_reader=read_process_mb):
+    def __init__(self, interval_s=3.0, ollama_ps=None, gpu_reader=None, memory_reader=None, process_reader=None, ollama_detail=None):
         self.interval_s = max(1.0, float(interval_s))
         self._ollama_ps = ollama_ps  # callable -> list of loaded model names, or None when unavailable
-        self._gpu_reader, self._memory_reader, self._process_reader = gpu_reader, memory_reader, process_reader
+        self._ollama_detail = ollama_detail  # callable -> list of {name, size_bytes, size_vram_bytes}, or None (used by the resource guard)
+        # readers are looked up at call time so tests can substitute them without touching real hardware
+        self._gpu_reader = gpu_reader or (lambda: read_gpu())
+        self._memory_reader = memory_reader or (lambda: read_memory())
+        self._process_reader = process_reader or (lambda: read_process_mb())
         self._cpu = _WindowsCpu() if sys.platform == "win32" else None
         self._lock = threading.Lock()
         self._snapshot = {}
@@ -122,7 +130,7 @@ class HostResourceMonitor:
             snap["ram_total_mb"], snap["ram_available_mb"] = self._memory_reader()
         except Exception:  # noqa: BLE001 - one failing probe never breaks another or the run
             snap["ram_total_mb"] = snap["ram_available_mb"] = None
-        for key, fn in (("process_mb", self._process_reader), ("gpu", self._gpu_reader), ("ollama_loaded_models", self._ollama_ps)):
+        for key, fn in (("process_mb", self._process_reader), ("gpu", self._gpu_reader), ("ollama_loaded_models", self._ollama_ps), ("ollama_loaded_detail", self._ollama_detail)):
             try:
                 snap[key] = fn() if fn else None
             except Exception:  # noqa: BLE001
