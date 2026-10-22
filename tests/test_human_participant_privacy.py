@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from human_testbed_helpers import Play
+from human_testbed_helpers import VALID_DESIGNS, Play
 
 FORBIDDEN_KEYS = {
     "correct", "hidden_correct", "build_error", "utility", "utility_score", "mental_model", "team_knowledge_manager", "knowledge_summary", "known_gaps",
@@ -78,11 +78,8 @@ def test_information_panel_holds_only_what_was_opened_and_nothing_derived(play):
 
 
 def test_view_is_invariant_to_hidden_construction_correctness(play):
-    play.walk_to("Build_Site_B")
-    play.choose("Build_Site_B", "Start a house")
-    play.advance(3)
+    pid = play.start_structure("house", VALID_DESIGNS["house"])
     construction = play.sim.environment.construction
-    pid = next(iter(construction.projects))
     strip = lambda v: json.dumps({k: v[k] for k in ("objects", "info", "agents")}, sort_keys=True)  # noqa: E731
     construction.projects[pid]["correct"] = True
     a = strip(play.view())

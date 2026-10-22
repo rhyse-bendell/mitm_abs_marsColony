@@ -8,6 +8,18 @@ from modules.realtime_testbed import HumanTestbedSession
 from modules.simulation import SimulationState
 
 
+VALID_DESIGNS = {
+    "house": {"floor_units": "2", "floor_color": "solid_other", "wall_ceiling_color": "different_from_floor", "headroom": "one_brick", "opening": "one_by_one", "enclosure": "sealed_apart_from_opening", "spacing": "six_or_more_studs"},
+    "greenhouse": {"soil": "dirt_and_grass", "soil_units": "2", "ceiling": "clear_glass", "walls": "two_opposite_sides", "air_gap": "small"},
+    "water_generator": {"foundation": "gray", "water_stack": "two_2x2_blue_two_high", "cap": "capped"},
+}
+INVALID_DESIGNS = {
+    "house": {"floor_units": "2", "floor_color": "mixed", "wall_ceiling_color": "same_as_floor", "headroom": "none", "opening": "none", "enclosure": "gaps", "spacing": "under_six_studs"},
+    "greenhouse": {"soil": "dirt_only", "soil_units": "1", "ceiling": "solid_bricks", "walls": "two_opposite_sides", "air_gap": "small"},
+    "water_generator": {"foundation": "other_color", "water_stack": "not_blue", "cap": "open"},
+}
+
+
 class Play:
     """A realtime human session driven by a fake wall clock, so tests control exactly how much wall time passes."""
 
@@ -52,6 +64,26 @@ class Play:
     def choose(self, object_id, label_part):
         item = next(i for i in self.obj(object_id)["items"] if label_part in i["label"])
         return self.gw.on_message({"t": "action", "item": item["id"]})
+
+    def start_structure(self, structure_type, design, site="Build_Site_B"):
+        """Walk to the site and START a structure with a participant design through the menu/gateway. -> project id (None if refused)."""
+        self.walk_to(site)
+        item = next(i for i in self.obj(site)["items"] if structure_type.replace("_", " ") in i["label"])
+        before = set(self.sim.environment.construction.projects)
+        self.gw.on_message({"t": "action", "item": item["id"], "design": design})
+        self.advance(3)
+        new = sorted(set(self.sim.environment.construction.projects) - before)
+        return new[0] if new else None
+
+    def complete_physically(self, project_id):
+        """Test SETUP only: deliver the bricks and finish every build step (physical progress is not what these tests are about)."""
+        c = self.sim.environment.construction
+        c.deliver_resource(project_id, "bricks", int(c.projects[project_id]["required_resources"]["bricks"]))
+        c.update()
+        c.start_project(project_id)
+        for _ in range(30):
+            c.execute_build_step(project_id, actor="test_setup", sim_time=self.sim.time)
+        c.update()
 
     def events_of(self, event_type):
         return [e for e in self.events if e["event_type"] == event_type]

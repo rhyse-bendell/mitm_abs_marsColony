@@ -121,6 +121,9 @@ class ConstructionManager:
         self._active_transports: Dict[str, Dict] = {}
         self._closure_reservations: Dict[str, Dict] = {}
         self.project_templates = self._build_project_templates()
+        from modules.construction_design import get_schema
+
+        self.design_schema = get_schema(getattr(task_model, "task_id", None) or "mars_colony")  # participant-authored design properties + authoritative evaluation
         self._project_counters: Dict[Tuple[str, str], int] = {}
         self._warned_legacy_targets = set()
 
@@ -452,15 +455,63 @@ class ConstructionManager:
                     )
         return options
 
-    def start_new_project(self, target, structure_type, *, author="system"):
+    def start_new_project(self, target, structure_type, *, author="system", design=None, sim_time=None):
         """Committed creation of a project of an explicit structure type: (project_id, status).
 
         The only runtime creation path for Pilot-started structures. Re-checks legality; never defaults the type.
+        A participant-authored START carries a `design`; the project then records it and its authoritative correctness is the task rules
+        evaluated on THAT design (see apply_design / evaluate_design).
         """
         legal, blockers, site_id = self.check_start(target, structure_type)
         if not legal:
             return None, blockers[0]
-        return self.create_project(site_id, str(structure_type).strip().lower(), author=author)
+        project_id, status = self.create_project(site_id, str(structure_type).strip().lower(), author=author)
+        if status == "created" and design:
+            self.apply_design(project_id, design, actor=author, sim_time=sim_time, initial=True)
+        return project_id, status
+
+    # ---- participant-authored design (human construction). Hidden truth stays here; participants only ever see their own choices.
+    DESIGN_AUTHORING = "participant_design"
+
+    def is_design_authored(self, project):
+        return isinstance(project, dict) and project.get("authoring") == self.DESIGN_AUTHORING
+
+    def evaluate_design(self, project_id):
+        """AUTHORITATIVE, HIDDEN: {valid, violations} of the project design against the task rules (None if it has no design)."""
+        project = self.projects.get(str(project_id or ""))
+        if not self.is_design_authored(project):
+            return None
+        return self.design_schema.evaluate(project.get("type"), project.get("design") or {})
+
+    def apply_design(self, project_id, design, *, actor=None, sim_time=None, initial=False):
+        """Record (initial) or change (repair) a project design and recompute its authoritative correctness from the task rules.
+
+        -> {"changed": [property ids], "valid_before", "valid_after"}; None if the project is unknown/not designable. Changing nothing is a no-op.
+        Physical/legal feasibility (materials, time) is enforced elsewhere; this never consults any actor DIK."""
+        project = self.projects.get(str(project_id or ""))
+        if not isinstance(project, dict) or not self.design_schema.has(project.get("type")):
+            return None
+        before = dict(project.get("design") or {})
+        valid_before = None if initial else bool(project.get("correct", True))
+        merged = {**before, **{str(k): str(v) for k, v in dict(design or {}).items()}}
+        changed = sorted(k for k in merged if before.get(k) != merged.get(k))
+        project["authoring"] = self.DESIGN_AUTHORING
+        project["design"] = merged
+        project.setdefault("design_history", []).append({"time": sim_time, "actor": actor, "design": dict(merged), "changed": list(changed), "initial": bool(initial)})
+        evaluation = self.design_schema.evaluate(project.get("type"), merged)
+        project["design_evaluation"] = evaluation  # hidden truth (research / validator only)
+        project["correct"] = bool(evaluation["valid"])
+        if not initial and changed:
+            project["repair_count"] = int(project.get("repair_count", 0) or 0) + 1
+            project["awaiting_revalidation"] = True
+            project["validated_complete"] = False
+            if str(project.get("closure_status") or "") == "failed":
+                project["closure_status"] = "idle"  # the failed attempt is superseded; the outcome is only known on revalidation
+                project["closure_owner"] = None
+                self._closure_reservations.pop(project_id, None)
+        self.update_project_provenance(project_id, event="design_recorded" if initial else ("design_changed" if changed else "design_unchanged"), actor=actor, sim_time=sim_time)
+        self.update()
+        return {"changed": changed, "valid_before": valid_before, "valid_after": bool(project["correct"])}
 
     def find_buildable_site_for_structure(self, structure_type):
         del structure_type
@@ -1245,6 +1296,8 @@ class ConstructionManager:
         project = self.projects.get(project_id)
         if not project or bool(correct):
             return False
+        if self.is_design_authored(project):
+            return False  # a participant-designed structure is correct or not according to its design, never by a draw on a contributor mechanisms
         if project.get("correct", True) is False:
             return False
         project["correct"] = False
@@ -1278,6 +1331,8 @@ class ConstructionManager:
         project = self.projects.get(project_id)
         if not project or not project.get("started"):
             return False
+        if self.is_design_authored(project):
+            return False  # nothing is silently corrected: a design is repaired only by CHANGING it (apply_design with the participant choices)
         was_incorrect = project.get("correct", True) is False
         project["correct"] = True
         project["validated_complete"] = False
@@ -1331,9 +1386,18 @@ class ConstructionManager:
                 team_rule_snapshot_ids=team_rule_snapshot_ids,
             )
             return
-        project["correct"] = True
+        design_authored = self.is_design_authored(project)
+        if design_authored:
+            # Authoritative truth is the recorded design. Completion needs the physical build and functional support, never simulated rules/workspace entries.
+            if not bool(project.get("correct", True)):
+                return self.mark_validated(project_id, False, actor=actor, sim_time=sim_time, held_data_ids=held_data_ids, held_information_ids=held_information_ids,
+                                           held_rule_ids=held_rule_ids, team_rule_snapshot_ids=team_rule_snapshot_ids, event=event)
+        else:
+            project["correct"] = True
         support_ready = self.recompute_support_status(project_id)
         readiness = self.evaluate_project_validation_readiness(project_id, actor=actor)
+        if design_authored:
+            readiness = {**readiness, "validation_ready": bool(readiness.get("physical_ready")) and bool(readiness.get("support_ready"))}
         if bool(readiness.get("validation_ready", False)) and support_ready:
             project["validated_complete"] = True
             project["status"] = "complete"

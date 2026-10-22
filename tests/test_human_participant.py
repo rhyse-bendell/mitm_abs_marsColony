@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from human_testbed_helpers import Play
+from human_testbed_helpers import INVALID_DESIGNS, VALID_DESIGNS, Play
 from modules.action_schema import ExecutableActionType
 from modules.controller_spec import (
     CONTROLLER_TYPES,
@@ -419,12 +419,9 @@ def test_vertical_slice_start_project_and_carry_bricks_through_contextual_menus(
         v = play.walk_to("Build_Site_B")
         assert play.obj("Build_Site_B")["near"]
         labels = [i["label"] for i in play.obj("Build_Site_B")["items"]]
-        assert "Start a house" in labels  # same typed START affordances the Pilots get; no role restriction
-        play.choose("Build_Site_B", "Start a house")
-        play.advance(3)
-        projects = [o for o in play.view()["objects"] if o["kind"] == "project"]
-        assert projects, "the committed START must have created a project"
-        pid = projects[0]["id"]
+        assert "Start a house..." in labels  # same typed START affordances the Pilots get (any role); the person then chooses a design
+        pid = play.start_structure("house", VALID_DESIGNS["house"])
+        assert pid, "the committed START must have created a project"
         assert [r for r in play.human_rows() if r["event_type"] == "action_intent" and r["grounded_action"]["project_id"] == pid]
         play.walk_to("pile_a")
         carry = [i for i in play.obj("pile_a")["items"] if "Carry bricks" in i["label"]]

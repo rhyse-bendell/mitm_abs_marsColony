@@ -120,14 +120,24 @@ _STRUCTURE_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 #   unfinished project at the target site); creating a NEW project requires it (enforced by the action gate).
 #   move_to_target: optional numeric destination `x`,`y` (world coordinates). With no `x`/`y` the destination is `target_id` (an interaction
 #     target or project id). Exactly one of the two must be given; the gate checks navigability/reachability read-only.
-#   communicate: optional typed message body `text` (+ `scope`: "team" or one teammate's name/role). Without `text` the existing Mecha-generated
-#     exchange applies unchanged. A typed body is delivered and logged as written; it is never parsed for DIK.
+#   communicate: optional typed message body `text` (+ `scope`: "team" or one teammate name/role). Without `text` the existing Mecha-generated
+#     exchange applies unchanged. A typed body is delivered and logged as written; it is never parsed for DIK. An optional `attachments` list of DIK
+#     element ids (information/data the sender has ENCOUNTERED) goes through the canonical DIK communication mechanism (TDP/TIP) as the same grounded objects.
+#   externalize_plan: optional `text` (a short note) + `attachments` (encountered DIK ids): a participant-authored whiteboard note instead of the
+#     Mecha-generated plan.
+#   start_construction: optional `design` {property_id: option_value} for a participant-authored structure; repair_or_correct_construction: optional
+#     `design` = the properties the participant chooses to CHANGE. The task package (construction_design.json) defines the properties; the gate checks them.
 ACTION_ARG_SPECS: Dict[ExecutableActionType, Dict[str, Any]] = {
-    ExecutableActionType.START_CONSTRUCTION: {"required": (), "allowed": ("structure_type",)},
+    ExecutableActionType.START_CONSTRUCTION: {"required": (), "allowed": ("structure_type", "design")},
     ExecutableActionType.CONNECT_STRUCTURES: {"required": CONNECT_STRUCTURES_ARG_KEYS, "allowed": CONNECT_STRUCTURES_ARG_KEYS},
     ExecutableActionType.MOVE_TO_TARGET: {"required": (), "allowed": ("x", "y")},
-    ExecutableActionType.COMMUNICATE: {"required": (), "allowed": ("text", "scope")},
+    ExecutableActionType.COMMUNICATE: {"required": (), "allowed": ("text", "scope", "attachments")},
+    ExecutableActionType.EXTERNALIZE_PLAN: {"required": (), "allowed": ("text", "attachments")},
+    ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION: {"required": (), "allowed": ("design",)},
 }
+
+MAX_ATTACHMENTS = 8
+MAX_DESIGN_PROPERTIES = 16
 
 _NUMERIC_ARG_KEYS = frozenset({"x", "y"})
 _FREE_TEXT_ARG_KEYS = frozenset({"text"})
@@ -171,6 +181,18 @@ def validate_action_args(action: ExecutableActionType, args: Any, *, allowed_str
         if key not in args or args.get(key) in (None, ""):
             continue
         value = args[key]
+        if key == "design":
+            if not isinstance(value, dict) or not value or len(value) > MAX_DESIGN_PROPERTIES:
+                errors.append("malformed_design")
+            elif not all(isinstance(k, str) and _ARG_ID_PATTERN.match(k) and isinstance(v, (str, int)) and not isinstance(v, bool) and len(str(v)) <= 60 for k, v in value.items()):
+                errors.append("malformed_design")
+            continue
+        if key == "attachments":
+            if not isinstance(value, list) or not value or len(value) > MAX_ATTACHMENTS or len(set(map(str, value))) != len(value):
+                errors.append("malformed_attachments")
+            elif not all(isinstance(v, str) and _ARG_ID_PATTERN.match(v) for v in value):
+                errors.append("malformed_attachments")
+            continue
         if key in _NUMERIC_ARG_KEYS:
             if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or abs(float(value)) > _COORDINATE_LIMIT:
                 errors.append(f"action_arg_not_a_number:{key}")

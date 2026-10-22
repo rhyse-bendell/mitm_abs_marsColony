@@ -1,0 +1,65 @@
+{
+  "schema": "construction_design/1",
+  "note": "Participant-chosen design properties per structure type. 'valid' and 'sources' are AUTHORITATIVE/HIDDEN: they never reach a participant (only property labels and option labels do). Valid values come from the final role briefs (Architect/Botanist/Engineer) and the Experimenter Protocol, cited by DIK element id. A property with no 'valid' list is a free design choice that the validator does not judge. Option order is deliberately not 'valid first'.",
+  "structures": {
+    "house": {
+      "title": "House design",
+      "properties": [
+        {"id": "floor_units", "label": "Floor area (2x2 bricks)", "sources": ["D_ARCH_CAPACITY_PER_2X2"],
+         "options": [{"value": "2", "label": "2"}, {"value": "1", "label": "1"}, {"value": "4", "label": "4"}, {"value": "3", "label": "3"}]},
+        {"id": "floor_color", "label": "Floor colour", "valid": ["solid_pink", "solid_other"], "sources": ["D_ARCH_FLOOR_SINGLE_COLOR", "D_ARCH_VIP_FLOOR_PINK", "D_ARCH_DIFF_FLOORS_SEPARATE_HOUSES"],
+         "options": [{"value": "mixed", "label": "Mixed colours"}, {"value": "solid_other", "label": "One solid colour (not pink)"}, {"value": "solid_pink", "label": "One solid pink"}]},
+        {"id": "wall_ceiling_color", "label": "Walls and ceiling colour", "valid": ["different_from_floor"], "sources": ["D_ARCH_WALLS_CEILING_DIFF_COLOR"],
+         "options": [{"value": "same_as_floor", "label": "Same colour as the floor"}, {"value": "different_from_floor", "label": "Different from the floor (any mix)"}]},
+        {"id": "headroom", "label": "Space between floor and ceiling", "valid": ["one_brick", "two_bricks"], "sources": ["D_ARCH_HEADROOM_1_BRICK"],
+         "options": [{"value": "two_bricks", "label": "Two bricks"}, {"value": "none", "label": "None"}, {"value": "one_brick", "label": "One brick"}]},
+        {"id": "opening", "label": "Opening", "valid": ["one_by_one"], "sources": ["D_ARCH_AIRLOCK_SIZE"],
+         "options": [{"value": "wide", "label": "One wide opening (wider than 1 brick)"}, {"value": "one_by_one", "label": "One opening, 1 brick wide and 1 brick high"}, {"value": "none", "label": "No opening"}, {"value": "several", "label": "Several openings"}]},
+        {"id": "enclosure", "label": "Walls and ceiling", "valid": ["sealed_apart_from_opening"], "sources": ["D_ARCH_HOUSE_ENCLOSED"],
+         "options": [{"value": "gaps", "label": "Some gaps in walls or ceiling"}, {"value": "sealed_apart_from_opening", "label": "Fully closed apart from the opening"}]},
+        {"id": "spacing", "label": "Distance to other structures", "valid": ["six_or_more_studs"], "sources": ["D_ARCH_SPACING_6_STUDS"],
+         "options": [{"value": "six_or_more_studs", "label": "6 studs or more"}, {"value": "under_six_studs", "label": "Less than 6 studs"}]}
+      ]
+    },
+    "greenhouse": {
+      "title": "Greenhouse design",
+      "properties": [
+        {"id": "soil", "label": "Soil", "valid": ["dirt_and_grass"], "sources": ["D_BOT_SOIL_BROWN_2X2", "D_BOT_SOIL_GREEN_2X2", "D_BOT_SOIL_IN_GREENHOUSE"],
+         "options": [{"value": "grass_only", "label": "Green grass plate only"}, {"value": "dirt_and_grass", "label": "Brown dirt brick and green grass plate (2x2)"}, {"value": "none", "label": "No soil"}, {"value": "dirt_only", "label": "Brown dirt brick only"}]},
+        {"id": "soil_units", "label": "Soil units", "sources": ["D_BOT_SOIL_SUPPORT_CAPACITY"],
+         "options": [{"value": "3", "label": "3"}, {"value": "1", "label": "1"}, {"value": "2", "label": "2"}, {"value": "5", "label": "5"}]},
+        {"id": "ceiling", "label": "Ceiling / covering", "valid": ["clear_glass"], "sources": ["D_BOT_GREENHOUSE_GLASS_CEILING"],
+         "options": [{"value": "solid_bricks", "label": "Solid bricks"}, {"value": "none", "label": "Open to the sky"}, {"value": "clear_glass", "label": "Clear glass bricks"}]},
+        {"id": "walls", "label": "Walls", "valid": ["two_opposite_sides"], "sources": ["D_BOT_GREENHOUSE_BREEZEWAY"],
+         "options": [{"value": "all_four_sides", "label": "Walls on all four sides"}, {"value": "two_opposite_sides", "label": "Walls on two opposite sides, two sides open"}, {"value": "one_side", "label": "A wall on one side"}, {"value": "no_walls", "label": "No walls"}]},
+        {"id": "air_gap", "label": "Space between soil and ceiling", "valid": ["small", "large"], "sources": ["D_BOT_GREENHOUSE_AIR_GAP"],
+         "options": [{"value": "large", "label": "Large"}, {"value": "none", "label": "None"}, {"value": "small", "label": "Small"}]}
+      ]
+    },
+    "water_generator": {
+      "title": "Water generator design",
+      "properties": [
+        {"id": "foundation", "label": "Foundation", "valid": ["gray"], "sources": ["D_ENG_WATERGEN_GRAY_FOUNDATION", "D_ENG_WATERGEN_BLUE_ON_GRAY"],
+         "options": [{"value": "other_color", "label": "Another colour"}, {"value": "none", "label": "No foundation"}, {"value": "gray", "label": "Gray blocks"}]},
+        {"id": "water_stack", "label": "Water bricks", "valid": ["two_2x2_blue_two_high"], "sources": ["D_ENG_WATERGEN_TWO_2X2_STACKED_2_HIGH", "D_ENG_WATERGEN_BLUE_ON_GRAY"],
+         "options": [{"value": "one_2x2_blue_one_high", "label": "One 2x2 translucent blue brick, one high"}, {"value": "not_blue", "label": "Bricks that are not translucent blue"}, {"value": "two_2x2_blue_two_high", "label": "Two 2x2 translucent blue bricks wide and long, stacked two high"}, {"value": "two_2x2_blue_one_high", "label": "Two 2x2 translucent blue bricks, one high"}]},
+        {"id": "cap", "label": "Top", "valid": ["capped"], "sources": ["D_ENG_WATERGEN_CAPPED"],
+         "options": [{"value": "open", "label": "Left open"}, {"value": "capped", "label": "Capped with a layer of bricks"}]}
+      ]
+    },
+    "food_connector": {
+      "title": "Food connector design",
+      "properties": [
+        {"id": "color", "label": "Connector colour", "valid": ["dark_green"], "sources": ["D_ENG_FOOD_CONNECTOR_GREENHOUSE_TO_HOUSING"],
+         "options": [{"value": "dark_blue", "label": "Dark blue"}, {"value": "other", "label": "Another colour"}, {"value": "dark_green", "label": "Dark green"}]}
+      ]
+    },
+    "water_connector": {
+      "title": "Water connector design",
+      "properties": [
+        {"id": "color", "label": "Connector colour", "valid": ["dark_blue"], "sources": ["D_ENG_WATER_CONNECTOR_GENERATOR_TO_HOUSING_OR_GREENHOUSE"],
+         "options": [{"value": "dark_green", "label": "Dark green"}, {"value": "dark_blue", "label": "Dark blue"}, {"value": "other", "label": "Another colour"}]}
+      ]
+    }
+  }
+}

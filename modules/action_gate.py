@@ -151,8 +151,22 @@ class AgentActionGate:
             return ActionGateResult(False, decision, blockers=["destination_unreachable"], target_id=decision.target_id, metadata={"destination": tuple(point)})
         return ActionGateResult(True, decision, target_id=decision.target_id, metadata={"destination": tuple(point)})
 
+    @staticmethod
+    def _unencountered_attachments(agent, args):
+        """Attached DIK ids the sender has NOT encountered (read-only). Only information the person was actually shown can be shared."""
+        ids = list(args.get("attachments") or [])
+        if not ids or not hasattr(agent, "encountered_dik"):
+            return []
+        encountered = agent.encountered_dik()
+        return [i for i in ids if i not in encountered]
+
     def _evaluate_communication(self, *, agent, decision, sim_state):
         args = decision_action_args(decision)
+        if "attachments" in args and "text" not in args:
+            return ActionGateResult(False, decision, blockers=["attachments_require_a_message"], target_id=decision.target_id)
+        missing = self._unencountered_attachments(agent, args)
+        if missing:
+            return ActionGateResult(False, decision, blockers=["attachment_not_encountered"], target_id=decision.target_id, metadata={"attachments": list(args.get("attachments") or [])})
         if decision.selected_action == ExecutableActionType.COMMUNICATE and "text" in args:
             # A typed message: its recipient scope must be the team or an existing teammate (never the sender).
             scope = str(args.get("scope") or "team")
@@ -163,6 +177,14 @@ class AgentActionGate:
         return self._pass(decision)
 
     def _evaluate_artifact(self, *, agent, decision, sim_state):
+        args = decision_action_args(decision)
+        if decision.selected_action == ExecutableActionType.EXTERNALIZE_PLAN and getattr(agent, "is_human_participant", lambda: False)() and "text" not in args:
+            return ActionGateResult(False, decision, blockers=["empty_message"], target_id=decision.target_id)  # a person writes the note; nothing is authored for them
+        if decision.selected_action == ExecutableActionType.EXTERNALIZE_PLAN and args:
+            if "text" not in args:
+                return ActionGateResult(False, decision, blockers=["attachments_require_a_note"], target_id=decision.target_id)
+            if self._unencountered_attachments(agent, args):
+                return ActionGateResult(False, decision, blockers=["attachment_not_encountered"], target_id=decision.target_id)
         return self._pass(decision)
 
     def _evaluate_transport(self, *, agent, decision, sim_state):
@@ -197,6 +219,9 @@ class AgentActionGate:
             # Read-only legality of creating a new project of this type here; the project is created only when the
             # committed START executes.
             legal, blockers, site_id = construction.check_start(decision.target_id, structure_type)
+            design_errors = self._design_errors(agent, construction, structure_type, decision_action_args(decision))
+            if design_errors:
+                legal, blockers = False, list(blockers) + design_errors
             return ActionGateResult(
                 legal,
                 decision,
@@ -213,6 +238,18 @@ class AgentActionGate:
         if is_site_target and not construction.resolve_project_id(target, create_if_missing=False):
             return ActionGateResult(False, decision, blockers=["structure_type_required_for_new_project"], target_id=decision.target_id)
         return self._pass(decision)
+
+    @staticmethod
+    def _design_errors(agent, construction, structure_type, args):
+        """Structural check of a participant design (task-package schema). A person must choose every property when starting a designable structure;
+        no default is ever filled in on their behalf. Artificial Pilots may omit the design (the legacy fidelity model applies)."""
+        schema = getattr(construction, "design_schema", None)
+        if schema is None or not schema.has(structure_type):
+            return ["design_not_supported_for_structure"] if args.get("design") else []
+        design = args.get("design")
+        if design is None:
+            return ["design_required"] if getattr(agent, "is_human_participant", lambda: False)() else []
+        return schema.validate_choice(structure_type, design, complete=True)
 
     def _evaluate_connection(self, *, agent, decision, sim_state):
         # Read-only legality of connect(connector, endpoint, endpoint). Any role may perform a legal connection;
@@ -233,6 +270,22 @@ class AgentActionGate:
         )
 
     def _evaluate_repair(self, *, agent, decision, sim_state):
+        design = decision_action_args(decision).get("design")
+        if getattr(agent, "is_human_participant", lambda: False)():
+            construction = getattr(getattr(sim_state, "environment", None), "construction", None)
+            project = (getattr(construction, "projects", None) or {}).get(str(decision.target_id or ""))
+            if construction is not None and isinstance(project, dict) and not construction.is_design_authored(project):
+                return ActionGateResult(False, decision, blockers=["design_not_applicable"], target_id=decision.target_id)
+            if design is None:
+                return ActionGateResult(False, decision, blockers=["design_required"], target_id=decision.target_id)
+        if design is not None:
+            construction = getattr(getattr(sim_state, "environment", None), "construction", None)
+            project = (getattr(construction, "projects", None) or {}).get(str(decision.target_id or ""))
+            if not isinstance(project, dict) or not construction.is_design_authored(project):
+                return ActionGateResult(False, decision, blockers=["design_not_applicable"], target_id=decision.target_id)
+            errors = construction.design_schema.validate_choice(project.get("type"), design, complete=False)
+            if errors:
+                return ActionGateResult(False, decision, blockers=errors, target_id=decision.target_id, project_id=project.get("id"))
         return self._pass(decision)
 
     def _evaluate_meta(self, *, agent, decision, sim_state):
@@ -366,6 +419,11 @@ class AgentActionGate:
             )
 
         readiness = construction.evaluate_project_validation_readiness(project_id) if hasattr(construction, "evaluate_project_validation_readiness") else {"validation_ready": True, "blockers": []}
+        if getattr(agent, "is_human_participant", lambda: False)():
+            # A person may ATTEMPT validation whenever it is physically/functionally possible. Rule knowledge and workspace evidence are simulated
+            # cognition; they are not a legality condition for a human.
+            readiness = {**readiness, "validation_ready": bool(readiness.get("physical_ready")) and bool(readiness.get("support_ready")),
+                         "blockers": [b for b in (readiness.get("blockers") or []) if b in {"physical_incomplete", "missing_functional_support"}]}
         if not bool(readiness.get("validation_ready", False)):
             return ActionGateResult(False, decision, blockers=list(readiness.get("blockers") or ["validation_not_ready"]), target_id=decision.target_id, project_id=project_id, metadata={"validation_readiness": readiness})
         return ActionGateResult(True, decision, target_id=decision.target_id, project_id=project_id, metadata={"validation_readiness": readiness})

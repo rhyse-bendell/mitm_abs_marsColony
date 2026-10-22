@@ -32,14 +32,26 @@
       <ul id="menu-items"></ul>
       <button id="menu-close" class="ghost">Close (Esc)</button>
     </section>
+    <section id="form-panel" class="panel" hidden>
+      <h2 id="form-title">Design</h2>
+      <p id="form-sub" class="sub"></p>
+      <div id="form-fields"></div>
+      <div id="form-share" hidden><div class="sub">Share information (optional)</div><div id="form-share-list"></div></div>
+      <div class="row"><button id="form-submit">Submit</button><button id="form-cancel" class="ghost">Cancel</button></div>
+    </section>
     <section class="panel" id="info-panel">
-      <h2>Information</h2>
-      <p class="sub">Only what you have opened or been told appears here.</p>
+      <h2 id="info-title">Reviewed information</h2>
+      <p class="sub" id="info-note">A record of what has been shown or sent to you. Not a record of what you know or remember.</p>
       <div id="info-list"><em>Nothing yet. Read your briefing and the team brief.</em></div>
+    </section>
+    <section class="panel" id="wb-panel" hidden>
+      <h2>Whiteboard (as last read)</h2>
+      <div id="wb-list"></div>
     </section>
     <section class="panel" id="chat-panel">
       <h2>Team chat</h2>
       <div id="chat-log" aria-live="polite"></div>
+      <details id="share-box"><summary>Share information (optional)</summary><div id="share-list" class="sub">Nothing to share yet.</div></details>
       <form id="chat-form" autocomplete="off"><input id="chat-input" maxlength="500" placeholder="Message your team (Enter to send)"><button type="submit">Send</button></form>
     </section>
   </aside>

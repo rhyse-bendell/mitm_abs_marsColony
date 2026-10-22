@@ -157,9 +157,14 @@ def _intent_key(action: str, target_id: Optional[str], args: Dict[str, Any], ui_
     return "m" + hashlib.sha1(raw.encode()).hexdigest()[:10]
 
 
-def _item(label: str, action: str, target_id: Optional[str], args: Dict[str, Any], *, enabled: bool = True, reason: Optional[str] = None, ui_object: str = "", detail: str = "") -> Dict[str, Any]:
+def _item(label: str, action: str, target_id: Optional[str], args: Dict[str, Any], *, enabled: bool = True, reason: Optional[str] = None, ui_object: str = "", detail: str = "",
+          form: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """A menu option. `form` (design / repair / note) tells the client to collect structured input before sending; the intent itself stays server-side."""
     key = _intent_key(action, target_id, args, ui_object)
-    return {"public": {"id": key, "label": label, "enabled": bool(enabled), "reason": reason, "detail": detail},
+    public = {"id": key, "label": label, "enabled": bool(enabled), "reason": reason, "detail": detail}
+    if form is not None:
+        public["form"] = form
+    return {"public": public,
             "intent": {"action": action, "target_id": target_id, "action_args": dict(args or {}), "ui_object": ui_object, "label": label}}
 
 
@@ -200,8 +205,8 @@ def build_menus(sim, agent, canonical: Dict[str, Any]) -> Dict[str, Dict[str, An
                 items.append(_item("Read the team brief" if is_shared else "Read briefing", ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, tid, {}, ui_object=tid))
         elif kind == "artifact":
             items = menu(tid, "Whiteboard", "artifact")
-            if any(a.get("action_type") == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value for a in executable):
-                items.append(_item("Read the whiteboard", ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, "whiteboard", {}, ui_object=tid))
+            items.append(_item("Read the whiteboard", ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, "whiteboard", {}, ui_object=tid))
+            items.append(_item("Add a note...", ExecutableActionType.EXTERNALIZE_PLAN.value, "whiteboard", {}, ui_object=tid, form={"kind": "note", "title": "Add a note to the whiteboard", "max_chars": 280}))
         elif kind == "build":
             site_id = target.get("site_id") or construction.PROJECT_TO_SITE.get(tid)
             site_label = f"Site {str(site_id or tid)[-1].upper()}"
@@ -210,7 +215,10 @@ def build_menus(sim, agent, canonical: Dict[str, Any]) -> Dict[str, Dict[str, An
                 if aff.get("action_type") == ExecutableActionType.START_CONSTRUCTION.value and aff.get("target_id") == tid and aff.get("start_mode") == "new_project":
                     stype = str((aff.get("action_args") or {}).get("structure_type") or "structure")
                     need = (aff.get("required_resources") or {}).get("bricks")
-                    items.append(_item(f"Start a {stype.replace('_', ' ')}", aff["action_type"], tid, dict(aff.get("action_args") or {}), ui_object=tid, detail=f"needs {need} bricks" if need is not None else ""))
+                    schema = construction.design_schema.public_schema(stype)
+                    form = {"kind": "design", **schema} if schema else None
+                    items.append(_item(f"Start a {stype.replace('_', ' ')}" + ("..." if form else ""), aff["action_type"], tid, dict(aff.get("action_args") or {}), ui_object=tid,
+                                       detail=f"needs {need} bricks" if need is not None else "", form=form))
     # ---- projects
     for pid, project in sorted(construction.projects.items()):
         if not isinstance(project, dict) or str(project.get("status") or "") == "complete" and project.get("validated_complete"):
@@ -228,6 +236,13 @@ def build_menus(sim, agent, canonical: Dict[str, Any]) -> Dict[str, Dict[str, An
             if aff.get("target_id") != pid or aff.get("start_mode") == "new_project":
                 continue
             ready = aff in executable
+            if at == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value:
+                if not construction.is_design_authored(project):
+                    continue  # no structured choice surface for structures that were not designed by a participant (documented gap)
+                schema = construction.design_schema.public_schema(project.get("type"))
+                form = {"kind": "repair", **schema, "current": {k: str(v) for k, v in (project.get("design") or {}).items()}} if schema else None
+                items.append(_item("Repair / change the design...", at, pid, {}, enabled=ready, reason=None if ready else "Not ready yet.", ui_object=pid, form=form))
+                continue
             label = {ExecutableActionType.TRANSPORT_RESOURCES.value: "Bring bricks to this project", ExecutableActionType.START_CONSTRUCTION.value: "Begin building",
                      ExecutableActionType.CONTINUE_CONSTRUCTION.value: "Continue building", ExecutableActionType.VALIDATE_CONSTRUCTION.value: "Validate this structure",
                      ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value: "Repair this structure"}.get(at, ACTION_LABELS.get(at, at))
@@ -313,6 +328,9 @@ def build_participant_view(sim, agent, controller, telemetry=None, *, seq: int =
                 row["status"] = "stocked" if int(node.quantity) > 0 else "empty"
         if m["kind"] == "project":
             b = built.get(oid, {})
+            proj = construction.projects.get(oid) or {}
+            if construction.is_design_authored(proj):
+                row["design"] = construction.design_schema.labelled(proj.get("type"), proj.get("design") or {})  # physical appearance: the participant's own choices
             row.update({"structure_type": str(types.get(oid) or "structure"), "status": str(b.get("project_status") or "in_progress"), "progress": b.get("progress", 0.0),
                         "materials": f"{b.get('delivered_resources', 0)}/{b.get('required_resources', 0)}", "validation_failed": bool(b.get("validation_failed"))})
         if m["kind"] == "bridge":
@@ -343,6 +361,19 @@ def build_participant_view(sim, agent, controller, telemetry=None, *, seq: int =
             label = (env.objects.get(target.get("object") or sid) or {}).get("label", sid)
             sources.append({"id": sid, "label": label, "scope": "shared" if env.is_shared_information_source(sid) else "own role", "open": sid in open_ids, "items": items})
 
+    listed = {i["id"] for s in sources for i in s["items"]}
+    groups: Dict[str, Dict[str, Any]] = {}
+    for eid, obj in agent.encountered_dik().items():
+        if eid in listed:
+            continue
+        info = (getattr(obj, "acquired_by", {}) or {}).get(agent.name, {})
+        mode, origin = info.get("mode"), str(info.get("from") or "a teammate")
+        key = f"received:{origin}" if mode == "shared" else f"artifact:{origin}"
+        label = f"Sent by {origin}" if mode == "shared" else f"From the whiteboard ({origin})"
+        grp = groups.setdefault(key, {"id": key, "label": label, "scope": "received" if mode == "shared" else "whiteboard", "open": False, "items": []})
+        grp["items"].append({"id": eid, "kind": "data" if obj.__class__.__name__ == "Data" else "information", "text": str(obj.content)})
+    sources.extend(groups.values())
+
     chat = []
     for rec in sim.chat_log[-80:]:
         if rec["kind"] == "human_chat" and (rec["sender"] == agent.name or agent.name in rec["recipients"]) or rec["kind"] == "agent_message" and agent.name in rec["recipients"]:
@@ -366,7 +397,8 @@ def build_participant_view(sim, agent, controller, telemetry=None, *, seq: int =
                    for o in sim.agents if o is not agent],
         "objects": objects,
         "bridge_bc_visible": str(construction.bridges["bridge_bc"].status) in {"in_progress", "complete"},
-        "info": {"sources": sources},
+        "info": {"title": "Reviewed information", "note": "A record of what has been shown to you or sent to you. It is not a record of what you know or remember.", "sources": sources},
+        "whiteboard": getattr(agent, "human_whiteboard_snapshot", None),
         "chat": chat,
         "feedback": controller.feedback_since(last_feedback_id)[-20:],
     }

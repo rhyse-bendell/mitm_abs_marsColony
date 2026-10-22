@@ -422,6 +422,10 @@ class BrainContextBuilder:
                 # (a query; no legality is computed here), so a generative Pilot is not offered a validation the gate already refuses.
                 readiness = environment.construction.evaluate_project_validation_readiness(project_id) if hasattr(environment.construction, "evaluate_project_validation_readiness") else {"validation_ready": True}
                 validation_ready = bool(readiness.get("validation_ready", False))
+                if getattr(agent, "is_human_participant", lambda: False)():
+                    # A person's validation is judged on the artifact; rule knowledge / workspace evidence are not preconditions.
+                    validation_ready = bool(readiness.get("physical_ready")) and bool(readiness.get("support_ready"))
+                    readiness = {**readiness, "blockers": [b for b in (readiness.get("blockers") or []) if b in {"physical_incomplete", "missing_functional_support"}]}
                 legal.append({**base, "action_type": ExecutableActionType.VALIDATE_CONSTRUCTION.value, "utility": utility_for(ExecutableActionType.VALIDATE_CONSTRUCTION, target_kind="build"),
                               "validation_failed": failed_here, "validation_candidate": not failed_here,
                               "validation_ready": validation_ready, "validation_blockers": [] if validation_ready else [str(b) for b in (readiness.get("blockers") or ["validation_not_ready"])]})

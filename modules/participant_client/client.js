@@ -50,7 +50,8 @@
       if (seenFeedback.has(f.id)) continue; seenFeedback.add(f.id);
       if (f.kind !== "accepted" && f.message) toast(f.message, f.level === "ok");
     }
-    renderChat(); renderInfo();
+    renderChat(); renderInfo(); renderShare(); renderWhiteboard();
+    $("info-title").textContent = view.info.title || "Reviewed information"; $("info-note").textContent = view.info.note || "";
     if (menuObject) renderMenu();
     draw();
   }
@@ -117,12 +118,66 @@
     for (const it of o.items) {
       const li = document.createElement("li"), b = document.createElement("button");
       b.textContent = it.label; b.disabled = !it.enabled || !o.near; b.title = !o.near ? "Move closer to interact" : (it.reason || "");
-      b.onclick = () => { send({ t: "action", item: it.id }); if (!it.id.startsWith("reopen:")) closeMenu(); };
+      b.onclick = () => { if (it.form) { closeMenu(); openForm(it); return; } send({ t: "action", item: it.id }); if (!it.id.startsWith("reopen:")) closeMenu(); };
       li.appendChild(b); if (it.detail) { const d = document.createElement("div"); d.className = "detail"; d.textContent = it.detail; li.appendChild(d); }
       ul.appendChild(li);
     }
   }
   $("menu-close").onclick = closeMenu;
+
+  // ---- structured input forms (design / repair / whiteboard note). The server holds the intent; the form only returns the participant choices. ----------
+  let formItem = null;
+  function allEncountered() {
+    const seen = new Map();
+    for (const s of (view ? view.info.sources : [])) for (const it of s.items) if (!seen.has(it.id)) seen.set(it.id, it.text);
+    return seen;
+  }
+  function shareList(container, prefix) {
+    container.textContent = "";
+    const enc = allEncountered();
+    if (!enc.size) { container.textContent = "Nothing reviewed yet."; return; }
+    for (const [id, text] of enc) {
+      const row = document.createElement("label"); row.className = "share-item";
+      const cb = document.createElement("input"); cb.type = "checkbox"; cb.value = id; cb.dataset.group = prefix;
+      const span = document.createElement("span"); span.textContent = text;
+      row.appendChild(cb); row.appendChild(span); container.appendChild(row);
+    }
+  }
+  const checkedAttachments = (group) => Array.from(document.querySelectorAll(`input[data-group="${group}"]:checked`)).map((c) => c.value);
+  function openForm(item) {
+    formItem = item; const f = item.form, fields = $("form-fields"); fields.textContent = "";
+    $("form-title").textContent = f.title || "Choose"; $("form-share").hidden = true;
+    if (f.kind === "note") {
+      $("form-sub").textContent = "Short note for your team (visible to everyone at the whiteboard).";
+      const ta = document.createElement("textarea"); ta.id = "note-text"; ta.maxLength = f.max_chars || 280; fields.appendChild(ta);
+      $("form-share").hidden = false; shareList($("form-share-list"), "note");
+    } else {
+      $("form-sub").textContent = f.kind === "repair" ? "Change any of these properties. Only the properties you change are modified." : "Choose every option, then submit to begin construction.";
+      for (const p of f.properties) {
+        const lab = document.createElement("label"); lab.textContent = p.label; lab.htmlFor = "prop-" + p.id;
+        const sel = document.createElement("select"); sel.id = "prop-" + p.id; sel.dataset.prop = p.id;
+        const blank = document.createElement("option"); blank.value = ""; blank.textContent = f.kind === "repair" ? "(keep as is)" : "- choose -"; sel.appendChild(blank);
+        for (const o of p.options) { const op = document.createElement("option"); op.value = o.value; op.textContent = o.label; if (f.current && f.current[p.id] === o.value) op.textContent += " (current)"; sel.appendChild(op); }
+        fields.appendChild(lab); fields.appendChild(sel);
+      }
+    }
+    $("form-panel").hidden = false;
+  }
+  function closeForm() { formItem = null; $("form-panel").hidden = true; }
+  $("form-cancel").onclick = closeForm;
+  $("form-submit").onclick = () => {
+    if (!formItem) return; const f = formItem.form;
+    if (f.kind === "note") {
+      const text = $("note-text").value.trim(); if (!text) { toast("Type a note first.", false); return; }
+      send({ t: "action", item: formItem.id, text, attachments: checkedAttachments("note") });
+    } else {
+      const design = {}; for (const sel of document.querySelectorAll("#form-fields select")) if (sel.value) design[sel.dataset.prop] = sel.value;
+      if (f.kind === "design" && Object.keys(design).length < f.properties.length) { toast("Choose an option for every property first.", false); return; }
+      if (f.kind === "repair" && !Object.keys(design).length) { toast("Choose at least one property to change.", false); return; }
+      send({ t: "action", item: formItem.id, design });
+    }
+    closeForm();
+  };
 
   // ---- info + chat -----------------------------------------------------------------------------------------------------
   function renderInfo() {
@@ -144,9 +199,29 @@
     }
     log.scrollTop = log.scrollHeight;
   }
-  $("chat-form").addEventListener("submit", (ev) => { ev.preventDefault(); const i = $("chat-input"); const text = i.value; i.value = ""; send({ t: "chat", text }); });
+  $("chat-form").addEventListener("submit", (ev) => {
+    ev.preventDefault(); const i = $("chat-input"); const text = i.value; const attachments = checkedAttachments("chat");
+    i.value = ""; send({ t: "chat", text, attachments });
+    for (const c of document.querySelectorAll('input[data-group="chat"]')) c.checked = false;
+  });
+  let lastShareSig = "";
+  function renderShare() {
+    const enc = allEncountered(), sig = Array.from(enc.keys()).join("|"); if (sig === lastShareSig) return; lastShareSig = sig;
+    const keep = new Set(checkedAttachments("chat")), box = $("share-list"); shareList(box, "chat");
+    for (const c of box.querySelectorAll("input")) if (keep.has(c.value)) c.checked = true;
+  }
+  function renderWhiteboard() {
+    const wb = view.whiteboard, panel = $("wb-panel"); if (!wb) { panel.hidden = true; return; }
+    panel.hidden = false; const list = $("wb-list"); list.textContent = "";
+    if (!wb.entries.length) { list.textContent = "The whiteboard is empty."; return; }
+    for (const e of wb.entries) {
+      const d = document.createElement("div"); d.className = "wb"; const b = document.createElement("b"); b.textContent = `${e.author} (${Math.round(e.time)}s): `; d.appendChild(b); d.appendChild(document.createTextNode(e.text));
+      for (const a of e.attachments) { const q = document.createElement("div"); q.className = "detail"; q.textContent = "Attached: " + a.text; d.appendChild(q); }
+      list.appendChild(d);
+    }
+  }
   document.addEventListener("keydown", (ev) => {
-    if (ev.key === "Escape") { closeMenu(); document.activeElement && document.activeElement.blur(); }
+    if (ev.key === "Escape") { closeMenu(); closeForm(); document.activeElement && document.activeElement.blur(); }
     else if (ev.key === "Enter" && document.activeElement !== $("chat-input")) { ev.preventDefault(); $("chat-input").focus(); }
   });
   connect();

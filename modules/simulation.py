@@ -106,6 +106,7 @@ class SimulationState:
     metrics finalization. It orchestrates, rather than redefining, task truth.
     """
 
+    REALTIME_EFFECT_PERIOD_S = 1.0  # realtime_testbed only: cadence of per-tick construct/validate effects (see Agent effect gating)
     SPEED_MULTIPLIERS = {
         "Slow": 0.5,
         "Normal": 1.0,

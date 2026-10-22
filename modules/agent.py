@@ -1793,6 +1793,19 @@ class Agent:
         spec = getattr(self, "controller_spec", None)
         return spec is not None and str(getattr(spec, "controller_type", "")) == "human_participant"
 
+    ENCOUNTER_MODES = ("direct", "shared", "artifact")
+
+    def encountered_dik(self):
+        """{element id: Data/Information object} this agent has actually ENCOUNTERED (a source it opened, a message it was sent, an artifact it read).
+        Exposure only: simulator-derived items are excluded, and nothing here says the person understood or remembers anything."""
+        out = {}
+        for bucket in ("data", "information"):
+            for item in list(self.mental_model[bucket]):
+                mode = (getattr(item, "acquired_by", {}) or {}).get(self.name, {}).get("mode")
+                if mode in self.ENCOUNTER_MODES:
+                    out[str(item.id)] = item
+        return out
+
     def human_controller(self, sim_state):
         """The HumanParticipantController behind this agent's adapter (None unless a human drives it)."""
         if not self.is_human_participant() or sim_state is None or not hasattr(sim_state, "get_agent_brain_runtime"):
@@ -4622,7 +4635,7 @@ class Agent:
         }
         if self._planless_consult():
             # With no active plan only a team plan can be consulted (others are skipped at execution), so only those count.
-            artifacts = {aid: a for aid, a in artifacts.items() if a.artifact_type == "team_plan" and not self._in_cooldown("planless_consult_artifact", aid, sim_state=sim_state)}
+            artifacts = {aid: a for aid, a in artifacts.items() if a.artifact_type in {"team_plan", "team_note"} and not self._in_cooldown("planless_consult_artifact", aid, sim_state=sim_state)}
         if not artifacts:
             return {"has_artifacts": False, "useful": False, "reasons": [], "artifact_id": None, "suppression_reason": "no_artifacts"}
         _, held_info, _ = self._held_dik_ids()
@@ -4705,14 +4718,15 @@ class Agent:
         gained = 0
         _, held_info, _ = self._held_dik_ids()
         for info in list(getattr(artifact, "carried_information", None) or []):
-            if getattr(info, "id", None) in held_info:
+            is_data = info.__class__.__name__ == "Data"  # a participant note may attach data items; they are held as data
+            if getattr(info, "id", None) in held_info or info in self.mental_model["data" if is_data else "information"]:
                 continue
-            self.mental_model["information"].add(info)
+            self.mental_model["data" if is_data else "information"].add(info)
             gained += 1
-            self.known_gaps.discard(f"information:{info.id}")
+            self.known_gaps.discard(f"{'data' if is_data else 'information'}:{info.id}")
             if self.name not in info.acquired_by:
                 info.acquired_by[self.name] = {"mode": "artifact", "from": artifact.author, "artifact_id": artifact.artifact_id}
-            DIK_LOG.append({"time": getattr(sim_state, "time", 0.0), "agent": self.name, "type": "Information", "id": info.id, "mode": "artifact", "from": artifact.author})
+            DIK_LOG.append({"time": getattr(sim_state, "time", 0.0), "agent": self.name, "type": "Data" if is_data else "Information", "id": info.id, "mode": "artifact", "from": artifact.author})
             self._emit_event(sim_state, "dik_acquired_from_artifact", {"agent": self.name, "information_id": info.id, "artifact_id": artifact.artifact_id, "author": artifact.author})
         if gained:
             self.last_dik_change_time = float(getattr(sim_state, "time", 0.0))
@@ -5643,7 +5657,8 @@ class Agent:
         hard = self._partition_action_blockers(blockers)["hard_blockers"]
         if hard:
             return None, sorted(set(blockers))
-        project_id, status = construction.start_new_project(decision.target_id, structure_type, author=self.name)
+        design = decision_action_args(decision).get("design")
+        project_id, status = construction.start_new_project(decision.target_id, structure_type, author=self.name, design=design, sim_time=float(getattr(sim_state, "time", 0.0) or 0.0))
         if status != "created":
             return None, [str(status)]
         setattr(decision, "_committed_project_id", project_id)
@@ -5703,7 +5718,10 @@ class Agent:
                 actor=self.name,
                 agent_supported_rules=set(local_rules or []).union(set(rule_ids or set())),
             )
-            blockers.extend(list(readiness.get("blockers") or []))
+            if self.is_human_participant():
+                blockers.extend(b for b in (readiness.get("blockers") or []) if b in {"physical_incomplete", "missing_functional_support"})
+            else:
+                blockers.extend(list(readiness.get("blockers") or []))
             if any(str(b).startswith("missing_expected_rule:") for b in blockers):
                 blockers.append("missing_validation_rule_knowledge")
 
@@ -5719,6 +5737,8 @@ class Agent:
         NOT a gate (it may shape the Pilot's reacquisition preference elsewhere). The blocker names only missing rule ids,
         never the hidden construction error. Acquiring the rules stays a Pilot choice (INSPECT / CONSULT / REQUEST).
         """
+        if self.is_human_participant():
+            return []  # repair grounding is the person own; legality does not depend on exposure-derived simulated knowledge
         project = environment.construction.projects.get(str(project_id or "")) if project_id else None
         _info_ids, rule_ids = self._effective_knowledge_for_readiness(sim_state=sim_state)
         held = {normalize_rule_token(r) for r in (rule_ids or set()) if normalize_rule_token(r)}
@@ -5729,6 +5749,15 @@ class Agent:
 
     def _build_readiness_blockers(self, environment, sim_state=None, *, typed_start_target=None):
         blockers = []
+        if self.is_human_participant():
+            # Physical feasibility only: a person is not gated by what the simulator thinks they know. (Information count, rule knowledge and
+            # grounding checks below are simulated cognition used to gate artificial Pilots.)
+            if typed_start_target is not None:
+                if environment.get_interaction_target_position(typed_start_target, from_position=self.position) is None:
+                    blockers.append("no_navigable_build_target")
+            elif self._select_build_target(environment, require_readiness=False) is None:
+                blockers.append("no_navigable_build_target")
+            return blockers
         info_ids, rule_ids = self._effective_knowledge_for_readiness(sim_state=sim_state)
         epistemic = self._epistemic_sufficiency(environment, sim_state=sim_state)
         closure_project_id = self.project_closure_state.get("project_id") if self.project_closure_state.get("active") else None
@@ -10665,6 +10694,82 @@ class Agent:
         if intent.clicked_at is not None:
             telemetry.record_input(sim_state, "pointer_click", at=list(intent.clicked_at), source=intent.source, intent_id=intent.intent_id)
 
+    def _human_add_whiteboard_note(self, action, sim_state):
+        """A participant-authored whiteboard note (text + optional encountered DIK), stored through the existing team-artifact path as a `team_note`.
+        Its attachments ride in `carried_information`, the same field artificial teammates already take information from when they consult."""
+        args = dict(action.get("action_args") or {})
+        text = str(args.get("text") or "").strip()
+        encountered = self.encountered_dik()
+        attached = [encountered[i] for i in (args.get("attachments") or []) if i in encountered]
+        manager = sim_state.team_knowledge_manager
+        n = 1 + sum(1 for a in manager.artifacts.values() if a.artifact_type == "team_note")
+        artifact = manager.externalize_artifact(
+            artifact_id=f"note:{self.name}:{n}", artifact_type="team_note", summary=text[:120],
+            content={"text": text, "author": self.name, "author_role": self.role, "attachment_ids": [str(getattr(o, "id", "")) for o in attached], "written_at": round(float(sim_state.time), 2)},
+            author=self.name, sim_time=sim_state.time, source="human_note", contributors=[self.name])
+        artifact.carried_information = list(attached)
+        self._emit_event(sim_state, "whiteboard_note_added", {"artifact_id": artifact.artifact_id, "attachment_ids": list(artifact.content["attachment_ids"]), "text_length": len(text)})
+        controller = self.human_controller(sim_state)
+        if controller is not None:
+            controller.push_feedback("info", "Note added to the whiteboard.", sim_time=sim_state.time, kind="whiteboard")
+        telemetry = getattr(self, "_human_telemetry", None)
+        if telemetry is not None:
+            telemetry.record(sim_state, "whiteboard_note_added", outcome="added", grounded={"artifact_id": artifact.artifact_id}, text=text, attachment_ids=list(artifact.content["attachment_ids"]))
+        return artifact.artifact_id
+
+    def _human_read_whiteboard(self, sim_state):
+        """Reading the board shows its current notes and plans as written; attached information counts as EXPOSURE (no adoption draw, no inference)."""
+        manager = sim_state.team_knowledge_manager
+        entries = []
+        for artifact in sorted(manager.artifacts.values(), key=lambda a: (float(a.created_at), a.artifact_id)):
+            if artifact.artifact_type == "team_note":
+                text = str((artifact.content or {}).get("text") or "")
+            elif artifact.artifact_type == "team_plan" and isinstance(artifact.content, dict):
+                summary = manager._team_plan_summary(dict(artifact.content))
+                text = f"Plan proposed by {summary.get('proposed_by')} ({summary.get('status')}): {summary.get('goal_summary') or ''}".strip()
+            else:
+                continue
+            attachments = []
+            for info in list(getattr(artifact, "carried_information", None) or []):
+                attachments.append({"id": str(info.id), "text": str(info.content)})
+                bucket = "data" if info.__class__.__name__ == "Data" else "information"
+                if info not in self.mental_model[bucket]:
+                    self.mental_model[bucket].add(info)
+                    self.last_dik_change_time = float(getattr(sim_state, "time", 0.0))
+                info.acquired_by.setdefault(self.name, {"mode": "artifact", "from": artifact.author, "artifact_id": artifact.artifact_id})
+            manager.adopt_artifact(artifact.artifact_id, self.name, sim_state.time)
+            entries.append({"id": artifact.artifact_id, "author": artifact.author, "time": round(float(artifact.created_at), 1), "kind": artifact.artifact_type, "text": text, "attachments": attachments})
+        self.human_whiteboard_snapshot = {"time": round(float(sim_state.time), 1), "entries": entries}
+        telemetry = getattr(self, "_human_telemetry", None)
+        if telemetry is not None:
+            telemetry.record(sim_state, "whiteboard_read", outcome="read", grounded={"entry_ids": [e["id"] for e in entries]}, attachment_ids=sorted({a["id"] for e in entries for a in e["attachments"]}))
+
+    def _human_report_validation(self, sim_state, environment, project_id, *, passed):
+        """What the participant is told after validating: pass/fail only (the physical task has no richer real-time feedback). The authoritative hidden
+        outcome - including which design properties violated which task rule - goes to a separate research file, never to the participant."""
+        controller = self.human_controller(sim_state)
+        telemetry = getattr(self, "_human_telemetry", None)
+        project = environment.construction.projects.get(project_id) or {}
+        if controller is not None:
+            controller.push_feedback("ok" if passed else "blocked", "Validation passed." if passed else "Validation did not pass. This structure needs repair.", sim_time=sim_state.time, kind="validation")
+        if telemetry is not None:
+            evaluation = environment.construction.evaluate_design(project_id)
+            telemetry.record(sim_state, "validation_result", outcome="passed" if passed else "failed", grounded={"project_id": project_id}, public_message="passed" if passed else "failed")
+            telemetry.record_hidden(sim_state, "validation_authoritative", project_id=project_id, structure_type=project.get("type"), passed=bool(passed), correct=bool(project.get("correct", True)),
+                                    design=dict(project.get("design") or {}), design_violations=(evaluation or {}).get("violations"), design_authored=environment.construction.is_design_authored(project))
+
+    def _human_report_repair(self, sim_state, environment, project_id, applied):
+        controller = self.human_controller(sim_state)
+        telemetry = getattr(self, "_human_telemetry", None)
+        changed = list((applied or {}).get("changed") or [])
+        if controller is not None:
+            controller.push_feedback("info", "Changes applied. Validate again to check the structure." if changed else "You did not change anything.", sim_time=sim_state.time, kind="repair")
+        if telemetry is not None:
+            project = environment.construction.projects.get(project_id) or {}
+            telemetry.record(sim_state, "repair_applied", outcome="changed" if changed else "no_change", grounded={"project_id": project_id, "changed_properties": changed})
+            telemetry.record_hidden(sim_state, "repair_authoritative", project_id=project_id, changed=changed, valid_before=(applied or {}).get("valid_before"), valid_after=(applied or {}).get("valid_after"),
+                                    design=dict(project.get("design") or {}))
+
     def _human_note_completion(self, sim_state, action):
         telemetry = getattr(self, "_human_telemetry", None)
         if telemetry is None or action.get("decision_action") in (None, ExecutableActionType.WAIT.value, ExecutableActionType.MOVE_TO_TARGET.value):
@@ -10685,8 +10790,28 @@ class Agent:
             inbox = other.__dict__.setdefault("chat_inbox", [])
             inbox.append({"time": float(sim_state.time), "from": self.name, "role": self.role, "text": text})
             delivery.append({"recipient": other.name, "outcome": "delivered", "readable_by_recipient": bool(other.is_human_participant())})
+        attachments = [str(i) for i in (args.get("attachments") or [])]
+        encountered = self.encountered_dik()
+        attached = [encountered[i] for i in attachments if i in encountered]  # the gate already refused anything not encountered
+        if attached:
+            from modules.knowledge import Data
+
+            for entry, other in zip(delivery, recipients):
+                before = {str(getattr(o, "id", "")) for o in list(other.mental_model["data"]) + list(other.mental_model["information"])}
+                for mtype, content in (("TDP", [o for o in attached if isinstance(o, Data)]), ("TIP", [o for o in attached if not isinstance(o, Data)])):
+                    if not content:
+                        continue
+                    outcome = other.receive_message({"type": mtype, "sender": self.name, "content": content}, from_agent=self.name, sim_state=sim_state) or {}
+                    if outcome.get("dik_changed") and not other.is_human_participant():
+                        other._trigger_epistemic_update_pipeline(sim_state=sim_state, trigger_source=f"communication:{self.name}")
+                after = {str(getattr(o, "id", "")) for o in list(other.mental_model["data"]) + list(other.mental_model["information"])}
+                new = sorted(set(attachments) & (after - before))
+                entry.update({"attached": list(attachments), "newly_held_by_recipient": new, "acquisition_outcome": "acquired" if new else "already_held"})
+            sim_state.logger.log_event(sim_state.time, "communication_exchange", {
+                "sender": self.name, "receiver": ",".join(a.name for a in recipients), "message_types": sorted({"TDP" if isinstance(o, Data) else "TIP" for o in attached}),
+                "provided_element_ids": list(attachments), "solicited": False, "meaningful": any(e.get("newly_held_by_recipient") for e in delivery), "human_authored": True})
         record = {"id": f"chat{len(sim_state.chat_log) + 1}", "time": round(float(sim_state.time), 2), "kind": "human_chat", "sender": self.name, "sender_role": self.role, "scope": scope,
-                  "recipients": [a.name for a in recipients], "text": text, "delivery": delivery}
+                  "recipients": [a.name for a in recipients], "text": text, "attachments": attachments, "delivery": delivery}
         sim_state.chat_log.append(record)
         self._emit_event(sim_state, "chat_message_sent", {k: v for k, v in record.items() if k != "id"})
         from modules.interaction_graph import canonical_agent_node, make_interaction_event
@@ -10697,8 +10822,8 @@ class Agent:
                 interaction_type="team_chat", status="delivered", agent_id=self.agent_id, payload_summary=f"{self.name} (human): {text[:120]}"))
         telemetry = getattr(self, "_human_telemetry", None)
         if telemetry is not None:
-            telemetry.record(sim_state, "chat_sent", intended={"action": "communicate", "category": "chat", "scope": scope, "text_length": len(text)}, grounded={"type": "communicate", "recipients": record["recipients"]},
-                             outcome="delivered" if delivery else "no_recipient", message_id=record["id"], text=text, delivery=delivery)
+            telemetry.record(sim_state, "chat_sent", intended={"action": "communicate", "category": "chat", "scope": scope, "text_length": len(text), "attachment_ids": attachments}, grounded={"type": "communicate", "recipients": record["recipients"]},
+                             outcome="delivered" if delivery else "no_recipient", message_id=record["id"], text=text, attachment_ids=attachments, delivery=delivery)
 
     def _receive_message_as_human(self, message, from_agent, sim_state):
         """A message arriving at a human. It is shown to the person as a readable line; nothing is answered on their behalf. Data/information it
@@ -12184,6 +12309,29 @@ class Agent:
             _set_action_stage(action, "en_route", {"target_id": target_id, "access_reason": access.get("reason")})
             return False, access
 
+        def _effect_due(action):
+            """Construct/validate effects run once per tick for the whole length of an action (one build step per tick). The calibrated tick is 1.0
+            simulated second (headless default, GUI test-drive default). In realtime_testbed the scheduler ticks finer for smooth movement, so these
+            effects are held to the same 1 Hz cadence: build/validate throughput per simulated second is then identical to simulation mode. Simulation
+            mode is untouched (always due)."""
+            if getattr(sim_state, "execution_mode", "simulation") != "realtime_testbed":
+                return True
+            now = float(sim_state.time)
+            last = action.get("_effect_t")
+            if last is not None and now - float(last) < float(getattr(sim_state, "REALTIME_EFFECT_PERIOD_S", 1.0)) - 1e-9:
+                return False
+            action["_effect_t"] = now
+            return True
+
+        def _artifact_effect_due(action):
+            """Whiteboard read/write effects also run on every tick of their (about 1 s) action. At the calibrated 1 s tick that is once; in realtime_testbed
+            (finer ticks) it would repeat 10x, so the effect is held to once per action. A person's note/read is always once per action."""
+            if action.get("_artifact_effect_ran"):
+                return False
+            if self.is_human_participant() or getattr(sim_state, "execution_mode", "simulation") == "realtime_testbed":
+                action["_artifact_effect_ran"] = True
+            return True
+
         for action in list(self.active_actions):
             if action["progress"] == 0 and action.get("execution_stage") is None:
                 _set_action_stage(action, "selected")
@@ -12194,6 +12342,12 @@ class Agent:
                     self._emit_event(sim_state, "externalization_en_route", {"target_id": "whiteboard", "access_reason": access.get("reason")})
                     continue
                 action["effect_done"] = True  # the artifact effect runs once on arrival; only then may the action complete
+                if not _artifact_effect_due(action):
+                    continue
+                if self.is_human_participant():
+                    artifact_id = self._human_add_whiteboard_note(action, sim_state)
+                    _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": artifact_id})
+                    continue
                 if self._artifact_action_is_redundant(ExecutableActionType.EXTERNALIZE_PLAN.value, environment, sim_state=sim_state, artifact_id="whiteboard"):
                     _set_action_stage(action, "mutation_execution_blocked", {"target_id": "whiteboard", "failure_category": "redundant_externalization"})
                     self._emit_event(sim_state, "artifact_externalization_suppressed_redundant", {"target_id": "whiteboard"})
@@ -12325,6 +12479,12 @@ class Agent:
                     self._emit_event(sim_state, "artifact_consult_en_route", {"target_id": "whiteboard", "access_reason": access.get("reason")})
                     continue
                 action["effect_done"] = True  # the artifact effect runs once on arrival; only then may the action complete
+                if not _artifact_effect_due(action):
+                    continue
+                if self.is_human_participant():
+                    self._human_read_whiteboard(sim_state)
+                    _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard"})
+                    continue
                 _set_action_stage(action, "mutation_execution_started", {"target_id": "whiteboard"})
                 artifacts = dict(sim_state.team_knowledge_manager.artifacts or {})
                 if artifacts:
@@ -12333,7 +12493,7 @@ class Agent:
                     if planless_consult:
                         candidate_artifacts = [
                             a for a in candidate_artifacts
-                            if a.artifact_type == "team_plan"
+                            if a.artifact_type in {"team_plan", "team_note"}
                             and not self._in_cooldown("planless_consult_artifact", a.artifact_id, sim_state=sim_state)
                         ]
                     assessment = self._consult_assessment(environment, sim_state=sim_state)
@@ -12405,7 +12565,7 @@ class Agent:
                     if self._rng.random() <= adopt_prob:
                         sim_state.team_knowledge_manager.adopt_artifact(preferred.artifact_id, self.name, sim_state.time)
                         dik_gained = self._adopt_artifact_information(preferred, sim_state)
-                    if planless_consult and preferred.artifact_type != "team_plan":
+                    if planless_consult and preferred.artifact_type not in {"team_plan", "team_note"}:
                         self._set_cooldown(
                             "planless_consult_artifact",
                             preferred.artifact_id,
@@ -12483,6 +12643,8 @@ class Agent:
                 sim_state.logger.log_event(sim_state.time, "assistance_requested", {"agent": self.name})
 
             if action["type"] == "idle" and action.get("decision_action") == ExecutableActionType.VALIDATE_CONSTRUCTION.value:
+                if not _effect_due(action):
+                    continue
                 action = self._validate_and_repair_validation_target_binding(action, environment, sim_state=sim_state)
                 project_id = action.get("project_id")
                 if not project_id:
@@ -12550,6 +12712,12 @@ class Agent:
                         actor=self.name,
                         agent_supported_rules=list(self.mental_model["knowledge"].rules),
                     )
+                    if self.is_human_participant():
+                        # Same process, different truth source: validation is judged on the artifact (hidden `correct`, derived from the participant
+                        # design, or from the build for structures other agents made) plus physical/functional readiness. Simulated rule knowledge
+                        # and workspace evidence are not consulted for a person.
+                        readiness_report = {**readiness_report, "rule_ready": True, "epistemic_ready": True,
+                                            "validation_ready": bool(readiness_report.get("physical_ready")) and bool(readiness_report.get("support_ready"))}
                     # project["status"] is a cache refreshed once per tick; the ActionGate judges legality
                     # from fresh readiness. Execution must agree with the gate, so a project that is
                     # validation-ready now is validatable even if the cached status has not caught up.
@@ -12582,6 +12750,9 @@ class Agent:
                         event="validation_passed" if (is_valid and has_required_rules) else "validation_failed",
                     )
                     project = environment.construction.projects.get(project_id, project)
+                    if self.is_human_participant() and not action.get("_human_reported"):
+                        action["_human_reported"] = True  # an action runs its effect on several ticks; the participant is told once
+                        self._human_report_validation(sim_state, environment, project_id, passed=bool(project.get("validated_complete")))
                     self.experimental_metrics["validation_attempts"] += 1
                     if not (is_valid and has_required_rules):
                         self.experimental_metrics["validation_failures"] += 1
@@ -12671,6 +12842,8 @@ class Agent:
                         )
 
             if action["type"] == "construct":
+                if not _effect_due(action):
+                    continue
                 project_id = action.get("project_id")
                 if not project_id:
                     _log_mutation_blocked(
@@ -12717,7 +12890,7 @@ class Agent:
                     fidelity = (self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5) + self._trait_value("rule_accuracy")) / 2.0
                     is_repair_action = decision_action == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value
                     # (A repair applies the same fidelity roll AFTER it clears the error, so a repair can itself be imperfect.)
-                    if not is_repair_action and self._rng.random() > fidelity:
+                    if not is_repair_action and not self.is_human_participant() and self._rng.random() > fidelity:
                         if environment.construction.record_build_quality(
                             project_id, correct=False, actor=self.name, sim_time=sim_state.time if sim_state is not None else None, cause="construction_fidelity"
                         ):
@@ -12754,7 +12927,18 @@ class Agent:
                                 },
                             )
                             continue
-                        if environment.construction.repair_project(project_id, actor=self.name, sim_time=sim_state.time if sim_state is not None else None):
+                        if environment.construction.is_design_authored(project) and self.is_human_participant() and action.get("_human_reported"):
+                            pass  # this repair action already applied the participant choices on an earlier tick
+                        elif environment.construction.is_design_authored(project) and self.is_human_participant():
+                            action["_human_reported"] = True
+                            # The participant chooses what to change (action_args.design); the artifact is re-evaluated by the task rules. Nothing is
+                            # corrected on their behalf, and an empty/unchanged repair is a no-op that leaves the structure as it was.
+                            applied = environment.construction.apply_design(project_id, (action.get("action_args") or {}).get("design") or {}, actor=self.name, sim_time=sim_state.time if sim_state is not None else None)
+                            self._human_report_repair(sim_state, environment, project_id, applied)
+                            if applied and applied["changed"]:
+                                self._emit_event(sim_state, "construction_repair_episode", {"project_id": project_id, "decision_action": decision_action, "design_changed": list(applied["changed"])})
+                                self.experimental_metrics["repair_applications"] += 1
+                        elif environment.construction.repair_project(project_id, actor=self.name, sim_time=sim_state.time if sim_state is not None else None):
                             self._emit_event(sim_state, "construction_repair_episode", {"project_id": project_id, "decision_action": decision_action})
                             self.experimental_metrics["repair_applications"] += 1
                             if self._rng.random() > fidelity and environment.construction.record_build_quality(

@@ -72,6 +72,16 @@ class ParticipantGateway:
     def on_disconnect(self) -> None:
         self.controller.set_connected(False)
 
+    @staticmethod
+    def _clean_attachments(raw) -> list:
+        if not isinstance(raw, list):
+            return []
+        out = []
+        for v in raw[:8]:
+            if isinstance(v, str) and 0 < len(v) <= 80 and v not in out:
+                out.append(v)
+        return out
+
     def _reject(self, reason: str) -> Dict[str, Any]:
         return {"t": "ack", "ok": False, "reason": reason}
 
@@ -104,7 +114,21 @@ class ParticipantGateway:
             if intent is None:
                 c.push_feedback("blocked", "That option is no longer available.", kind="action")
                 return self._reject("stale_option")
-            res = c.submit_intent(HumanIntent(action=intent["action"], target_id=intent["target_id"], action_args=dict(intent["action_args"]), source="menu", ui_object=intent.get("ui_object") or None, label=intent.get("label", "")))
+            args = dict(intent["action_args"])
+            if intent["action"] in {ExecutableActionType.START_CONSTRUCTION.value, ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value}:
+                design = msg.get("design")
+                if isinstance(design, dict) and design:
+                    args["design"] = {str(k)[:40]: (v if isinstance(v, (str, int)) and not isinstance(v, bool) else str(v)[:60]) for k, v in list(design.items())[:16]}
+            if intent["action"] == ExecutableActionType.EXTERNALIZE_PLAN.value:
+                text = str(msg.get("text") or "").strip()
+                if not text:
+                    c.push_feedback("blocked", "Type a note first.", kind="whiteboard")
+                    return self._reject("empty_message")  # an empty note is not an event
+                args["text"] = text[:280]
+                attachments = self._clean_attachments(msg.get("attachments"))
+                if attachments:
+                    args["attachments"] = attachments
+            res = c.submit_intent(HumanIntent(action=intent["action"], target_id=intent["target_id"], action_args=args, source="menu", ui_object=intent.get("ui_object") or None, label=intent.get("label", "")))
             return {"t": "ack", "ok": res["accepted"], "reason": res["reason"]}
         if kind == "chat":
             text = str(msg.get("text") or "").strip()
@@ -114,7 +138,11 @@ class ParticipantGateway:
             if len(text) > MAX_FREE_TEXT_CHARS:
                 c.push_feedback("blocked", "That message is too long.", kind="chat")
                 return self._reject("message_too_long")
-            res = c.submit_intent(HumanIntent(action=ExecutableActionType.COMMUNICATE.value, action_args={"text": text, "scope": "team"}, source="chat", label="team chat"))
+            chat_args = {"text": text, "scope": "team"}
+            attachments = self._clean_attachments(msg.get("attachments"))
+            if attachments:
+                chat_args["attachments"] = attachments  # DIK element ids the participant ticked; the gate refuses any they have not encountered
+            res = c.submit_intent(HumanIntent(action=ExecutableActionType.COMMUNICATE.value, action_args=chat_args, source="chat", label="team chat"))
             return {"t": "ack", "ok": res["accepted"], "reason": res["reason"]}
         if kind == "menu_opened":
             c.submit_ui_event({"kind": "menu_opened", "object": str(msg.get("object") or "")[:80]})

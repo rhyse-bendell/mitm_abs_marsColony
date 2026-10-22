@@ -40,6 +40,7 @@ HUMAN_SUBMITTABLE_ACTIONS = frozenset({
     ExecutableActionType.MOVE_TO_TARGET.value,
     ExecutableActionType.INSPECT_INFORMATION_SOURCE.value,
     ExecutableActionType.CONSULT_TEAM_ARTIFACT.value,
+    ExecutableActionType.EXTERNALIZE_PLAN.value,  # for a person this is a whiteboard NOTE they write (text required); the Mecha never authors a plan for them
     ExecutableActionType.COMMUNICATE.value,
     ExecutableActionType.TRANSPORT_RESOURCES.value,
     ExecutableActionType.START_CONSTRUCTION.value,
@@ -75,11 +76,17 @@ PARTICIPANT_BLOCKER_MESSAGES: Dict[str, str] = {
     "project_already_complete": "That project is already complete.",
     "physical_build_not_started": "Nothing has been built there yet.",
     "physical_incomplete": "The structure is not finished being built yet.",
+    "missing_functional_support": "This structure still needs its food and water connections.",
     "destination_not_navigable": "You can't walk there.",
     "destination_unreachable": "There is no route to that spot.",
     "target_locked_until_bridge_access": "That area is not accessible yet.",
     "unknown_recipient": "That teammate isn't available to receive the message.",
     "empty_message": "Type a message first.",
+    "design_required": "Choose a design for every option first.",
+    "design_not_applicable": "You can't repair that structure.",
+    "attachment_not_encountered": "You can only share information you have reviewed.",
+    "attachments_require_a_message": "Write a message to go with the information.",
+    "attachments_require_a_note": "Write a note to go with the information.",
     "message_too_long": "That message is too long.",
     "stale_option": "That option is no longer available.",
     "not_a_participant_action": "That is not something you can do.",
@@ -298,6 +305,14 @@ class HumanTelemetry:
         # Mirror to the observer event stream (the logger stamps its own time; payload carries the full research row).
         sim_state.logger.log_event(sim_state.time, f"human_{event_type}", {k: v for k, v in row.items() if k not in {"schema", "event_type"}})
         return row
+
+    def record_hidden(self, sim_state, kind: str, **payload: Any) -> None:
+        """AUTHORITATIVE hidden outcome (design violations, true correctness) for research only: its own file, mirrored to the observer/experimenter event
+        stream, and never part of any participant view or participant feedback."""
+        row = self._base(sim_state, "hidden_outcome")
+        row.update({"kind": kind, **payload})
+        self._write(sim_state, "human_hidden_outcomes.jsonl", row)
+        sim_state.logger.log_event(sim_state.time, f"human_authoritative_{kind}", {k: v for k, v in row.items() if k not in {"schema", "event_type"}})
 
     def record_input(self, sim_state, kind: str, **payload: Any) -> None:
         row = self._base(sim_state, "input")

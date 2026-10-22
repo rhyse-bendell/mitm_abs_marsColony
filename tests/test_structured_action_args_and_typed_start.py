@@ -91,7 +91,7 @@ def test_non_mapping_action_args_fail_closed():
 
 
 def test_arg_validation_is_per_action():
-    assert set(ACTION_ARG_SPECS) == {START, CONNECT, ExecutableActionType.MOVE_TO_TARGET, ExecutableActionType.COMMUNICATE}  # START/CONNECT migrated earlier; MOVE (x,y) and COMMUNICATE (typed text) added for the human participant testbed
+    assert set(ACTION_ARG_SPECS) == {START, CONNECT, ExecutableActionType.MOVE_TO_TARGET, ExecutableActionType.COMMUNICATE, ExecutableActionType.EXTERNALIZE_PLAN, ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION}  # START/CONNECT migrated earlier; MOVE (x,y) and COMMUNICATE (typed text) added for the human participant testbed
     assert validate_action_args(START, {}) == []
     assert validate_action_args(START, {"structure_type": "greenhouse"}) == []
     assert "unsupported_action_arg:site_id" in validate_action_args(START, {"structure_type": "greenhouse", "site_id": "site_b"})
