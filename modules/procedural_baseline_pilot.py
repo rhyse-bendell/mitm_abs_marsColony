@@ -6,6 +6,7 @@ from typing import Optional, Any
 
 from modules.action_schema import BrainDecision, ExecutableActionType
 from modules.brain_contract import AgentBrainRequest, AgentBrainResponse
+from modules.controller_context import partition_affordances
 from modules.brain_provider import ProceduralBaselinePilot, select_productive_fallback_action
 
 
@@ -21,7 +22,8 @@ class ProceduralBaselinePilotAdapter:
 
     def choose_fallback_action(self, *, agent: Any, context_packet: Any, reason: str, sim_state: Any = None) -> Optional[BrainDecision]:
         # Procedural-baseline-specific fallback delegation; not generic mecha behavior.
-        allowed_actions = list(getattr(context_packet, "action_affordances", []) or [])
+        # the fallback, like the main policy, may only choose currently-executable affordances (blocked ones are information, never selectable)
+        allowed_actions, _blocked = partition_affordances(list(getattr(context_packet, "action_affordances", []) or []))
         step = select_productive_fallback_action(allowed_actions)
         return step.to_brain_decision(confidence=0.25, plan_method_id="procedural_baseline_fallback", next_steps=[reason])
 

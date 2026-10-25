@@ -960,6 +960,13 @@ class Agent:
             "blocker": blocker,
             "consecutive_identical_failures": int(count),
         }
+        validation_result = payload.get("validation_result") if succeeded else None
+        if validation_result in ("passed", "failed"):
+            # Execution and result are distinct: the validation ran (execution_status) but the structure may not have passed. Only the pass/fail
+            # outcome is reported to the Pilot; the reasons (missing rules etc.) stay in the authoritative event log.
+            record["status"] = "completed"
+            record["execution_status"] = "completed"
+            record["validation_result"] = validation_result
         outcomes = self.__dict__.setdefault("recent_action_outcomes", [])
         outcomes.append(record)
         del outcomes[:-12]
@@ -12272,7 +12279,7 @@ class Agent:
                     actually_completed = bool(project.get("validated_complete", False))
                     sim_state.team_knowledge_manager.upsert_construction_artifact(project, sim_state.time)
                     self._emit_event(sim_state, "construction_artifact_provenance_updated", {"project_id": project_id, "event": "validation"})
-                    _set_action_stage(action, "mutation_execution_succeeded", {"project_id": project_id, "is_valid": is_valid})
+                    _set_action_stage(action, "mutation_execution_succeeded", {"project_id": project_id, "is_valid": is_valid, "validation_result": "passed" if is_valid else "failed"})
                     if bool(is_valid) and not actually_completed and support_missing:
                         self._emit_event(
                             sim_state,

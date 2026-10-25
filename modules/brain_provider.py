@@ -24,6 +24,7 @@ from urllib import error, request
 
 from modules.action_catalog import ACTION_CATALOG, normalize_action_alias, validate_rulebrain_action_references
 from modules.action_schema import BrainDecision, CommunicationIntent, ExecutableActionType
+from modules.controller_context import partition_affordances
 from modules.brain_contract import (
     AgentBrainRequest,
     AgentBrainResponse,
@@ -1764,7 +1765,9 @@ class RuleBrain(BrainProvider):
         # 4) select/advance method step, 5) choose legal action for that step,
         # 6) emit policy snapshot, 7) hand action to executor bridge (Agent).
         affordances = list(context_packet.action_affordances if not is_request else context_packet.allowed_actions)
-        affordances = [a for a in affordances if a.get("source_accessible") is not False]  # a blocked (inaccessible private source) INSPECT is not a candidate for any Pilot
+        # Only currently-executable affordances are candidates: the same canonical executable/blocked boundary the generative controllers are given
+        # (controller_context.partition_affordances). Blocked ones (inaccessible private source, not-ready validate/repair) stay in the context packet as information.
+        affordances, _blocked_affordances = partition_affordances(affordances)
         sorted_affordances = sorted(affordances, key=lambda a: float(a.get("utility", 0.0)), reverse=True)
         legal_types = {a.get("action_type") for a in affordances if a.get("action_type")}
         mechanism_profile = (
