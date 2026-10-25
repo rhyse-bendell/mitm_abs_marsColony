@@ -37,3 +37,26 @@ Procedural Baseline selects gate-blocked validations; speculative-connector spam
 
 ## Not done (by instruction)
 No larger batch, no prompt/coefficient tuning, no human-testbed work. feature/human-participant-testbed untouched (b1d728b); stash@{0} untouched; CLAUDE.md untracked.
+
+---
+
+# Addendum: final controller-contract cleanup (supersedes the Procedural-validation and ambiguous-feedback limitations above)
+
+Code commit: see `git log` ("Controller-contract cleanup ..."); the frozen SHA is the commit that contains this addendum (recorded in the hand-off message and `git log -1 -- <this file>`).
+
+## Changes
+1. `RuleBrain._policy_core` and the Procedural fallback (`ProceduralBaselinePilotAdapter.choose_fallback_action`) now take their candidates from `controller_context.partition_affordances` - the same executable/blocked boundary that builds the LLM `executable_actions`. Blocked affordances (not-ready VALIDATE, not-ready REPAIR, inaccessible private INSPECT) stay in the context packet as information and cannot be selected. No VALIDATE special case; no change to preferences among executable actions.
+2. Validation outcomes seen by Pilots: `status: completed`, `execution_status: completed`, `validation_result: passed|failed` (was `status: succeeded` for any executed validation). Reasons (missing rules, support detail) stay only in the authoritative event log; `is_valid` / `missing_expected_rules` never reach the prompt (0 occurrences in A0 prompts). Validation rule and outcome unchanged. Other actions' outcome records are unchanged.
+3. Tests: `tests/test_controller_contract_cleanup.py` (10 tests; 5 fail on the pre-change code): blocked VALIDATE/REPAIR/INSPECT never selected by RuleBrain over 6 modes; selectable once executable; fallback restricted; LLM partition unchanged; failed/passed validation reporting; non-validation outcomes unchanged; result reaches the prompt.
+
+## Regression
+Related focused set (45 files incl. authority, connector, gate, pilot-adapter, rule-brain, validation): 379 passed / 35 failed; the same 35 fail on the unmodified code (pre-existing, plus the known flaky rng test `test_generate_plan_respects_method_state_source_targeting`, which fails intermittently on both trees). No new failure.
+
+## Small diagnostic (`Outputs/contract_diag_20261025`; P seeds 0,1,4 + A seed 0, 600 s, same settings)
+Blocked-validation selections reaching the gate / refused validations: P0 22->0, P1 40->0, P4 20->0, A0 18->0 (`mecha_action_blocked` 11/20/10/9 -> 0/0/0/0). 0 controller errors; 0 private-source reroutes; substitution events all `applied: false`; task package untouched.
+Procedural taskwork (core validated H/G/Gen; before -> after): P0 6 -> 5; P1 5 -> 5; P4 4 -> 2; supported capacity max P0 9 -> 0, P1 6 -> 0, P4 0 -> 0. Single runs per cell with a changed decision/RNG sequence; direction is mixed and N=1, so not interpreted or tuned. Connect selections 11->4, 9->10, 6->2; blocked-project support pressure still applied (152/315/344 events).
+A0: Engineer longest identical streak 23 -> 27 (now on `validate_construction` of a failed water connector, not the greenhouse). Every repeat is reported as `validation_result: failed` in the prompt (403 failed / 3 passed records), so the repetition persists despite unambiguous feedback: model behaviour, not an interface ambiguity. A0 also validated 5 core structures (was 1) with 11 repair episodes (was 0).
+Host note: A0 waited 1807 s in guard warm-up (desktop applications held ~2.3 GB of VRAM) and then ran normally; wall time not comparable.
+
+## Status
+READY for the larger characterization batch. Remaining documented limitations: LLM perseveration on re-validating failed projects; speculative-connector proliferation; truncated history/communication/held-DIK sections in LLM prompts; Procedural taskwork changed (mixed) by removing wasted blocked selections - characterize, do not tune; N=3 / host memory pressure caveats.
