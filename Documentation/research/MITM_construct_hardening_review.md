@@ -362,3 +362,72 @@ Commits on `research/mitm-construct-hardening` (not merged; `main` remains `aba5
 
 Not touched: `main`, `feature/human-participant-testbed`, `stash@{0}`, `CLAUDE.md`, the 45-run baseline dataset.
 
+
+
+---
+
+# Part B. Second hardening block: approved decisions implemented
+
+Sections 6 and 7 above were proposals; they are now implemented as described in `MITM_contracts.md` (the contract) and below. H1 (request-reply) is
+resolved. Commits on `research/mitm-construct-hardening`: `03f5a7c` request-response ledger; `fbe3f51` externalize_knowledge; `735be6d` artifact-derived
+correctness and specification separation; `6137509` repair menu for unlocalized failures; `cab04bc` generative-Pilot tests; `4ebefaa` test alignment; `a2a7583`
+Pilot-authority guard fix; and the commit adding this part.
+
+## B1. What changed
+* **Request-response (decision 1).** Persistent `request_ledger`; the recipient's Pilot sees a per-requester COMMUNICATE affordance and chooses; the Mecha no
+  longer queues DIK payloads. Selection, delivery attempt, provision, uptake and gap resolution are separate events; partial, unanswered, expired, duplicate and
+  out-of-range cases are tested (`tests/test_request_response_lifecycle.py`, 13 tests).
+* **Externalization (decision 2, M1 and M2).** `externalize_knowledge {kind, element_id[, project_id]}`; distinct events; `externalization_episodes` counts DIK put
+  on the workspace; same affordances and gate for Procedural and Ollama (`tests/test_knowledge_externalization.py`, `tests/test_generative_pilot_shared_semantics.py`).
+* **Construction (decisions 3-5).** `construction_specs.csv` (14 slots, final packets, headroom minimum one brick); explicit `design_slot`/`design_option`;
+  unresolved choices block the step; one fidelity draw per build action realizes a slip; `correct` is derived from realized features; validation, support and
+  repair no longer write it; validation feedback is limited to what the validator can assess (`tests/test_construction_specification.py`, 18 tests).
+* **Efficiency (decision 6).** Mapping unchanged, neutral 1.0; a translation-level test shows transport, start, continue, repair and validate each get exactly
+  one hook multiplier. The neutral change is a deliberate model-version change (see `MITM_contracts.md`); no speed was altered to restore scores.
+
+## B2. Regression against frozen main, by failure identity
+Same 104 non-GUI test files, run on a worktree at `aba5f04` and on the branch: **baseline 103 failed / 1048 passed; branch 102 failed / 1049 passed. New failures: 0.**
+One baseline failure passes on the branch (`test_provider_internal_fallback_marks_effective_backend`, flaky). The new test files (69 tests) all pass. The 103 baseline
+failures are pre-existing and untouched.
+Existing tests were edited only where the contract intentionally changed, never loosened: scripted Pilots now supply the specification choice; tests that set a hidden
+flag now inject a realized defect; the proof-matrix test uses the request ledger; the action-argument spec set includes the new actions; two timing-dependent checks
+became behavioural invariants (the Pilot-authority end-to-end test requires the no-rewrite invariant to be exercised on at least three substantive action families instead of
+a decision-count floor; the blocked-selection test requires that control returns to the Pilot, not that it does so within 12 s).
+
+## B3. Pivot audit (Pilot authority)
+Instrumented 12 runs (baseline, request-high, extern-high, push-high; seeds 0/1/4; 600 s) logging every pivot that changed an action. First pass: 4 rewrites, **2 genuine
+violations**: a forced recovery pivot replaced a Pilot's `externalize_knowledge` with an inspect, because the new action was missing from the substantive and state-mutating
+guard sets (my omission). Fixed and tested; no strategy was changed to hide it. After the fix: 2 rewrites in 12 runs, both with an input that was not the Pilot's anchored
+decision and an output equal to the Pilot's own choice in that tick, so no substantive Pilot choice was replaced. Rewrites in the 45-run screening and the first probe were not
+logged at this granularity and cannot be re-attributed.
+
+## B4. Causal probes (Procedural, compact panel, 600 s, seeds 0/1/4, 15 runs; N=3, descriptive)
+| Probe | Result |
+|---|---|
+| A legitimate request leads to new knowledge in the requester | `request_high`: of 48 requests per run, 1.0 element provided, 0.67 uptakes with acquisition, 1.0 requester gaps resolved through a request; the full chain occurred in 2 of 3 seeds |
+| More request propensity gives more meaningful requests, no false gaps | requests 0 / 4.3 / 48 (low / baseline / high; screening 0.3 / 2.0 / 40.3); requests from agents already holding the item: 0 in every cell (screening high: 21.3) |
+| The Procedural response is rare | a response was offered in 66 of 927 decisions and selected 3 times (communicate was chosen 10 times); the +1.0 solicited-provision term is a pre-existing hypothesized default and was not tuned |
+| Shared artifact gives uptake independent of plans | `extern_high`: 14.3 knowledge externalizations per run (7.0 claims, 1.3 evidence, 2.0 design notes, 10.7 contributions to the shared artifact) against 4.3 at low and 5.7 at baseline, with plan proposals unchanged (2.7 / 2.3 / 2.7); 3.7 uptakes per run from the knowledge workspace (0 at low and baseline). In the screening the two counts were identical in 45 of 45 runs |
+| Holding a construction rule changes selected specifications | informed choices (n=140): intended compliant 100%; uninformed (n=205): 38% |
+| An informed Pilot can still slip | informed slip rate 39%; informed realized compliant 66% (48 of 140 became defects) |
+| An uninformed Pilot can produce a correct design | uninformed realized compliant 38%; 5 fully specified valid structures were built wholly by uninformed actors (4 wholly by informed ones) |
+| Failed validation creates no defect | no run produced a failure with a structurally valid artifact, and no defect appeared without a realization event; the Environment-level invariant rests on unit tests and the scripted probe (`scripted_probes.json`: a failed validation left `correct` and the violation list unchanged). Validation only executes when ready, so this case does not arise naturally |
+| A valid artifact can lack functional support | 7 structurally valid structures without functional support in the probe; scripted probe: a valid house with no connectors stays valid and validation is refused for missing support rather than failing the artifact |
+
+Probe files: `Outputs/mitm_hardening_probe4_20261025/` (final code); earlier attempts `probe2`, `probe3` and the pre-fix audit are kept; `mitm_pivot_audit_20261025`.
+
+## B5. Compared with the 45-run screening (same cells)
+Requests from agents that already held the item fell from 21.3 to 0 (high). Externalization episodes now differ from plan proposals. **Validated core structures fell from
+3.7-4.7 to 1.0-2.3 per run.** This follows from the specification: an uninformed builder reaches a valid structure with probability 0.01-0.17, an informed one 0.06-0.25
+(against f^n before), and repair now needs an observed or localized defect and a new choice that can slip again. It is an intended consequence of making knowledge matter,
+not a tuned setting, and its level is not calibrated. Validation attempts rose (16.7 to 23.0 at baseline) because failed structures are revalidated.
+
+## B6. Remaining limitations and unresolved assumptions
+See `MITM_contracts.md` section 6. Chief ones: the slot design and the 0.5 slip rate are uncalibrated abstractions; the informed Procedural rule is deterministic; defects
+surface only through a validator with the right DIK; Procedural response and externalization rates are low under hypothesized weights; the closure-dialogue status (TPS) is
+still auto-queued; at 600 s supported capacity remains floor-dominated.
+
+## B7. Readiness for the second construct-validation screen
+**Ready for a second screen of mechanisms and proximal/intermediate pathways**, with conditions: runs of at least 3000 s and at least 5 seeds (at 600 s validated structures
+are 1-2); treat absolute outcome levels as a new model version, not comparable with `aba5f04`; do not read Procedural request or externalization uptake rates as properties of
+MITM (they come from hypothesized weights); keep outcome-level hypothesis claims out of that screen. The larger experiment was not launched.
