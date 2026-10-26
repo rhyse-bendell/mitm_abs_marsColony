@@ -73,10 +73,13 @@ class TestTraitDrivenBehavior(unittest.TestCase):
 
             decision = BrainDecision(selected_action=ExecutableActionType.TRANSPORT_RESOURCES)
 
+            # build_speed reaches durations only through its action_duration hook (inverse_duration_scale: 1.5 - build_speed)
             agent.build_speed = 1.0
+            agent.hook_effects[("action_duration", "transport_resources", "duration_scale")] = 0.5
             fast_action = agent._translate_brain_decision_to_legacy_action(decision, sim.environment)[0]
 
             agent.build_speed = 0.0
+            agent.hook_effects[("action_duration", "transport_resources", "duration_scale")] = 1.5
             slow_action = agent._translate_brain_decision_to_legacy_action(decision, sim.environment)[0]
 
             self.assertLess(fast_action["duration"], slow_action["duration"])

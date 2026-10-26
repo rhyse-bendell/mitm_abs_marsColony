@@ -2571,10 +2571,17 @@ class Agent:
         shift = self._hook_value("decision_threshold", "start_construction", "readiness_threshold", default=0.0)
         return max(1.0, 3.0 + shift)
 
-    def _scaled_duration(self, base_duration):
-        build_speed = self._trait_value("build_speed", 0.5)
-        factor = 1.25 - (0.75 * build_speed)
-        return max(0.2, round(base_duration * factor, 3))
+    def _scaled_duration(self, base_duration, action_name):
+        """Task-execution-efficiency -> action duration, applied exactly once.
+
+        duration = task-authored base duration x the ``action_duration/duration_scale`` hook for ``action_name``.
+        The hook is the only place ``build_speed`` (task_execution_efficiency) enters, via the construct->mechanism->hook
+        mapping ``inverse_duration_scale`` (config/experimental/mechanism_to_hook.csv): scale = 1.5 - build_speed over
+        [0.5, 1.5], so build_speed 0.5 (the neutral/reference setting) leaves the authored duration unchanged.
+        (Before the hardening branch a second, independent ``1.25 - 0.75*build_speed`` factor was also applied here,
+        compounding the effect and shifting the neutral point to x0.875.)
+        """
+        return max(0.2, round(float(base_duration) * self._duration_scale(action_name), 3))
 
     def _help_context_available(self, sim_state):
         if self._stalled_teammates(sim_state):
@@ -10776,7 +10783,7 @@ class Agent:
             }:
                 action["project_id"] = decision.target_id
         if decision.selected_action == ExecutableActionType.TRANSPORT_RESOURCES:
-            action["duration"] = self._scaled_duration(action.get("duration", 30.0)) * self._duration_scale("transport_resources")
+            action["duration"] = self._scaled_duration(action.get("duration", 30.0), "transport_resources")
             exact_project = str(decision.target_id or "") in environment.construction.projects
             bridge_named = str(decision.target_id or "") == "bridge_bc"
             build_selection = None if bridge_named else self._select_build_target(
@@ -10832,7 +10839,7 @@ class Agent:
             ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
             ExecutableActionType.VALIDATE_CONSTRUCTION,
         }:
-            action["duration"] = self._scaled_duration(action["duration"]) * self._duration_scale(decision.selected_action.value)
+            action["duration"] = self._scaled_duration(action["duration"], decision.selected_action.value)
 
         if self._is_typed_start(decision):
             typed_project_id, typed_blockers = self._commit_typed_start(decision, environment, sim_state=sim_state)

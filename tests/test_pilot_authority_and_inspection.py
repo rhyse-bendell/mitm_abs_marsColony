@@ -289,7 +289,7 @@ def _run(seed, constituent_overrides, seconds, probe_times=()):
 
 def test_substantive_pilot_actions_are_not_rewritten_end_to_end():
     mismatches, selected, _ = _run(seed=0, constituent_overrides={}, seconds=240)
-    assert selected > 100
+    assert selected > 80  # a sufficiency floor, not a rate: neutral durations are the authored ones since the single-application duration fix (was x0.875)
     substantive = {a.value for a in SUBSTANTIVE}
     assert [m for m in mismatches if m[0] in substantive] == []  # what the Pilot selected is what was attempted
 
