@@ -90,10 +90,10 @@ def test_30_communication_exchange_names_exact_provided_elements_and_solicitatio
             giver = next(a for a in state.agents if a.mental_model["information"])
             peer = next(a for a in state.agents if a is not giver)
             eid = f"information:{next(iter(giver.mental_model['information'])).id}"
-            giver.theory_of_mind.setdefault(peer.name, {"goals": [], "knowledge_ids": set(), "last_seen": None})["requested_dik_ids"] = {eid}
+            giver.request_ledger.receive(peer.name, {eid}, float(state.time))
             giver.generate_message(recipient_name=peer.name, include_requests=False)
             assert giver._provision_solicited is True and giver._provided_element_ids == [eid]
-            giver.theory_of_mind[peer.name]["requested_dik_ids"] = set()
+            giver.request_ledger.receive(peer.name, set(), float(state.time))  # the requester withdraws the request
             giver.source_memory_state.setdefault(f"{giver.role}_Info", {})["pending_role_share_ids"] = [eid]
             giver.generate_message(recipient_name=peer.name, include_requests=False)
             assert giver._provision_solicited is False

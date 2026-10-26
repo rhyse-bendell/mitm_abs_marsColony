@@ -50,6 +50,7 @@ from modules.goal_manager import GoalManager
 from modules.goal_state import GOAL_SOURCES, GOAL_STATUSES
 from modules.plan_state import PlanRecord
 from modules.task_model import normalize_rule_token
+from modules.request_ledger import ReceivedRequestLedger
 
 DIK_LOG = []
 
@@ -295,7 +296,7 @@ class Agent:
 
         # Theory of Mind (ToM) about teammates
         self.theory_of_mind = {}  # {agent_name: {"goals": [], "knowledge": set(), "last_seen": time}}
-        self.received_dik_requests = {}  # {sender: {"ids": set, "time": t}}: teammates' information needs; NOT this agent's own known_gaps
+        self.request_ledger = ReceivedRequestLedger()  # teammates' information needs (persistent lifecycle record); NOT this agent's own known_gaps
 
         # ---------------------------------------------------------------------------
         # MECHA CORE STATE: embodied/cognitive-action state owned by the agent suit
@@ -696,8 +697,32 @@ class Agent:
                 self.experimental_metrics["dik_reacquired"] += 1
                 self._emit_event(sim_state, "dik_reacquired", {"element_id": eid, "kind": kind})
             if eid in self.outstanding_dik_requests:
-                self.outstanding_dik_requests.pop(eid)
+                asked_at = self.outstanding_dik_requests.pop(eid)
                 self.experimental_metrics["request_successes"] += 1
+                self._emit_event(sim_state, "dik_request_gap_resolved", {"element_id": eid, "kind": kind, "requested_at": asked_at, "mode": self.dik_ledger[eid].get("mode"), "source": self.dik_ledger[eid].get("source")})
+
+    def _held_tokens(self):
+        """Canonical data:/information:/rule: tokens this agent actually holds right now (own mental model only)."""
+        tokens = {f"data:{d.id}" for d in self.mental_model["data"]} | {f"information:{i.id}" for i in self.mental_model["information"]}
+        tokens |= {f"rule:{normalize_rule_token(r)}" for r in self.mental_model["knowledge"].rules if normalize_rule_token(r)}
+        return tokens
+
+    def _expire_received_requests(self, sim_state):
+        for record in self.request_ledger.expire(float(getattr(sim_state, "time", 0.0))):
+            self._emit_event(sim_state, "dik_request_closed", {"request_id": record["request_id"], "requester": record["requester"], "reason": "expired", "provided_ids": sorted(record["delivered"]), "unprovided_ids": sorted(self.request_ledger.outstanding_ids(record))})
+
+    def response_opportunities(self, now=None):
+        """Actionable received requests: requester, the requested elements this agent holds and has not provided, and those it lacks.
+        Read-only; a Pilot may respond, defer or ignore."""
+        held = self._held_tokens()
+        rows = []
+        for record in self.request_ledger.open_records():
+            have, lack = self.request_ledger.actionable(record["requester"], held)
+            rows.append({
+                "request_id": record["request_id"], "requester": record["requester"], "can_provide": have, "cannot_provide": lack,
+                "age_s": None if now is None else round(float(now) - record["requested_at"], 1), "status": self.request_ledger.status(record),
+            })
+        return rows
 
     def _reconcile_known_gaps(self, sim_state=None):
         """Drop recognized gaps for DIK elements this agent now genuinely holds.
@@ -926,14 +951,15 @@ class Agent:
         role_mem = self.source_memory_state.get(f"{self.role}_Info", {}) or {}
         unsolicited = [i for i in (role_mem.get("pending_role_share_ids") or []) if i in held_ids]
         solicited = set()
-        for name, model in (self.theory_of_mind or {}).items():
-            if isinstance(model, dict):
-                solicited |= {i for i in (model.get("requested_dik_ids") or set()) if i in held_ids}
+        responses = self.response_opportunities(float(getattr(sim_state, "time", 0.0)) if sim_state is not None else None)
+        for row in responses:
+            solicited |= set(row["can_provide"])
         gaps = self._extract_requested_dik_ids(self.known_gaps)
         active_plan = self._get_active_team_plan(sim_state) if sim_state is not None else {}
         return {
             "provision_unsolicited": len(unsolicited),
             "provision_solicited": len(solicited),
+            "response_opportunities": [r for r in responses if r["can_provide"]],
             "dik_gap_count": len(gaps),
             "externalize_gap": bool(self._workspace_externalization_gap_exists(environment)),
             "team_plan_opportunity": self._team_plan_opportunity(sim_state, active_plan),
@@ -5593,7 +5619,7 @@ class Agent:
             ) or any(tok.startswith("missing_expected_rule:") for tok in normalized_blockers),
             "pending_role_share_count": len(pending_role_share),
             "recent_epistemic_request": bool(recent_epistemic_request),
-            "received_engineering_request": bool(recent_epistemic_request and any("engineer" in str(x).lower() for entry in self.received_dik_requests.values() for x in list(entry.get("ids", ()))[:8])),
+            "received_engineering_request": bool(recent_epistemic_request and any("engineer" in str(x).lower() for entry in self.request_ledger.open_records() for x in list(entry.get("requested_ids", ()))[:8])),
             "recent_meaningful_comm": bool(last_exchange.get("meaningful")),
             "recent_comm_no_effect": int(self.communication_state.get("no_effect_streak", 0) or 0) > 0,
             "needs_source_revisit": bool(role_mem.get("revisitable_for_verification", True)) and float(role_mem.get("memory_confidence", 1.0) or 1.0) < 0.45,
@@ -11225,6 +11251,15 @@ class Agent:
             self._emit_event(sim_state, "moving_to_externalization_site", {"selected_next_action": decision.selected_action.value, "current_location": self.position})
         if decision.selected_action == ExecutableActionType.REQUEST_ASSISTANCE:
             action["assist_action"] = decision.selected_action.value
+        if decision.selected_action == ExecutableActionType.COMMUNICATE and sim_state is not None:
+            addressee = next((o for o in sim_state.agents if o is not self and o.name == str(decision.target_id or "")), None)
+            if addressee is not None:
+                action["recipient"] = addressee.name  # the Pilot addressed a specific teammate (e.g. a requester)
+                record = self.request_ledger.open_record(addressee.name)
+                if record is not None:
+                    action["response_to_request"] = record["request_id"]
+                    self.request_ledger.mark_selected(addressee.name)
+                    self._emit_event(sim_state, "dik_response_selected", {"request_id": record["request_id"], "requester": addressee.name, "can_provide": self.request_ledger.actionable(addressee.name, self._held_tokens())[0]})
         self._sync_active_intent(sim_state, action_type=decision.selected_action.value, target=decision.target_id or action.get("project_id") or action.get("source_target_id"))
 
         self._emit_event(sim_state, "action_translation_succeeded", {"planner_action_type": decision.selected_action.value, "translated_action_type": action.get("type"), "target_id": decision.target_id, "target_zone": decision.target_zone})
@@ -11676,6 +11711,7 @@ class Agent:
         self._sync_dik_ledger(sim_state)
         self._update_recognized_gaps(sim_state)
         self._reconcile_known_gaps(sim_state)
+        self._expire_received_requests(sim_state)
         self._update_memory(sim_state)
         self.sim_step_count += 1
         self._record_team_plan_commitment_tick(sim_state)
@@ -13118,6 +13154,10 @@ class Agent:
                         dist = math.hypot(other.position[0] - self.position[0], other.position[1] - self.position[1])
                         if dist <= COMMUNICATION_RADIUS:
                             nearby.append((dist, other))
+                if action.get("recipient"):
+                    nearby = [(d, o) for d, o in nearby if o.name == action["recipient"]]  # spatial requirement: only the addressee, only in range
+                    if not nearby:
+                        self._emit_event(sim_state, "dik_response_delivery_failed", {"request_id": action.get("response_to_request"), "requester": action["recipient"], "reason": "out_of_range"})
                 if not nearby:
                     self.communication_state["no_effect_streak"] = int(self.communication_state.get("no_effect_streak", 0) or 0) + 1
                     self.progress_tracker["communication_no_effect"] = int(self.progress_tracker.get("communication_no_effect", 0) or 0) + 1
@@ -13777,8 +13817,9 @@ class Agent:
             if len(signature_parts) >= 3 and signature_parts[0] == str(closure_project_id):
                 closure_missing_rule_ids = [normalize_rule_token(r) for r in signature_parts[2].split(",") if normalize_rule_token(r)]
         requested = set()
-        if recipient_name and recipient_name in self.theory_of_mind:
-            requested.update(self.theory_of_mind[recipient_name].get("requested_dik_ids", set()) or set())
+        self._response_request_id = None
+        if recipient_name and self.request_ledger.open_record(recipient_name) is not None:
+            requested.update(self.request_ledger.actionable(recipient_name, self._held_tokens())[0])  # only what this agent holds
         if requested:
             data_payload, info_payload, rule_payload = self._build_dik_payload_for_ids(requested)
             if data_payload:
@@ -13790,6 +13831,8 @@ class Agent:
             shared_ids = {f"data:{d.id}" for d in data_payload} | {f"information:{i.id}" for i in info_payload} | {f"rule:{normalize_rule_token(r)}" for r in rule_payload}
             self._provided_element_ids = sorted(shared_ids)
             self._provision_solicited = bool(shared_ids)
+            if shared_ids:
+                self._response_request_id = (self.request_ledger.open_record(recipient_name) or {}).get("request_id")
             if pending_role_share and shared_ids:
                 remaining = sorted(pending_role_share - shared_ids)
                 self.source_memory_state.setdefault(role_source, {})["pending_role_share_ids"] = remaining
@@ -13894,6 +13937,12 @@ class Agent:
                 sim_state=sim_state,
             )
             closure_blockers_before = set(closure_blockers_before or [])
+        response_request_id = getattr(self, "_response_request_id", None)
+        responded_ids = sorted(self._provided_element_ids) if (self._provision_solicited and response_request_id) else []
+        if sim_state is not None and self.request_ledger.open_record(other_agent.name) is not None:
+            record = self.request_ledger.mark_attempt(other_agent.name)
+            self._emit_event(sim_state, "dik_response_delivery_attempted", {"request_id": record["request_id"], "requester": other_agent.name, "will_provide": responded_ids})
+        held_before_exchange = other_agent._held_tokens()
         for msg in messages:
             message_types.append(msg.get("type"))
             if sim_state is not None and msg.get("type") == "TKRQ" and msg.get("project_id"):
@@ -13924,6 +13973,16 @@ class Agent:
             receiver_derivation_triggered = receiver_derivation_triggered or bool(outcome.get("derivation_triggered"))
             if outcome.get("response_category"):
                 response_categories.add(str(outcome.get("response_category")))
+        if sim_state is not None and responded_ids:
+            now_resp = float(getattr(sim_state, "time", 0.0))
+            record = self.request_ledger.mark_provided(other_agent.name, responded_ids, now_resp)
+            acquired = sorted(set(responded_ids) & (other_agent._held_tokens() - held_before_exchange))
+            self._emit_event(sim_state, "dik_response_provided", {"request_id": response_request_id, "requester": other_agent.name, "provided_ids": responded_ids,
+                                                                   "unprovided_ids": sorted(self.request_ledger.outstanding_ids(record)) if record else [],
+                                                                   "request_status": self.request_ledger.status(record) if record else None})
+            self._emit_event(sim_state, "dik_request_uptake", {"request_id": response_request_id, "requester": other_agent.name, "provided_ids": responded_ids, "acquired_ids": acquired})
+            if record is not None and record["closed_reason"]:
+                self._emit_event(sim_state, "dik_request_closed", {"request_id": record["request_id"], "requester": record["requester"], "reason": record["closed_reason"], "provided_ids": sorted(record["delivered"]), "unprovided_ids": []})
         readiness_after = set(other_agent._build_readiness_blockers(sim_state.environment, sim_state=sim_state)) if sim_state is not None else set()
         readiness_unblocked = bool(readiness_before and len(readiness_after) < len(readiness_before))
         closure_blockers_after = set()
@@ -14127,9 +14186,12 @@ class Agent:
             requested_ids = self._extract_requested_dik_ids(content if isinstance(content, list) else [content])
             # A received request is the SENDER's information need, not a gap in this agent's own knowledge: it is kept
             # apart from known_gaps (which holds only this agent's self-recognized gaps).
+            request_record = None
             if sender:
                 self.theory_of_mind[sender]["requested_dik_ids"] = set(requested_ids)
-                self.received_dik_requests[sender] = {"ids": set(requested_ids), "time": float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)) or 0.0)}
+                request_record, _new = self.request_ledger.receive(
+                    sender, requested_ids, float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)) or 0.0), project_id=message.get("project_id")
+                )
             if requested_ids:
                 data_payload, info_payload, rule_payload = self._build_dik_payload_for_ids(requested_ids)
                 requested_modes = [str(mode) for mode in (message.get("request_modes", []) or ["exact_rule"]) if str(mode)]
@@ -14154,16 +14216,9 @@ class Agent:
                                 {"from_agent": sender, "project_id": project.get("id"), "requested_ids": sorted(requested_ids)},
                             )
                             break
+                # The recipient's Pilot decides whether and when to answer (the request stays in request_ledger as a response
+                # opportunity). The Mecha no longer queues DIK payloads on its behalf.
                 queue = self.team_plan_state.setdefault("pending_outbound_messages", [])
-                if data_payload:
-                    entry = {"type": "TDP", "sender": self.name, "recipient": sender, "content": data_payload}
-                    queue.insert(0, entry) if prioritized_for_closure else queue.append(entry)
-                if info_payload:
-                    entry = {"type": "TIP", "sender": self.name, "recipient": sender, "content": info_payload}
-                    queue.insert(0, entry) if prioritized_for_closure else queue.append(entry)
-                if rule_payload:
-                    entry = {"type": "TKP", "sender": self.name, "recipient": sender, "content": rule_payload}
-                    queue.insert(0, entry) if prioritized_for_closure else queue.append(entry)
                 requested_rules = [
                     normalize_rule_token(item.split(":", 1)[1])
                     for item in requested_ids
@@ -14257,11 +14312,13 @@ class Agent:
                             "recipient": self.name,
                         },
                     )
-                queue.append({"type": "TPS", "sender": self.name, "recipient": sender, "content": tps_payload})
+                if message.get("project_id"):  # legacy validation-closure dialogue only: a status, never DIK content
+                    queue.append({"type": "TPS", "sender": self.name, "recipient": sender, "content": tps_payload})
                 self._emit_event(
                     sim_state,
                     "dik_request_received",
                     {
+                        "request_id": (request_record or {}).get("request_id"),
                         "from_agent": sender,
                         "requested_ids": sorted(requested_ids),
                         "respondable_count": len(data_payload) + len(info_payload) + len(rule_payload),

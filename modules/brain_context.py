@@ -271,6 +271,7 @@ class BrainContextBuilder:
                 return 0.1 if stage == "early" else 0.06
             return 0.2
 
+        response_rows = list(opportunities.get("response_opportunities") or [])
         legal = [
             {"action_type": ExecutableActionType.WAIT.value, "target_id": None, "target_class": "self", "utility": 0.1},
             {"action_type": ExecutableActionType.COMMUNICATE.value, "target_id": "nearby_agent", "target_class": "team", "utility": utility_for(ExecutableActionType.COMMUNICATE)},
@@ -280,11 +281,26 @@ class BrainContextBuilder:
              "consult_useful": bool(consult_assessment.get("useful")), "consult_redundant": bool(consult_assessment.get("has_artifacts")) and not bool(consult_assessment.get("useful")),
              "consult_reasons": list(consult_assessment.get("reasons") or []), "consult_artifact_id": consult_assessment.get("artifact_id")},
         ]
+        import math
+        from modules.agent import COMMUNICATION_RADIUS
+        peer_positions = dict((team_state or {}).get("teammate_positions") or {})
+        for row in response_rows:
+            # A received request is a response OPPORTUNITY addressed to the requester; whether and when to answer is the Pilot's choice.
+            peer_pos = peer_positions.get(row["requester"])
+            dist = None if peer_pos is None else math.hypot(peer_pos[0] - agent.position[0], peer_pos[1] - agent.position[1])
+            legal.append({
+                "action_type": ExecutableActionType.COMMUNICATE.value, "target_id": row["requester"], "target_class": "team",
+                "utility": utility_for(ExecutableActionType.COMMUNICATE), "response_to_request": row["request_id"],
+                "provision_solicited": len(row["can_provide"]), "can_provide": list(row["can_provide"]), "cannot_provide": list(row["cannot_provide"]),
+                "request_age_s": row.get("age_s"), "reachable": dist is not None and dist <= COMMUNICATION_RADIUS, "productive": True, "no_effect_streak": 0,
+            })
         for item in legal:
             # Read-only facts for the Pilot's constituent-weighted terms; no opportunity -> the propensity has no effect.
+            if item.get("response_to_request"):
+                continue
             if item.get("action_type") == ExecutableActionType.COMMUNICATE.value:
                 item["provision_unsolicited"] = int(opportunities.get("provision_unsolicited", 0))
-                item["provision_solicited"] = int(opportunities.get("provision_solicited", 0))
+                item["provision_solicited"] = 0  # answering a request is exposed as its own per-requester affordance
             elif item.get("action_type") == ExecutableActionType.REQUEST_ASSISTANCE.value:
                 item["dik_gap_count"] = int(opportunities.get("dik_gap_count", 0))
             elif item.get("action_type") == ExecutableActionType.EXTERNALIZE_PLAN.value:
@@ -737,7 +753,7 @@ class BrainContextBuilder:
         # or the teammate's visible status text. The teammate's own (hidden) known_gaps are never read.
         teammate_help_signals = {
             other.name: (
-                bool((agent.received_dik_requests.get(other.name) or {}).get("ids"))
+                bool((agent.request_ledger.open_record(other.name) or {}).get("requested_ids"))
                 or bool((agent.theory_of_mind.get(other.name) or {}).get("believed_missing_ids"))
                 or "blocked" in (getattr(other, "status_last_action", "").lower())
                 or "stalled" in (getattr(other, "status_last_action", "").lower())
@@ -776,6 +792,7 @@ class BrainContextBuilder:
         team_state = {
             "team_shared_knowledge": team_knowledge_summary,
             "teammate_roles": {other.name: other.role for other in sim_state.agents if other.name != agent.name},
+            "teammate_positions": {other.name: tuple(other.position) for other in sim_state.agents if other.name != agent.name},
             "teammate_inferred_goals": {
                 teammate: model.get("goals", []) for teammate, model in agent.theory_of_mind.items()
             },

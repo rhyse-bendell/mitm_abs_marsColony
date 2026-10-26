@@ -34,19 +34,20 @@ def test_received_request_is_not_a_gap_in_the_recipient(sim):
     before = held_tokens(holder)
     holder.receive_message({"type": "TKRQ", "sender": asker.name, "content": ["information:I_TEST_RECEIVED", "information:I_TEST_OTHER"]}, sim_state=sim)
     assert not holder.known_gaps  # the sender's need is not the recipient's own gap
-    assert holder.received_dik_requests[asker.name]["ids"] == {"information:I_TEST_RECEIVED", "information:I_TEST_OTHER"}
+    assert holder.request_ledger.open_record(asker.name)["requested_ids"] == {"information:I_TEST_RECEIVED", "information:I_TEST_OTHER"}
     assert holder.theory_of_mind[asker.name]["requested_dik_ids"] == {"information:I_TEST_RECEIVED", "information:I_TEST_OTHER"}
     assert held_tokens(holder) == before  # and nothing is granted either way
     assert "I_TEST_OTHER" not in {i.id for i in holder.mental_model["information"]}
 
 
-def test_request_is_still_answered_from_actual_holdings(sim):
+def test_request_is_not_auto_answered_by_the_middleware(sim):
     asker, holder = _pair(sim)
     info = Information("I_TEST_ANSWER", "x")
     holder.mental_model["information"].add(info)
     holder.receive_message({"type": "TKRQ", "sender": asker.name, "content": ["information:I_TEST_ANSWER"]}, sim_state=sim)
     queued = holder.team_plan_state.get("pending_outbound_messages", [])
-    assert any(m["type"] == "TIP" and m["recipient"] == asker.name and info in m["content"] for m in queued)
+    assert not [m for m in queued if m["type"] in {"TDP", "TIP", "TKP"}]  # the recipient's Pilot decides whether and when to answer
+    assert holder.response_opportunities()[0]["can_provide"] == ["information:I_TEST_ANSWER"]
 
 
 def test_resolved_gaps_are_removed_and_unresolved_ones_retained(sim):
@@ -241,7 +242,7 @@ def test_teammate_help_signal_does_not_read_a_teammates_hidden_gaps(sim):
     other.known_gaps.add("information:I_TEST_PRIVATE_GAP")  # the teammate's own, unannounced gap
     ctx = sim.brain_context_builder.build(sim, observer)
     assert ctx.team_state["teammate_help_signals"][other.name] is False
-    observer.received_dik_requests[other.name] = {"ids": {"information:I_TEST_PRIVATE_GAP"}, "time": 0.0}  # once they say so, it is evidence
+    observer.request_ledger.receive(other.name, {"information:I_TEST_PRIVATE_GAP"}, 0.0)  # once they say so, it is evidence
     ctx = sim.brain_context_builder.build(sim, observer)
     assert ctx.team_state["teammate_help_signals"][other.name] is True
 
