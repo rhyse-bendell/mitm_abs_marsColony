@@ -189,3 +189,15 @@ def test_candidates_are_grounded_and_exposed_identically_as_affordances(sim):
     offers = [x for x in sim.brain_context_builder.build(sim, a).action_affordances if x["action_type"] == "externalize_knowledge"]
     assert len(offers) == len(cands) and all(o["action_args"]["element_id"] for o in offers)
     assert not any(x.get("externalize_gap") for x in sim.brain_context_builder.build(sim, a).action_affordances if x["action_type"] == "externalize_plan")
+
+
+def test_a_forced_recovery_pivot_cannot_replace_a_pilots_knowledge_externalization(sim):
+    """Audit finding: externalize_knowledge was missing from the Pilot-authority guard, so a forced inspect pivot could replace it."""
+    agent = sim.agents[0]
+    agent.mental_model["information"].add(Information(EVID, "x"))
+    decision = _knowledge("evidence", EVID)
+    agent.progress_tracker["forced_pivot"] = A.INSPECT_INFORMATION_SOURCE.value
+    agent.progress_tracker["forced_pivot_until"] = sim.time + 100.0
+    result = agent._apply_policy_pivots(decision, sim.environment, sim_state=sim, pivot_origin="audit")
+    assert result.selected_action == A.EXTERNALIZE_KNOWLEDGE and dict(result.action_args) == dict(decision.action_args)
+    assert A.EXTERNALIZE_KNOWLEDGE in agent._SUBSTANTIVE_PILOT_ACTIONS and A.EXTERNALIZE_KNOWLEDGE in agent._PILOT_STATE_MUTATING_ACTIONS

@@ -1321,6 +1321,7 @@ class Agent:
             ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
             ExecutableActionType.CONNECT_STRUCTURES,
             ExecutableActionType.EXTERNALIZE_PLAN,
+            ExecutableActionType.EXTERNALIZE_KNOWLEDGE,
             ExecutableActionType.COMMUNICATE,
             ExecutableActionType.REQUEST_ASSISTANCE,
         }
@@ -1336,6 +1337,7 @@ class Agent:
             ExecutableActionType.COMMUNICATE,
             ExecutableActionType.REQUEST_ASSISTANCE,
             ExecutableActionType.EXTERNALIZE_PLAN,
+            ExecutableActionType.EXTERNALIZE_KNOWLEDGE,
             ExecutableActionType.MEETING,
             ExecutableActionType.TRANSPORT_RESOURCES,
             ExecutableActionType.START_CONSTRUCTION,
@@ -7801,6 +7803,7 @@ class Agent:
             ExecutableActionType.REQUEST_ASSISTANCE.value,
             ExecutableActionType.COMMUNICATE.value,
             ExecutableActionType.EXTERNALIZE_PLAN.value,
+            ExecutableActionType.EXTERNALIZE_KNOWLEDGE.value,
             ExecutableActionType.TRANSPORT_RESOURCES.value,
             ExecutableActionType.START_CONSTRUCTION.value,
             ExecutableActionType.CONTINUE_CONSTRUCTION.value,
