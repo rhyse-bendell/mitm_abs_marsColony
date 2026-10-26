@@ -122,7 +122,7 @@ _STRUCTURE_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 ACTION_ARG_SPECS: Dict[ExecutableActionType, Dict[str, Any]] = {
     ExecutableActionType.START_CONSTRUCTION: {"required": (), "allowed": ("structure_type", "design_slot", "design_option")},
     # design_slot/design_option: the specification choice the Pilot makes for the next build step (or, for a repair, the slot it reworks).
-    # The option menu is the same for every agent and never marks an option as correct (see Documentation/research/MITM_construction_contract.md).
+    # The option menu is the same for every agent and never marks an option as correct (see Documentation/research/MITM_contracts.md).
     ExecutableActionType.CONTINUE_CONSTRUCTION: {"required": (), "allowed": ("design_slot", "design_option")},
     ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION: {"required": (), "allowed": ("design_slot", "design_option")},
     ExecutableActionType.CONNECT_STRUCTURES: {"required": CONNECT_STRUCTURES_ARG_KEYS, "allowed": CONNECT_STRUCTURES_ARG_KEYS},

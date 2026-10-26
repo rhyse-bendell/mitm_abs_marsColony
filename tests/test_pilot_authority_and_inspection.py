@@ -260,6 +260,7 @@ def _run(seed, constituent_overrides, seconds, probe_times=()):
                              experimental_settings={"constructs": {"teamwork_potential": 0.5, "taskwork_potential": 0.5}, "constituent_overrides": constituent_overrides, "profile_mode": "compact_panel"})
         last_sel, first_attempt, mismatches, selected = {}, {}, [], 0
         taskwork_at = {}
+        families = set()  # substantive action families whose first attempt followed the Pilot's selection (non-vacuity of the invariant)
 
         def lst(e):
             nonlocal selected
@@ -273,6 +274,8 @@ def _run(seed, constituent_overrides, seconds, probe_times=()):
                 first_attempt[p["agent"]] = False
                 if last_sel.get(p["agent"]) and p.get("planner_action_type") != last_sel[p["agent"]]:
                     mismatches.append((last_sel[p["agent"]], p.get("planner_action_type")))
+                elif last_sel.get(p["agent"]):
+                    families.add(last_sel[p["agent"]])
 
         st.logger.register_event_listener(lst)
         import contextlib
@@ -284,12 +287,15 @@ def _run(seed, constituent_overrides, seconds, probe_times=()):
                 if (i + 1) in probe_times:
                     taskwork_at[i + 1] = sum(a.experimental_metrics.get("taskwork_actions", 0) for a in st.agents)
             st.stop()
+    _run.last_families = families
     return mismatches, selected, taskwork_at
 
 
 def test_substantive_pilot_actions_are_not_rewritten_end_to_end():
     mismatches, selected, _ = _run(seed=0, constituent_overrides={}, seconds=240)
-    assert selected > 80  # a sufficiency floor, not a rate: neutral durations are the authored ones since the single-application duration fix (was x0.875)
+    # Behavioural, not a rate: the invariant below must have been exercised on several distinct substantive action families
+    # (a decision-count floor depends on action durations, which changed intentionally with the single-application efficiency fix).
+    assert selected >= 1 and len(_run.last_families & {a.value for a in SUBSTANTIVE}) >= 3
     substantive = {a.value for a in SUBSTANTIVE}
     assert [m for m in mismatches if m[0] in substantive] == []  # what the Pilot selected is what was attempted
 

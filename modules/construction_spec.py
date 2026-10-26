@@ -5,7 +5,7 @@ choice (a *slot*), the closed set of options every agent is offered, which optio
 world truth held by the Environment only), and the DIK elements that state the requirement (``requirement_elements``). A task package
 without this file has no specified slots and keeps the earlier construction semantics.
 
-Three things stay separate (see Documentation/research/MITM_construction_contract.md):
+Three things stay separate (see Documentation/research/MITM_contracts.md):
 * the INTENDED option, selected by a Pilot (informed by the DIK it holds, or by chance);
 * the REALIZED option, which equals the intended one unless an execution slip occurred;
 * structural validity, which the Environment derives from the realized options alone.

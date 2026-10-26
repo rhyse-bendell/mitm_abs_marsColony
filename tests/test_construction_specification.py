@@ -291,3 +291,22 @@ def test_a_failed_validation_names_observed_violations_and_enables_a_targeted_re
     offers = [a for a in sim.brain_context_builder.build(sim, agent).action_affordances if a["action_type"] == "repair_or_correct_construction" and a.get("target_id") == pid]
     assert {a["design_slot"] for a in offers} == {"airlock_opening"} and {a["design_option"] for a in offers} == {"no_opening", "one_brick_opening", "two_brick_opening"}
     assert not any(k in a for a in offers for k in ("compliant", "correct"))
+
+
+def test_a_failure_that_could_not_be_localized_offers_the_unassessed_slots_for_rework(sim):
+    cm, pid = _staged_house(sim)
+    for step in cm.projects[pid]["build_steps"]:
+        step["completed"] = True
+    realize_compliant(cm, pid)
+    inject_defect(cm, pid)
+    agent = sim.agents[0]
+    agent.mental_model["knowledge"].add_rule("R_HOUSE_VALIDITY", [])
+    cm.mark_validated(pid, is_valid=False, actor="V", sim_time=1.0)
+    ignorant = cm.assess_validation(pid, {"D_ARCH_AIRLOCK_SIZE"} - {"D_ARCH_AIRLOCK_SIZE"})  # the validator holds no requirement element
+    cm.record_validation_observation(pid, actor="V", sim_time=1.0, passed=False, assessment=ignorant)
+    cm.update()
+    assert ignorant["observed_violations"] == [] and set(ignorant["cannot_assess"]) == {"floor_wall_colour", "headroom_bricks", "airlock_opening"}
+    offers = [a for a in sim.brain_context_builder.build(sim, agent).action_affordances if a["action_type"] == "repair_or_correct_construction" and a.get("target_id") == pid]
+    assert {a["design_slot"] for a in offers} == {"floor_wall_colour", "headroom_bricks", "airlock_opening"}  # no slot is singled out as the defective one
+    cm.record_validation_observation(pid, actor="V", sim_time=2.0, passed=True, assessment={"observed_violations": [], "cannot_assess": []})
+    assert not [a for a in sim.brain_context_builder.build(sim, agent).action_affordances if a["action_type"] == "repair_or_correct_construction" and a.get("target_id") == pid]

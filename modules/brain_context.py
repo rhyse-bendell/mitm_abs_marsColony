@@ -415,9 +415,11 @@ class BrainContextBuilder:
             slots = []
             if repair:
                 feedback = project.get("observed_validation_feedback")
-                observed = list((feedback or {}).get("observed_violations") or [])
+                # Localized defects first; when the failed validation could not localize one, the slots nobody could assess are where it may
+                # hide (a read of the team-visible observation, not of world truth). Physical permission to rework is separate from epistemic readiness.
+                candidates = list((feedback or {}).get("observed_violations") or []) or list((feedback or {}).get("cannot_assess") or [])
                 for step, spec in cm.project_slots(project):
-                    if bool(step.get("completed")) and (feedback is None or spec.slot_id in observed):
+                    if bool(step.get("completed")) and (feedback is None or spec.slot_id in candidates):
                         slots.append((spec.slot_id, spec.label, list(spec.options)))
             elif ready:
                 pending = cm.pending_specification(project_id)

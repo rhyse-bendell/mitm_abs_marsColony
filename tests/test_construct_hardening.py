@@ -260,3 +260,28 @@ def test_measurement_against_authoritative_truth(sim):
     assert rq["requests_scored"] > 0 and 0.0 <= rq["routing_quality"] <= 1.0
     acc = team_model_accuracy(agents)
     assert acc["precision"] in (None, 1.0) or 0.0 <= acc["precision"] <= 1.0  # defined, bounded, and read from ground truth
+
+
+def test_every_affected_action_gets_exactly_one_efficiency_multiplier_through_translation(sim):
+    """End to end through the translators: transport, start, continue, repair and validate durations scale by the hook factor only."""
+    from unittest.mock import patch
+
+    from modules.action_schema import BrainDecision, ExecutableActionType as A
+
+    agent = sim.agents[0]
+    cm = sim.environment.construction
+    pid, _ = cm.create_project("site_b", "house")
+    base = {}
+    for action in (A.TRANSPORT_RESOURCES, A.START_CONSTRUCTION, A.CONTINUE_CONSTRUCTION, A.REPAIR_OR_CORRECT_CONSTRUCTION, A.VALIDATE_CONSTRUCTION):
+        durations = {}
+        for factor in (0.6, 1.0, 1.4):
+            for name in ACTIONS:
+                agent.hook_effects[("action_duration", name, "duration_scale")] = factor
+            decision = BrainDecision(selected_action=action, target_id=pid, confidence=0.9)
+            with patch.object(agent, "_construction_action_blockers", return_value=([], pid)):
+                translated = agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)[0]
+            durations[factor] = translated["duration"]
+        base[action.value] = durations[1.0]
+        assert durations[0.6] == pytest.approx(durations[1.0] * 0.6, abs=1e-3), action
+        assert durations[1.4] == pytest.approx(durations[1.0] * 1.4, abs=1e-3), action
+    assert all(v > 0 for v in base.values())
