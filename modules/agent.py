@@ -849,26 +849,73 @@ class Agent:
         elif owner and owner != str(self.role).lower():
             metrics["backup_actions"] += 1
 
-    def _route_request_receiver(self, nearby):
-        """Whom to ask, from what THIS agent can know: its teammate model, who has provided DIK before, and role ownership
-        of the missing element (task-package role-brief metadata). Falls back to the nearest teammate; never reads a
-        teammate's actual holdings."""
-        gaps = [str(g).partition(":")[2] for g in self._extract_requested_dik_ids(self.known_gaps) if str(g).split(":")[0] in {"data", "information"}]
+    # ---- teammate model: evidence-grounded beliefs (never a copy of a teammate's hidden mental model)
+    def _tom_entry(self, name):
+        """The belief record about teammate ``name``. ``knowledge_ids``/``believed_ids`` are what this agent BELIEVES the
+        teammate holds, built only from evidence it has itself seen (communicated or provided content); ``believed_missing_ids``
+        are elements the teammate told it they lack. ``evidence`` keeps the source and time of each belief."""
+        entry = self.theory_of_mind.setdefault(name, {"goals": [], "knowledge_ids": set(), "last_seen": None})
+        entry.setdefault("knowledge_ids", set())
+        entry.setdefault("believed_ids", set())
+        entry.setdefault("believed_missing_ids", set())
+        entry.setdefault("evidence", {})
+        return entry
+
+    def _tom_record(self, name, tokens, source, now, holds=True):
+        """Record evidence that ``name`` holds (or lacks) the DIK tokens (``data:``/``information:``/``rule:``)."""
+        entry = self._tom_entry(name)
+        for token in sorted(str(t) for t in tokens):
+            if holds:
+                entry["believed_ids"].add(token)
+                entry["believed_missing_ids"].discard(token)
+                if token.startswith("rule:"):
+                    entry["knowledge_ids"].add(token.partition(":")[2])
+            else:
+                entry["believed_ids"].discard(token)
+                entry["believed_missing_ids"].add(token)
+                if token.startswith("rule:"):
+                    entry["knowledge_ids"].discard(token.partition(":")[2])
+            entry["evidence"][token] = {"source": source, "holds": bool(holds), "time": now}
+
+    @staticmethod
+    def _message_dik_tokens(messages):
+        """DIK tokens a sender actually put into its provision messages, and those it asked for (its stated lack)."""
+        provided, requested = set(), set()
+        for msg in messages or []:
+            mtype = LEGACY_COMMUNICATION_TYPE_MAP.get(msg.get("type"), msg.get("type"))
+            content = msg.get("content") or []
+            if mtype == "TDP":
+                provided |= {f"data:{d.id}" for d in content}
+            elif mtype == "TIP":
+                provided |= {f"information:{i.id}" for i in content}
+            elif mtype == "TKP":
+                provided |= {f"rule:{normalize_rule_token(r)}" for r in content if normalize_rule_token(r)}
+        return provided, requested
+
+    def _request_route_score(self, other, dist, gap_tokens):
+        """Score a candidate for a DIK request from evidence available to THIS agent: its belief about what the teammate
+        holds (communication/provision evidence), the publicly known role responsibility for the element (task-package
+        role-brief metadata), and who has provided DIK before. Never reads the teammate's actual holdings."""
         elements = getattr(getattr(self, "task_model", None), "dik_elements", {}) or {}
+        model = (self.theory_of_mind or {}).get(other.name) or {}
+        believed = set(model.get("believed_ids") or set())
+        score = 0.0
+        for token in gap_tokens:
+            if token in believed:
+                score += 3.0
+            element = elements.get(token.partition(":")[2])
+            scope = str(getattr(element, "role_scope", "") or "").lower()
+            if scope and scope == str(other.role).lower():
+                score += 2.0
+        score += min(2.0, 0.5 * int(self.received_dik_from.get(other.name, 0)))
+        return score
+
+    def _route_request_receiver(self, nearby):
+        """Whom to ask, from what THIS agent can know (see ``_request_route_score``). Falls back to the nearest teammate."""
+        gap_tokens = [g for g in self._extract_requested_dik_ids(self.known_gaps) if str(g).split(":")[0] in {"data", "information"}]
         best = None
         for dist, other in nearby:
-            score = 0.0
-            model = (self.theory_of_mind or {}).get(other.name) or {}
-            known = set(model.get("knowledge_ids") or set())
-            for eid in gaps:
-                if eid in known:
-                    score += 3.0
-                element = elements.get(eid)
-                scope = str(getattr(element, "role_scope", "") or "").lower()
-                if scope and scope == str(other.role).lower():
-                    score += 2.0
-            score += min(2.0, 0.5 * int(self.received_dik_from.get(other.name, 0)))
-            key = (-score, dist)
+            key = (-self._request_route_score(other, dist, gap_tokens), dist)
             if best is None or key < best[0]:
                 best = (key, other)
         return best[1]
@@ -11207,13 +11254,12 @@ class Agent:
                 continue
             dist = math.hypot(agent.position[0] - self.position[0], agent.position[1] - self.position[1])
             if dist <= self_visible_range:
+                # Observation yields what is publicly visible (whether the teammate is moving or idle), NOT its hidden holdings.
                 inferred_goal = "moving" if agent.target else "idle"
-                known_knowledge_ids = {k for k in agent.mental_model["knowledge"].rules}
-                self.theory_of_mind[agent.name] = {
-                    "goals": [inferred_goal],
-                    "knowledge_ids": known_knowledge_ids,
-                    "last_seen": sim_state.time
-                }
+                entry = self._tom_entry(agent.name)
+                entry["goals"] = [inferred_goal]
+                entry["last_seen"] = sim_state.time
+                entry["requested_dik_ids"] = set()  # a request is transient (cleared on the next observation, as before)
 
     def perform_action(self, actions):
         if not isinstance(actions, list):
@@ -11629,6 +11675,7 @@ class Agent:
         self._env_ref = environment
         self._sync_dik_ledger(sim_state)
         self._update_recognized_gaps(sim_state)
+        self._reconcile_known_gaps(sim_state)
         self._update_memory(sim_state)
         self.sim_step_count += 1
         self._record_team_plan_commitment_tick(sim_state)
@@ -11675,7 +11722,6 @@ class Agent:
                 elif self.planner_state.get("status") == "in_flight":
                     self.planner_state["total_skipped_inflight"] += 1
                     self.planner_state["consecutive_inflight_skips"] = int(self.planner_state.get("consecutive_inflight_skips", 0)) + 1
-        self._reconcile_known_gaps(sim_state)
                     runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend, "effective_backend": sim_state.effective_brain_backend, "provider": sim_state.brain_provider}
                     self._emit_event(sim_state, "planner_request_skipped_inflight", {"reason": planner_reason, "request_id": self.planner_state.get("request_id"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
                     stall_threshold = max(3, int(self.planner_cadence.planner_interval_steps) * 3)
@@ -13765,6 +13811,7 @@ class Agent:
                 remaining = sorted(pending_role_share - shared_ids)
                 self.source_memory_state.setdefault(role_source, {})["pending_role_share_ids"] = remaining
                 self.source_memory_state.setdefault(role_source, {})["role_contribution_shared"] = not bool(remaining)
+        self._reconcile_known_gaps(None)  # never request what is already held
         missing_ids = self._extract_requested_dik_ids(self.known_gaps)
         if closure_project_id and self.project_closure_state.get("repair_mode") and closure_missing_rule_ids:
             anchored = {f"rule:{rid}" for rid in closure_missing_rule_ids}
@@ -13811,7 +13858,6 @@ class Agent:
                                 "plan_event_time": active_team_plan.get("plan_event_time"),
                             },
                         }
-        self._reconcile_known_gaps(None)  # never request what is already held
                     )
             routed_pending = []
             carry_forward = []
@@ -13925,13 +13971,21 @@ class Agent:
                             self.outstanding_dik_requests.setdefault(eid, now_req)
         # Update Theory of Mind estimates
         if other_agent._should_apply_tom_update():
-            other_agent.theory_of_mind[self.name] = {
-                "goals": [self.goal] if self.goal else [],
-                "knowledge_ids": set(self.mental_model["knowledge"].rules),
-                "last_seen": None
-            }
+            # Evidence-grounded update: the receiver learns that the sender holds what the sender actually put in its messages
+            # (and the sender knows the receiver now holds what it sent). Nothing is read from the other agent's mental model.
+            now_tom = float(getattr(sim_state, "time", 0.0)) if sim_state is not None else 0.0
+            provided_tokens, _ = self._message_dik_tokens(messages)
+            entry = other_agent._tom_entry(self.name)
+            entry["goals"] = [self.goal] if self.goal else []
+            entry["requested_dik_ids"] = set()
+            other_agent._tom_record(self.name, provided_tokens, "communicated_provision", now_tom, holds=True)
+            asked = {t for msg in messages if msg.get("type") == "TKRQ" for t in self._extract_requested_dik_ids(msg.get("content") or [])}
+            if asked:
+                other_agent._tom_record(self.name, asked, "stated_request", now_tom, holds=False)
+            if provided_tokens:
+                self._tom_record(other_agent.name, provided_tokens, "provided_by_me", now_tom, holds=True)
             if sim_state is not None:
-                other_agent._emit_event(sim_state, "teammate_model_updated", {"teammate": self.name, "source": "communication_exchange"})
+                other_agent._emit_event(sim_state, "teammate_model_updated", {"teammate": self.name, "source": "communication_exchange", "evidence_provided": len(provided_tokens), "evidence_stated_lack": len(asked)})
         elif sim_state is not None:
             other_agent._emit_event(sim_state, "teammate_model_update_degraded", {"teammate": self.name, "source": "communication_exchange"})
 
@@ -14071,9 +14125,11 @@ class Agent:
 
         elif mtype == "TKRQ":
             requested_ids = self._extract_requested_dik_ids(content if isinstance(content, list) else [content])
-            self.known_gaps.update(set(content if isinstance(content, list) else [content]))
+            # A received request is the SENDER's information need, not a gap in this agent's own knowledge: it is kept
+            # apart from known_gaps (which holds only this agent's self-recognized gaps).
             if sender:
                 self.theory_of_mind[sender]["requested_dik_ids"] = set(requested_ids)
+                self.received_dik_requests[sender] = {"ids": set(requested_ids), "time": float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)) or 0.0)}
             if requested_ids:
                 data_payload, info_payload, rule_payload = self._build_dik_payload_for_ids(requested_ids)
                 requested_modes = [str(mode) for mode in (message.get("request_modes", []) or ["exact_rule"]) if str(mode)]
@@ -14129,7 +14185,6 @@ class Agent:
                     )
                     response_category = "propose_source_check" if redirect else "state_uncertainty"
                 elif info_payload or data_payload:
-                self.received_dik_requests[sender] = {"ids": set(requested_ids), "time": float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)) or 0.0)}
                     response_category = "partial_support"
                 elif requested_rules:
                     response_category = "propose_source_check"

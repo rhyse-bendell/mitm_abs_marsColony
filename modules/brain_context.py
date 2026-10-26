@@ -733,9 +733,12 @@ class BrainContextBuilder:
             my_role_assignment = dict(active_team_plan.get("assignments_by_role", {})).get(agent.role)
         validated_plan_exists = any(a.artifact_type == "plan" for a in sim_state.team_knowledge_manager.artifacts.values()) or known_status in {"proposed", "committed"}
         committed_team_plan_exists = known_status == "committed"
+        # A teammate's help signal rests on evidence this agent has: something the teammate asked it for or said it lacks,
+        # or the teammate's visible status text. The teammate's own (hidden) known_gaps are never read.
         teammate_help_signals = {
             other.name: (
-                bool(other.known_gaps)
+                bool((agent.received_dik_requests.get(other.name) or {}).get("ids"))
+                or bool((agent.theory_of_mind.get(other.name) or {}).get("believed_missing_ids"))
                 or "blocked" in (getattr(other, "status_last_action", "").lower())
                 or "stalled" in (getattr(other, "status_last_action", "").lower())
             )
