@@ -295,6 +295,7 @@ class Agent:
 
         # Theory of Mind (ToM) about teammates
         self.theory_of_mind = {}  # {agent_name: {"goals": [], "knowledge": set(), "last_seen": time}}
+        self.received_dik_requests = {}  # {sender: {"ids": set, "time": t}}: teammates' information needs; NOT this agent's own known_gaps
 
         # ---------------------------------------------------------------------------
         # MECHA CORE STATE: embodied/cognitive-action state owned by the agent suit
@@ -697,6 +698,38 @@ class Agent:
             if eid in self.outstanding_dik_requests:
                 self.outstanding_dik_requests.pop(eid)
                 self.experimental_metrics["request_successes"] += 1
+
+    def _reconcile_known_gaps(self, sim_state=None):
+        """Drop recognized gaps for DIK elements this agent now genuinely holds.
+
+        known_gaps tokens that name a DIK element (data:/information:/rule:/missing_expected_rule:) are resolved the moment
+        the element is held, whatever the acquisition route (inspection, derivation, communication, artifact, reacquisition).
+        Tokens that name a standing construction/repair dependency (e.g. missing_validation_rule_knowledge) and elements
+        not held stay open. Nothing is granted: this only reads the agent's own mental model. Acquisition provenance stays
+        in dik_ledger / acquired_by; each closure is logged as ``dik_gap_resolved`` with the ledger's acquisition mode.
+        """
+        if not self.known_gaps:
+            return
+        held = {f"data:{d.id}" for d in self.mental_model["data"]} | {f"information:{i.id}" for i in self.mental_model["information"]}
+        held_rules = {f"rule:{normalize_rule_token(r)}" for r in self.mental_model["knowledge"].rules if normalize_rule_token(r)}
+        resolved = []
+        for token in sorted(str(g) for g in self.known_gaps):
+            kind, _, ident = token.partition(":")
+            if kind in {"data", "information"}:
+                is_held = token in held
+            elif kind in {"rule", "missing_expected_rule"}:
+                is_held = f"rule:{normalize_rule_token(ident)}" in held_rules
+            else:
+                continue
+            if is_held:
+                resolved.append(token)
+        for token in resolved:
+            self.known_gaps.discard(token)
+            self._derived_gap_tokens.discard(token)
+        if resolved:
+            self.experimental_metrics["gaps_resolved"] = int(self.experimental_metrics.get("gaps_resolved", 0)) + len(resolved)
+            modes = {t: str((self.dik_ledger.get(t.partition(":")[2]) or {}).get("mode", "unknown")) for t in resolved}
+            self._emit_event(sim_state, "dik_gap_resolved", {"gap_tokens": resolved, "acquisition_modes": modes})
 
     def _update_recognized_gaps(self, sim_state):
         """Recognize DIK gaps from the agent's OWN task-method requirements (no world truth, no peeking at teammates).
@@ -5513,7 +5546,7 @@ class Agent:
             ) or any(tok.startswith("missing_expected_rule:") for tok in normalized_blockers),
             "pending_role_share_count": len(pending_role_share),
             "recent_epistemic_request": bool(recent_epistemic_request),
-            "received_engineering_request": bool(recent_epistemic_request and any("engineer" in str(x).lower() for x in list(self.known_gaps)[:8])),
+            "received_engineering_request": bool(recent_epistemic_request and any("engineer" in str(x).lower() for entry in self.received_dik_requests.values() for x in list(entry.get("ids", ()))[:8])),
             "recent_meaningful_comm": bool(last_exchange.get("meaningful")),
             "recent_comm_no_effect": int(self.communication_state.get("no_effect_streak", 0) or 0) > 0,
             "needs_source_revisit": bool(role_mem.get("revisitable_for_verification", True)) and float(role_mem.get("memory_confidence", 1.0) or 1.0) < 0.45,
@@ -11642,6 +11675,7 @@ class Agent:
                 elif self.planner_state.get("status") == "in_flight":
                     self.planner_state["total_skipped_inflight"] += 1
                     self.planner_state["consecutive_inflight_skips"] = int(self.planner_state.get("consecutive_inflight_skips", 0)) + 1
+        self._reconcile_known_gaps(sim_state)
                     runtime = sim_state.get_agent_brain_runtime(self) if hasattr(sim_state, "get_agent_brain_runtime") else {"configured_backend": sim_state.configured_brain_backend, "effective_backend": sim_state.effective_brain_backend, "provider": sim_state.brain_provider}
                     self._emit_event(sim_state, "planner_request_skipped_inflight", {"reason": planner_reason, "request_id": self.planner_state.get("request_id"), "backend": runtime.get("configured_backend", sim_state.configured_brain_backend)})
                     stall_threshold = max(3, int(self.planner_cadence.planner_interval_steps) * 3)
@@ -13777,6 +13811,7 @@ class Agent:
                                 "plan_event_time": active_team_plan.get("plan_event_time"),
                             },
                         }
+        self._reconcile_known_gaps(None)  # never request what is already held
                     )
             routed_pending = []
             carry_forward = []
@@ -14094,6 +14129,7 @@ class Agent:
                     )
                     response_category = "propose_source_check" if redirect else "state_uncertainty"
                 elif info_payload or data_payload:
+                self.received_dik_requests[sender] = {"ids": set(requested_ids), "time": float(getattr(sim_state, "time", getattr(self, "current_time", 0.0)) or 0.0)}
                     response_category = "partial_support"
                 elif requested_rules:
                     response_category = "propose_source_check"
