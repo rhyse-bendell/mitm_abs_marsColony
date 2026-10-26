@@ -5,6 +5,8 @@ import tempfile
 
 import pytest
 
+from tests.construction_helpers import design_args_for
+
 from modules.action_schema import BrainDecision, ExecutableActionType as A
 from modules.agent import Agent
 from modules.simulation import SimulationState
@@ -113,7 +115,7 @@ def test_a_pilot_chosen_transport_reaches_only_the_named_connector_and_identity_
             return BrainDecision(selected_action=A.WAIT, confidence=0.9)
         if mode["value"] == "transport":
             return BrainDecision(selected_action=A.TRANSPORT_RESOURCES, target_id=connector, assumptions=["duration_s=30"], confidence=0.9)
-        return BrainDecision(selected_action=A.CONTINUE_CONSTRUCTION, target_id=connector, confidence=0.9)
+        return BrainDecision(selected_action=A.CONTINUE_CONSTRUCTION, target_id=connector, action_args=design_args_for(cm, connector), confidence=0.9)  # the Pilot names the specification choice too
 
     monkeypatch.setattr(Agent, "_select_decision_through_pilot_adapter", pilot)
     events = []

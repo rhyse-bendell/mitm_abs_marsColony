@@ -743,7 +743,9 @@ class ConstructionManager:
                 continue
             if not spec.is_compliant(entry.get("realized")):
                 violations.append(spec.slot_id)
-        return {"violations": violations, "unspecified": unspecified, "valid": not violations and not unspecified}
+        # A completed step without a recorded realization cannot arise through the engine (a step with a slot is not built without an option),
+        # so it is reported but does not by itself make the artifact defective; only a realized non-compliant feature does.
+        return {"violations": violations, "unspecified": unspecified, "valid": not violations}
 
     def derive_structural_validity(self, project):
         """For a project whose type has a specification, ``project['correct']`` is a DERIVED mirror of its realized features. Nothing

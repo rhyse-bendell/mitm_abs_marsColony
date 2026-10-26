@@ -91,7 +91,8 @@ def test_non_mapping_action_args_fail_closed():
 
 
 def test_arg_validation_is_per_action():
-    assert set(ACTION_ARG_SPECS) == {START, CONNECT}  # only the actions migrated in this patch
+    # actions with structured arguments: typed start / connect, and (construction hardening) the specification choice on continue / repair and knowledge externalization
+    assert set(ACTION_ARG_SPECS) == {START, CONNECT, ExecutableActionType.CONTINUE_CONSTRUCTION, ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, ExecutableActionType.EXTERNALIZE_KNOWLEDGE}
     assert validate_action_args(START, {}) == []
     assert validate_action_args(START, {"structure_type": "greenhouse"}) == []
     assert "unsupported_action_arg:site_id" in validate_action_args(START, {"structure_type": "greenhouse", "site_id": "site_b"})

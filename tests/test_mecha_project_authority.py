@@ -5,6 +5,8 @@ import tempfile
 
 import pytest
 
+from tests.construction_helpers import design_args_for
+
 from modules.action_schema import BrainDecision, ExecutableActionType as A
 from modules.agent import Agent
 from modules.simulation import SimulationState
@@ -184,7 +186,7 @@ def test_every_world_changing_project_event_traces_to_a_pilot_selected_project(s
         if not cm.projects[b]["resource_complete"]:
             return _transport(b)
         if not cm.projects[a]["structurally_complete"]:
-            return BrainDecision(selected_action=A.CONTINUE_CONSTRUCTION, target_id=a, confidence=0.9)
+            return BrainDecision(selected_action=A.CONTINUE_CONSTRUCTION, target_id=a, action_args=design_args_for(cm, a), confidence=0.9)  # includes the Pilot's specification choice
         return BrainDecision(selected_action=A.WAIT, confidence=0.9)
 
     picks = _stub_pilot(monkeypatch, sim, chooser)

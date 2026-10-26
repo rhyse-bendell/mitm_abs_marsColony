@@ -33,7 +33,7 @@ def _ready_house(cm, project_id="site_b_house_001"):
         step["completed"] = True
     for _step, spec in cm.project_slots(p):  # every slot realized as intended and compliant: a structurally valid house
         good = sorted(spec.compliant)[0]
-        cm.realize_specification(project_id, slot_id=spec.slot_id, intended=good, realized=good, slipped=False, fidelity=0.5, actor="X", sim_time=0.0)
+        cm.realize_specification(project_id, slot_id=spec.slot_id, intended=good, realized=good, slipped=False, fidelity=0.5, actor=None, sim_time=0.0)
     cm.update()
     return project_id
 

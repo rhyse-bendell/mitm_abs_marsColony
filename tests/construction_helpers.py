@@ -34,7 +34,7 @@ def design_args_for(cm, project_id, option="compliant"):
     return {"design_slot": pending["slot_id"], "design_option": compliant_option(cm, project_id) if option == "compliant" else option}
 
 
-def realize_compliant(cm, project_id, actor="X", sim_time=0.0):
+def realize_compliant(cm, project_id, actor=None, sim_time=0.0):
     """Record every slot of a (test-assembled) completed project as intended and realized compliant."""
     project = cm.projects[project_id]
     for _step, spec in cm.project_slots(project):
@@ -42,7 +42,7 @@ def realize_compliant(cm, project_id, actor="X", sim_time=0.0):
         cm.realize_specification(project_id, slot_id=spec.slot_id, intended=good, realized=good, slipped=False, fidelity=0.5, actor=actor, sim_time=sim_time)
 
 
-def inject_defect(cm, project_id, slot="airlock_opening", actor="X", sim_time=0.5):
+def inject_defect(cm, project_id, slot="airlock_opening", actor="X", sim_time=0.5, update=True):
     """A realized defect: an execution slip made one slot non-compliant. Works on projects with a specification; legacy flag otherwise."""
     project = cm.projects[project_id]
     spec = next((sp for _st, sp in cm.project_slots(project) if sp.slot_id == slot), None)
@@ -50,5 +50,6 @@ def inject_defect(cm, project_id, slot="airlock_opening", actor="X", sim_time=0.
         return cm.record_build_quality(project_id, correct=False, actor=actor)
     wrong = next(o for o in spec.options if o not in spec.compliant)
     cm.realize_specification(project_id, slot_id=slot, intended=sorted(spec.compliant)[0], realized=wrong, slipped=True, fidelity=0.5, actor=actor, sim_time=sim_time)
-    cm.update()
+    if update:
+        cm.update()
     return True

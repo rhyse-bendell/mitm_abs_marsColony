@@ -210,10 +210,13 @@ def test_a_blocked_selection_closes_its_episode_and_returns_control_to_the_pilot
     pid, _ = cm.create_project("site_b", "house")
     events = _events(sim)
     agent, picks = _pilot(monkeypatch, sim, lambda i, s: BrainDecision(selected_action=A.VALIDATE_CONSTRUCTION, target_id=pid, confidence=0.9))
-    for _ in range(12):
+    for _ in range(90):  # the invariant is "control returns to the Pilot after a block", not a fixed number of seconds (re-query timing follows action durations)
         sim.update(1.0)
+        if len(picks) >= 2:
+            break
     blocked = [p for t, n, p in events if n == "pilot_intent_blocked" and p["agent"] == agent.name]
     assert blocked and len(picks) >= 2  # blocked -> the Pilot is asked again
+    assert blocked[0]["episode_id"] != "" and picks[1][0] > picks[0][0]  # a later, fresh selection, after the blocked episode was closed
     assert agent.pilot_episode_stats["blocked"] >= 1
 
 

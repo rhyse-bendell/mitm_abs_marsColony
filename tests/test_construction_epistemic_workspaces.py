@@ -2,7 +2,7 @@ import unittest
 
 from modules.action_schema import BrainDecision, ExecutableActionType
 from modules.simulation import SimulationState
-from tests.construction_helpers import build_step
+from tests.construction_helpers import build_step, design_args_for
 
 
 class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
@@ -99,9 +99,11 @@ class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
         sim.environment.construction.deliver_resource(project_id, "bricks", quantity=required)
         sim.environment.construction.record_project_epistemic_externalization(project_id, entry_type="claim", note="claim", actor=agent.name, sim_time=sim.time)
         sim.environment.construction.record_project_epistemic_externalization(project_id, entry_type="evidence", note="evidence", actor=agent.name, sim_time=sim.time)
-        decision = BrainDecision(selected_action=ExecutableActionType.START_CONSTRUCTION, target_id=project_id, confidence=0.9)
+        decision = BrainDecision(selected_action=ExecutableActionType.START_CONSTRUCTION, target_id=project_id, action_args=design_args_for(sim.environment.construction, project_id), confidence=0.9)  # the Pilot also names its specification choice
         translated = agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)
         self.assertEqual(translated[0]["type"], "construct")
+        missing = BrainDecision(selected_action=ExecutableActionType.START_CONSTRUCTION, target_id=project_id, confidence=0.9)  # unresolved required choice: not built, not filled in
+        self.assertEqual(agent._translate_brain_decision_to_legacy_action(missing, sim.environment, sim_state=sim)[0]["type"], "idle")
         sim.stop()
 
     def test_transport_unbound_target_is_suppressed(self):

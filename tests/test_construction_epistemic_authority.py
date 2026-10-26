@@ -4,7 +4,7 @@ from unittest import mock
 from modules.action_schema import BrainDecision, ExecutableActionType
 from modules.simulation import SimulationState
 from modules.task_model import load_task_model
-from tests.construction_helpers import build_step
+from tests.construction_helpers import build_step, inject_defect, realize_compliant
 
 
 class ConstructionEpistemicAuthorityTests(unittest.TestCase):
@@ -91,7 +91,13 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         project_id, project = self._ensure_project(sim, "Build_Site_B")
         required = int(project["required_resources"]["bricks"])
         sim.environment.construction.deliver_resource(project_id, "bricks", quantity=required)
-        project["correct"] = False
+        cm = sim.environment.construction
+        for step in project["build_steps"]:
+            step["completed"] = True
+        realize_compliant(cm, project_id)
+        inject_defect(cm, project_id)  # a realized defect; the failed validation below is the OBSERVED evidence that licenses a repair
+        cm.mark_validated(project_id, is_valid=False, actor="Validator", sim_time=sim.time)
+        cm.record_validation_observation(project_id, actor="Validator", sim_time=sim.time, passed=False, assessment=cm.assess_validation(project_id, {"D_ARCH_AIRLOCK_SIZE"}))
         for expected_rule in list(project.get("expected_rules") or []):
             if expected_rule not in agent.mental_model["knowledge"].rules:
                 agent.mental_model["knowledge"].rules.append(expected_rule)
@@ -100,6 +106,7 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         repair = BrainDecision(
             selected_action=ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION,
             target_id=project_id,
+            action_args={"design_slot": "airlock_opening", "design_option": "one_brick_opening"},
             confidence=0.8,
         )
         repair_action = agent._translate_brain_decision_to_legacy_action(repair, sim.environment, sim_state=sim)[0]

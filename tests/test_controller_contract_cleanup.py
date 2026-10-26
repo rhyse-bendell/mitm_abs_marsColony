@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from tests.construction_helpers import inject_defect
+
 from modules.action_schema import ExecutableActionType
 from modules.brain_provider import RuleBrain
 from modules.controller_context import partition_affordances, last_rejection
@@ -81,7 +83,7 @@ def _last(agent):
 def test_a_failed_validation_is_reported_as_completed_execution_with_failed_result(sim):
     agent = sim.agents[0]
     project_id = _make_project(sim, ready=True)
-    sim.environment.construction.projects[project_id]["correct"] = False
+    inject_defect(sim.environment.construction, project_id, update=False)  # a realized defect (an execution slip), not a flag set from outside
     _run_validation(sim, agent, project_id)
     rec = _last(agent)
     assert rec["action"] == "validate_construction" and rec["target"] == project_id
@@ -111,7 +113,7 @@ def test_non_validation_outcomes_are_unchanged(sim):
 def test_validation_result_reaches_the_controller_prompt(sim):
     agent = sim.agents[0]
     project_id = _make_project(sim, ready=True)
-    sim.environment.construction.projects[project_id]["correct"] = False
+    inject_defect(sim.environment.construction, project_id, update=False)  # a realized defect (an execution slip), not a flag set from outside
     _run_validation(sim, agent, project_id)
     canon = {"identity": {"agent_id": "a", "role": "Engineer"}, "executable_actions": [{"action_type": "wait", "target_id": None}], "blocked_actions": [],
              "last_rejection": None, "observations": {}, "recent_outcomes": {"recent_action_outcomes": list(agent.recent_action_outcomes)}}

@@ -14533,8 +14533,9 @@ class Agent:
                             "recipient": self.name,
                         },
                     )
-                if message.get("project_id"):  # legacy validation-closure dialogue only: a status, never DIK content
-                    queue.append({"type": "TPS", "sender": self.name, "recipient": sender, "content": tps_payload})
+                # The closure-dialogue status (TPS: a category such as "state_support" or "state_uncertainty") is still queued as before; it
+                # carries no DIK content. Any DIK actually provided is a Pilot-selected response (request_ledger / response affordance).
+                queue.append({"type": "TPS", "sender": self.name, "recipient": sender, "content": tps_payload})
                 self._emit_event(
                     sim_state,
                     "dik_request_received",
