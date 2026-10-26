@@ -424,6 +424,7 @@ class RuleBrain(BrainProvider):
         ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value,
         ExecutableActionType.TRANSPORT_RESOURCES.value,
         ExecutableActionType.EXTERNALIZE_PLAN.value,
+        ExecutableActionType.EXTERNALIZE_KNOWLEDGE.value,
         ExecutableActionType.COMMUNICATE.value,
         ExecutableActionType.CONSULT_TEAM_ARTIFACT.value,
         ExecutableActionType.REQUEST_ASSISTANCE.value,
@@ -456,7 +457,7 @@ class RuleBrain(BrainProvider):
     MODE_ACTION_PREFERENCES = {
         "BOOTSTRAP": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value: 1.3, ExecutableActionType.OBSERVE_ENVIRONMENT.value: 0.5},
         "ACQUIRE_DIK": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value: 1.6, ExecutableActionType.CONSULT_TEAM_ARTIFACT.value: 0.4, ExecutableActionType.REQUEST_ASSISTANCE.value: 0.4},
-        "INTEGRATE_DIK": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value: 1.1, ExecutableActionType.REASSESS_PLAN.value: 0.2, ExecutableActionType.EXTERNALIZE_PLAN.value: 0.5},
+        "INTEGRATE_DIK": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value: 1.1, ExecutableActionType.REASSESS_PLAN.value: 0.2, ExecutableActionType.EXTERNALIZE_PLAN.value: 0.5, ExecutableActionType.EXTERNALIZE_KNOWLEDGE.value: 0.5},
         "COORDINATE": {ExecutableActionType.COMMUNICATE.value: 1.2, ExecutableActionType.EXTERNALIZE_PLAN.value: 1.0, ExecutableActionType.REQUEST_ASSISTANCE.value: 0.8},
         "LOGISTICS": {ExecutableActionType.TRANSPORT_RESOURCES.value: 1.5, ExecutableActionType.COMMUNICATE.value: 0.3},
         "CONSTRUCT": {ExecutableActionType.START_CONSTRUCTION.value: 1.4, ExecutableActionType.CONTINUE_CONSTRUCTION.value: 1.5},
@@ -485,7 +486,7 @@ class RuleBrain(BrainProvider):
         "identify_role_source": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value, ExecutableActionType.OBSERVE_ENVIRONMENT.value},
         "move_to_role_source": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value},
         "inspect_role_source": {ExecutableActionType.INSPECT_INFORMATION_SOURCE.value},
-        "integrate_role_dik": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.EXTERNALIZE_PLAN.value},
+        "integrate_role_dik": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.EXTERNALIZE_PLAN.value, ExecutableActionType.EXTERNALIZE_KNOWLEDGE.value},
         "select_teammate_or_artifact": {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.EXTERNALIZE_PLAN.value},
         "communicate_critical_dik": {ExecutableActionType.COMMUNICATE.value, ExecutableActionType.EXTERNALIZE_PLAN.value, ExecutableActionType.REQUEST_ASSISTANCE.value},
         "diagnose_deadlock": {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.OBSERVE_ENVIRONMENT.value},
@@ -1360,6 +1361,7 @@ class RuleBrain(BrainProvider):
             ExecutableActionType.CONSULT_TEAM_ARTIFACT.value,
             ExecutableActionType.COMMUNICATE.value,
             ExecutableActionType.EXTERNALIZE_PLAN.value,
+            ExecutableActionType.EXTERNALIZE_KNOWLEDGE.value,
             ExecutableActionType.REQUEST_ASSISTANCE.value,
         }
         has_concrete_reachable = features.get("productive_taskwork_available", 1.0) > 0.0 and any(
@@ -1402,9 +1404,9 @@ class RuleBrain(BrainProvider):
                 score -= 0.8 * features["loop_pressure"]
                 if int(affordance.get("dik_gap_count", 0) or 0) > 0:
                     score += weights["dik_request"] * centered("dik_request_propensity")
+            if action_type == ExecutableActionType.EXTERNALIZE_KNOWLEDGE.value and affordance.get("externalize_gap"):
+                score += weights["externalization"] * centered("artifact_externalization_tendency")
             if action_type == ExecutableActionType.EXTERNALIZE_PLAN.value:
-                if affordance.get("externalize_gap"):
-                    score += weights["externalization"] * centered("artifact_externalization_tendency")
                 if affordance.get("team_plan_opportunity"):
                     score += weights["coordination_plan"] * centered("coordination_propensity")
             if (
@@ -1461,7 +1463,7 @@ class RuleBrain(BrainProvider):
             if features.get("new_structure_needed", 0.0) > 0.0:
                 if action_type == ExecutableActionType.START_CONSTRUCTION.value:
                     score += 3.5
-                if action_type in {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.EXTERNALIZE_PLAN.value}:
+                if action_type in {ExecutableActionType.CONSULT_TEAM_ARTIFACT.value, ExecutableActionType.EXTERNALIZE_PLAN.value, ExecutableActionType.EXTERNALIZE_KNOWLEDGE.value}:
                     score -= 1.2  # a concrete start is available; do not keep re-reading the plan
                 if action_type == ExecutableActionType.TRANSPORT_RESOURCES.value and str(affordance.get("target_id") or "") != "bridge_bc":
                     score -= 3.0  # no unfinished project to carry bricks to
@@ -1475,6 +1477,7 @@ class RuleBrain(BrainProvider):
             elif features.get("productive_taskwork_available", 1.0) <= 0.0 and action_type in {
                 ExecutableActionType.CONSULT_TEAM_ARTIFACT.value,
                 ExecutableActionType.EXTERNALIZE_PLAN.value,
+                ExecutableActionType.EXTERNALIZE_KNOWLEDGE.value,
                 ExecutableActionType.COMMUNICATE.value,
                 ExecutableActionType.REQUEST_ASSISTANCE.value,
                 ExecutableActionType.START_CONSTRUCTION.value,

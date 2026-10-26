@@ -405,7 +405,7 @@ class MetricsCollector:
                     self.breakdown_counts["idle_fallback_action_count"][selected] += 1
                 else:
                     self.breakdown_counts["productive_fallback_action_count"][selected] += 1
-            planning = {"inspect_information_source", "communicate", "externalize_plan", "consult_team_artifact", "request_assistance"}
+            planning = {"inspect_information_source", "communicate", "externalize_plan", "externalize_knowledge", "consult_team_artifact", "request_assistance"}
             execution = {"transport_resources", "start_construction", "continue_construction"}
             correction = {"repair_or_correct_construction", "validate_construction"}
             agent = payload.get("agent")

@@ -5,6 +5,7 @@ communicate,True,all,team
 request_assistance,True,all,team
 meeting,True,all,team
 externalize_plan,True,all,artifact
+externalize_knowledge,True,all,artifact
 consult_team_artifact,True,all,artifact
 transport_resources,True,all,logistics
 start_construction,True,all,build

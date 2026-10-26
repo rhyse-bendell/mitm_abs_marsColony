@@ -495,7 +495,7 @@ class Agent:
         self.experimental_metrics = {
             "provision_attempts": 0, "provision_successes": 0, "unsolicited_provision_attempts": 0,
             "request_attempts": 0, "request_successes": 0,
-            "externalization_episodes": 0, "team_plan_proposals": 0,
+            "externalization_episodes": 0, "team_plan_proposals": 0, "knowledge_externalizations": 0, "externalized_dik_elements": 0, "uncertainties_externalized": 0, "shared_artifact_contributions": 0,
             "dik_acquired": 0, "dik_forgotten": 0, "dik_reacquired": 0,
             "taskwork_actions": 0, "taskwork_completed": 0, "taskwork_seconds": 0.0, "backup_actions": 0, "shared_infrastructure_actions": 0,
             "taskwork_by_kind": {},
@@ -962,6 +962,7 @@ class Agent:
             "response_opportunities": [r for r in responses if r["can_provide"]],
             "dik_gap_count": len(gaps),
             "externalize_gap": bool(self._workspace_externalization_gap_exists(environment)),
+            "externalization_candidates": self.externalization_candidates(sim_state, environment) if sim_state is not None else [],
             "team_plan_opportunity": self._team_plan_opportunity(sim_state, active_plan),
         }
 
@@ -4539,6 +4540,102 @@ class Agent:
             "blocker_category": blocker_category,
         }
 
+    def externalization_candidates(self, sim_state, environment):
+        """Grounded knowledge-externalization options for the Pilot (read-only). Each names a DIK element this agent holds
+        (claim / evidence / design_note) or recognizes as a gap (uncertainty) that is not already on the shared workspace.
+        Nothing here is chosen for the Pilot and nothing is invented: no held or recognized element, no option."""
+        from modules.support_reasoning import load_support_reasoning, plan_relevant_dik_ids
+
+        manager = getattr(sim_state, "team_knowledge_manager", None)
+        on_board_info, on_board_rules, posted = set(), set(), set()
+        for artifact in (manager.artifacts.values() if manager is not None else []):
+            on_board_info |= {str(getattr(i, "id", i)) for i in (getattr(artifact, "carried_information", None) or [])}
+            on_board_rules |= {str(r) for r in (getattr(artifact, "carried_rules", None) or [])}
+            if artifact.artifact_type == "knowledge_note" and isinstance(artifact.content, dict):
+                posted |= {(e.get("kind"), e.get("element_id"), e.get("project_id")) for e in artifact.content.get("entries", [])}
+        task_id = getattr(getattr(sim_state, "task_model", None), "task_id", None) or "mars_colony"
+        relevant = plan_relevant_dik_ids(load_support_reasoning(task_id))
+        out = []
+        evidence = sorted(i.id for i in self.mental_model["information"] if i.id in relevant and i.id not in on_board_info and ("evidence", i.id, None) not in posted)
+        out += [{"kind": "evidence", "element_id": eid} for eid in evidence[:2]]
+        rules = sorted({normalize_rule_token(r) for r in self.mental_model["knowledge"].rules if str(normalize_rule_token(r)).startswith("K_")})
+        out += [{"kind": "claim", "element_id": rid} for rid in [r for r in rules if r not in on_board_rules and ("claim", r, None) not in posted][:2]]
+        gaps = sorted(str(g).partition(":")[2] for g in self.known_gaps if str(g).split(":")[0] in {"information", "data", "rule"})
+        out += [{"kind": "uncertainty", "element_id": eid} for eid in [g for g in gaps if ("uncertainty", g, None) not in posted][:2]]
+        task_model = getattr(sim_state, "task_model", None)
+        construction = getattr(environment, "construction", None)
+        for pid, project in sorted((getattr(construction, "projects", None) or {}).items()):
+            if len([c for c in out if c["kind"] == "design_note"]) >= 2:
+                break
+            if not isinstance(project, dict) or str(project.get("status") or "") == "complete":
+                continue
+            for rule_id in project.get("expected_rules", []) or []:
+                definition = (getattr(task_model, "rules", None) or {}).get(rule_id)
+                for kid in (getattr(definition, "required_knowledge", None) or []):
+                    if kid in rules and ("design_note", kid, pid) not in posted and not any(c["kind"] == "design_note" and c["element_id"] == kid and c.get("project_id") == pid for c in out):
+                        out.append({"kind": "design_note", "element_id": kid, "project_id": pid})
+                        break
+        return out
+
+    def _reference_tokens(self, element_id):
+        return {f"information:{element_id}", f"data:{element_id}", f"rule:{normalize_rule_token(element_id)}"}
+
+    def _execute_knowledge_externalization(self, action, environment, sim_state):
+        """Write one grounded knowledge entry onto the shared workspace artifact. Returns the entry, or None when it is blocked."""
+        args = dict(action.get("action_args") or {})
+        kind, eid, pid = str(args.get("kind")), str(args.get("element_id")), args.get("project_id") or None
+        held = self._held_tokens()
+        references_held = bool(self._reference_tokens(eid) & held)
+        if kind == "uncertainty":
+            if references_held:
+                self._emit_event(sim_state, "knowledge_externalization_blocked", {"kind": kind, "element_id": eid, "reason": "no_longer_a_gap"})
+                return None
+        elif not references_held:
+            self._emit_event(sim_state, "knowledge_externalization_blocked", {"kind": kind, "element_id": eid, "reason": "reference_not_held"})
+            return None
+        manager = sim_state.team_knowledge_manager
+        artifact = manager.artifacts.get("knowledge_workspace")
+        created = artifact is None
+        if created:
+            artifact = manager.externalize_artifact(
+                "knowledge_workspace", "knowledge_note", "Shared knowledge workspace", {"entries": []}, self.name, sim_state.time, contributors=[self.name],
+            )
+        entries = artifact.content.setdefault("entries", [])
+        if any(e.get("kind") == kind and e.get("element_id") == eid and e.get("project_id") == pid for e in entries):
+            self._emit_event(sim_state, "knowledge_externalization_blocked", {"kind": kind, "element_id": eid, "reason": "already_on_workspace"})
+            return None
+        entries.append({"kind": kind, "element_id": eid, "project_id": pid, "author": self.name, "time": float(sim_state.time)})
+        if self.name not in artifact.contributors:
+            artifact.contributors.append(self.name)
+        artifact.knowledge_summary.append(f"{kind}:{eid}")
+        carried = None
+        if kind != "uncertainty":
+            info = next((i for i in self.mental_model["information"] if i.id == eid), None)
+            rule = next((r for r in self.mental_model["knowledge"].rules if normalize_rule_token(r) == normalize_rule_token(eid)), None)
+            if info is not None and info not in artifact.carried_information:
+                artifact.carried_information.append(info)
+                carried = f"information:{eid}"
+            elif rule is not None and normalize_rule_token(rule) not in artifact.carried_rules:
+                artifact.carried_rules.append(normalize_rule_token(rule))
+                carried = f"rule:{normalize_rule_token(rule)}"
+        if pid and getattr(environment, "construction", None) is not None:
+            environment.construction.record_project_epistemic_externalization(
+                pid, entry_type=kind, note=f"{kind}: {eid}", references=[eid], actor=self.name, sim_time=sim_state.time,
+            )
+        metrics = self.experimental_metrics
+        if kind == "uncertainty":
+            metrics["uncertainties_externalized"] = int(metrics.get("uncertainties_externalized", 0)) + 1
+        else:
+            metrics["externalization_episodes"] += 1
+            metrics["knowledge_externalizations"] = int(metrics.get("knowledge_externalizations", 0)) + 1
+            metrics["externalized_dik_elements"] = int(metrics.get("externalized_dik_elements", 0)) + 1
+        self.artifact_coordination_state["last_externalized_time"] = float(sim_state.time)
+        payload = {"artifact_id": artifact.artifact_id, "kind": kind, "element_id": eid, "project_id": pid, "carried": carried}
+        self._emit_event(sim_state, "knowledge_externalized", payload)
+        if not created:
+            self._emit_event(sim_state, "shared_artifact_contribution", {**payload, "contributors": list(artifact.contributors)})
+        return entries[-1]
+
     def _workspace_externalization_gap_exists(self, environment):
         construction = getattr(environment, "construction", None)
         projects = getattr(construction, "projects", {}) if construction is not None else {}
@@ -4573,7 +4670,7 @@ class Agent:
                 "validation": artifact.validation_state,
                 "content": content,
                 "knowledge": list(artifact.knowledge_summary or []),
-                "carried": sorted(str(getattr(i, "id", i)) for i in (getattr(artifact, "carried_information", None) or [])),
+                "carried": sorted(str(getattr(i, "id", i)) for i in (getattr(artifact, "carried_information", None) or [])) + sorted("rule:" + str(r) for r in (getattr(artifact, "carried_rules", None) or [])),
             },
             sort_keys=True,
             default=str,
@@ -4595,6 +4692,8 @@ class Agent:
         seen = self.artifact_consult_sig_memory.get(signature)
         reasons = []
         carried_new = sorted(str(i.id) for i in (getattr(artifact, "carried_information", None) or []) if getattr(i, "id", None) not in held_info)
+        held_rule_ids = {normalize_rule_token(r) for r in self.mental_model["knowledge"].rules}
+        carried_new += sorted("rule:" + str(r) for r in (getattr(artifact, "carried_rules", None) or []) if normalize_rule_token(r) not in held_rule_ids)
         if seen is None:
             reasons.append("artifact_changed_since_consult" if aid in self.artifact_consult_memory else "unseen")
         if carried_new:
@@ -4718,6 +4817,16 @@ class Agent:
                 info.acquired_by[self.name] = {"mode": "artifact", "from": artifact.author, "artifact_id": artifact.artifact_id}
             DIK_LOG.append({"time": getattr(sim_state, "time", 0.0), "agent": self.name, "type": "Information", "id": info.id, "mode": "artifact", "from": artifact.author})
             self._emit_event(sim_state, "dik_acquired_from_artifact", {"agent": self.name, "information_id": info.id, "artifact_id": artifact.artifact_id, "author": artifact.author})
+        held_rules = {normalize_rule_token(r) for r in self.mental_model["knowledge"].rules}
+        for rule in list(getattr(artifact, "carried_rules", None) or []):
+            if normalize_rule_token(rule) in held_rules:
+                continue
+            self.mental_model["knowledge"].add_rule(rule, [artifact.artifact_id])
+            gained += 1
+            self.known_gaps.discard(f"rule:{normalize_rule_token(rule)}")
+            self.known_gaps.discard(f"missing_expected_rule:{normalize_rule_token(rule)}")
+            DIK_LOG.append({"time": getattr(sim_state, "time", 0.0), "agent": self.name, "type": "Knowledge", "id": rule, "mode": "artifact", "from": artifact.author})
+            self._emit_event(sim_state, "dik_acquired_from_artifact", {"agent": self.name, "rule_id": normalize_rule_token(rule), "artifact_id": artifact.artifact_id, "author": artifact.author})
         if gained:
             self.last_dik_change_time = float(getattr(sim_state, "time", 0.0))
         return gained
@@ -10728,6 +10837,7 @@ class Agent:
             ExecutableActionType.REQUEST_ASSISTANCE: {"type": "communicate", "duration": 0.5, "priority": 1},
             ExecutableActionType.MEETING: {"type": "communicate", "duration": 0.8, "priority": 1},
             ExecutableActionType.EXTERNALIZE_PLAN: {"type": "idle", "duration": 1.0, "priority": 1},
+            ExecutableActionType.EXTERNALIZE_KNOWLEDGE: {"type": "idle", "duration": 1.0, "priority": 1},
             ExecutableActionType.CONSULT_TEAM_ARTIFACT: {"type": "idle", "duration": 1.0, "priority": 1},
             ExecutableActionType.TRANSPORT_RESOURCES: {"type": "transport_resources", "duration": 30.0, "priority": 1},
             ExecutableActionType.START_CONSTRUCTION: {"type": "construct", "duration": 2.0, "priority": 1},
@@ -10864,7 +10974,7 @@ class Agent:
         if decision.target_id:
             lookup_target_id = decision.target_id
             if (
-                decision.selected_action in {ExecutableActionType.EXTERNALIZE_PLAN, ExecutableActionType.CONSULT_TEAM_ARTIFACT}
+                decision.selected_action in {ExecutableActionType.EXTERNALIZE_PLAN, ExecutableActionType.CONSULT_TEAM_ARTIFACT, ExecutableActionType.EXTERNALIZE_KNOWLEDGE}
                 and str(lookup_target_id).strip().lower() == "team_artifact"
             ):
                 lookup_target_id = "whiteboard"
@@ -11221,6 +11331,9 @@ class Agent:
                     if action.get("target") is not None:
                         action["target_bound"] = action.get("target")
 
+        if decision.selected_action == ExecutableActionType.EXTERNALIZE_KNOWLEDGE:
+            action["artifact_action"] = decision.selected_action.value
+            self._emit_event(sim_state, "artifact_externalization_action_selected", {"agent": self.name, "epistemic_action": "externalize_knowledge", **{k: v for k, v in decision_action_args(decision).items()}})
         if decision.selected_action in {ExecutableActionType.EXTERNALIZE_PLAN, ExecutableActionType.CONSULT_TEAM_ARTIFACT}:
             action["artifact_action"] = decision.selected_action.value
             if decision.selected_action == ExecutableActionType.EXTERNALIZE_PLAN:
@@ -11998,6 +12111,21 @@ class Agent:
             if action["progress"] == 0 and action.get("execution_stage") is None:
                 _set_action_stage(action, "selected")
 
+            if action["type"] == "idle" and action.get("artifact_action") == ExecutableActionType.EXTERNALIZE_KNOWLEDGE.value:
+                ready, access = _location_ready(action, "whiteboard")
+                if not ready:
+                    self._emit_event(sim_state, "externalization_en_route", {"target_id": "whiteboard", "access_reason": access.get("reason")})
+                    continue
+                action["effect_done"] = True
+                _set_action_stage(action, "mutation_execution_started", {"target_id": "whiteboard"})
+                entry = self._execute_knowledge_externalization(action, environment, sim_state)
+                if entry is None:
+                    _set_action_stage(action, "mutation_execution_blocked", {"target_id": "whiteboard", "failure_category": "knowledge_externalization_blocked"})
+                else:
+                    _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": "knowledge_workspace"})
+                if action.get("target") is not None and self.target is not None and tuple(self.target) == tuple(action.get("target")):
+                    self.target = None
+
             if action["type"] == "idle" and action.get("artifact_action") == ExecutableActionType.EXTERNALIZE_PLAN.value:
                 ready, access = _location_ready(action, "whiteboard")
                 if not ready:
@@ -12074,6 +12202,11 @@ class Agent:
                         contributed = self._contribute_to_live_plan_artifact(sim_state)
                         self._emit_event(sim_state, "externalization_plan_refused_active_plan", {"plan_id": plan_id, "supersedes_plan_id": plan_supersedes, "dik_contributed_to_existing_plan": contributed})
                         if contributed:
+                            self.experimental_metrics["externalization_episodes"] += 1
+                            self.experimental_metrics["externalized_dik_elements"] += len(contributed)
+                            self.experimental_metrics["shared_artifact_contributions"] += 1
+                            self._emit_event(sim_state, "knowledge_externalized", {"artifact_id": "existing_team_plan", "kind": "plan_contribution", "element_ids": list(contributed)})
+                            self._emit_event(sim_state, "shared_artifact_contribution", {"artifact_id": "existing_team_plan", "kind": "plan_contribution", "element_ids": list(contributed)})
                             _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": "existing_team_plan", "contributed_dik_ids": contributed})
                             self._record_plan_externalization(environment, sim_state=sim_state)
                         else:
@@ -12083,6 +12216,11 @@ class Agent:
                         continue
                     self._note_known_plan(sim_state, sim_state.team_knowledge_manager._team_plan_summary(dict(proposed_artifact.content)), via="authored")
                     self._attach_carried_information(proposed_artifact, sim_state)
+                    carried_ids = sorted(str(getattr(i, "id", i)) for i in (proposed_artifact.carried_information or []))
+                    if carried_ids:  # the plan artifact also carries information the author holds: that part IS knowledge externalization
+                        self.experimental_metrics["externalization_episodes"] += 1
+                        self.experimental_metrics["externalized_dik_elements"] += len(carried_ids)
+                        self._emit_event(sim_state, "knowledge_externalized", {"artifact_id": proposed_artifact.artifact_id, "kind": "plan_carried_information", "element_ids": carried_ids})
                     self.artifact_coordination_state["last_proposed_plan"] = {
                         "signature": plan_signature,
                         "artifact_id": getattr(proposed_artifact, "artifact_id", None),
@@ -12124,7 +12262,6 @@ class Agent:
                 _set_action_stage(action, "mutation_execution_succeeded", {"target_id": "whiteboard", "artifact_id": artifact_id})
                 self._emit_event(sim_state, "artifact_externalization_action_executed", {"agent": self.name, "project_id": project_id, "epistemic_action": epistemic_action, "artifact_id": artifact_id})
                 self._record_plan_externalization(environment, sim_state=sim_state)
-                self.experimental_metrics["externalization_episodes"] += 1
                 if action.get("target") is not None and self.target is not None and tuple(self.target) == tuple(action.get("target")):
                     self.target = None
                 sim_state.logger.log_event(sim_state.time, "externalization_created", {"agent": self.name, "artifact_id": artifact_id, "type": "whiteboard_plan"})
@@ -13140,6 +13277,7 @@ class Agent:
         completed = []
         artifact_idle_actions = {
             ExecutableActionType.EXTERNALIZE_PLAN.value,
+            ExecutableActionType.EXTERNALIZE_KNOWLEDGE.value,
             ExecutableActionType.CONSULT_TEAM_ARTIFACT.value,
         }
 

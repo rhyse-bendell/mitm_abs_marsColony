@@ -190,21 +190,19 @@ def test_request_routing_uses_the_agents_own_teammate_model_and_role_knowledge(m
     assert asker._route_request_receiver([near_botanist, far_engineer]).role == "Botanist"  # nothing to route on: nearest
 
 
-def test_externalization_propensity_changes_externalization_choice_through_the_pilot(make_sim):
+def test_externalization_propensity_changes_knowledge_externalization_choice_through_the_pilot(make_sim):
+    """The constituent scores the knowledge-externalization action (it has a grounded opportunity) and not plan proposal."""
+    from modules.knowledge import Information
+
     sim = make_sim()
     agent = sim.agents[0]
-    agent.control_state["mode"] = "COORDINATE"
-    cm = sim.environment.construction
-    cm.create_project("site_b", "house")  # an unfinished project with an empty epistemic workspace: a real externalization gap
-    def rate(value):
-        agent.artifact_externalization_tendency = value
-        agent.known_gaps.clear()
-        n = 0
-        for i in range(60):
-            agent._rng = random.Random(i)
-            n += agent._select_decision_through_pilot_adapter(sim, sim.brain_context_builder.build(sim, agent), "test").selected_action == A.EXTERNALIZE_PLAN
-        return n
-    assert rate(1.0) > rate(0.0)
+    agent.mental_model["information"].add(Information("I_ARCH_HOUSING_DEPENDENCIES", "held, task-relevant, not yet on the shared workspace"))
+    assert any(a.get("action_type") == A.EXTERNALIZE_KNOWLEDGE.value for a in sim.brain_context_builder.build(sim, agent).action_affordances)
+    low, high = _scores(sim, agent, None, artifact_externalization_tendency=0.0), _scores(sim, agent, None, artifact_externalization_tendency=1.0)
+    assert _pick(high, A.EXTERNALIZE_KNOWLEDGE) > _pick(low, A.EXTERNALIZE_KNOWLEDGE) + 1.5
+    assert _pick(high, A.EXTERNALIZE_PLAN) == pytest.approx(_pick(low, A.EXTERNALIZE_PLAN))  # a plan proposal is governed by coordination, not externalization
+    none = sim.agents[1]  # holds nothing to externalize: no opportunity, no effect
+    assert not any(a.get("action_type") == A.EXTERNALIZE_KNOWLEDGE.value for a in sim.brain_context_builder.build(sim, none).action_affordances)
 
 
 def _held(sim, agent, *ids):

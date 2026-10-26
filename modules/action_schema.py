@@ -19,6 +19,7 @@ class ExecutableActionType(str, Enum):
     REQUEST_ASSISTANCE = "request_assistance"
     MEETING = "meeting"
     EXTERNALIZE_PLAN = "externalize_plan"
+    EXTERNALIZE_KNOWLEDGE = "externalize_knowledge"
     CONSULT_TEAM_ARTIFACT = "consult_team_artifact"
     TRANSPORT_RESOURCES = "transport_resources"
     START_CONSTRUCTION = "start_construction"
@@ -121,7 +122,11 @@ _STRUCTURE_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 ACTION_ARG_SPECS: Dict[ExecutableActionType, Dict[str, Any]] = {
     ExecutableActionType.START_CONSTRUCTION: {"required": (), "allowed": ("structure_type",)},
     ExecutableActionType.CONNECT_STRUCTURES: {"required": CONNECT_STRUCTURES_ARG_KEYS, "allowed": CONNECT_STRUCTURES_ARG_KEYS},
+    # Knowledge externalization (not a team plan): `kind` is the epistemic intent, `element_id` the grounded DIK reference (a held
+    # information/rule element, or for `uncertainty` a recognized gap), `project_id` an optional construction project it concerns.
+    ExecutableActionType.EXTERNALIZE_KNOWLEDGE: {"required": ("kind", "element_id"), "allowed": ("kind", "element_id", "project_id")},
 }
+EXTERNALIZATION_KINDS: Tuple[str, ...] = ("claim", "evidence", "uncertainty", "design_note")
 
 
 def decision_action_args(decision: Any) -> Dict[str, Any]:
@@ -162,6 +167,9 @@ def validate_action_args(action: ExecutableActionType, args: Any, *, allowed_str
         value = args[key]
         if not isinstance(value, str):
             errors.append(f"action_arg_not_a_string:{key}")
+        elif key == "kind":
+            if value not in EXTERNALIZATION_KINDS:
+                errors.append(f"unknown_externalization_kind:{value}")
         elif key == "structure_type":
             if not _STRUCTURE_TYPE_PATTERN.match(value):
                 errors.append("malformed_structure_type")

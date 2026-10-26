@@ -49,7 +49,7 @@ class AgentActionGate:
             return self._evaluate_inspect(agent=agent, decision=decision, sim_state=sim_state)
         if action in {ExecutableActionType.COMMUNICATE, ExecutableActionType.REQUEST_ASSISTANCE}:
             return self._evaluate_communication(agent=agent, decision=decision, sim_state=sim_state)
-        if action in {ExecutableActionType.EXTERNALIZE_PLAN, ExecutableActionType.CONSULT_TEAM_ARTIFACT}:
+        if action in {ExecutableActionType.EXTERNALIZE_PLAN, ExecutableActionType.EXTERNALIZE_KNOWLEDGE, ExecutableActionType.CONSULT_TEAM_ARTIFACT}:
             return self._evaluate_artifact(agent=agent, decision=decision, sim_state=sim_state)
         if action == ExecutableActionType.TRANSPORT_RESOURCES:
             return self._evaluate_transport(agent=agent, decision=decision, sim_state=sim_state)
@@ -124,6 +124,24 @@ class AgentActionGate:
         return self._pass(decision)
 
     def _evaluate_artifact(self, *, agent, decision, sim_state):
+        if decision.selected_action == ExecutableActionType.EXTERNALIZE_KNOWLEDGE:
+            # An agent can externalize only what it holds (or a gap it recognizes). The gate reports; it never substitutes a reference.
+            args = decision_action_args(decision)
+            kind, element_id, project_id = args.get("kind"), str(args.get("element_id") or ""), args.get("project_id")
+            tokens = agent._reference_tokens(element_id)
+            held = bool(tokens & agent._held_tokens())
+            blockers = []
+            if kind == "uncertainty":
+                if held or not (tokens & {str(g) for g in agent.known_gaps}):
+                    blockers.append("uncertainty_reference_not_a_recognized_gap")
+            elif not held:
+                blockers.append("externalization_reference_not_held")
+            if kind == "design_note":
+                projects = getattr(getattr(getattr(sim_state, "environment", None), "construction", None), "projects", None) or {}
+                if not project_id or str(project_id) not in projects:
+                    blockers.append("design_note_requires_existing_project")
+            if blockers:
+                return ActionGateResult(False, decision, blockers=blockers, target_id=decision.target_id, metadata={"action_args": args})
         return self._pass(decision)
 
     def _evaluate_transport(self, *, agent, decision, sim_state):

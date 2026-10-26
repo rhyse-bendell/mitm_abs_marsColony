@@ -241,6 +241,8 @@ class BrainContextBuilder:
                 return max(0.01, base)
             if action == ExecutableActionType.EXTERNALIZE_PLAN:
                 return 0.8 if stage in {"early", "execution"} else 0.45
+            if action == ExecutableActionType.EXTERNALIZE_KNOWLEDGE:
+                return 0.35  # hypothesized simulator default, not calibrated
             if action == ExecutableActionType.CONSULT_TEAM_ARTIFACT:
                 if consult_assessment.get("has_artifacts") and not consult_assessment.get("useful"):
                     return 0.05  # nothing new to learn from it: the same artifact version, no new context
@@ -272,6 +274,7 @@ class BrainContextBuilder:
             return 0.2
 
         response_rows = list(opportunities.get("response_opportunities") or [])
+        knowledge_rows = list(opportunities.get("externalization_candidates") or [])
         legal = [
             {"action_type": ExecutableActionType.WAIT.value, "target_id": None, "target_class": "self", "utility": 0.1},
             {"action_type": ExecutableActionType.COMMUNICATE.value, "target_id": "nearby_agent", "target_class": "team", "utility": utility_for(ExecutableActionType.COMMUNICATE)},
@@ -283,6 +286,12 @@ class BrainContextBuilder:
         ]
         import math
         from modules.agent import COMMUNICATION_RADIUS
+        for cand in knowledge_rows:
+            args = {k: v for k, v in cand.items() if v}
+            legal.append({
+                "action_type": ExecutableActionType.EXTERNALIZE_KNOWLEDGE.value, "target_id": "whiteboard", "target_class": "artifact",
+                "utility": utility_for(ExecutableActionType.EXTERNALIZE_KNOWLEDGE), "action_args": args, "externalize_kind": cand["kind"], "externalize_gap": True,
+            })
         peer_positions = dict((team_state or {}).get("teammate_positions") or {})
         for row in response_rows:
             # A received request is a response OPPORTUNITY addressed to the requester; whether and when to answer is the Pilot's choice.
@@ -304,7 +313,7 @@ class BrainContextBuilder:
             elif item.get("action_type") == ExecutableActionType.REQUEST_ASSISTANCE.value:
                 item["dik_gap_count"] = int(opportunities.get("dik_gap_count", 0))
             elif item.get("action_type") == ExecutableActionType.EXTERNALIZE_PLAN.value:
-                item["externalize_gap"] = bool(opportunities.get("externalize_gap"))
+                item["externalize_gap"] = False  # knowledge externalization is its own action (externalize_knowledge); a plan is not scored as one
                 item["team_plan_opportunity"] = bool(opportunities.get("team_plan_opportunity"))
             elif item.get("action_type") == ExecutableActionType.CONSULT_TEAM_ARTIFACT.value:
                 item["consult_artifact_type"] = consult_assessment.get("artifact_type")
