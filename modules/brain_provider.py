@@ -15,6 +15,9 @@ import json
 import logging
 import math
 import random
+from pathlib import Path
+
+from modules.task_model import normalize_rule_token
 import time
 from abc import ABC, abstractmethod
 from copy import deepcopy
@@ -80,6 +83,31 @@ def _content_text(value: Any) -> str:
             if isinstance(value.get(key), str):
                 return str(value.get(key)).strip()
     return ""
+
+
+def resolve_design_variant(choice: dict[str, Any], allowed_actions: list[dict[str, Any]], held_ids, task_id: str, seed_key: str) -> dict[str, Any]:
+    """Procedural Baseline decision rule for a specification choice (a documented POLICY, not Mecha behaviour).
+
+    Among the offered options of the slot ``choice`` belongs to, the Procedural Pilot commits to ONE: if it holds a DIK element that
+    states the slot's requirement it intends a compliant option (uniformly among the compliant ones); otherwise it draws uniformly
+    among all offered options. The draw is stable for that agent, project and slot. Whether the realized artifact is valid is decided
+    later by the Environment, and an execution slip can still change the realized option.
+    """
+    if not isinstance(choice, dict) or not choice.get("design_slot"):
+        return choice
+    from modules.construction_spec import load_construction_specs, requirement_held
+
+    key = (choice.get("action_type"), choice.get("target_id"), choice.get("design_slot"))
+    members = [a for a in allowed_actions if isinstance(a, dict) and (a.get("action_type"), a.get("target_id"), a.get("design_slot")) == key]
+    specs = load_construction_specs(Path(__file__).resolve().parents[1] / "config" / "tasks" / str(task_id))
+    spec = next((sp for sp in (specs.get(str(choice.get("project_type") or "").lower()) or {}).values() if sp.slot_id == choice.get("design_slot")), None)
+    if spec is None or not members:
+        return choice
+    pool = [a for a in members if a.get("design_option") in spec.compliant] if requirement_held(spec, held_ids) else list(members)
+    pool = pool or list(members)
+    options = sorted(a.get("design_option") for a in pool)
+    pick = random.Random(f"{seed_key}|{choice.get('target_id')}|{choice.get('design_slot')}|{choice.get('action_type')}").choice(options)
+    return next(a for a in pool if a.get("design_option") == pick)
 
 
 def select_productive_fallback_action(allowed_actions: list[dict[str, Any]]) -> PlannedActionStep:
@@ -1762,6 +1790,40 @@ class RuleBrain(BrainProvider):
         control_state.setdefault("method_state", dict(control_state.get("method_state") or {}))
         return control_state
 
+    DESIGN_NONSELECTED_PENALTY = 6.0
+
+    @staticmethod
+    def _design_policy_inputs(context_packet, is_request):
+        """What the Procedural decision rule may use: the DIK ids THIS agent holds, the task id, and a stable per-agent seed."""
+        if is_request:
+            task_id = str(getattr(context_packet, "task_id", "") or "mars_colony")
+            canonical = (getattr(context_packet, "task_context", {}) or {}).get("canonical_context") or {}
+            held_dik = canonical.get("held_dik") or {}
+            wm = getattr(context_packet, "working_memory_summary", {}) or {}
+            held = set(held_dik.get("data") or wm.get("data") or []) | set(held_dik.get("information") or wm.get("information") or [])
+            held |= {normalize_rule_token(k) for k in (held_dik.get("knowledge") or wm.get("knowledge") or [])}
+            seed_key = str(((getattr(context_packet, "task_context", {}) or {}).get("policy_seed_key")) or "ctx")
+        else:
+            cognitive = context_packet.individual_cognitive_state
+            task_id = str((getattr(context_packet, "static_task_context", {}) or {}).get("task_id") or "mars_colony")
+            held = set(cognitive.get("data_summary", [])) | set(cognitive.get("information_summary", [])) | {normalize_rule_token(k) for k in cognitive.get("knowledge_summary", [])}
+            seed_key = "ctx"
+        return held, task_id, seed_key
+
+    def _apply_design_choice_policy(self, action_scores, sorted_affordances, context_packet, *, is_request) -> None:
+        """Score down the non-committed options of every offered slot so each slot counts as ONE variant in the family pick
+        (see ``resolve_design_variant`` for the decision rule itself)."""
+        if not any(a.get("design_slot") for a in sorted_affordances):
+            return
+        held, task_id, seed_key = self._design_policy_inputs(context_packet, is_request)
+        for i, a in enumerate(sorted_affordances):
+            if a.get("design_slot"):
+                committed = resolve_design_variant(a, sorted_affordances, held, task_id, seed_key)
+                if committed is not a:
+                    key = f"{i}:{a.get('action_type')}"
+                    if key in action_scores:
+                        action_scores[key] -= self.DESIGN_NONSELECTED_PENALTY
+
     def _policy_core(self, context_packet, *, control_state: dict[str, Any] | None = None, is_request: bool = False) -> dict[str, Any]:
         # Authoritative fallback controller pipeline:
         # 1) derive features, 2) select/continue macro mode, 3) select/continue method,
@@ -1848,6 +1910,7 @@ class RuleBrain(BrainProvider):
             mechanism_profile=mechanism_profile,
             startup_required_pending=frozenset(startup_pending),
         )
+        self._apply_design_choice_policy(action_scores, sorted_affordances, context_packet, is_request=is_request)
         preferred_for_mode = set(self.MODE_ACTION_PREFERENCES.get(selected_mode, {}).keys())
         legal_non_preferred = sorted(
             {
@@ -1927,6 +1990,9 @@ class RuleBrain(BrainProvider):
                 f"physical_build_progress={active_proj.get('physical_build_progress', active_proj.get('progress'))};"
                 f"executable={executable_actions[:3]}"
             )
+        if chosen.get("design_slot"):
+            held_for_design, task_for_design, seed_for_design = self._design_policy_inputs(context_packet, is_request)
+            chosen = resolve_design_variant(chosen, sorted_affordances, held_for_design, task_for_design, seed_for_design)
         reason = f"mode={selected_mode};transition={transition_reason}"
         assumptions = [f"policy_mode={selected_mode}", f"mode_dwell={control_state.get('mode_dwell_steps', 0)}"]
         if method_id:

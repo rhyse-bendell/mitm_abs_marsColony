@@ -4,6 +4,7 @@ from unittest import mock
 from modules.action_schema import BrainDecision, ExecutableActionType
 from modules.simulation import SimulationState
 from modules.task_model import load_task_model
+from tests.construction_helpers import build_step
 
 
 class ConstructionEpistemicAuthorityTests(unittest.TestCase):
@@ -112,7 +113,7 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         agent.activity_log = [entry for entry in agent.activity_log if "Mismatch with construction" not in str(entry)]
         remaining_steps = sum(1 for step in project.get("build_steps", []) if not step.get("completed"))
         for _ in range(remaining_steps):
-            sim.environment.construction.execute_build_step(project_id, actor=agent.name, sim_time=sim.time)
+            build_step(sim.environment.construction, project_id, actor=agent.name, sim_time=sim.time)
 
         sim.environment.construction.record_project_epistemic_externalization(
             project_id,
@@ -181,7 +182,7 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         required = int(project["required_resources"]["bricks"])
         sim.environment.construction.deliver_resource(project_id, "bricks", quantity=required)
         for _ in range(sum(1 for step in project.get("build_steps", []) if not step.get("completed"))):
-            sim.environment.construction.execute_build_step(project_id, actor=agent.name, sim_time=sim.time)
+            build_step(sim.environment.construction, project_id, actor=agent.name, sim_time=sim.time)
         for entry_type in ("claim", "evidence", "design_note"):
             sim.environment.construction.record_project_epistemic_externalization(
                 project_id, entry_type=entry_type, note=f"{entry_type} for validation", references=["R_HOUSE_VALIDITY"], actor=agent.name, sim_time=sim.time
@@ -329,7 +330,7 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         house_id, house = self._ensure_project(sim, "Build_Site_B")
         cm.deliver_resource(house_id, "bricks", quantity=int(house["required_resources"]["bricks"]))
         for _ in range(len(house["build_steps"])):
-            cm.execute_build_step(house_id, actor=agent.name, sim_time=sim.time)
+            build_step(cm, house_id, actor=agent.name, sim_time=sim.time)
         cm.record_project_epistemic_externalization(house_id, entry_type="claim", note="claim", actor=agent.name, sim_time=sim.time)
         cm.record_project_epistemic_externalization(house_id, entry_type="evidence", note="evidence", actor=agent.name, sim_time=sim.time)
         cm.record_project_epistemic_externalization(house_id, entry_type="design_note", note="design", actor=agent.name, sim_time=sim.time)
@@ -407,7 +408,7 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         required = int(project["required_resources"]["bricks"])
         sim.environment.construction.deliver_resource(project_id, "bricks", quantity=required)
         for _ in range(len(project["build_steps"])):
-            sim.environment.construction.execute_build_step(project_id, actor=agent.name, sim_time=sim.time)
+            build_step(sim.environment.construction, project_id, actor=agent.name, sim_time=sim.time)
         project["support_requirements"] = {}
         project["support_counts"] = {}
         project["support_status"] = {}
@@ -488,7 +489,7 @@ class ConstructionEpistemicAuthorityTests(unittest.TestCase):
         required = int(project["required_resources"]["bricks"])
         sim.environment.construction.deliver_resource(project_id, "bricks", quantity=required)
         for _ in range(len(project["build_steps"])):
-            sim.environment.construction.execute_build_step(project_id, actor=agent.name, sim_time=sim.time)
+            build_step(sim.environment.construction, project_id, actor=agent.name, sim_time=sim.time)
         project["support_requirements"] = {}
         project["support_counts"] = {}
         project["support_status"] = {}

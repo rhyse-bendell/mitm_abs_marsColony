@@ -34,7 +34,7 @@ AFFORDANCE_ESSENTIAL = ("action_type", "target_id", "action_args", "reachable", 
 AFFORDANCE_OPTIONAL = (
     "target_class", "start_mode", "work_stage", "duration_s", "required_resources", "materials_staged", "materials_deficit", "repair_ready", "repair_blockers",
     "validation_failed", "validation_candidate", "observed_repair_need", "observed_failure_age_s", "consult_useful", "consult_redundant", "consult_reasons",
-    "consult_artifact_type", "externalize_kind", "provision_unsolicited", "provision_solicited", "response_to_request", "can_provide", "cannot_provide", "request_age_s", "dik_gap_count", "externalize_gap", "team_plan_opportunity",
+    "consult_artifact_type", "externalize_kind", "design_slot", "design_slot_label", "design_option", "provision_unsolicited", "provision_solicited", "response_to_request", "can_provide", "cannot_provide", "request_age_s", "dik_gap_count", "externalize_gap", "team_plan_opportunity",
     "addresses_support_subgoals", "serves_task_methods", "reinspect_informative", "source_state",
 )
 BUILT_STATE_KEYS = ("structure_id", "structure_type", "project_status", "state", "material_progress", "physical_build_progress", "resource_complete",

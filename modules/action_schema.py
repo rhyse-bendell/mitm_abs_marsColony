@@ -120,7 +120,11 @@ _STRUCTURE_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 #   start_construction: structure_type is optional at the schema level (a START without it continues an existing
 #   unfinished project at the target site); creating a NEW project requires it (enforced by the action gate).
 ACTION_ARG_SPECS: Dict[ExecutableActionType, Dict[str, Any]] = {
-    ExecutableActionType.START_CONSTRUCTION: {"required": (), "allowed": ("structure_type",)},
+    ExecutableActionType.START_CONSTRUCTION: {"required": (), "allowed": ("structure_type", "design_slot", "design_option")},
+    # design_slot/design_option: the specification choice the Pilot makes for the next build step (or, for a repair, the slot it reworks).
+    # The option menu is the same for every agent and never marks an option as correct (see Documentation/research/MITM_construction_contract.md).
+    ExecutableActionType.CONTINUE_CONSTRUCTION: {"required": (), "allowed": ("design_slot", "design_option")},
+    ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION: {"required": (), "allowed": ("design_slot", "design_option")},
     ExecutableActionType.CONNECT_STRUCTURES: {"required": CONNECT_STRUCTURES_ARG_KEYS, "allowed": CONNECT_STRUCTURES_ARG_KEYS},
     # Knowledge externalization (not a team plan): `kind` is the epistemic intent, `element_id` the grounded DIK reference (a held
     # information/rule element, or for `uncertainty` a recognized gap), `project_id` an optional construction project it concerns.

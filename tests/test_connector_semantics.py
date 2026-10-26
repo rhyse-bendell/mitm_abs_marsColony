@@ -14,6 +14,7 @@ from modules.action_schema import BrainDecision, ExecutableActionType
 from modules.construction import ConstructionManager
 from modules.simulation import SimulationState
 from modules.support_accounting import evaluate_structural_support, validated_structure_breakdown
+from tests.construction_helpers import build_step
 
 
 def _built(cm, pid, ptype, *, validated=True, site="site_b"):
@@ -33,7 +34,7 @@ def _physically_built(cm, pid):
     cm.update()
     cm.start_project(pid)
     for _ in range(40):
-        cm.execute_build_step(pid, actor="test", sim_time=1.0)
+        build_step(cm, pid, actor="test", sim_time=1.0)
     cm.update()
 
 

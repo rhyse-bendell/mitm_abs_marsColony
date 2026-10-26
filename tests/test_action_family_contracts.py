@@ -39,8 +39,8 @@ def sim():
             state.stop()
 
 
-def _decision(action, target=None):
-    return BrainDecision(selected_action=action, target_id=target, confidence=0.9)
+def _decision(action, target=None, args=None):
+    return BrainDecision(selected_action=action, target_id=target, confidence=0.9, action_args=dict(args or {}))
 
 
 def _construction_snapshot(sim):
@@ -171,8 +171,11 @@ def test_construction_builds_through_construction_and_refuses_unstaged_materials
     steps = lambda: sum(1 for s in cm.projects[pid]["build_steps"] if s.get("completed"))
 
     def run(action):
+        from tests.construction_helpers import design_args_for
+
+        # the Pilot's specification choice for the next step (an explicit part of the action; the Mecha never fills it in)
         with patch.object(agent, "_build_readiness_blockers", return_value=[]), patch.object(agent, "_epistemic_sufficiency", return_value=READY):
-            _execute(sim, agent, _decision(action, pid))
+            _execute(sim, agent, _decision(action, pid, design_args_for(cm, pid)))
 
     run(A.START_CONSTRUCTION)  # no materials staged: refused, nothing built
     assert steps() == 0 and cm.projects[pid]["structurally_complete"] is False

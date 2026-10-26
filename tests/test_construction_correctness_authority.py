@@ -5,6 +5,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.construction_helpers import inject_defect, realize_compliant
+
 from modules.action_schema import BrainDecision, ExecutableActionType
 from modules.construction import ConstructionManager
 from modules.simulation import SimulationState
@@ -23,6 +25,7 @@ def _ready_house(cm, project_id="site_b_house_001"):
     p["staged_resources"] = {"bricks": p["required_resources"]["bricks"]}
     for step in p["build_steps"]:  # physically built: Construction.update() recomputes completeness from the steps
         step["completed"] = True
+    realize_compliant(cm, project_id)
     cm.update()
     return project_id
 
@@ -81,7 +84,7 @@ def test_agent_rule_disagreement_never_writes_project_correctness(sim):
     # a mismatch can still be perceived and raised with the team
     assert any(name == "construction_mismatch_detected" for name, _ in sim.captured_events)
 
-    cm.record_build_quality(pid, correct=False, actor="X")
+    inject_defect(cm, pid)
     for step in range(40):
         sim.time = 500.0 + 6.0 * step
         agent.compare_and_repair_construction(cm, sim_state=sim)
@@ -92,13 +95,14 @@ def test_repair_action_executes_through_construction_then_requires_validation(si
     agent = sim.agents[0]
     cm = sim.environment.construction
     pid = _ready_house(cm)
-    cm.record_build_quality(pid, correct=False, actor="X")
+    inject_defect(cm, pid)
     cm.update()
     assert cm.projects[pid]["status"] == "needs_repair"
     cm.mark_validated(pid, is_valid=False, actor="X", sim_time=1.0)  # a repair needs an OBSERVED error: the failed validation
+    cm.record_validation_observation(pid, actor="X", sim_time=1.0, passed=False, assessment=cm.assess_validation(pid, {"K_HOUSE_VALIDITY_REQUIREMENTS"}))
     agent._rng.random = lambda: 0.0  # the fidelity roll applied to the repair itself succeeds in this test
 
-    decision = BrainDecision(selected_action=ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, target_id=pid, confidence=0.9)
+    decision = BrainDecision(selected_action=ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, target_id=pid, confidence=0.9, action_args={"design_slot": "airlock_opening", "design_option": "one_brick_opening"})
     # project-specific repair grounding: the agent holds the rules needed to reason about this project's validity
     agent.mental_model["knowledge"].rules.extend(cm.projects[pid]["expected_rules"])
     actions = agent._translate_brain_decision_to_legacy_action(decision, sim.environment, sim_state=sim)

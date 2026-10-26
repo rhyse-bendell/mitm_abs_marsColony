@@ -3,6 +3,7 @@ from unittest import mock
 
 from modules.action_schema import BrainDecision, ExecutableActionType
 from modules.simulation import SimulationState
+from tests.construction_helpers import build_step
 
 
 class ConstructionLifecycleOrderingTests(unittest.TestCase):
@@ -69,7 +70,7 @@ class ConstructionLifecycleOrderingTests(unittest.TestCase):
         required = int(project["required_resources"]["bricks"])
         sim.environment.construction.deliver_resource(project_id, "bricks", quantity=required)
 
-        ok, reason, _ = sim.environment.construction.execute_build_step(project_id, actor="Architect", sim_time=sim.time)
+        ok, reason, _ = build_step(sim.environment.construction, project_id, actor="Architect", sim_time=sim.time)
         self.assertTrue(ok, reason)
         self.assertTrue(any(step.get("completed") for step in project.get("build_steps", [])))
 
@@ -84,7 +85,7 @@ class ConstructionLifecycleOrderingTests(unittest.TestCase):
 
         # Project may still be in-progress after first step, but once fully built it can become ready.
         while not project.get("structurally_complete"):
-            sim.environment.construction.execute_build_step(project_id, actor="Architect", sim_time=sim.time)
+            build_step(sim.environment.construction, project_id, actor="Architect", sim_time=sim.time)
         sim.environment.construction.update()
         self.assertEqual(project.get("status"), "ready_for_validation")
         sim.stop()

@@ -3,6 +3,7 @@ from unittest import mock
 
 from modules.action_schema import BrainDecision, ExecutableActionType
 from modules.simulation import SimulationState
+from tests.construction_helpers import build_step
 
 
 class ReadinessHandoffRepairTests(unittest.TestCase):
@@ -61,7 +62,7 @@ class ReadinessHandoffRepairTests(unittest.TestCase):
         self.assertIn(decision.selected_action, {ExecutableActionType.START_CONSTRUCTION, ExecutableActionType.CONTINUE_CONSTRUCTION})
 
         for _ in range(len(project.get("build_steps") or [])):
-            sim.environment.construction.execute_build_step(project_id, actor=agent.name, sim_time=sim.time)
+            build_step(sim.environment.construction, project_id, actor=agent.name, sim_time=sim.time)
         sim.environment.construction.record_project_epistemic_externalization(project_id, entry_type="claim", note="c", actor=agent.name, sim_time=sim.time)
         sim.environment.construction.record_project_epistemic_externalization(project_id, entry_type="evidence", note="e", actor=agent.name, sim_time=sim.time)
         sim.environment.construction.record_project_epistemic_externalization(project_id, entry_type="design_note", note="d", actor=agent.name, sim_time=sim.time)

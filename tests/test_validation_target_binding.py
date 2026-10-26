@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from modules.action_schema import BrainDecision, ExecutableActionType
 from modules.simulation import SimulationState
+from tests.construction_helpers import build_step
 
 
 class TestValidationTargetBinding(unittest.TestCase):
@@ -99,7 +100,7 @@ class TestValidationTargetBinding(unittest.TestCase):
                 cm.deliver_resource(project_id, "bricks", quantity=req)
             remaining_steps = sum(1 for step in project.get("build_steps", []) if not step.get("completed"))
             for _ in range(remaining_steps):
-                cm.execute_build_step(project_id, actor=agent.name, sim_time=sim.time)
+                build_step(cm, project_id, actor=agent.name, sim_time=sim.time)
             for entry_type in ("claim", "evidence", "design_note"):
                 cm.record_project_epistemic_externalization(
                     project_id,

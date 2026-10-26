@@ -121,6 +121,9 @@ class ConstructionManager:
         self._active_transports: Dict[str, Dict] = {}
         self._closure_reservations: Dict[str, Dict] = {}
         self.project_templates = self._build_project_templates()
+        from modules.construction_spec import load_construction_specs
+
+        self.specs = load_construction_specs(getattr(task_model, "base_path", None)) if task_model is not None else {}
         self._project_counters: Dict[Tuple[str, str], int] = {}
         self._warned_legacy_targets = set()
 
@@ -343,6 +346,9 @@ class ConstructionManager:
                 "team_rule_snapshot_ids": [],
             },
             "validation_discussion": {},
+            "specification": {},
+            "specification_log": [],
+            "observed_validation_feedback": None,
         }
         project["validation_discussion"] = self._default_validation_discussion(project)
         self.projects[project_id] = project
@@ -667,6 +673,134 @@ class ConstructionManager:
         if "progress" in project:
             return float(project.get("progress", 0.0) or 0.0)
         return float(self._recompute_project_progress(project))
+
+    # ---- task-package construction specification (intended vs realized features -> structural validity)
+    def specified_slot(self, structure_type, component):
+        return (self.specs.get(str(structure_type or "").strip().lower()) or {}).get(component)
+
+    def has_specification(self, project):
+        return bool(self.specs.get(str((project or {}).get("type") or "").strip().lower()))
+
+    def project_slots(self, project):
+        """[(step, SlotSpec)] for the project's build steps that involve a specification choice, in build order."""
+        spec_by_component = self.specs.get(str((project or {}).get("type") or "").strip().lower()) or {}
+        return [(step, spec_by_component[step.get("component")]) for step in list((project or {}).get("build_steps") or []) if step.get("component") in spec_by_component]
+
+    def pending_specification(self, project_id):
+        """The next build step's specification slot, or None. Read-only. A step with a slot cannot be built until the Pilot names an option."""
+        project = self.projects.get(str(project_id or ""))
+        if not isinstance(project, dict):
+            return None
+        for step in list(project.get("build_steps") or []):
+            if not bool(step.get("completed")):
+                spec = self.specified_slot(project.get("type"), step.get("component"))
+                return None if spec is None else {"step_id": step.get("step_id"), "component": step.get("component"), "slot_id": spec.slot_id, "label": spec.label, "options": list(spec.options)}
+        return None
+
+    def check_design_choice(self, project_id, slot_id, option, *, for_repair=False):
+        """Structural legality of a named design choice (the option must exist for the slot). It never says which option is right."""
+        project = self.projects.get(str(project_id or ""))
+        if not isinstance(project, dict):
+            return ["unknown_project"]
+        if for_repair:
+            slots = {spec.slot_id: spec for step, spec in self.project_slots(project) if bool(step.get("completed"))}
+        else:
+            pending = self.pending_specification(project_id)
+            slots = {pending["slot_id"]: self.specified_slot(project.get("type"), pending["component"])} if pending else {}
+        spec = slots.get(str(slot_id or ""))
+        if spec is None:
+            return ["design_slot_not_available"]
+        if str(option or "") not in spec.options:
+            return ["design_option_not_offered"]
+        return []
+
+    def realize_specification(self, project_id, *, slot_id, intended, realized, slipped, fidelity, actor=None, sim_time=None, episode=None, repair=False):
+        """Record the intended and realized option for a slot, then re-derive structural validity. Nothing is decided here: the
+        Pilot chose ``intended``; the caller's execution-slip draw produced ``realized``."""
+        project = self.projects.get(str(project_id or ""))
+        if not isinstance(project, dict):
+            return None
+        spec = next((sp for _step, sp in self.project_slots(project) if sp.slot_id == slot_id), None)
+        record = {
+            "slot_id": slot_id, "component": spec.component if spec else None, "intended": intended, "realized": realized, "slipped": bool(slipped),
+            "fidelity": round(float(fidelity), 4), "actor": actor, "time": sim_time, "episode": episode, "repair": bool(repair),
+        }
+        project.setdefault("specification", {})[slot_id] = record
+        project.setdefault("specification_log", []).append(dict(record))
+        self.derive_structural_validity(project)
+        self.update_project_provenance(project_id, event="specification_realized" if not repair else "specification_reworked", actor=actor, sim_time=sim_time)
+        return record
+
+    def structural_assessment(self, project):
+        """World truth: which realized slots violate the requirement. {'violations': [...], 'unspecified': [...], 'valid': bool}."""
+        realized = (project or {}).get("specification") or {}
+        violations, unspecified = [], []
+        for step, spec in self.project_slots(project):
+            entry = realized.get(spec.slot_id)
+            if entry is None:
+                if bool(step.get("completed")):
+                    unspecified.append(spec.slot_id)
+                continue
+            if not spec.is_compliant(entry.get("realized")):
+                violations.append(spec.slot_id)
+        return {"violations": violations, "unspecified": unspecified, "valid": not violations and not unspecified}
+
+    def derive_structural_validity(self, project):
+        """For a project whose type has a specification, ``project['correct']`` is a DERIVED mirror of its realized features. Nothing
+        else writes it: validation, support and repair-by-toggle cannot change it."""
+        if self.has_specification(project):
+            project["correct"] = bool(self.structural_assessment(project)["valid"])
+        return project.get("correct", True)
+
+    def assess_validation(self, project_id, held_element_ids):
+        """What one validation observes. Truth (structural validity) is separate from what the validator can ASSESS with the DIK it holds:
+        a violation is observable only for slots whose requirement the validator holds; the others are reported as 'cannot assess'."""
+        project = self.projects.get(str(project_id or ""))
+        held = set(held_element_ids or [])
+        if not isinstance(project, dict):
+            return {"structural_valid": False, "observed_violations": [], "cannot_assess": [], "slots": 0}
+        truth = self.structural_assessment(project)
+        observed, cannot = [], []
+        for _step, spec in self.project_slots(project):
+            if any(eid in held for eid in spec.requirement_elements):
+                if spec.slot_id in truth["violations"] or spec.slot_id in truth["unspecified"]:
+                    observed.append(spec.slot_id)
+            else:
+                cannot.append(spec.slot_id)
+        return {"structural_valid": bool(project.get("correct", True)) if not self.has_specification(project) else bool(truth["valid"]),
+                "observed_violations": observed, "cannot_assess": cannot, "slots": len(self.project_slots(project))}
+
+    def record_validation_observation(self, project_id, *, actor, sim_time, passed, assessment, support_missing=None):
+        """The team-visible outcome of a validation attempt (the observation, not the world truth behind it)."""
+        project = self.projects.get(str(project_id or ""))
+        if not isinstance(project, dict):
+            return
+        project["observed_validation_feedback"] = {
+            "validator": actor, "time": sim_time, "passed": bool(passed),
+            "observed_violations": list(assessment.get("observed_violations") or []),
+            "cannot_assess": list(assessment.get("cannot_assess") or []),
+            "support_missing": dict(support_missing or {}),
+        }
+
+    def repair_specification(self, project_id, *, slot_id, intended, realized, slipped, fidelity, actor=None, sim_time=None, episode=None):
+        """Rework one slot: a new intended option and its realization replace the old ones. This changes artifact features; it does not
+        toggle correctness."""
+        project = self.projects.get(str(project_id or ""))
+        if not isinstance(project, dict) or not project.get("started"):
+            return None
+        record = self.realize_specification(project_id, slot_id=slot_id, intended=intended, realized=realized, slipped=slipped, fidelity=fidelity, actor=actor, sim_time=sim_time, episode=episode, repair=True)
+        feedback = project.get("observed_validation_feedback")
+        if isinstance(feedback, dict):
+            feedback["observed_violations"] = [s for s in feedback.get("observed_violations", []) if s != slot_id]
+        project["repair_count"] = int(project.get("repair_count", 0) or 0) + 1
+        project["validated_complete"] = False
+        project["awaiting_revalidation"] = True
+        if str(project.get("closure_status") or "") == "failed":
+            project["closure_status"] = "idle"
+            project["closure_owner"] = None
+            self._closure_reservations.pop(str(project_id), None)
+        self.update()
+        return record
 
     def _project_component_templates(self, project):
         structure_type = str((project or {}).get("type") or "").strip().lower()
@@ -1009,6 +1143,7 @@ class ConstructionManager:
         for project in self.projects.values():
             self.ensure_validation_discussion(project.get("id"))
             prior_status = str(project.get("status") or "")
+            self.derive_structural_validity(project)
             required = int(project["required_resources"].get("bricks", 0) or 0)
             delivered = int(project["delivered_resources"].get("bricks", 0) or 0)
             staged = int(project.get("staged_resources", {}).get("bricks", 0) or 0)
@@ -1127,7 +1262,7 @@ class ConstructionManager:
 
 
 # Build steps change physical structure state and can deposit DIK artifacts used later in validation.
-    def execute_build_step(self, project_id, *, actor=None, sim_time=None, requested_component=None):
+    def execute_build_step(self, project_id, *, actor=None, sim_time=None, requested_component=None, intended_option=None, realized_option=None, slipped=False, fidelity=None, episode=None):
         resolved_id = self.resolve_project_id(project_id, create_if_missing=True)
         project = self.projects.get(resolved_id)
         if not project:
@@ -1146,10 +1281,22 @@ class ConstructionManager:
             matched = next((candidate for candidate in pending if str(candidate.get("component")) == str(requested_component)), None)
             if matched is not None:
                 step = matched
+        spec = self.specified_slot(project.get("type"), step.get("component"))
+        if spec is not None:
+            # A step that involves a specification choice cannot be built until a Pilot names an option; nothing fills it in.
+            if intended_option is None:
+                return False, "specification_required", None
+            if str(intended_option) not in spec.options or (realized_option is not None and str(realized_option) not in spec.options):
+                return False, "design_option_not_offered", None
         step["completed"] = True
         step["completed_at"] = sim_time
         step["completed_by"] = actor
         project["build_steps"] = steps
+        if spec is not None:
+            self.realize_specification(
+                resolved_id, slot_id=spec.slot_id, intended=str(intended_option), realized=str(realized_option or intended_option), slipped=bool(slipped),
+                fidelity=0.0 if fidelity is None else fidelity, actor=actor, sim_time=sim_time, episode=episode,
+            )
         if "connector" in str(step.get("component") or ""):
             project.setdefault("connections", []).append(
                 {
@@ -1314,7 +1461,7 @@ class ConstructionManager:
         project["last_validation_attempt_time"] = sim_time
         project["last_validation_was_revalidation"] = bool(project.pop("awaiting_revalidation", False))
         if not is_valid:
-            project["correct"] = False
+            # Validation OBSERVES: a failed validation does not change the artifact's structural validity (see derive_structural_validity).
             project["validated_complete"] = False
             project["status"] = "needs_repair"
             project["in_progress"] = True
@@ -1331,7 +1478,6 @@ class ConstructionManager:
                 team_rule_snapshot_ids=team_rule_snapshot_ids,
             )
             return
-        project["correct"] = True
         support_ready = self.recompute_support_status(project_id)
         readiness = self.evaluate_project_validation_readiness(project_id, actor=actor)
         if bool(readiness.get("validation_ready", False)) and support_ready:

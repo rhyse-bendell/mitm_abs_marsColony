@@ -2,6 +2,7 @@ import unittest
 
 from modules.action_schema import BrainDecision, ExecutableActionType
 from modules.simulation import SimulationState
+from tests.construction_helpers import build_step
 
 
 class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
@@ -43,7 +44,7 @@ class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
         before = sum(1 for step in project["build_steps"] if step["completed"])
         before_workspace = len(project["epistemic_workspace"]["entries"])
         before_timeline = len(project["provenance"]["timeline"])
-        ok, reason, _step = sim.environment.construction.execute_build_step(project_id, actor="Architect", sim_time=1.0)
+        ok, reason, _step = build_step(sim.environment.construction, project_id, actor="Architect", sim_time=1.0)
         after = sum(1 for step in project["build_steps"] if step["completed"])
         self.assertTrue(ok, reason)
         self.assertGreater(after, before)
@@ -77,7 +78,7 @@ class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
         self.assertNotEqual(project["status"], "complete")
 
         for _ in range(len(project["build_steps"])):
-            sim.environment.construction.execute_build_step(project_id, actor="Architect", sim_time=3.0)
+            build_step(sim.environment.construction, project_id, actor="Architect", sim_time=3.0)
         sim.environment.construction.record_project_epistemic_externalization(project_id, entry_type="claim", note="claim", actor="Architect", sim_time=4.0)
         sim.environment.construction.record_project_epistemic_externalization(project_id, entry_type="evidence", note="evidence", actor="Architect", sim_time=4.1)
         sim.environment.construction.record_project_epistemic_externalization(project_id, entry_type="design_note", note="layout", actor="Architect", sim_time=4.2)
@@ -219,7 +220,7 @@ class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
         required = int(house["required_resources"]["bricks"])
         cm.deliver_resource(house_id, "bricks", quantity=required)
         for _ in range(len(house["build_steps"])):
-            cm.execute_build_step(house_id, actor="Architect", sim_time=3.0)
+            build_step(cm, house_id, actor="Architect", sim_time=3.0)
         cm.record_project_epistemic_externalization(house_id, entry_type="claim", note="claim", actor="Architect", sim_time=4.0)
         cm.record_project_epistemic_externalization(house_id, entry_type="evidence", note="evidence", actor="Architect", sim_time=4.1)
         self.assertTrue(house["structurally_complete"])
@@ -279,7 +280,7 @@ class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
             project = cm.projects[project_id]
             cm.deliver_resource(project_id, "bricks", quantity=int(project["required_resources"]["bricks"]))
             for _ in range(len(project["build_steps"])):
-                cm.execute_build_step(project_id, actor="Architect", sim_time=2.0)
+                build_step(cm, project_id, actor="Architect", sim_time=2.0)
         ok, reason = cm.attach_connector(connector_id, from_project_id=house_id, to_project_id=provider_id, actor="Architect", sim_time=3.0)
         self.assertTrue(ok, reason)
         summary = cm.get_structure_support_summary(house_id)
@@ -296,7 +297,7 @@ class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
             project = cm.projects[project_id]
             cm.deliver_resource(project_id, "bricks", quantity=int(project["required_resources"]["bricks"]))
             for _ in range(len(project["build_steps"])):
-                cm.execute_build_step(project_id, actor="Architect", sim_time=2.0)
+                build_step(cm, project_id, actor="Architect", sim_time=2.0)
         ok, reason = cm.attach_connector(connector_id, from_project_id=house_id, to_project_id=provider_id, actor="Architect", sim_time=3.0)
         self.assertTrue(ok, reason)
         summary = cm.get_structure_support_summary(house_id)
@@ -310,7 +311,7 @@ class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
         house = cm.projects[house_id]
         cm.deliver_resource(house_id, "bricks", quantity=int(house["required_resources"]["bricks"]))
         for _ in range(len(house["build_steps"])):
-            cm.execute_build_step(house_id, actor="Architect", sim_time=1.0)
+            build_step(cm, house_id, actor="Architect", sim_time=1.0)
         cm.record_project_epistemic_externalization(house_id, entry_type="claim", note="claim", actor="Architect", sim_time=1.1)
         cm.record_project_epistemic_externalization(house_id, entry_type="evidence", note="evidence", actor="Architect", sim_time=1.2)
         cm.record_project_epistemic_externalization(house_id, entry_type="design_note", note="design", actor="Architect", sim_time=1.3)
@@ -323,7 +324,7 @@ class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
             project = cm.projects[project_id]
             cm.deliver_resource(project_id, "bricks", quantity=int(project["required_resources"]["bricks"]))
             for _ in range(len(project["build_steps"])):
-                cm.execute_build_step(project_id, actor="Architect", sim_time=2.0)
+                build_step(cm, project_id, actor="Architect", sim_time=2.0)
         self.assertTrue(cm.attach_connector(food_connector_id, from_project_id=house_id, to_project_id=greenhouse_id, actor="Architect", sim_time=3.0)[0])
         self.assertTrue(cm.attach_connector(water_connector_id, from_project_id=house_id, to_project_id=water_id, actor="Architect", sim_time=3.1)[0])
         self.assertTrue(cm.get_structure_support_summary(house_id)["functional_support_complete"])
@@ -358,7 +359,7 @@ class ConstructionEpistemicWorkspaceTests(unittest.TestCase):
         required = int(project["required_resources"]["bricks"])
         cm.deliver_resource(project_id, "bricks", quantity=required)
         for _ in range(len(project["build_steps"])):
-            cm.execute_build_step(project_id, actor="Architect", sim_time=1.0)
+            build_step(cm, project_id, actor="Architect", sim_time=1.0)
         report = cm.evaluate_project_validation_readiness(project_id)
         self.assertFalse(report["validation_ready"])
         self.assertIn("missing_functional_support", report["blockers"])

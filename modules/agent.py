@@ -2761,7 +2761,7 @@ class Agent:
                     project.get("status"),
                     int(project.get("required_resources", {}).get("bricks", 0) or 0),
                     int(project.get("delivered_resources", {}).get("bricks", 0) or 0),
-                    bool(project.get("correct", True)),
+                    bool(environment.construction.observed_validation_failure(project)),
                 )
             )
         return tuple(projects)
@@ -5656,6 +5656,9 @@ class Agent:
             if token.startswith("project_status_") or token.startswith("illegal_project_status:"):
                 hard_blockers.append(token)
                 continue
+            if token.startswith("specification_required") or token in {"design_slot_not_available", "design_option_not_offered"}:
+                hard_blockers.append(token)  # the Pilot's specification choice is missing or malformed: reported back, never filled in
+                continue
             epistemic_advisories.append(token)
         return {"hard_blockers": sorted(set(hard_blockers)), "epistemic_advisories": sorted(set(epistemic_advisories))}
 
@@ -5793,6 +5796,15 @@ class Agent:
             if (action_type == ExecutableActionType.START_CONSTRUCTION and not self._is_typed_start(decision)
                     and not bool(project.get("build_ready", False)) and not self._project_has_physical_build_progress(project)):
                 blockers.append("materials_not_staged")  # an existing project cannot be physically started before its materials are staged
+            construction = environment.construction
+            if construction.has_specification(project) and bool(project.get("build_ready", False)) and not self._is_typed_start(decision):
+                pending = construction.pending_specification(project_id)
+                if pending is not None:
+                    args = decision_action_args(decision)
+                    if not args.get("design_slot") or not args.get("design_option"):
+                        blockers.append(f"specification_required:{pending['slot_id']}")  # never filled in for the Pilot
+                    else:
+                        blockers.extend(construction.check_design_choice(project_id, args.get("design_slot"), args.get("design_option")))
         elif action_type == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION:
             closure_project_id = self._live_project_closure_commitment(environment, sim_state=sim_state)
             closure_active_for_project = bool(project_id and closure_project_id and project_id == closure_project_id)
@@ -5806,6 +5818,12 @@ class Agent:
             )
             if not mismatch_detected and not closure_active_for_project:
                 blockers.append("no_detected_mismatch")
+            if environment.construction.has_specification(project):
+                args = decision_action_args(decision)
+                if not args.get("design_slot") or not args.get("design_option"):
+                    blockers.append("specification_required:repair")
+                else:
+                    blockers.extend(environment.construction.check_design_choice(project_id, args.get("design_slot"), args.get("design_option"), for_repair=True))
         elif action_type == ExecutableActionType.VALIDATE_CONSTRUCTION:
             if not self._project_has_physical_build_progress(project) and not bool(project.get("structurally_complete", False)):
                 blockers.append("physical_build_not_started")
@@ -12516,7 +12534,9 @@ class Agent:
                     physical_ready = bool(readiness_report.get("physical_ready", False))
                     support_ready = bool(readiness_report.get("support_ready", False))
                     epistemic_ready = bool(readiness_report.get("epistemic_ready", False))
-                    is_valid = bool(project.get("correct", True)) and physical_ready and support_ready and has_required_rules and epistemic_ready
+                    data_ids_now, info_ids_now, knowledge_ids_now = self._held_dik_ids()
+                    validation_assessment = environment.construction.assess_validation(project_id, set(data_ids_now) | set(info_ids_now) | set(knowledge_ids_now))
+                    is_valid = bool(validation_assessment["structural_valid"]) and physical_ready and support_ready and has_required_rules and epistemic_ready
                     environment.construction.mark_validated(
                         project_id,
                         is_valid=bool(is_valid and has_required_rules),
@@ -12529,6 +12549,13 @@ class Agent:
                         event="validation_passed" if (is_valid and has_required_rules) else "validation_failed",
                     )
                     project = environment.construction.projects.get(project_id, project)
+                    environment.construction.record_validation_observation(
+                        project_id, actor=self.name, sim_time=validation_ts, passed=bool(is_valid and has_required_rules), assessment=validation_assessment,
+                        support_missing=dict((readiness_report.get("evidence_summary") or {}).get("support_missing") or {}),
+                    )
+                    self._emit_event(sim_state, "construction_validation_assessed", {"project_id": project_id, "structurally_valid": bool(validation_assessment["structural_valid"]), "support_ready": support_ready,
+                                                                                        "validator_rules_ready": has_required_rules, "epistemic_ready": epistemic_ready, "observed_violations": list(validation_assessment["observed_violations"]),
+                                                                                        "cannot_assess": list(validation_assessment["cannot_assess"]), "passed": bool(is_valid and has_required_rules)})
                     self.experimental_metrics["validation_attempts"] += 1
                     if not (is_valid and has_required_rules):
                         self.experimental_metrics["validation_failures"] += 1
@@ -12663,21 +12690,42 @@ class Agent:
 
                     fidelity = (self._hook_value("construction_fidelity", "start_construction", "fidelity_score", default=0.5) + self._trait_value("rule_accuracy")) / 2.0
                     is_repair_action = decision_action == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value
-                    # (A repair applies the same fidelity roll AFTER it clears the error, so a repair can itself be imperfect.)
-                    if not is_repair_action and self._rng.random() > fidelity:
-                        if environment.construction.record_build_quality(
-                            project_id, correct=False, actor=self.name, sim_time=sim_state.time if sim_state is not None else None, cause="construction_fidelity"
-                        ):
+                    construction = environment.construction
+                    spec_project = construction.has_specification(project)
+                    design_args = dict(action.get("action_args") or {})
+                    now_t = sim_state.time if sim_state is not None else None
+                    episode = f"{self.name}@{float(now_t or 0.0):.1f}:{project_id}"
+                    build_kwargs = {}
+                    pending_slot = None
+                    if spec_project and not is_repair_action:
+                        # Knowledge shapes what the Pilot ATTEMPTS (the option it names); the Environment decides correctness from the realized
+                        # features. One execution-fidelity exposure per build action, exactly as before; a slip realizes a different option.
+                        pending_slot = construction.pending_specification(project_id) if bool(project.get("build_ready", False)) else None
+                        if pending_slot is not None:
+                            if str(design_args.get("design_slot") or "") != pending_slot["slot_id"] or not design_args.get("design_option"):
+                                _log_mutation_blocked("construction_progress_blocked", {"project_id": project_id, "failure_category": "specification_required", "slot_id": pending_slot["slot_id"], "project_status": project.get("status")})
+                                continue
+                            intended = str(design_args["design_option"])
+                            if intended not in pending_slot["options"]:
+                                _log_mutation_blocked("construction_progress_blocked", {"project_id": project_id, "failure_category": "design_option_not_offered", "slot_id": pending_slot["slot_id"], "project_status": project.get("status")})
+                                continue
+                            slipped = self._rng.random() > fidelity
+                            realized = intended if not slipped else self._rng.choice(sorted(o for o in pending_slot["options"] if o != intended))
+                            build_kwargs = dict(intended_option=intended, realized_option=realized, slipped=slipped, fidelity=fidelity, episode=episode)
+                    elif not spec_project and not is_repair_action and self._rng.random() > fidelity:
+                        # (task packages without a construction specification keep the earlier single-flag semantics)
+                        if construction.record_build_quality(project_id, correct=False, actor=self.name, sim_time=now_t, cause="construction_fidelity"):
                             self._emit_event(sim_state, "construction_build_error_introduced", {"project_id": project_id, "cause": "construction_fidelity", "fidelity": round(float(fidelity), 3)})
 
-                    build_ok, build_reason, completed_step = environment.construction.execute_build_step(
-                        project_id,
-                        actor=self.name,
-                        sim_time=sim_state.time if sim_state is not None else None,
-                    )
+                    if spec_project and is_repair_action:
+                        build_ok, build_reason, completed_step = False, "repair_by_specification", None
+                    else:
+                        build_ok, build_reason, completed_step = construction.execute_build_step(project_id, actor=self.name, sim_time=now_t, **build_kwargs)
                     if build_ok:
-                        self._note_taskwork(project_id, "repair" if decision_action == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value else "build", sim_state=sim_state)
-                    if not build_ok and decision_action != ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value:
+                        self._note_taskwork(project_id, "build", sim_state=sim_state)
+                        if pending_slot is not None:
+                            self._emit_specification_events(construction, project, pending_slot["slot_id"], sim_state, repair=False)
+                    if not build_ok and not is_repair_action:
                         if self._execution_lock_active_for_project(project_id):
                             self._release_execution_lock(sim_state, reason=f"real_blocker:{build_reason}")
                         _log_mutation_blocked(
@@ -12690,7 +12738,7 @@ class Agent:
                         )
                         continue
 
-                    if decision_action == ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value:
+                    if is_repair_action:
                         if project.get("status") not in {"needs_repair", "ready_for_validation", "in_progress"}:
                             _log_mutation_blocked(
                                 "construction_repair_blocked",
@@ -12701,12 +12749,27 @@ class Agent:
                                 },
                             )
                             continue
-                        if environment.construction.repair_project(project_id, actor=self.name, sim_time=sim_state.time if sim_state is not None else None):
+                        if spec_project:
+                            slot_id, new_option = design_args.get("design_slot"), design_args.get("design_option")
+                            errors = construction.check_design_choice(project_id, slot_id, new_option, for_repair=True)
+                            if errors:
+                                _log_mutation_blocked("construction_repair_blocked", {"project_id": project_id, "failure_category": "specification_required" if not slot_id else errors[0], "project_status": project.get("status")})
+                                continue
+                            spec = next(sp for _st, sp in construction.project_slots(project) if sp.slot_id == slot_id)
+                            slipped = self._rng.random() > fidelity
+                            realized = str(new_option) if not slipped else self._rng.choice(sorted(o for o in spec.options if o != str(new_option)))
+                            if construction.repair_specification(project_id, slot_id=slot_id, intended=str(new_option), realized=realized, slipped=slipped, fidelity=fidelity, actor=self.name, sim_time=now_t, episode=episode):
+                                self._note_taskwork(project_id, "repair", sim_state=sim_state)
+                                self._emit_event(sim_state, "construction_repair_episode", {"project_id": project_id, "decision_action": decision_action, "slot_id": slot_id})
+                                self.experimental_metrics["repair_applications"] += 1
+                                self._emit_specification_events(construction, project, slot_id, sim_state, repair=True)
+                                if spec.is_compliant(realized):
+                                    self.experimental_metrics["repair_successes"] += 1  # the reworked feature now satisfies the requirement
+                        elif construction.repair_project(project_id, actor=self.name, sim_time=now_t):
+                            self._note_taskwork(project_id, "repair", sim_state=sim_state)
                             self._emit_event(sim_state, "construction_repair_episode", {"project_id": project_id, "decision_action": decision_action})
                             self.experimental_metrics["repair_applications"] += 1
-                            if self._rng.random() > fidelity and environment.construction.record_build_quality(
-                                project_id, correct=False, actor=self.name, sim_time=sim_state.time if sim_state is not None else None, cause="repair_fidelity"
-                            ):
+                            if self._rng.random() > fidelity and construction.record_build_quality(project_id, correct=False, actor=self.name, sim_time=now_t, cause="repair_fidelity"):
                                 self._emit_event(sim_state, "construction_build_error_introduced", {"project_id": project_id, "cause": "repair_fidelity", "fidelity": round(float(fidelity), 3)})
                             else:
                                 self.experimental_metrics["repair_successes"] += 1  # the error was actually cleared
@@ -13489,6 +13552,26 @@ class Agent:
             if f"rule:{rid}" in wanted:
                 rule_payload.append(rule)
         return data_payload, info_payload, sorted(set(rule_payload))
+
+    def _emit_specification_events(self, construction, project, slot_id, sim_state, *, repair):
+        """Measurement of the knowledge -> choice -> realization link (events only; no controller reads them)."""
+        from modules.construction_spec import requirement_held
+
+        record = (project.get("specification") or {}).get(slot_id)
+        spec = next((sp for _st, sp in construction.project_slots(project) if sp.slot_id == slot_id), None)
+        if record is None or spec is None:
+            return
+        data_ids, info_ids, knowledge_ids = self._held_dik_ids()
+        informed = requirement_held(spec, set(data_ids) | set(info_ids) | set(knowledge_ids))
+        base = {"project_id": project.get("id"), "structure_type": project.get("type"), "slot_id": slot_id, "intended": record["intended"], "realized": record["realized"],
+                "slipped": record["slipped"], "fidelity": record["fidelity"], "episode": record["episode"], "repair": bool(repair), "actor_held_requirement": bool(informed),
+                "intended_compliant": spec.is_compliant(record["intended"]), "realized_compliant": spec.is_compliant(record["realized"])}
+        self._emit_event(sim_state, "construction_design_choice_made", {k: base[k] for k in ("project_id", "structure_type", "slot_id", "intended", "actor_held_requirement", "intended_compliant", "repair", "episode")})
+        self._emit_event(sim_state, "construction_specification_realized", base)
+        if record["slipped"]:
+            self._emit_event(sim_state, "construction_execution_slip", {k: base[k] for k in ("project_id", "slot_id", "intended", "realized", "fidelity", "episode", "repair", "realized_compliant")})
+        if not base["realized_compliant"]:
+            self._emit_event(sim_state, "construction_build_error_introduced", {"project_id": project.get("id"), "cause": "specification_noncompliant", "slot_id": slot_id, "fidelity": record["fidelity"]})
 
     def _record_known_gaps_from_blockers(self, blockers, sim_state=None, project_id=None):
         gap_tokens = set()
@@ -14799,7 +14882,7 @@ class Agent:
                 str(project.get("status")) == "ready_for_validation"
                 and project.get("closure_owner")
                 and str(project.get("closure_status")) in {"assigned", "in_progress"}
-                and bool(project.get("correct", True))
+                and not bool(construction.observed_validation_failure(project))
             ):
                 discussion = dict(project.get("validation_discussion") or {})
                 discussion_open = str(discussion.get("status") or "") in {"open", "active_discussion", "provisionally_supported", "blocked"}

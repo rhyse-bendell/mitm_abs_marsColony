@@ -4,6 +4,8 @@ import tempfile
 
 import pytest
 
+from tests.construction_helpers import inject_defect, realize_compliant
+
 from modules.action_schema import BrainDecision, ExecutableActionType
 from modules.brain_provider import RuleBrain
 from modules.construction import ConstructionManager
@@ -29,6 +31,9 @@ def _ready_house(cm, project_id="site_b_house_001"):
     p["staged_resources"] = {"bricks": p["required_resources"]["bricks"]}
     for step in p["build_steps"]:
         step["completed"] = True
+    for _step, spec in cm.project_slots(p):  # every slot realized as intended and compliant: a structurally valid house
+        good = sorted(spec.compliant)[0]
+        cm.realize_specification(project_id, slot_id=spec.slot_id, intended=good, realized=good, slipped=False, fidelity=0.5, actor="X", sim_time=0.0)
     cm.update()
     return project_id
 
@@ -54,11 +59,24 @@ def _affordances(sim, agent, kind, pid):
     return [a for a in sim.brain_context_builder.build(sim, agent).action_affordances if a["action_type"] == kind and a.get("target_id") == pid]
 
 
+DEFECT_SLOT = "airlock_opening"
+
+
 def _fail_validation(cm, pid):
-    cm.record_build_quality(pid, correct=False, actor="X")
+    """A realized defect (an execution slip on one slot), then a failed validation by a validator who can assess that slot."""
+    spec = next(sp for _st, sp in cm.project_slots(cm.projects[pid]) if sp.slot_id == DEFECT_SLOT)
+    wrong = next(o for o in spec.options if o not in spec.compliant)
+    cm.realize_specification(pid, slot_id=DEFECT_SLOT, intended=sorted(spec.compliant)[0], realized=wrong, slipped=True, fidelity=0.5, actor="X", sim_time=0.5)
     cm.update()
+    assessment = cm.assess_validation(pid, {"K_HOUSE_VALIDITY_REQUIREMENTS"})
     cm.mark_validated(pid, is_valid=False, actor="X", sim_time=1.0)
+    cm.record_validation_observation(pid, actor="X", sim_time=1.0, passed=False, assessment=assessment)
     cm.update()
+
+
+def _repair_args(cm, pid, slot=DEFECT_SLOT):
+    spec = next(sp for _st, sp in cm.project_slots(cm.projects[pid]) if sp.slot_id == slot)
+    return {"design_slot": slot, "design_option": sorted(spec.compliant)[0]}
 
 
 def _hold_rule(agent, held=True):
@@ -70,8 +88,8 @@ def _hold_rule(agent, held=True):
             rules.remove(HOUSE_RULE)
 
 
-def _decide(kind, pid):
-    return BrainDecision(selected_action=kind, target_id=pid, confidence=0.9)
+def _decide(kind, pid, args=None):
+    return BrainDecision(selected_action=kind, target_id=pid, confidence=0.9, action_args=dict(args or {}))
 
 
 def _run(sim, agent, decision):
@@ -85,7 +103,7 @@ def _run(sim, agent, decision):
 def test_1_hidden_incorrect_not_visible_before_validation(sim):
     cm = sim.environment.construction
     pid = _ready_house(cm)
-    cm.record_build_quality(pid, correct=False, actor="X")
+    inject_defect(cm, pid)
     cm.update()
     assert cm.projects[pid]["status"] == "needs_repair"  # world truth
     s = _summary(sim, pid)
@@ -96,7 +114,7 @@ def test_1_hidden_incorrect_not_visible_before_validation(sim):
 def test_2_complete_but_incorrect_project_is_still_a_validation_candidate(sim):
     cm = sim.environment.construction
     pid = _ready_house(cm)
-    cm.record_build_quality(pid, correct=False, actor="X")
+    inject_defect(cm, pid)
     cm.update()
     aff = _affordances(sim, sim.agents[0], VALIDATE, pid)
     assert aff and aff[0]["validation_candidate"] is True and aff[0]["validation_failed"] is False
@@ -139,7 +157,7 @@ def test_6_repair_not_advertised_on_healthy_or_unobserved_project(sim):
     agent = sim.agents[0]
     _hold_rule(agent)
     assert not _affordances(sim, agent, REPAIR, pid)
-    cm.record_build_quality(pid, correct=False, actor="X")  # hidden error, no observed failure
+    inject_defect(cm, pid)  # hidden error, no observed failure
     cm.update()
     assert not _affordances(sim, agent, REPAIR, pid)
 
@@ -155,8 +173,8 @@ def test_7_grounded_pilot_can_select_repair_even_with_low_source_memory(sim):
     aff = _affordances(sim, agent, REPAIR, pid)
     assert aff and aff[0]["repair_ready"] is True  # source-memory confidence is not a hard gate
     agent._rng.random = lambda: 0.0
-    _run(sim, agent, _decide(REPAIR_T, pid))
-    assert cm.projects[pid]["correct"] is True
+    _run(sim, agent, _decide(REPAIR_T, pid, _repair_args(cm, pid)))
+    assert cm.projects[pid]["correct"] is True and cm.projects[pid]["specification"][DEFECT_SLOT]["realized"] == "one_brick_opening"  # the artifact's feature changed
 
 
 def test_8_ungrounded_pilot_does_not_repair_gap_visible_acquisition_possible(sim):
@@ -177,7 +195,7 @@ def test_8_ungrounded_pilot_does_not_repair_gap_visible_acquisition_possible(sim
     assert agent.experimental_metrics["repair_blocked"] >= 1
     _hold_rule(agent)  # once the rule is actually held the same repair proceeds
     assert _affordances(sim, agent, REPAIR, pid)[0]["repair_ready"] is True
-    _run(sim, agent, _decide(REPAIR_T, pid))
+    _run(sim, agent, _decide(REPAIR_T, pid, _repair_args(cm, pid)))
     assert cm.projects[pid]["correct"] is True
 
 
@@ -190,7 +208,7 @@ def test_9_repair_is_exact_project_addressed(sim):
     aff = _affordances(sim, agent, REPAIR, pid)
     assert aff and all(a["target_id"] == pid for a in aff)
     agent._rng.random = lambda: 0.0
-    actions = _run(sim, agent, _decide(REPAIR_T, pid))
+    actions = _run(sim, agent, _decide(REPAIR_T, pid, _repair_args(cm, pid)))
     assert actions and all(a.get("project_id") in (None, pid) for a in actions)
     assert cm.projects[pid]["repair_count"] == 1
 
@@ -216,7 +234,7 @@ def test_11_successful_repair_leads_to_explicit_revalidation(sim):
     agent = sim.agents[0]
     _hold_rule(agent)
     agent._rng.random = lambda: 0.0
-    _run(sim, agent, _decide(REPAIR_T, pid))
+    _run(sim, agent, _decide(REPAIR_T, pid, _repair_args(cm, pid)))
     p = cm.projects[pid]
     assert p["correct"] is True and p["status"] != "complete" and p["awaiting_revalidation"] is True
     assert not ConstructionManager.observed_validation_failure(p)
@@ -233,10 +251,11 @@ def test_12_repair_is_not_guaranteed_to_succeed(sim):
     _hold_rule(agent)
     agent._rng.random = lambda: 0.9999  # the application-fidelity roll fails
     agent._trait_value = lambda name, *a, **k: 0.0 if name == "rule_accuracy" else 1.0
-    _run(sim, agent, _decide(REPAIR_T, pid))
+    _run(sim, agent, _decide(REPAIR_T, pid, _repair_args(cm, pid)))
     cm.update()
-    assert cm.projects[pid]["correct"] is False  # attempted, executed, still wrong
-    assert any(n == "construction_build_error_introduced" and d.get("cause") == "repair_fidelity" for n, d in sim.captured_events)
+    assert cm.projects[pid]["correct"] is False  # attempted, executed, still wrong: the slip realized a different, non-compliant option
+    assert cm.projects[pid]["specification"][DEFECT_SLOT]["slipped"] is True and cm.projects[pid]["specification"][DEFECT_SLOT]["intended"] == "one_brick_opening"
+    assert any(n == "construction_execution_slip" and d.get("repair") is True for n, d in sim.captured_events)
     assert agent.experimental_metrics["repair_applications"] == 1 and agent.experimental_metrics["repair_successes"] == 0
     assert _summary(sim, pid)["validation_failed"] is False  # and not visibly so until revalidated
 
@@ -261,7 +280,7 @@ def test_13_state_changing_events_are_pilot_authored():
 def test_14_no_raw_correct_in_team_artifacts_or_context_before_observation(sim):
     cm = sim.environment.construction
     pid = _ready_house(cm)
-    cm.record_build_quality(pid, correct=False, actor="X")
+    inject_defect(cm, pid)
     cm.update()
     art = sim.team_knowledge_manager.upsert_construction_artifact(cm.projects[pid], 2.0)
     assert art.content["correct"] is True and art.content["status"] != "needs_repair" and art.validation_state != "mismatch"

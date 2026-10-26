@@ -405,6 +405,29 @@ class BrainContextBuilder:
                 )
 
         bricks_available = self._bricks_available(environment, agent)
+
+        def design_variants(aff, project_id, project, ready, repair=False):
+            """One affordance per offered option of the next specification slot (or per option of each OBSERVED-defective slot for a repair).
+            The same menu goes to every agent and nothing marks an option as correct; choosing is the Pilot's job."""
+            cm = environment.construction
+            if not cm.has_specification(project):
+                return [aff]
+            slots = []
+            if repair:
+                feedback = project.get("observed_validation_feedback")
+                observed = list((feedback or {}).get("observed_violations") or [])
+                for step, spec in cm.project_slots(project):
+                    if bool(step.get("completed")) and (feedback is None or spec.slot_id in observed):
+                        slots.append((spec.slot_id, spec.label, list(spec.options)))
+            elif ready:
+                pending = cm.pending_specification(project_id)
+                if pending is not None:
+                    slots.append((pending["slot_id"], pending["label"], list(pending["options"])))
+            if not slots:
+                return [] if repair else [aff]
+            return [{**aff, "action_args": {**dict(aff.get("action_args") or {}), "design_slot": slot_id, "design_option": option}, "design_slot": slot_id, "design_slot_label": label, "design_option": option}
+                    for slot_id, label, options in slots for option in options]
+
         for project_id, project in sorted(environment.construction.projects.items()):
             if not isinstance(project, dict) or str(project.get("status") or "") == "complete" or project.get("validated_complete"):
                 continue
@@ -446,9 +469,9 @@ class BrainContextBuilder:
                 legal.append({**base, "action_type": ExecutableActionType.TRANSPORT_RESOURCES.value, "work_stage": "material_delivery", "duration_s": 30.0, "utility": utility_for(ExecutableActionType.TRANSPORT_RESOURCES)})
             if not physically_complete:
                 if progressed:
-                    legal.append({**base, "action_type": ExecutableActionType.CONTINUE_CONSTRUCTION.value, "utility": utility_for(ExecutableActionType.CONTINUE_CONSTRUCTION)})
+                    legal.extend(design_variants({**base, "action_type": ExecutableActionType.CONTINUE_CONSTRUCTION.value, "utility": utility_for(ExecutableActionType.CONTINUE_CONSTRUCTION)}, project_id, project, materials_staged))
                 elif materials_staged:
-                    legal.append({**base, "action_type": ExecutableActionType.START_CONSTRUCTION.value, "start_mode": "existing_project", "utility": utility_for(ExecutableActionType.START_CONSTRUCTION)})
+                    legal.extend(design_variants({**base, "action_type": ExecutableActionType.START_CONSTRUCTION.value, "start_mode": "existing_project", "utility": utility_for(ExecutableActionType.START_CONSTRUCTION)}, project_id, project, materials_staged))
             else:
                 failed_here = bool(environment.construction.observed_validation_failure(project))
                 # Whether VALIDATE is executable right now is stated up front from the SAME readiness read the ActionGate uses at commit
@@ -464,10 +487,10 @@ class BrainContextBuilder:
                 # choose to acquire grounding instead of picking a repair that predictably fails.
                 repair_blockers = agent._repair_epistemic_blockers(environment, project_id=project_id) if hasattr(agent, "_repair_epistemic_blockers") else []
                 failed_at = project.get("last_validation_attempt_time")
-                legal.append({**base, "action_type": ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value, "utility": utility_for(ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, target_kind="build"),
+                legal.extend(design_variants({**base, "action_type": ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION.value, "utility": utility_for(ExecutableActionType.REPAIR_OR_CORRECT_CONSTRUCTION, target_kind="build"),
                               "observed_repair_need": True, "repair_ready": not repair_blockers, "repair_blockers": list(repair_blockers),
                               # how long this observed failure has stood (a world fact read off the project record; a query, not a tracker)
-                              "observed_failure_age_s": round(max(0.0, float(sim_time) - float(failed_at)), 1) if (sim_time is not None and failed_at is not None) else 0.0})
+                              "observed_failure_age_s": round(max(0.0, float(sim_time) - float(failed_at)), 1) if (sim_time is not None and failed_at is not None) else 0.0}, project_id, project, True, repair=True))
 
         has_productive_target = any(
             item.get("action_type")
@@ -831,6 +854,7 @@ class BrainContextBuilder:
         action_affordances = self._affordances(agent, environment, build_readiness=build_readiness, phase_profile=phase_profile, team_state=team_state, support_subgoals=support_reasoning["subgoals"], task_methods=task_methods, sim_time=float(sim_state.time))
 
         static_task_context = {
+            "task_id": getattr(getattr(sim_state, "task_model", None), "task_id", None) or "mars_colony",
             "mission": self.scenario_name,
             "current_phase": current_phase.get("name", "default"),
             "role": agent.role,
